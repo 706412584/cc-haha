@@ -1,4 +1,5 @@
 import chokidar, { type FSWatcher } from 'chokidar'
+import { getComputerUseConfigPath } from '../computerUse/preauthorizedConfig.js'
 import * as platformPath from 'path'
 import { getAdditionalDirectoriesForClaudeMd } from '../../bootstrap/state.js'
 import {
@@ -198,6 +199,20 @@ export async function getWatchablePaths(): Promise<string[]> {
     } catch {
       // Path doesn't exist, skip it
     }
+  }
+
+  // Computer Use config. Not a skill directory, but the `computer-use` skill's
+  // isEnabled() gate reads it, and the command list is memoized above that gate
+  // — without watching this file, toggling the feature in Settings would leave
+  // the slash menu unchanged until the next restart. The settings page runs in
+  // the server process and cannot invalidate this process's caches, so the file
+  // itself is the only signal that crosses.
+  const computerUseConfigPath = getComputerUseConfigPath()
+  try {
+    await fs.stat(computerUseConfigPath)
+    paths.push(computerUseConfigPath)
+  } catch {
+    // Never toggled the setting; nothing to watch yet.
   }
 
   // Project skills directory (.claude/skills)

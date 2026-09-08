@@ -432,6 +432,78 @@ describe('MessageList nested tool calls', () => {
     expect(document.querySelector('img:not([src])')).toBeNull()
   })
 
+  it('preserves local Markdown image placement when a streamed reply becomes final', () => {
+    const firstChunk = [
+      '文字A',
+      '',
+      '![图A](01',
+    ].join('\n')
+    const secondChunk = [
+      '.png)',
+      '',
+      '文字B',
+      '',
+      '![图B](nested/02.png)',
+      '',
+      '文字C',
+      '',
+      '![图C](03.png)',
+      '',
+      '裸路径仍需兜底：outputs/fallback.png',
+      '',
+      '![remote](https://attacker.example/track.png)',
+      '',
+      '![loopback](http://127.0.0.1:3456/status.png)',
+    ].join('\n')
+
+    const { container } = render(<MessageList sessionId={ACTIVE_TAB} />)
+    const store = useChatStore.getState()
+
+    act(() => {
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_start', blockType: 'text' })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_delta', text: firstChunk })
+    })
+
+    expect(container.querySelectorAll('img')).toHaveLength(0)
+
+    act(() => {
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_delta', text: secondChunk })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
+    })
+
+    const assistant = container.querySelector('[data-message-shell="assistant"]')
+    const prose = assistant?.querySelector('.markdown-prose')
+    expect(prose).not.toBeNull()
+
+    const inlineImages = Array.from(prose!.querySelectorAll('img'))
+    expect(inlineImages.map((image) => image.getAttribute('alt'))).toEqual(['图A', '图B', '图C'])
+    expect(inlineImages.map((image) => image.getAttribute('src'))).toEqual([
+      'http://127.0.0.1:3456/preview-fs/active-tab/01.png',
+      'http://127.0.0.1:3456/preview-fs/active-tab/nested/02.png',
+      'http://127.0.0.1:3456/preview-fs/active-tab/03.png',
+    ])
+
+    const orderedNodes = [
+      screen.getByText('文字A'),
+      inlineImages[0]!,
+      screen.getByText('文字B'),
+      inlineImages[1]!,
+      screen.getByText('文字C'),
+      inlineImages[2]!,
+    ]
+    for (let index = 0; index < orderedNodes.length - 1; index += 1) {
+      expect(orderedNodes[index]!.compareDocumentPosition(orderedNodes[index + 1]!) & Node.DOCUMENT_POSITION_FOLLOWING)
+        .toBeTruthy()
+    }
+
+    const galleryImages = Array.from(assistant!.querySelectorAll('img')).filter((image) => !prose!.contains(image))
+    expect(galleryImages.map((image) => image.getAttribute('alt'))).toEqual(['fallback.png'])
+    expect(assistant!.querySelectorAll('img[alt="图A"]')).toHaveLength(1)
+    expect(assistant!.querySelectorAll('img[alt="图B"]')).toHaveLength(1)
+    expect(assistant!.querySelectorAll('img[alt="图C"]')).toHaveLength(1)
+    expect(assistant!.querySelector('img[alt="remote"], img[alt="loopback"]')).toBeNull()
+  })
+
   it('keeps fractional border-box jitter from invalidating a settled virtual row', async () => {
     const sessionId = 'virtual-row-measurement-jitter'
     const observers: Array<{
@@ -2787,6 +2859,88 @@ describe('MessageList nested tool calls', () => {
 
     expect(group.getAttribute('data-running')).toBe('false')
     expect(group.querySelector('.thinking-dots')).toBeNull()
+  })
+
+  it('summarizes repeated Edit events for one path as one changed file', () => {
+    render(<MessageList sessionId={ACTIVE_TAB} />)
+    const store = useChatStore.getState()
+    const filePath = '/tmp/cc-haha-manual-qa/live-run.json'
+
+    act(() => {
+      for (let index = 0; index < 4; index += 1) {
+        const toolUseId = `edit-live-run-${index}`
+        store.handleServerMessage(ACTIVE_TAB, {
+          type: 'content_start',
+          blockType: 'tool_use',
+          toolName: 'Edit',
+          toolUseId,
+        })
+        store.handleServerMessage(ACTIVE_TAB, {
+          type: 'tool_use_complete',
+          toolName: 'Edit',
+          toolUseId,
+          input: {
+            file_path: filePath,
+            old_string: `before ${index}`,
+            new_string: `after ${index}`,
+          },
+        })
+        store.handleServerMessage(ACTIVE_TAB, {
+          type: 'tool_result',
+          toolUseId,
+          content: 'The file was updated successfully.',
+          isError: false,
+        })
+      }
+      store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
+    })
+
+    const group = screen.getByTestId('activity-group')
+    expect(group.getAttribute('data-expanded')).toBe('false')
+    const summary = group.querySelector('[data-chat-disclosure="true"]')
+    expect(summary?.textContent).toContain('edited a file')
+    expect(summary?.textContent).not.toContain('edited 4 files')
+  })
+
+  it('still counts Edit events for different paths as different files', () => {
+    render(<MessageList sessionId={ACTIVE_TAB} />)
+    const store = useChatStore.getState()
+
+    act(() => {
+      for (const [index, filePath] of [
+        '/tmp/cc-haha-manual-qa/live-run.json',
+        '/tmp/cc-haha-manual-qa/summary.json',
+      ].entries()) {
+        const toolUseId = `edit-distinct-${index}`
+        store.handleServerMessage(ACTIVE_TAB, {
+          type: 'content_start',
+          blockType: 'tool_use',
+          toolName: 'Edit',
+          toolUseId,
+        })
+        store.handleServerMessage(ACTIVE_TAB, {
+          type: 'tool_use_complete',
+          toolName: 'Edit',
+          toolUseId,
+          input: {
+            file_path: filePath,
+            old_string: `before ${index}`,
+            new_string: `after ${index}`,
+          },
+        })
+        store.handleServerMessage(ACTIVE_TAB, {
+          type: 'tool_result',
+          toolUseId,
+          content: 'The file was updated successfully.',
+          isError: false,
+        })
+      }
+      store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
+    })
+
+    const summary = screen.getByTestId('activity-group')
+      .querySelector('[data-chat-disclosure="true"]')
+    expect(summary?.textContent).toContain('edited 2 files')
   })
 
   it('spaces turns without drawing a rail', () => {
@@ -7847,6 +8001,209 @@ describe('MessageList nested tool calls', () => {
     })
   })
 
+  it('rewinds a failed continue through the authoritative conversation-only target', async () => {
+    const initialChatStore = useChatStore.getInitialState()
+    useChatStore.setState({
+      reloadHistory: initialChatStore.reloadHistory,
+      queueComposerPrefill: initialChatStore.queueComposerPrefill,
+    })
+    vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({
+      checkpoints: [
+        {
+          target: {
+            targetUserMessageId: 'transcript-user-first',
+            userMessageIndex: 0,
+            userMessageCount: 2,
+          },
+          code: {
+            available: true,
+            filesChanged: ['src/kept.ts'],
+            insertions: 2,
+            deletions: 0,
+          },
+        },
+        {
+          target: {
+            targetUserMessageId: 'transcript-user-failed-continue',
+            userMessageIndex: 1,
+            userMessageCount: 2,
+          },
+          code: {
+            available: false,
+            filesChanged: [],
+            insertions: 0,
+            deletions: 0,
+          },
+          restoreAvailable: true,
+        },
+      ],
+    })
+    const rewind = vi.spyOn(sessionsApi, 'rewind').mockResolvedValue({
+      target: {
+        targetUserMessageId: 'transcript-user-failed-continue',
+        userMessageIndex: 1,
+        userMessageCount: 2,
+      },
+      conversation: {
+        messagesRemoved: 2,
+        removedMessageIds: ['transcript-user-failed-continue', 'provider-error'],
+      },
+      code: {
+        available: false,
+        filesChanged: [],
+        insertions: 0,
+        deletions: 0,
+      },
+      restoreAvailable: true,
+      unverifiedChangeSources: [],
+      mode: 'conversation',
+    })
+    vi.spyOn(sessionsApi, 'getMessages').mockResolvedValue({
+      messages: [
+        {
+          id: 'transcript-user-first',
+          type: 'user',
+          content: 'make a file',
+          timestamp: '2026-01-01T00:00:00.000Z',
+        },
+        {
+          id: 'transcript-assistant-first',
+          type: 'assistant',
+          content: 'created src/kept.ts',
+          timestamp: '2026-01-01T00:00:01.000Z',
+        },
+      ],
+    })
+
+    render(<MessageList />)
+    const store = useChatStore.getState()
+    act(() => {
+      store.sendMessage(ACTIVE_TAB, 'make a file')
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_start', blockType: 'text' })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_delta',
+        text: 'created src/kept.ts',
+      })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
+
+      store.sendMessage(ACTIVE_TAB, 'continue')
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'error',
+        code: 'PROVIDER_ERROR',
+        message: 'Provider request failed',
+      })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
+    })
+
+    expect(await screen.findByText('kept.ts')).toBeTruthy()
+    const conversationUndo = await screen.findByRole('button', { name: 'Roll back conversation' })
+    expect(screen.getByText('Provider request failed')).toBeTruthy()
+    fireEvent.click(conversationUndo)
+
+    const dialog = await screen.findByRole('dialog', { name: 'Undo current turn?' })
+    expect(within(dialog).getByText(
+      'This will rewind the conversation to before this turn. Files on disk will not be changed.',
+    )).toBeTruthy()
+    expect(within(dialog).queryByRole('button', { name: 'Undo current turn' })).toBeNull()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Roll back conversation only' }))
+
+    await waitFor(() => {
+      expect(rewind).toHaveBeenCalledWith(ACTIVE_TAB, {
+        targetUserMessageId: 'transcript-user-failed-continue',
+        userMessageIndex: 1,
+        expectedContent: 'continue',
+        mode: 'conversation',
+      })
+    })
+    await waitFor(() => {
+      const messages = useChatStore.getState().sessions[ACTIVE_TAB]?.messages ?? []
+      expect(messages.some((message) => message.type === 'user_text' && message.content === 'continue')).toBe(false)
+      expect(messages.some((message) => message.type === 'error')).toBe(false)
+    })
+    expect(screen.getByText('kept.ts')).toBeTruthy()
+    expect(useChatStore.getState().sessions[ACTIVE_TAB]?.composerPrefill).toMatchObject({
+      text: 'continue',
+    })
+  })
+
+  it('offers the lightweight conversation action for an ordinary text-only turn', async () => {
+    vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({
+      checkpoints: [
+        {
+          target: {
+            targetUserMessageId: 'transcript-user-text-only',
+            userMessageIndex: 0,
+            userMessageCount: 1,
+          },
+          code: {
+            available: false,
+            filesChanged: [],
+            insertions: 0,
+            deletions: 0,
+          },
+          restoreAvailable: true,
+        },
+      ],
+    })
+
+    render(<MessageList />)
+    const store = useChatStore.getState()
+    act(() => {
+      store.sendMessage(ACTIVE_TAB, 'explain this code')
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_start', blockType: 'text' })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_delta',
+        text: 'Here is the explanation.',
+      })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
+    })
+
+    expect(await screen.findByRole('button', { name: 'Roll back conversation' })).toBeTruthy()
+    expect(screen.queryByLabelText('Turn changed files')).toBeNull()
+  })
+
+  it('waits for the active text-only turn to settle before loading its rewind target', async () => {
+    const getTurnCheckpoints = vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({
+      checkpoints: [
+        {
+          target: {
+            targetUserMessageId: 'transcript-user-running',
+            userMessageIndex: 0,
+            userMessageCount: 1,
+          },
+          code: {
+            available: false,
+            filesChanged: [],
+            insertions: 0,
+            deletions: 0,
+          },
+        },
+      ],
+    })
+
+    render(<MessageList />)
+    const store = useChatStore.getState()
+    act(() => {
+      store.sendMessage(ACTIVE_TAB, 'explain while running')
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_start', blockType: 'text' })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_delta',
+        text: 'Partial explanation',
+      })
+    })
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(getTurnCheckpoints).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Roll back conversation' })).toBeNull()
+
+    act(() => {
+      store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
+    })
+    expect(await screen.findByRole('button', { name: 'Roll back conversation' })).toBeTruthy()
+  })
+
   it('does not render cards for turns without file changes', async () => {
     vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({
       checkpoints: [
@@ -7918,6 +8275,7 @@ describe('MessageList nested tool calls', () => {
     expect(cards).toHaveLength(1)
     expect(screen.getByText('first.ts')).toBeTruthy()
     expect(screen.queryByText('second.ts')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Roll back conversation' })).toBeNull()
     await waitFor(() => {
       expect(screen.queryByText('Markdown')).toBeNull()
     })

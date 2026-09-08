@@ -8,7 +8,9 @@ import { COMPUTER_USE_MCP_SERVER_NAME } from './common.js'
 import { createCliExecutor } from './executor.js'
 import { getChicagoEnabled, getChicagoSubGates } from './gates.js'
 import { normalizeOsPermissions } from './permissions.js'
-import { callPythonHelper } from './pythonBridge.js'
+// Platform-routed helper: macOS → native cu-helper, Windows → Python helper.
+import { callHelper } from './helperBridge.js'
+import { maybeShowNativePermissionCard } from './nativePermissionCard.js'
 
 class DebugLogger implements Logger {
   silly(message: string, ...args: unknown[]): void {
@@ -40,11 +42,17 @@ export function getComputerUseHostAdapter(): ComputerUseHostAdapter {
       getHideBeforeActionEnabled: () => getChicagoSubGates().hideBeforeAction,
     }),
     ensureOsPermissions: async () => {
-      const rawPerms = await callPythonHelper<{ accessibility: boolean; screenRecording: boolean | null }>('check_permissions', {})
+      const rawPerms = await callHelper<{ accessibility: boolean; screenRecording: boolean | null }>('check_permissions', {})
       const perms = normalizeOsPermissions(rawPerms)
-      return perms.granted
-        ? { granted: true as const }
-        : { granted: false as const, accessibility: perms.accessibility, screenRecording: perms.screenRecording }
+      if (perms.granted) return { granted: true as const }
+      // Missing a TCC grant → pop the native, guided permission card (macOS).
+      // Fire-and-forget + debounced; spawned from this same CLI process so it
+      // grants the very cu-helper binary that runs injection/capture.
+      maybeShowNativePermissionCard({
+        accessibility: perms.accessibility,
+        screenRecording: perms.screenRecording,
+      })
+      return { granted: false as const, accessibility: perms.accessibility, screenRecording: perms.screenRecording }
     },
     isDisabled: () => !getChicagoEnabled(),
     getSubGates: getChicagoSubGates,

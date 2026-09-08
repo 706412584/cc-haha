@@ -38,21 +38,20 @@ import {
   type SessionHeaderMetaItem,
 } from '@/components/chat/SessionChatSurface'
 import { getWorktreeDisplayName, WorktreeDetails } from '../components/chat/WorktreeDetails'
-import { ComputerUsePermissionModal } from '../components/chat/ComputerUsePermissionModal'
 import { Modal } from '@/components/ui/Modal'
 import { SessionTaskBar } from '../components/chat/SessionTaskBar'
 import { SoloCouncilPanel } from '../components/chat/SoloCouncilPanel'
 import { BackgroundTasksBar } from '../components/chat/BackgroundTasksBar'
 import { SessionActivityButton } from '../components/activity/SessionActivityButton'
+import { WorkbenchPanel } from '../components/workbench/WorkbenchPanel'
+import { AgentTeamsStrip } from '../components/agentTeams/AgentTeamsSummary'
+import { snapshotWithHistoricalMembers } from '../components/agentTeams/agentTeamsModel'
 import {
   SessionActivityPanel,
   type OpenSubagentPayload,
 } from '../components/activity/SessionActivityPanel'
 import { buildMainSessionActivityModel, hasVisibleSessionActivity } from '../components/activity/sessionActivityModel'
-import { WorkbenchPanel } from '../components/workbench/WorkbenchPanel'
 import { TeamStatusBar } from '../components/teams/TeamStatusBar'
-import { AgentTeamsStrip } from '../components/agentTeams/AgentTeamsSummary'
-import { snapshotWithHistoricalMembers } from '../components/agentTeams/agentTeamsModel'
 import { runsForSession, useWorkflowStore } from '../stores/workflowStore'
 import { TerminalSettings } from './TerminalSettings'
 import type { SessionListItem } from '../types/session'
@@ -359,7 +358,6 @@ export function ActiveSession() {
   )
   const soloPipelineModeForActive = pipelineModeForActive === 'solo'
   const rePipelineModeForActive = pipelineModeForActive === 're'
-  const pendingComputerUsePermission = sessionState?.pendingComputerUsePermission ?? null
   const pendingProviderTransition = sessionState?.pendingProviderTransition ?? null
   const runtimeConfigError = sessionState?.runtimeConfigError ?? null
   const fetchSessionTasks = useCLITaskStore((s) => s.fetchSessionTasks)
@@ -573,8 +571,9 @@ export function ActiveSession() {
   // Header "session active" badge: chat + background tasks, but not CLI tasks in isolation
   const isChatActive = isPreparingTurn || chatState !== 'idle' || hasRunningBackgroundTasks
   const totalTokens = getTokenUsageTotal(tokenUsage)
-  const cachedTokens = (tokenUsage.cache_read_tokens ?? 0) +
-    (tokenUsage.cache_creation_tokens ?? 0)
+  const cacheReadTokens = tokenUsage.cache_read_tokens ?? 0
+  const cacheCreationTokens = tokenUsage.cache_creation_tokens ?? 0
+  const cachedTokens = cacheReadTokens + cacheCreationTokens
   useEffect(() => {
     if (!showUnifiedActivity || !activeTabId) return
     pruneActivityBackgroundTaskKeys(
@@ -792,10 +791,13 @@ export function ActiveSession() {
                 total: totalTokens.toLocaleString(),
                 input: tokenUsage.input_tokens.toLocaleString(),
                 output: tokenUsage.output_tokens.toLocaleString(),
-                cache: cachedTokens.toLocaleString(),
+                cacheRead: cacheReadTokens.toLocaleString(),
+                cacheWrite: cacheCreationTokens.toLocaleString(),
               })}
             >
-              {t('session.apiTokens', { count: formatTokenCount(totalTokens) })}
+              {t(cachedTokens > 0 ? 'session.apiTokensWithCache' : 'session.apiTokens', {
+                count: formatTokenCount(totalTokens),
+              })}
             </span>
           ),
         }
@@ -853,10 +855,6 @@ export function ActiveSession() {
       ) : null}
       overlay={(
         <>
-          <ComputerUsePermissionModal
-            sessionId={activeTabId}
-            request={pendingComputerUsePermission?.request ?? null}
-          />
           {!isMemberSession && pendingProviderTransition ? (
             <Modal
               open

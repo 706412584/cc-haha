@@ -64,12 +64,14 @@ The permission mode is locked while a turn is running and unlocks when the turn 
 
 ## Undoing a turn
 
-After each turn, a card appears in the conversation reading "**{n} files changed**", listing every file that turn touched. It offers two actions:
+After each turn that changes files, a card appears in the conversation reading "**{n} files changed**", listing every file that turn touched. It offers two actions:
 
 - **Undo current turn** — roll back the latest reply and restore the files it changed.
 - **Roll back to before this turn** — for older turns: rewind both the conversation and the files to that checkpoint.
 
 Both ask for confirmation first, where you choose between rolling back **code and conversation together** or **the conversation only** (leaving the files on disk untouched).
+
+For a text-only turn, or a failed turn that made no file changes, no empty file card is shown. A lightweight **Roll back conversation** action appears below the response instead. It rewinds the session to before that turn, refills the original prompt, and leaves files on disk untouched.
 
 Checkpoints capture the files Claude changed through its editing tools. **Files written by shell commands are not checkpointed** — `npm install`, `rm`, or a command redirecting into a file cannot be undone. On such a turn the card and the confirmation name the tools that went unrecorded; undo still works, but it only restores the files it lists. Use git for anything you need a guaranteed way back from.
 

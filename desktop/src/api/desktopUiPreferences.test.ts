@@ -7,7 +7,7 @@ const preferences = {
   projectDisplayNames: {},
   profile: {
     displayName: 'cc-haha',
-    subtitle: 'github.com/NanmiCoder/cc-haha',
+    subtitle: 'github.com/706412584/cc-haha',
     avatarFile: null,
     avatarUpdatedAt: null,
   },

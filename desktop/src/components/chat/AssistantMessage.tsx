@@ -4,6 +4,9 @@ import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import { OpenWithMenu } from '@/components/composite/OpenWithMenu'
 import { buildOpenWithMenuItemsForHref } from '../../lib/openWithMenuItems'
 import { fileRefFromElement } from '../../lib/markdownAutolink'
+import { createAssistantMarkdownImageResolver } from '../../lib/markdownImages'
+import { getServerBaseUrl } from '../../lib/desktopRuntime'
+import { isManagedGeneratedImagePath } from '../../lib/attachmentImages'
 import type { OpenWithItem } from '../../lib/openWithItems'
 import { MessageActionBar, type MessageBranchAction } from './MessageActionBar'
 import { TurnCompletionStamp } from './TurnCompletionStamp'
@@ -130,6 +133,20 @@ export const AssistantMessage = memo(function AssistantMessage({
     [cleanContent, isStreaming, isTurnOutputOwner, sessionId, workDir, turnChangedFiles],
   )
 
+  const resolveAssistantImageSrc = useMemo(
+    () => {
+      if (isStreaming || !sessionId) return undefined
+      const resolveLocalImage = createAssistantMarkdownImageResolver({
+        baseUrl: getServerBaseUrl(),
+        sessionId,
+      })
+      return (src: string) => isManagedGeneratedImagePath(src)
+        ? null
+        : resolveLocalImage(src)
+    },
+    [isStreaming, sessionId],
+  )
+
   if (!cleanContent.trim() && fakeBlocks.length === 0) return null
 
   const documentLayout = shouldUseDocumentLayout(cleanContent)
@@ -162,6 +179,7 @@ export const AssistantMessage = memo(function AssistantMessage({
             variant={documentLayout ? 'document' : 'default'}
             streaming={isStreaming}
             onLinkClick={sessionId ? handleLinkClick : undefined}
+            resolveImageSrc={resolveAssistantImageSrc}
           />
           {!isStreaming && (
             <InlineImageGallery

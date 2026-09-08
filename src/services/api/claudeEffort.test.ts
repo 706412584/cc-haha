@@ -175,6 +175,26 @@ describe('configureEffortParams', () => {
     expect(betas).not.toContain(EFFORT_BETA_HEADER)
   })
 
+  test('keeps explicit GPT effort for direct relays that disable beta headers', () => {
+    process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = '1'
+
+    const outputConfig: Record<string, unknown> = {}
+    const extraBodyParams: Record<string, unknown> = {}
+    const betas: string[] = []
+
+    configureEffortParams(
+      'xhigh',
+      outputConfig,
+      extraBodyParams,
+      betas,
+      'gpt-5.6-sol[1m]',
+    )
+
+    expect(outputConfig).toEqual({ effort: 'xhigh' })
+    expect(extraBodyParams).toEqual({})
+    expect(betas).not.toContain(EFFORT_BETA_HEADER)
+  })
+
   test('keeps effort output_config for local proxy providers so it can convert to reasoning_effort', () => {
     process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = '1'
     process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:3456/proxy'

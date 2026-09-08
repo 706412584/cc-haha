@@ -19,7 +19,63 @@ export type ParsedResponse = {
 
 type JsonRecord = Record<string, unknown>
 
-const REQUEST_CORE_KEYS = new Set(['model', 'system', 'messages', 'tools'])
+// `instructions` and `input` are the OpenAI Responses spellings of `system`
+// and `messages`; both wire formats reach this parser through the same trace.
+const REQUEST_CORE_KEYS = new Set(['model', 'system', 'messages', 'tools', 'instructions', 'input'])
+
+/**
+ * The turns of a request, under whichever key this provider spells them.
+ *
+ * Responses splits a tool round trip into sibling `function_call` and
+ * `function_call_output` entries where the Messages format nests `tool_use`
+ * and `tool_result` blocks inside a turn. Real traces carry more of those than
+ * plain messages, so they are mapped onto the block vocabulary the rest of the
+ * viewer already speaks rather than skipped. Reasoning items hold no
+ * model-visible turn and are the one kind dropped.
+ */
+function requestTurns(body: JsonRecord): NormalizedMessage[] {
+  if (Array.isArray(body.messages)) {
+    return body.messages
+      .map((entry) => normalizeMessage(entry))
+      .filter((entry): entry is NormalizedMessage => entry !== null)
+  }
+  if (!Array.isArray(body.input)) return []
+
+  const turns: NormalizedMessage[] = []
+  for (const entry of body.input) {
+    if (!isRecord(entry)) continue
+    if (entry.type === undefined || entry.type === 'message') {
+      const message = normalizeMessage(entry)
+      if (message) turns.push(message)
+      continue
+    }
+    if (entry.type === 'function_call') {
+      const name = typeof entry.name === 'string' ? entry.name : ''
+      if (!name) continue
+      turns.push({
+        role: 'assistant',
+        content: [{
+          type: 'tool_use',
+          ...(typeof entry.call_id === 'string' ? { id: entry.call_id } : {}),
+          name,
+          input: parseToolArguments(entry.arguments),
+        }],
+      })
+      continue
+    }
+    if (entry.type === 'function_call_output') {
+      turns.push({
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          ...(typeof entry.call_id === 'string' ? { toolUseId: entry.call_id } : {}),
+          content: entry.output,
+        }],
+      })
+    }
+  }
+  return turns
+}
 
 export function parseTraceRequestBody(preview: string, source: 'anthropic' | 'proxy'): ParsedRequest | null {
   const parsed = parseJsonRecord(preview)
@@ -28,12 +84,10 @@ export function parseTraceRequestBody(preview: string, source: 'anthropic' | 'pr
   if (!isRecord(body)) return null
 
   const model = typeof body.model === 'string' && body.model ? body.model : undefined
-  const system = extractSystemText(body.system)
-  const messages = Array.isArray(body.messages)
-    ? body.messages
-        .map((entry) => normalizeMessage(entry))
-        .filter((entry): entry is NormalizedMessage => entry !== null)
-    : []
+  // `||`, not `??`: an empty `system` array flattens to '', which would
+  // otherwise shadow a real `instructions` string.
+  const system = extractSystemText(body.system) || extractSystemText(body.instructions)
+  const messages = requestTurns(body)
   const tools = Array.isArray(body.tools)
     ? body.tools
         .map((entry) => normalizeToolDefinition(entry))
@@ -163,7 +217,9 @@ function normalizeToolDefinition(entry: unknown): ParsedRequest['tools'][number]
     : fn && typeof fn.description === 'string' && fn.description
       ? fn.description
       : undefined
-  const schema = entry.input_schema ?? fn?.parameters
+  // Three spellings: Anthropic `input_schema`, Chat Completions
+  // `function.parameters`, and the flat Responses `parameters`.
+  const schema = entry.input_schema ?? fn?.parameters ?? entry.parameters
   return {
     name,
     ...(description ? { description } : {}),

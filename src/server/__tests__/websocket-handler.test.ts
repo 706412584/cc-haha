@@ -72,27 +72,27 @@ describe('translateCliMessage usage mapping', () => {
     mock.restore()
   })
 
-  it('keeps cache token counts on result completion events', () => {
+  it('keeps DeepSeek cache token counts separate on result completion events', () => {
     const sessionId = `usage-${crypto.randomUUID()}`
 
     const messages = translateCliMessage({
       type: 'result',
       subtype: 'success',
       usage: {
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_input_tokens: 3456,
-        cache_creation_input_tokens: 789,
+        input_tokens: 107_600,
+        output_tokens: 11_400,
+        cache_read_input_tokens: 4_971_000,
+        cache_creation_input_tokens: 10_000,
       },
     }, sessionId)
 
     expect(messages).toEqual([{
       type: 'message_complete',
       usage: {
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: 3456,
-        cache_creation_tokens: 789,
+        input_tokens: 107_600,
+        output_tokens: 11_400,
+        cache_read_tokens: 4_971_000,
+        cache_creation_tokens: 10_000,
       },
     }])
   })

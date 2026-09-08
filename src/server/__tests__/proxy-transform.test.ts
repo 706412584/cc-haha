@@ -297,6 +297,117 @@ describe('anthropicToOpenaiChat', () => {
     expect(result.messages[0].content).toBe('Sunny, 72°F')
   })
 
+  test('preserves text-only tool_result arrays as strings', () => {
+    const req: AnthropicRequest = {
+      model: 'gpt-4o',
+      max_tokens: 100,
+      messages: [{
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'computer_0',
+          content: [
+            { type: 'text', text: 'first' },
+            { type: 'text', text: 'second' },
+          ],
+        }],
+      }],
+    }
+
+    const result = anthropicToOpenaiChat(req)
+
+    expect(result.messages[0].content).toBe('first\nsecond')
+  })
+
+  test('preserves image-only tool_result content', () => {
+    const req: AnthropicRequest = {
+      model: 'gpt-4o',
+      max_tokens: 100,
+      messages: [{
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'computer_1',
+          content: [{
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/AA==' },
+          }],
+        }],
+      }],
+    }
+
+    const result = anthropicToOpenaiChat(req)
+
+    expect(result.messages[0]).toEqual({
+      role: 'tool',
+      tool_call_id: 'computer_1',
+      content: [{
+        type: 'image_url',
+        image_url: { url: 'data:image/jpeg;base64,/9j/AA==' },
+      }],
+    })
+  })
+
+  test('preserves mixed tool_result content in order', () => {
+    const req: AnthropicRequest = {
+      model: 'gpt-4o',
+      max_tokens: 100,
+      messages: [{
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'computer_2',
+          content: [
+            { type: 'text', text: 'before' },
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/AA==' },
+            },
+            { type: 'text', text: 'after' },
+          ],
+        }],
+      }],
+    }
+
+    const result = anthropicToOpenaiChat(req)
+
+    expect(result.messages[0].content).toEqual([
+      { type: 'text', text: 'before' },
+      { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,/9j/AA==' } },
+      { type: 'text', text: 'after' },
+    ])
+  })
+
+  test('replaces nested tool_result images in text-only mode without leaking base64', () => {
+    const req: AnthropicRequest = {
+      model: 'deepseek-v4-pro',
+      max_tokens: 100,
+      messages: [{
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'computer_3',
+          content: [
+            { type: 'text', text: 'before' },
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/jpeg', data: 'private-screenshot-data' },
+            },
+            { type: 'text', text: 'after' },
+          ],
+        }],
+      }],
+    }
+
+    const result = anthropicToOpenaiChat(req, { imageContentMode: 'text_only' })
+
+    expect(result.messages[0].content).toBe(
+      'before\n[Image omitted: this OpenAI-compatible chat endpoint only supports text content.]\nafter',
+    )
+    expect(JSON.stringify(result)).not.toContain('private-screenshot-data')
+    expect(JSON.stringify(result)).not.toContain('image_url')
+  })
+
   test('image content conversion', () => {
     const req: AnthropicRequest = {
       model: 'gpt-4',

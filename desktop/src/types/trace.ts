@@ -22,6 +22,11 @@ export type TraceCallUsage = {
   cacheCreationInputTokens?: number
 }
 
+export type TraceRequestSemantic = {
+  version: 1
+  request: Record<string, unknown>
+}
+
 export type TraceCallRecord = {
   id: string
   sessionId: string
@@ -40,6 +45,7 @@ export type TraceCallRecord = {
     url: string
     headers: Record<string, string>
     body: TraceBodySnapshot
+    semantic?: TraceRequestSemantic
   }
   response?: {
     status: number

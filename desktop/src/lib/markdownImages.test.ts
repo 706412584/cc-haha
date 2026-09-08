@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  createAssistantMarkdownImageResolver,
   createWorkspaceMarkdownImageResolver,
   isSafeMarkdownImageSource,
 } from './markdownImages'
@@ -100,5 +101,35 @@ describe('createWorkspaceMarkdownImageResolver', () => {
     expect(resolve('javascript:alert(1)')).toBeNull()
     expect(resolve('file:///etc/passwd')).toBeNull()
     expect(resolve('data:text/html;base64,AAAA')).toBeNull()
+  })
+})
+
+describe('createAssistantMarkdownImageResolver', () => {
+  const resolve = createAssistantMarkdownImageResolver({
+    baseUrl: 'http://127.0.0.1:3456',
+    sessionId: 'session-1',
+  })
+
+  it('routes relative and absolute local paths through the session workspace sandbox', () => {
+    expect(resolve('images/../01.png')).toBe(
+      'http://127.0.0.1:3456/preview-fs/session-1/01.png',
+    )
+    expect(resolve('/repo/output/02.png')).toBe(
+      'http://127.0.0.1:3456/preview-fs/session-1//repo/output/02.png',
+    )
+  })
+
+  it('keeps safe in-memory images without opening a network path', () => {
+    expect(resolve('data:image/png;base64,AAAA')).toBe('data:image/png;base64,AAAA')
+    expect(resolve('blob:https://desktop.invalid/1234')).toBe('blob:https://desktop.invalid/1234')
+  })
+
+  it('rejects remote, loopback, schemes, and workspace escapes', () => {
+    expect(resolve('https://attacker.example/track.png')).toBeNull()
+    expect(resolve('http://127.0.0.1:3456/status.png')).toBeNull()
+    expect(resolve('//attacker.example/track.png')).toBeNull()
+    expect(resolve('file:///repo/01.png')).toBeNull()
+    expect(resolve('../outside.png')).toBeNull()
+    expect(resolve('#fragment')).toBeNull()
   })
 })

@@ -18,7 +18,7 @@
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -30,8 +30,15 @@ import {
   defersLockAcquire,
   handleToolCall,
   resetMouseButtonHeld,
+  staticRequestError,
 } from "./toolCalls.js";
 import { buildComputerUseTools } from "./tools.js";
+import {
+  defersLockAcquire as legacyDefersLockAcquire,
+  handleToolCall as legacyHandleToolCall,
+  resetMouseButtonHeld as legacyResetMouseButtonHeld,
+} from "./windowsLegacyToolCalls.js";
+import { buildComputerUseTools as buildLegacyComputerUseTools } from "./windowsLegacyTools.js";
 import type {
   AppGrant,
   ComputerUseHostAdapter,
@@ -74,6 +81,29 @@ function mergePermissionResponse(
     ...truthyFlags,
   };
   return { apps, flags };
+}
+
+/**
+ * Build the tool face this platform can actually service.
+ *
+ * Exported because the CLI host assembles the advertised tool list and the
+ * `allowedTools` allowlist in two other places. Those must not re-derive the
+ * choice themselves: advertising the semantic tools while dispatch runs the
+ * legacy pixel handler produces two disjoint name sets, and every model call
+ * lands on "Unknown computer-use tool".
+ */
+export function buildPlatformComputerUseTools(
+  caps: {
+    screenshotFiltering: "native" | "none";
+    platform: "darwin" | "win32";
+    teachMode?: boolean;
+  },
+  coordinateMode: CoordinateMode,
+  installedAppNames?: string[],
+): Tool[] {
+  return caps.platform === "win32"
+    ? buildLegacyComputerUseTools(caps, coordinateMode, installedAppNames)
+    : buildComputerUseTools(caps, coordinateMode, installedAppNames);
 }
 
 /**
@@ -139,7 +169,37 @@ export function bindSessionContext(
       }
     : undefined;
 
+  // Which tool face this session speaks. macOS drives the semantic AX engine;
+  // Windows has no AX tree to address, so it keeps the legacy pixel face.
+  // Everything below — dispatch, lock deferral, stale-mouse cleanup — has to
+  // come from the SAME module, or a Windows session would defer the lock by
+  // the semantic face's rules while dispatching through the pixel one.
+  const legacyPixelFace = adapter.executor.capabilities.platform === "win32";
+  const dispatchToolCall = legacyPixelFace
+    ? legacyHandleToolCall
+    : handleToolCall;
+  const toolDefersLockAcquire = legacyPixelFace
+    ? legacyDefersLockAcquire
+    : defersLockAcquire;
+  const clearStaleMouseState = legacyPixelFace
+    ? legacyResetMouseButtonHeld
+    : resetMouseButtonHeld;
+
   return async (name, args) => {
+    // ─── Static request validation (semantic face only) ───────────────────
+    // Runs before the lock so a malformed call costs nothing: no cross-process
+    // lock acquisition, no TCC probe, no approval dialog. The legacy face
+    // validates inside its own dispatch and has no equivalent pure stage.
+    if (!legacyPixelFace && !adapter.isDisabled()) {
+      const invalid = staticRequestError(
+        name,
+        args,
+        ctx.getGrantFlags(),
+        adapter.executor.capabilities.platform,
+      );
+      if (invalid) return invalid;
+    }
+
     // ─── Async lock gate ─────────────────────────────────────────────────
     // Replaces the sync Gate-3 in `handleToolCall` — we pass
     // `checkCuLock: undefined` below so it no-ops. Hosts with
@@ -156,7 +216,7 @@ export function bindSessionContext(
           telemetry: { error_kind: "cu_lock_held" },
         };
       }
-      if (lock.holder === undefined && !defersLockAcquire(name)) {
+      if (lock.holder === undefined && !toolDefersLockAcquire(name)) {
         await ctx.acquireCuLock?.();
         // Re-check: the awaits above yield the microtask queue, so another
         // session's check+acquire can interleave with ours. Hosts where
@@ -179,7 +239,7 @@ export function bindSessionContext(
         // Fresh holder → any prior session's mouseButtonHeld is stale.
         // Mirrors what Gate-3 does on the acquire branch. After the
         // re-check so we only clear module state when we actually won.
-        resetMouseButtonHeld();
+        clearStaleMouseState();
       }
     }
 
@@ -236,7 +296,7 @@ export function bindSessionContext(
 
     // ─── Dispatch ────────────────────────────────────────────────────────
     try {
-      const result = await handleToolCall(adapter, name, args, overrides);
+      const result = await dispatchToolCall(adapter, name, args, overrides);
 
       if (result.screenshot) {
         lastScreenshot = result.screenshot;
@@ -261,10 +321,16 @@ export function createComputerUseMcpServer(
 
   const server = new Server(
     { name: serverName, version: "0.1.3" },
+    // NO server `instructions` here, deliberately. Server instructions are
+    // spliced into the system prompt for as long as the server is connected,
+    // which would put Computer Use workflow guidance in front of every user —
+    // including the ones who deliberately turned the feature off. The guidance
+    // lives in the `computer-use` skill instead, which is registered only when
+    // the setting is on and loaded only when actually invoked.
     { capabilities: { tools: {}, logging: {} } },
   );
 
-  const tools = buildComputerUseTools(
+  const tools = buildPlatformComputerUseTools(
     adapter.executor.capabilities,
     coordinateMode,
   );

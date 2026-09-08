@@ -1077,8 +1077,11 @@ async function getSessionSlashCommands(sessionId: string): Promise<Response> {
     throw ApiError.notFound(`Session not found: ${sessionId}`)
   }
 
-  const skillCommands = await listSkillSlashCommands(workDir)
-  const slashCommands = cachedCommands.length > 0
+  const hasCliList = cachedCommands.length > 0
+  const skillCommands = await listSkillSlashCommands(workDir, {
+    includeCompiledIn: !hasCliList,
+  })
+  const slashCommands = hasCliList
     ? mergeSessionSlashCommands(cachedCommands, skillCommands)
     : skillCommands
 
@@ -1116,8 +1119,11 @@ async function getSessionInspection(req: Request, sessionId: string, url: URL): 
     ? (await getTranscriptSnapshot())?.metadata ?? null
     : null
   const cachedSlashCommands = getSlashCommands(sessionId)
-  const skillSlashCommands = await listSkillSlashCommands(workDir)
-  const fallbackSlashCommands = cachedSlashCommands.length > 0
+  const hasCliSlashCommands = cachedSlashCommands.length > 0
+  const skillSlashCommands = await listSkillSlashCommands(workDir, {
+    includeCompiledIn: !hasCliSlashCommands,
+  })
+  const fallbackSlashCommands = hasCliSlashCommands
     ? mergeSessionSlashCommands(cachedSlashCommands, skillSlashCommands)
     : skillSlashCommands
   const slashCommandCount = Array.isArray(initMessage?.slash_commands)

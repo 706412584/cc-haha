@@ -1,0 +1,376 @@
+diff --git a/desktop/src/components/layout/Sidebar.test.tsx b/desktop/src/components/layout/Sidebar.test.tsx
+index fd5ad503..372c18bb 100644
+--- a/desktop/src/components/layout/Sidebar.test.tsx
++++ b/desktop/src/components/layout/Sidebar.test.tsx
+@@ -16,12 +16,27 @@ vi.mock('../../api/desktopUiPreferences', () => ({
+   desktopUiPreferencesApi: desktopUiPreferencesApiMock,
+ }))
+ 
+-const repositoryContextMock = vi.hoisted(() => vi.fn())
++const sessionsApiMock = vi.hoisted(() => ({
++  create: vi.fn(),
++  list: vi.fn(),
++  getGitInfo: vi.fn(),
++  getRepositoryContext: vi.fn(),
++  getRecentProjects: vi.fn(),
++  createRepositoryBranch: vi.fn(),
++}))
++
++const repositoryContextMock = sessionsApiMock.getRepositoryContext
+ 
+ vi.mock('../../api/sessions', () => ({
+-  sessionsApi: {
+-    getRepositoryContext: repositoryContextMock,
+-  },
++  sessionsApi: sessionsApiMock,
++}))
++
++const agentsApiMock = vi.hoisted(() => ({
++  list: vi.fn(),
++}))
++
++vi.mock('../../api/agents', () => ({
++  agentsApi: agentsApiMock,
+ }))
+ 
+ const openTargetStoreMock = vi.hoisted(() => ({
+@@ -88,6 +103,15 @@ vi.mock('../../i18n', () => ({
+       'sidebar.collapseProject': 'Collapse {project}',
+       'sidebar.worktree': 'worktree',
+       'sidebar.sessionRunning': 'Session running',
++      'sidebar.sessionNeedsAttention': 'Waiting for your approval',
++      'sidebar.taskView': 'Task view',
++      'sidebar.tasks': 'Tasks',
++      'sidebar.taskGroup.running': 'In progress',
++      'sidebar.taskGroup.today': 'Today',
++      'sidebar.taskGroup.yesterday': 'Yesterday',
++      'sidebar.taskGroup.last7Days': 'Previous 7 days',
++      'sidebar.taskGroup.last30Days': 'Previous 30 days',
++      'sidebar.taskGroup.earlier': 'Earlier',
+       'common.retry': 'Retry',
+       'common.loading': 'Loading...',
+       'common.cancel': 'Cancel',
+@@ -206,6 +230,7 @@ vi.mock('./ProjectEditorModal', () => ({
+ }))
+ 
+ import { Sidebar } from './Sidebar'
++import { ChatInput } from '../chat/ChatInput'
+ import { useChatStore } from '../../stores/chatStore'
+ import { useSessionStore } from '../../stores/sessionStore'
+ import { useTabStore } from '../../stores/tabStore'
+@@ -222,6 +247,8 @@ const PROJECT_PINNED_STORAGE_KEY = 'cc-haha-sidebar-pinned-projects'
+ const PROJECT_HIDDEN_STORAGE_KEY = 'cc-haha-sidebar-hidden-projects'
+ const PROJECT_ORGANIZATION_STORAGE_KEY = 'cc-haha-sidebar-project-organization'
+ const PROJECT_SORT_STORAGE_KEY = 'cc-haha-sidebar-project-sort'
++const realCreateSession = useSessionStore.getInitialState().createSession
++const realFetchSessions = useSessionStore.getInitialState().fetchSessions
+ 
+ function makeSession(
+   id: string,
+@@ -391,6 +418,13 @@ describe('Sidebar', () => {
+     }))
+     repositoryContextMock.mockReset()
+     repositoryContextMock.mockImplementation(async (workDir: string) => ({ repoRoot: null, workDir }))
++    sessionsApiMock.create.mockReset()
++    sessionsApiMock.list.mockReset()
++    sessionsApiMock.getGitInfo.mockReset()
++    sessionsApiMock.getRecentProjects.mockReset()
++    sessionsApiMock.createRepositoryBranch.mockReset()
++    agentsApiMock.list.mockReset()
++    agentsApiMock.list.mockResolvedValue({ activeAgents: [], allAgents: [] })
+     act(() => {
+       hydrateProjectDisplayNames({}, Number.MAX_SAFE_INTEGER)
+     })
+@@ -700,6 +734,45 @@ describe('Sidebar', () => {
+     })
+   })
+ 
++  it('keeps the project cwd in the composer when the post-create session refresh is stale', async () => {
++    const existingSession = makeSession(
++      'tmp-existing',
++      'Existing tmp session',
++      '/private/tmp',
++      new Date().toISOString(),
++    )
++    sessionsApiMock.create.mockResolvedValue({
++      sessionId: 'tmp-project-new',
++      workDir: '/private/tmp',
++    })
++    sessionsApiMock.list.mockResolvedValue({
++      sessions: [existingSession],
++      total: 1,
++    })
++    sessionsApiMock.getGitInfo.mockImplementation(() => new Promise(() => {}))
++    useSessionStore.setState({
++      sessions: [existingSession],
++      createSession: realCreateSession,
++      fetchSessions: realFetchSessions,
++    })
++
++    render(
++      <>
++        <Sidebar />
++        <ChatInput variant="hero" />
++      </>,
++    )
++
++    fireEvent.click(screen.getByRole('button', { name: 'New session in tmp' }))
++
++    expect(await screen.findByRole('button', { name: 'repoLaunch.launchLocation: tmp' }))
++      .toBeInTheDocument()
++    expect(sessionsApiMock.create).toHaveBeenCalledWith({ workDir: '/private/tmp' })
++    expect(useSessionStore.getState().sessions).toEqual(expect.arrayContaining([
++      expect.objectContaining({ id: 'tmp-project-new', workDir: '/private/tmp' }),
++    ]))
++  })
++
+   it('shows project header menus and starts a blank project session', async () => {
+     createSession.mockResolvedValue('session-blank-project')
+     useSessionStore.setState({
+@@ -2453,5 +2526,246 @@ describe('Sidebar', () => {
+       // Same flex row as the two above; at h-9 it left the row ragged.
+       expect(screen.getAllByRole('button', { name: 'Search chats' })[0]).toHaveClass('h-11')
+     })
++
++    it('raises the task view bell to the touch minimum as well', () => {
++      renderWithProject(true)
++
++      // 铃铛跟旁边的折叠按钮同处标题行；停在 32px 会是这行里唯一打不中的目标。
++      expect(screen.getByRole('button', { name: 'Task view' })).toHaveClass('h-11', 'w-11')
++    })
++  })
++
++  describe('task view', () => {
++    /**
++     * 相对当天算，不用假时钟：`buildSidebarTaskGroups` 读 `Date.now()`，而
++     * `waitFor` 跟 fake timers 相处不好。固定到本地 09:00 也让「测试凌晨跑」
++     * 不会把「今天」滑成「昨天」。
++     */
++    function daysAgoIso(days: number): string {
++      const date = new Date()
++      date.setDate(date.getDate() - days)
++      date.setHours(9, 0, 0, 0)
++      return date.toISOString()
++    }
++
++    function seedSessions() {
++      useSessionStore.setState({
++        sessions: [
++          makeSession('today-1', 'Today Session', '/workspace/alpha', daysAgoIso(0)),
++          makeSession('yesterday-1', 'Yesterday Session', '/workspace/beta', daysAgoIso(1)),
++          makeSession('week-1', 'This Week Session', '/workspace/beta', daysAgoIso(4)),
++          makeSession('month-1', 'This Month Session', '/workspace/gamma', daysAgoIso(20)),
++          makeSession('old-1', 'Ancient Session', '/workspace/gamma', daysAgoIso(90)),
++        ],
++      })
++    }
++
++    function toggleBell() {
++      fireEvent.click(screen.getByRole('button', { name: 'Task view' }))
++    }
++
++    it('replaces the project grouping with day buckets when the bell is switched on', async () => {
++      seedSessions()
++      render(<Sidebar />)
++
++      expect(screen.getAllByTestId(/^sidebar-project-group-/).length).toBeGreaterThan(0)
++
++      await act(async () => { toggleBell() })
++
++      expect(screen.queryAllByTestId(/^sidebar-project-group-/)).toHaveLength(0)
++      expect(screen.getAllByTestId(/^sidebar-task-group-/).map((group) => group.getAttribute('data-testid')))
++        .toEqual([
++          'sidebar-task-group-today',
++          'sidebar-task-group-yesterday',
++          'sidebar-task-group-last7Days',
++          'sidebar-task-group-last30Days',
++          'sidebar-task-group-earlier',
++        ])
++      expect(screen.getByText('Tasks')).toBeInTheDocument()
++    })
++
++    it('shows the owning workspace under each task title', async () => {
++      act(() => {
++        hydrateProjectDisplayNames(
++          { '/workspace/alpha': 'Thunderbird glasses' },
++          captureProjectDisplayNameHydrationRevision(),
++        )
++      })
++      seedSessions()
++      render(<Sidebar />)
++
++      await act(async () => { toggleBell() })
++
++      // 标题和所属目录必须在同一行里：这正是分组视图找不到任务时缺的那条信息。
++      const todayRow = screen.getByRole('button', { name: /Today Session/ })
++      expect(within(todayRow).getByText('Thunderbird glasses')).toBeInTheDocument()
++
++      const yesterdayRow = screen.getByRole('button', { name: /Yesterday Session/ })
++      expect(within(yesterdayRow).getByText('beta')).toBeInTheDocument()
++    })
++
++    it('hoists a running session into the in-progress group instead of its day bucket', async () => {
++      seedSessions()
++      useSessionStore.setState({
++        sessions: [
++          ...useSessionStore.getState().sessions,
++          // 同一个时间桶里的第二条：跑起来的那条离开后，这条必须还留在原位，
++          // 否则「搬走了」和「整段没了」两种实现都能让测试变绿。
++          makeSession('week-2', 'Other Week Session', '/workspace/beta', daysAgoIso(5)),
++        ],
++      })
++      render(<Sidebar />)
++
++      await act(async () => { toggleBell() })
++
++      act(() => {
++        useTabStore.getState().openTab('week-1', 'This Week Session')
++        useTabStore.getState().updateTabStatus('week-1', 'running')
++      })
++
++      const runningGroup = await screen.findByTestId('sidebar-task-group-running')
++      expect(within(runningGroup).getByRole('button', { name: /This Week Session/ })).toBeInTheDocument()
++      expect(within(runningGroup).getByLabelText('Session running')).toBeInTheDocument()
++
++      const weekGroup = screen.getByTestId('sidebar-task-group-last7Days')
++      expect(within(weekGroup).queryByRole('button', { name: /This Week Session/ })).not.toBeInTheDocument()
++      expect(within(weekGroup).getByRole('button', { name: /Other Week Session/ })).toBeInTheDocument()
++    })
++
++    it('carries the running spinner over when the bell is pressed mid-run', async () => {
++      seedSessions()
++      useSessionStore.setState({
++        sessions: [
++          ...useSessionStore.getState().sessions,
++          // 同桶的第二条：跑起来的那条离开后这条要留在原位，否则「挪走了」和
++          // 「整段没了」两种实现都能让断言变绿。
++          makeSession('yesterday-2', 'Other Yesterday Session', '/workspace/beta', daysAgoIso(1)),
++        ],
++      })
++      render(<Sidebar />)
++
++      // 先跑起来，再切视图 —— 另一条用例是反过来的顺序，两条都要覆盖：
++      // taskGroups 的 memo 对 isTaskView 做了短路，只测「先切后跑」的话，
++      // 一个在切换时读不到当前运行集合的实现照样能过。
++      act(() => {
++        useTabStore.getState().openTab('yesterday-1', 'Yesterday Session')
++        useTabStore.getState().updateTabStatus('yesterday-1', 'running')
++      })
++      // `^` 是必需的：`Other Yesterday Session` 也会匹配没锚定的模式。
++      const projectRow = screen.getByRole('button', { name: /^Yesterday Session/ })
++      expect(within(projectRow).getByLabelText('Session running')).toBeInTheDocument()
++
++      await act(async () => { toggleBell() })
++
++      const runningGroup = screen.getByTestId('sidebar-task-group-running')
++      const taskRow = within(runningGroup).getByRole('button', { name: /^Yesterday Session/ })
++      const spinner = within(taskRow).getByLabelText('Session running')
++      expect(spinner).toBeInTheDocument()
++      // 分组视图那边转的是同一个 spinner，不是另画一个静止图标。
++      expect(spinner.querySelector('svg')).toHaveClass('animate-spin')
++
++      const yesterdayGroup = screen.getByTestId('sidebar-task-group-yesterday')
++      expect(within(yesterdayGroup).queryByRole('button', { name: /^Yesterday Session/ })).not.toBeInTheDocument()
++      expect(within(yesterdayGroup).getByRole('button', { name: /Other Yesterday Session/ })).toBeInTheDocument()
++    })
++
++    it('marks a session that is stopped on a permission prompt as waiting, not running', async () => {
++      seedSessions()
++      useChatStore.setState({
++        sessions: {
++          'today-1': makeChatSessionState({ chatState: 'permission_pending' }),
++        },
++      } as Partial<ReturnType<typeof useChatStore.getState>>)
++
++      render(<Sidebar />)
++      await act(async () => { toggleBell() })
++
++      const runningGroup = screen.getByTestId('sidebar-task-group-running')
++      const waitingRow = within(runningGroup).getByRole('button', { name: /Today Session/ })
++      expect(within(waitingRow).getByLabelText('Waiting for your approval')).toBeInTheDocument()
++      expect(within(waitingRow).queryByLabelText('Session running')).not.toBeInTheDocument()
++    })
++
++    it('lights the bell when the organize menu picks by time, because they are one state', async () => {
++      seedSessions()
++      render(<Sidebar />)
++
++      expect(screen.getByRole('button', { name: 'Task view' })).toHaveAttribute('aria-pressed', 'false')
++
++      fireEvent.click(screen.getByRole('button', { name: 'Project menu' }))
++      fireEvent.click(screen.getByRole('menuitem', { name: 'Organize sidebar' }))
++      fireEvent.click(screen.getByRole('menuitem', { name: 'By time' }))
++
++      expect(screen.getByRole('button', { name: 'Task view' })).toHaveAttribute('aria-pressed', 'true')
++      expect(screen.getByTestId('sidebar-task-list')).toBeInTheDocument()
++    })
++
++    it('returns to the grouping that was in use, not to the default, when switched off', async () => {
++      seedSessions()
++      render(<Sidebar />)
++
++      fireEvent.click(screen.getByRole('button', { name: 'Project menu' }))
++      fireEvent.click(screen.getByRole('menuitem', { name: 'Organize sidebar' }))
++      fireEvent.click(screen.getByRole('menuitem', { name: 'By project' }))
++
++      await act(async () => { toggleBell() })
++      expect(screen.getByTestId('sidebar-task-list')).toBeInTheDocument()
++
++      await act(async () => { toggleBell() })
++
++      // 回到「按项目」，而不是悄悄把用户的选择重置成默认的 recentProject。
++      expect(screen.queryByTestId('sidebar-task-list')).not.toBeInTheDocument()
++      await waitFor(() => {
++        expect(desktopUiPreferencesApiMock.updateSidebarPreferences).toHaveBeenLastCalledWith(
++          expect.objectContaining({ projectOrganization: 'project' }),
++        )
++      })
++    })
++
++    it('keeps hidden projects hidden in the task view too', async () => {
++      seedSessions()
++      window.localStorage.setItem(PROJECT_HIDDEN_STORAGE_KEY, JSON.stringify(['/workspace/gamma']))
++
++      render(<Sidebar />)
++      await act(async () => { toggleBell() })
++
++      expect(screen.getByRole('button', { name: /Today Session/ })).toBeInTheDocument()
++      expect(screen.queryByRole('button', { name: /This Month Session/ })).not.toBeInTheDocument()
++      expect(screen.queryByRole('button', { name: /Ancient Session/ })).not.toBeInTheDocument()
++    })
++
++    it('opens and connects the session when a task row is clicked', async () => {
++      seedSessions()
++      render(<Sidebar />)
++      await act(async () => { toggleBell() })
++
++      await act(async () => {
++        fireEvent.click(screen.getByRole('button', { name: /Yesterday Session/ }))
++      })
++
++      expect(connectToSession).toHaveBeenCalledWith('yesterday-1')
++      expect(useTabStore.getState().tabs.map((tab) => tab.sessionId)).toContain('yesterday-1')
++    })
++
++    it('takes the bell out of reach while the sidebar is collapsed', () => {
++      seedSessions()
++      useUIStore.setState({ sidebarOpen: false } as Partial<ReturnType<typeof useUIStore.getState>>)
++
++      render(<Sidebar />)
++
++      // 折叠态不渲染会话列表，能聚焦或被读出来但切不动视图的铃铛只会让人点空。
++      // `sidebar-copy--hidden` 只夹宽度和透明度，所以两条都得自己钉住。
++      expect(screen.getByTestId('sidebar-task-view-toggle')).toHaveAttribute('tabindex', '-1')
++      expect(screen.queryByRole('button', { name: 'Task view' })).not.toBeInTheDocument()
++    })
++
++    it('keeps the bell reachable once the sidebar is expanded again', () => {
++      seedSessions()
++      render(<Sidebar />)
++
++      const bell = screen.getByRole('button', { name: 'Task view' })
++      expect(bell).toBeInTheDocument()
++      expect(bell).not.toHaveAttribute('tabindex', '-1')
++    })
+   })
+ })

@@ -18,7 +18,7 @@ const BOUNDARY_CASES: Array<{ input: string; expected: string | null; why: strin
   { input: 'http://localhost:3000、或者', expected: 'http://localhost:3000', why: 'ideographic comma' },
   { input: 'http://localhost:3000；完成', expected: 'http://localhost:3000', why: 'full-width semicolon' },
   { input: 'http://localhost:3000 查看', expected: 'http://localhost:3000', why: 'space ends the URL' },
-  { input: 'https://github.com/NanmiCoder/cc-haha/issues/1145 里', expected: 'https://github.com/NanmiCoder/cc-haha/issues/1145', why: 'nested path' },
+  { input: 'https://github.com/706412584/cc-haha/issues/1145 里', expected: 'https://github.com/706412584/cc-haha/issues/1145', why: 'nested path' },
   { input: 'http://localhost:3000/api/users?id=1&name=zhang#top 试试', expected: 'http://localhost:3000/api/users?id=1&name=zhang#top', why: 'query + fragment' },
   { input: 'http://localhost:3000/文档.html 打开', expected: 'http://localhost:3000/文档.html', why: 'Han letters are legal inside a path' },
   { input: 'http://localhost:3000/预览。查看', expected: 'http://localhost:3000/预览', why: 'CJK punctuation still ends the path' },

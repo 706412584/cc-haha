@@ -249,6 +249,63 @@ describe('providerRuntimeEnv', () => {
     })
   })
 
+  test('scopes GLM 5.3 standard API capabilities without disabling Coding Plan aliases', async () => {
+    const models = {
+      main: 'glm-5.3-flash[1m]',
+      haiku: 'glm-5.3-flash[1m]',
+      sonnet: 'glm-5.3[1m]',
+      opus: 'glm-5.3[1m]',
+    }
+    await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
+      activeId: 'provider-zhipu-standard',
+      providers: [{
+        id: 'provider-zhipu-standard',
+        presetId: 'zhipuglm',
+        name: 'Zhipu GLM',
+        apiKey: 'sk-zhipu',
+        authStrategy: 'auth_token',
+        baseUrl: 'https://open.bigmodel.cn/api/anthropic',
+        apiFormat: 'anthropic',
+        models,
+      }],
+    })
+
+    const standardEnv = readActiveProviderManagedEnv(tmpDir)
+    expect(standardEnv).toMatchObject({
+      ANTHROPIC_MODEL: 'glm-5.3-flash[1m]',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,required_thinking,effort,max_effort',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,required_thinking,effort,max_effort',
+    })
+    expect(JSON.parse(standardEnv!.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toMatchObject({
+      'glm-5.3[1m]': 1000000,
+      'glm-5.3-flash[1m]': 1000000,
+    })
+
+    await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
+      activeId: 'provider-zhipu-coding-plan',
+      providers: [{
+        id: 'provider-zhipu-coding-plan',
+        presetId: 'custom',
+        name: 'Zhipu Coding Plan',
+        apiKey: 'sk-zhipu-plan',
+        authStrategy: 'auth_token',
+        baseUrl: 'https://open.bigmodel.cn/api/anthropic',
+        apiFormat: 'anthropic',
+        models,
+      }],
+    })
+
+    const codingPlanEnv = readActiveProviderManagedEnv(tmpDir)
+    expect(codingPlanEnv).toMatchObject({
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,required_thinking,effort,xhigh_effort,max_effort',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,required_thinking,effort,xhigh_effort,max_effort',
+    })
+  })
+
   test('active provider env overrides stale proxy settings while preserving unrelated env', async () => {
     await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
       activeId: 'provider-1',
@@ -671,8 +728,12 @@ describe('providerRuntimeEnv', () => {
     expect(env).toMatchObject({
       ANTHROPIC_BASE_URL: 'https://router.shengsuanyun.com/api',
       ANTHROPIC_MODEL: 'anthropic/claude-sonnet-4.6',
-      ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES: 'none',
-      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'none',
+      // Per-slot capabilities come from the reasoning profile layer now
+      // (claude-sonnet-4.6 resolves there); the preset only pins auth/window.
+      ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
       // preset defaultEnv survives the retirement
       API_TIMEOUT_MS: '3000000',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',

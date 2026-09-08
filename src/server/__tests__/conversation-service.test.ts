@@ -291,9 +291,8 @@ describe('ConversationService', () => {
       // 240s apart keeps it alive forever. The overall-duration cap is NOT reset
       // by chunks and is what actually frees that case (#766).
       expect(env.CLAUDE_STREAM_MAX_DURATION_MS).toBe('600000')
-      // Tool JSON is not user-visible and should normally finish in seconds.
-      // Bound it separately so a model cannot spend the full response budget
-      // streaming a truncated Write payload (#1237).
+      // Tool JSON gets a shorter inactivity budget. Progress resets it, while
+      // the overall response cap still bounds a stream that trickles forever.
       expect(env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS).toBe('120000')
       // Non-streaming fallback stays off — its retry loop also hangs the UI (#766).
       expect(env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK).toBe('1')

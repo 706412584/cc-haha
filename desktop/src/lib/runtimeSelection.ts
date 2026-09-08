@@ -16,6 +16,7 @@ import {
   normalizeModelReasoningEffort,
   resolveModelReasoningProfile,
   type ModelReasoningApiFormat,
+  type ModelReasoningProviderKind,
 } from '../../../src/shared/modelReasoning'
 
 export function resolveActiveProviderRuntimeSelection(
@@ -86,6 +87,7 @@ export function resolveDefaultRuntimeSelection(
 export function normalizeRuntimeSelection(
   selection: RuntimeSelection,
   apiFormat?: ModelReasoningApiFormat,
+  providerKind?: ModelReasoningProviderKind,
 ): RuntimeSelection {
   if (
     selection.effortLevel === undefined ||
@@ -111,15 +113,27 @@ export function normalizeRuntimeSelection(
   const requestedEffort = isModelReasoningEffort(selection.effortLevel)
     ? selection.effortLevel
     : undefined
-  const reasoningProfile = resolveModelReasoningProfile(selection.modelId, apiFormat)
+  const reasoningProfile = resolveModelReasoningProfile(
+    selection.modelId,
+    apiFormat,
+    undefined,
+    providerKind,
+  )
   if (!reasoningProfile && apiFormat === undefined) return selection
   const effortLevel = normalizeModelReasoningEffort(
     selection.modelId,
     requestedEffort,
     apiFormat,
+    undefined,
+    providerKind,
   )
   if (effortLevel === selection.effortLevel) return selection
 
   const { effortLevel: _unsupportedEffort, ...runtime } = selection
-  return effortLevel ? { ...runtime, effortLevel } : runtime
+  const defaultEffort = reasoningProfile?.defaultReasoningEffort
+  return effortLevel
+    ? { ...runtime, effortLevel }
+    : defaultEffort
+      ? { ...runtime, effortLevel: defaultEffort }
+      : runtime
 }

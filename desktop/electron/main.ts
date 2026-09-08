@@ -95,6 +95,8 @@ let previewService: ElectronPreviewService | null = null
 let petWindowController: PetWindowController | null = null
 const traceWindows = new Map<string, BrowserWindow>()
 let isQuitting = false
+let quitCleanupStarted = false
+let quitCleanupFinished = false
 let trayController: TrayController | null = null
 
 // Must run before anything logs: a Finder/Dock launch inherits unreadable
@@ -830,16 +832,42 @@ app.on('window-all-closed', () => {
   if (isQuitting && process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', event => {
   isQuitting = true
-  if (mainWindow) saveWindowState(app, mainWindow)
-  trayController?.dispose()
+  if (quitCleanupFinished) return
+  event.preventDefault()
+  if (quitCleanupStarted) return
+  quitCleanupStarted = true
+  const cleanupSteps = {
+    window: () => { if (mainWindow) saveWindowState(app, mainWindow) },
+    tray: () => { trayController?.dispose() },
+    terminal: () => { terminalService?.killAll() },
+    preview: () => { previewService?.close() },
+    pet: () => { petWindowController?.dispose() },
+  }
+  // A destroyed native view or PTY can throw during cleanup. Keep going so a
+  // failed resource cannot leave every later quit blocked by cleanupStarted.
+  for (const [resource, cleanup] of Object.entries(cleanupSteps)) {
+    try {
+      cleanup()
+    } catch (error) {
+      console.error(`[desktop] ${resource} cleanup failed during quit`, error)
+    }
+  }
   trayController = null
-  terminalService?.killAll()
-  previewService?.close()
-  petWindowController?.dispose()
   petWindowController = null
-  // Synchronous on quit so the Windows taskkill completes before the process
-  // exits, otherwise the fire-and-forget kill can leave orphaned sidecars.
-  getServerRuntime().stopAll(true)
+  // Keep Electron (and the server's stdout/stderr pipes) alive until the server
+  // has waited for its CLI children to finish their graceful cleanup. The CLI
+  // owns the launchd-reparented Computer Use helper, so exiting the host first
+  // can strand its active turn across an immediate app restart.
+  void (async () => {
+    try {
+      await getServerRuntime().stopAllAndWait()
+    } catch (error) {
+      console.error('[desktop] graceful server shutdown failed', error)
+    } finally {
+      quitCleanupFinished = true
+      app.quit()
+    }
+  })()
 })

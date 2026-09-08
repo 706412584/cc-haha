@@ -7,7 +7,7 @@ import { SearchField } from '@/components/ui/SearchField'
 import { SegmentedControl } from '@/components/ui/SegmentedControl'
 import { useTranslation } from '../../i18n'
 import { previewTraceValue, type TraceSpan, type TraceViewModel } from '../../lib/traceViewModel'
-import { formatDurationMs } from '../../lib/trace/formatters'
+import { formatDurationMs, formatTokenCount } from '../../lib/trace/formatters'
 import { StatusGlyph, TypeIcon, spanDisplayTitle, turnDisplayTitle } from './TraceBadges'
 
 export type TraceTreeFilter = 'all' | 'llm' | 'tool' | 'error'
@@ -207,8 +207,9 @@ function TurnGroup({
 function TreeRowButton({ row, selected, onSelect }: { row: TreeRow; selected: boolean; onSelect: () => void }) {
   const t = useTranslation()
   const span = row.span
-  const preview = rowPreview(span)
+  const preview = rowPreview(span, t)
   const duration = span.durationMs !== undefined ? formatDurationMs(span.durationMs) : null
+  const tokens = rowTokens(span)
 
   return (
     <button
@@ -242,6 +243,9 @@ function TreeRowButton({ row, selected, onSelect }: { row: TreeRow; selected: bo
           </span>
         ) : null}
       </span>
+      {tokens ? (
+        <span className="shrink-0 font-mono text-[11.5px] text-[var(--color-text-tertiary)]">{tokens}</span>
+      ) : null}
       {duration ? (
         <span className="shrink-0 font-mono text-[12px] text-[var(--color-text-tertiary)]">{duration}</span>
       ) : null}
@@ -250,12 +254,56 @@ function TreeRowButton({ row, selected, onSelect }: { row: TreeRow; selected: bo
   )
 }
 
-function rowPreview(span: TraceSpan): string | null {
-  if (span.kind === 'message' || span.kind === 'event') {
+function rowPreview(span: TraceSpan, t: ReturnType<typeof useTranslation>): string | null {
+  // A tool row's subtitle is its summarized input, which is what distinguishes
+  // one Bash call from the next; without it every tool row reads the same.
+  if (span.kind === 'message' || span.kind === 'event' || span.kind === 'tool') {
     const preview = span.subtitle
-    return preview && preview !== 'empty' ? preview : null
+    if (preview && preview !== 'empty') return preview
+    // An assistant turn that only reasoned has no extractable text, which would
+    // otherwise leave the row as a bare "Assistant" label with nothing on it.
+    return span.kind === 'message' ? reasoningPreview(span.message?.content, t) : null
   }
   return null
+}
+
+const REASONING_PREVIEW_MAX = 120
+
+/**
+ * What an assistant turn did when it produced no visible text. Readable
+ * reasoning is previewed; provider reasoning the harness stores encoded is
+ * named rather than dumped, since its payload is not text a reader can use.
+ */
+function reasoningPreview(content: unknown, t: ReturnType<typeof useTranslation>): string | null {
+  if (!Array.isArray(content)) return null
+  let redacted = false
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    const record = block as { type?: unknown; thinking?: unknown }
+    if (record.type === 'redacted_thinking') {
+      redacted = true
+      continue
+    }
+    if (record.type !== 'thinking' || typeof record.thinking !== 'string') continue
+    const text = record.thinking.replace(/\s+/g, ' ').trim()
+    if (text.length === 0) continue
+    return text.length > REASONING_PREVIEW_MAX ? `${text.slice(0, REASONING_PREVIEW_MAX)}…` : text
+  }
+  return redacted ? t('trace.message.redactedReasoning') : null
+}
+
+/**
+ * Compact token counts for a model call, so cost reads off the row itself.
+ * Counts only `inputTokens`, matching the detail header's `formatUsageBrief`
+ * and the session overview — a row that added cached tokens here would
+ * contradict both the moment prompt caching is on.
+ */
+function rowTokens(span: TraceSpan): string | null {
+  if (span.kind !== 'llm') return null
+  const usage = span.call?.usage
+  if (!usage) return null
+  if (usage.inputTokens === 0 && usage.outputTokens === 0) return null
+  return `${formatTokenCount(usage.inputTokens)}↑ ${formatTokenCount(usage.outputTokens)}↓`
 }
 
 function turnPreview(turnSpan: TraceSpan, t: ReturnType<typeof useTranslation>): string {

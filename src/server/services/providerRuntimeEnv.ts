@@ -21,7 +21,11 @@ import {
   BUILT_IN_PROVIDER_IDS,
   PROVIDER_TOOL_SEARCH_OPT_IN_SCHEMA_VERSION,
 } from '../types/provider.js'
-import { getClaudeCodeModelCapabilities } from '../../shared/modelReasoning.js'
+import {
+  getClaudeCodeModelCapabilities,
+  resolveModelReasoningProfile,
+  type ModelReasoningProviderKind,
+} from '../../shared/modelReasoning.js'
 import {
   ATTRIBUTION_HEADER_ENV_KEY,
   attributionHeaderEnvForModel,
@@ -330,6 +334,12 @@ export function getPresetDefaultEnv(presetId: string): Record<string, string> {
   return PROVIDER_PRESETS.find((preset) => preset.id === presetId)?.defaultEnv ?? {}
 }
 
+export function getPresetReasoningProviderKind(
+  presetId: string,
+): ModelReasoningProviderKind | undefined {
+  return PROVIDER_PRESETS.find((preset) => preset.id === presetId)?.reasoningProviderKind
+}
+
 function omitAuthEnv(env: Record<string, string>): Record<string, string> {
   return Object.fromEntries(
     Object.entries(env).filter(([key]) => !AUTH_ENV_KEYS.has(key.toUpperCase())),
@@ -384,15 +394,28 @@ function getProviderCapabilityEnv(
   provider: SavedProvider,
   models: SavedProvider['models'],
 ): Record<string, string> {
+  const providerKind = getPresetReasoningProviderKind(provider.presetId)
   if (provider.presetId === 'custom') {
+    // Custom providers keep the broad custom capability set, unless a slot's
+    // model resolves to a concrete reasoning profile (e.g. a GLM Coding Plan
+    // alias saved as a custom provider) — then the profile is more precise.
+    const customCapabilities = (model: string): string => {
+      const profile = resolveModelReasoningProfile(
+        model,
+        provider.apiFormat ?? 'anthropic',
+      )
+      return profile && profile.family !== 'generic'
+        ? profile.claudeCodeCapabilities
+        : getCustomProviderModelCapabilities(provider, models)
+    }
     const capabilities = getCustomProviderModelCapabilities(provider, models)
     return {
       ...(models.fable
-        ? { ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES: capabilities }
+        ? { ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES: customCapabilities(models.fable) }
         : {}),
-      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: capabilities,
-      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: capabilities,
-      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: capabilities,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: customCapabilities(models.haiku),
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: customCapabilities(models.sonnet),
+      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: customCapabilities(models.opus),
     }
   }
   if (provider.presetId === 'kimi') {
@@ -403,28 +426,21 @@ function getProviderCapabilityEnv(
     }
   }
 
-  const preset = PROVIDER_PRESETS.find((entry) => entry.id === provider.presetId)
-  const capabilityEnv: Record<string, string> = {}
-  const slots = [
-    ['fable', 'ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES'],
-    ['haiku', 'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES'],
-    ['sonnet', 'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES'],
-    ['opus', 'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES'],
-  ] as const
-  for (const [slot, envKey] of slots) {
-    const configuredModel = models[slot]
-    const presetModel = preset?.defaultModels[slot]
-    if (
-      configuredModel &&
-      (!presetModel || normalizeCapabilityModelId(configuredModel) !== normalizeCapabilityModelId(presetModel))
-    ) {
-      capabilityEnv[envKey] = getClaudeCodeModelCapabilities(
-        configuredModel,
-        provider.apiFormat ?? 'anthropic',
-      )
-    }
+  const apiFormat = provider.apiFormat ?? 'anthropic'
+  return {
+    ...(models.fable
+      ? {
+          ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES:
+            getClaudeCodeModelCapabilities(models.fable, apiFormat, undefined, providerKind),
+        }
+      : {}),
+    ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES:
+      getClaudeCodeModelCapabilities(models.haiku, apiFormat, undefined, providerKind),
+    ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
+      getClaudeCodeModelCapabilities(models.sonnet, apiFormat, undefined, providerKind),
+    ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES:
+      getClaudeCodeModelCapabilities(models.opus, apiFormat, undefined, providerKind),
   }
-  return capabilityEnv
 }
 
 export function buildProviderAuthEnv(

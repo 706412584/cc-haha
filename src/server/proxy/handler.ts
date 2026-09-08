@@ -272,7 +272,7 @@ async function handleOpenaiChat(
     // through so the upstream returns the thinking we already asked for.
     roundTripReasoningContent: true,
     passThinkingToggle: true,
-    imageContentMode: shouldUseTextOnlyOpenAIChatContent(baseUrl) ? 'text_only' : 'vision',
+    imageContentMode: shouldUseTextOnlyOpenAIChatContent(baseUrl, body.model) ? 'text_only' : 'vision',
   })
   const url = `${baseUrl}/v1/chat/completions`
   const upstreamRequestHeaders = {
@@ -429,8 +429,24 @@ function shouldUseDeepSeekReasoningCompat(baseUrl: string): boolean {
   )
 }
 
-function shouldUseTextOnlyOpenAIChatContent(baseUrl: string): boolean {
-  return shouldUseDeepSeekReasoningCompat(baseUrl)
+function shouldUseTextOnlyOpenAIChatContent(baseUrl: string, model: string): boolean {
+  // DeepSeek's classic Chat endpoint accepts string content only.
+  if (/(^|[./-])deepseek([./-]|$)/i.test(baseUrl)) return true
+
+  // image_url inside a tool message is a gateway extension, not a universal
+  // Chat Completions contract. Only opt opencode models in when their id
+  // explicitly advertises vision capability; unknown gateway models stay safe.
+  if (/(^|[./-])opencode\.ai([:/]|$)/i.test(baseUrl)) {
+    return !hasExplicitVisionModelMarker(model)
+  }
+
+  // Preserve the existing behavior for generic compatible providers whose
+  // capabilities are not controlled by either compatibility policy above.
+  return false
+}
+
+function hasExplicitVisionModelMarker(model: string): boolean {
+  return /(^|[/:._-])vision([/:._-]|$)/i.test(model)
 }
 
 async function handleOpenaiResponses(

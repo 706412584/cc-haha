@@ -4,10 +4,29 @@ import {
   getBundledRipgrepName,
   stageRipgrepLicenses,
 } from './prepare-ripgrep'
+import {
+  SIDECAR_SIGNING_IDENTIFIER,
+  codesignTimestampArgument,
+  detectStableSigningIdentity,
+} from './sign-identity'
+import {
+  createCuHelperBuildEnv,
+  resolveCuHelperArch,
+  type CuHelperArch,
+} from './cu-helper-build-target'
 
 const desktopRoot = path.resolve(import.meta.dir, '..')
 const repoRoot = path.resolve(desktopRoot, '..')
 const binariesDir = path.join(desktopRoot, 'src-tauri', 'binaries')
+
+// The SwiftPM resource bundle the cu-helper binary loads at runtime via
+// `Bundle.module`. It MUST travel next to the binary or the LensSequence
+// overlay assets fail to load. Declared up here (BEFORE the top-level
+// `await buildCuHelper()` below) so it is initialized when that runs — a
+// `const` placed after the call site hits the temporal dead zone (ReferenceError).
+// SwiftPM names the resource bundle `${PackageName}_${TargetName}.bundle`.
+// Package stays `cu-helper`; the executable target is now `cc-haha-computer-use`.
+const CU_HELPER_RESOURCE_BUNDLE = 'cu-helper_cc-haha-computer-use.bundle'
 
 const targetTriple =
   process.env.SIDECAR_TARGET_TRIPLE ||
@@ -44,6 +63,17 @@ await compileExecutable({
 })
 
 console.log(`[build-sidecars] Built desktop sidecar for ${targetTriple} (${bunTarget})`)
+
+// macOS-only: build + bundle the native `cu-helper` Computer Use binary.
+// On Windows/Linux this is skipped entirely so the Python helper path is
+// preserved (helperBridge.ts routes non-darwin → python). We do NOT ad-hoc
+// re-sign cu-helper here: native/cu-helper/build.sh already signs it with a
+// STABLE identity + hardened runtime, and re-signing would rotate its TCC
+// identity, dropping the user's Accessibility + Screen Recording grants.
+const cuHelperArch = resolveCuHelperArch(targetTriple)
+if (process.platform === 'darwin' && cuHelperArch) {
+  await buildCuHelper(cuHelperArch)
+}
 
 async function stageHostRipgrepForOfflineBuild() {
   const destination = path.join(binariesDir, getBundledRipgrepName(targetTriple))
@@ -230,27 +260,142 @@ async function compileExecutable({
   // macOS Apple System Policy (ASP) requires valid code signatures on all
   // executables. Bun-compiled binaries ship with an invalid/empty signature
   // that causes "load code signature error 4" and SIGKILL at launch.
-  // Fix: strip the broken signature, then ad-hoc sign.
+  // Fix: strip the broken signature, then re-sign.
   if (process.platform === 'darwin') {
-    await adHocSignMacBinary(outputPath)
+    await signMacBinary(outputPath)
   }
 }
 
-async function adHocSignMacBinary(outputPath: string) {
-  console.log(`[build-sidecars] ad-hoc signing ${outputPath} for macOS ...`)
+/**
+ * Sign a compiled sidecar with the build's stable identity and — critically —
+ * the FIXED identifier the helper's attestation policy expects.
+ *
+ * The identifier is the reason this is not just `codesign -s -`. Ad-hoc signing
+ * derives the identifier from the file name plus a content hash
+ * (`claude-sidecar-aarch64-apple-darwin-5555…`), which never matches
+ * `com.claude-code-haha.desktop.sidecar`. `ClientAttestation.swift` compares
+ * that identifier exactly, so a hash-suffixed one makes every Computer Use call
+ * fail closed with `unauthorized_client`.
+ *
+ * `--identifier` applies to ad-hoc signatures too, so the unsigned local build
+ * still gets the right identifier — it just cannot satisfy the team/leaf half of
+ * the policy, which is inherent to having no certificate.
+ *
+ * electron-builder must not overwrite this signature; `mac.signIgnore` in
+ * package.json excludes `claude-sidecar-…` for exactly that reason. That also
+ * means entitlements are OUR job here — electron-builder's `entitlementsInherit`
+ * never reaches a file it does not sign.
+ */
+async function signMacBinary(outputPath: string) {
+  const identity = await detectStableSigningIdentity()
+  const label = identity ?? 'ad-hoc'
+  console.log(
+    `[build-sidecars] signing ${outputPath} as ${SIDECAR_SIGNING_IDENTIFIER} (${label}) ...`,
+  )
+
   const strip = Bun.spawn(['codesign', '--remove-signature', outputPath], {
     stdout: 'inherit',
     stderr: 'inherit',
   })
   await strip.exited
 
-  const sign = Bun.spawn(
-    ['codesign', '--sign', '-', '--force', '--timestamp=none', outputPath],
-    { stdout: 'inherit', stderr: 'inherit' },
-  )
+  const args = [
+    'codesign',
+    '--sign',
+    identity ?? '-',
+    '--force',
+    '--identifier',
+    SIDECAR_SIGNING_IDENTIFIER,
+    codesignTimestampArgument(identity),
+  ]
+  if (identity) {
+    // Hardened runtime + inherited entitlements match what electron-builder
+    // would have applied, so skipping its signing pass changes nothing else
+    // about how the sidecar runs.
+    args.push(
+      '--options',
+      'runtime',
+      '--entitlements',
+      path.join(desktopRoot, 'build', 'entitlements.mac.inherit.plist'),
+    )
+  }
+  args.push(outputPath)
+
+  const sign = Bun.spawn(args, { stdout: 'inherit', stderr: 'inherit' })
   const signExit = await sign.exited
   if (signExit !== 0) {
-    throw new Error(`[build-sidecars] ad-hoc codesign failed for ${outputPath} (exit ${signExit})`)
+    throw new Error(
+      `[build-sidecars] codesign failed for ${outputPath} (exit ${signExit}, identity: ${label})`,
+    )
   }
-  console.log(`[build-sidecars] ad-hoc signed ${outputPath}`)
+  console.log(`[build-sidecars] signed ${outputPath} (${label})`)
+}
+
+/**
+ * macOS-only: run `native/cu-helper/build.sh`, then copy the produced (already
+ * signed) `cu-helper` binary AND its sibling SwiftPM resource bundle into
+ * `desktop/src-tauri/binaries/` so electron-builder packs them (the existing
+ * `src-tauri/binaries/**` glob already covers both).
+ *
+ * The copy is byte-preserving (`cp -R`) so cu-helper's stable `dev.cchaha.cu-helper`
+ * Mach-O signature is left intact — we never strip or re-sign it here.
+ */
+async function buildCuHelper(arch: CuHelperArch) {
+  const buildScript = path.join(repoRoot, 'native', 'cu-helper', 'build.sh')
+  console.log(`[build-sidecars] Building native cu-helper (${arch}) via ${buildScript} ...`)
+
+  const proc = Bun.spawn(['bash', buildScript], {
+    cwd: path.dirname(buildScript),
+    env: createCuHelperBuildEnv(targetTriple, process.env),
+    // build.sh prints all diagnostics to STDERR and the ONE machine-readable
+    // `built: <abs path>` line to STDOUT, so capture stdout and inherit stderr.
+    stdout: 'pipe',
+    stderr: 'inherit',
+  })
+  const stdout = await new Response(proc.stdout).text()
+  const exitCode = await proc.exited
+  if (exitCode !== 0) {
+    throw new Error(`[build-sidecars] cu-helper build.sh failed (exit ${exitCode})`)
+  }
+
+  // Parse the single `built: <abs path>` line (build.sh:286).
+  const builtMatch = stdout.match(/^built:\s*(.+)$/m)
+  const builtBinary = builtMatch?.[1]?.trim()
+  if (!builtBinary) {
+    throw new Error(
+      `[build-sidecars] cu-helper build.sh did not print a 'built: <path>' line.\nstdout:\n${stdout}`,
+    )
+  }
+
+  // build.sh now emits the .app BUNDLE path (Screen Recording only works for a
+  // real .app bundle subject, not a bare Mach-O). Copy the WHOLE bundle — the
+  // resource bundle lives inside it at Contents/Resources/, and the spawnable
+  // executable is at Contents/MacOS/cc-haha-computer-use (see cuHelperBridge.ts).
+  const destApp = path.join(binariesDir, 'cc-haha-computer-use.app')
+
+  // Remove any stale copies first (incl. ALL legacy bare-binary / bundle / old
+  // -name artifacts) so `cp -R` does not nest into an existing dir.
+  await Bun.spawn(
+    ['rm', '-rf',
+     destApp,
+     path.join(binariesDir, 'cc-haha-computer-use'),         // legacy bare binary
+     path.join(binariesDir, 'cu-helper'),                    // legacy old-name binary
+     path.join(binariesDir, CU_HELPER_RESOURCE_BUNDLE),      // legacy sibling bundle
+     path.join(binariesDir, 'cu-helper_cu-helper.bundle')],
+    { stderr: 'inherit' },
+  ).exited
+
+  // Byte-preserving copy — keeps the .app's signature; do NOT re-sign.
+  await copyPreserving(builtBinary, destApp)
+
+  console.log(`[build-sidecars] cu-helper .app bundle -> ${destApp}`)
+}
+
+/** `cp -R <src> <dest>` — preserves the Mach-O code signature byte-for-byte. */
+async function copyPreserving(src: string, dest: string) {
+  const proc = Bun.spawn(['cp', '-R', src, dest], { stderr: 'inherit' })
+  const exitCode = await proc.exited
+  if (exitCode !== 0) {
+    throw new Error(`[build-sidecars] failed to copy ${src} -> ${dest} (exit ${exitCode})`)
+  }
 }

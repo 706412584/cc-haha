@@ -64,6 +64,64 @@ export function splitMessage(text: string, limit: number): string[] {
   return chunks
 }
 
+const utf8Encoder = new TextEncoder()
+
+/** UTF-8 byte length — WeCom and several other platforms cap on bytes, not characters. */
+export function utf8Length(text: string): number {
+  return utf8Encoder.encode(text).length
+}
+
+/**
+ * Split text into chunks that each fit within a UTF-8 **byte** limit.
+ *
+ * `splitMessage` counts characters, which silently overflows a byte cap the
+ * moment the text is Chinese (3 bytes per character). Splitting still prefers
+ * paragraph, then line, then word boundaries; a single oversized token is cut
+ * at a code-point boundary rather than mid-sequence.
+ */
+export function splitMessageByBytes(text: string, maxBytes: number): string[] {
+  if (maxBytes <= 0) return [text]
+  if (utf8Length(text) <= maxBytes) return [text]
+
+  const chunks: string[] = []
+  let remaining = text
+
+  while (remaining.length > 0) {
+    if (utf8Length(remaining) <= maxBytes) {
+      chunks.push(remaining)
+      break
+    }
+
+    // Walk back from an upper-bound character index until the slice fits.
+    let end = Math.min(remaining.length, maxBytes)
+    while (end > 0 && utf8Length(remaining.slice(0, end)) > maxBytes) {
+      end -= 1
+    }
+    if (end <= 0) end = 1
+
+    const window = remaining.slice(0, end)
+    let splitAt = window.lastIndexOf('\n\n')
+    if (splitAt <= 0) splitAt = window.lastIndexOf('\n')
+    if (splitAt <= 0) splitAt = window.lastIndexOf(' ')
+    if (splitAt <= 0) splitAt = end
+
+    // Never split inside a surrogate pair — that produces invalid UTF-8.
+    if (splitAt < remaining.length && isLowSurrogate(remaining.charCodeAt(splitAt))) {
+      splitAt -= 1
+    }
+    if (splitAt <= 0) splitAt = end
+
+    chunks.push(remaining.slice(0, splitAt).trimEnd())
+    remaining = remaining.slice(splitAt).trimStart()
+  }
+
+  return chunks.filter((chunk) => chunk.length > 0)
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff
+}
+
 type MarkdownTable = {
   headers: string[]
   rows: string[][]

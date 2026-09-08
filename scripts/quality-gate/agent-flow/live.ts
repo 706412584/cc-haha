@@ -39,6 +39,9 @@ export type ResolvedLiveTarget = {
   providerId: string
   providerName: string
   modelId: string
+  effortLevel?: string
+  /** Applied only to the copied provider config used by this live run. */
+  disableExperimentalBetas?: boolean
   /** Host only. The full base URL can carry a key in its query string. */
   host: string
   source: string
@@ -51,7 +54,12 @@ export type ResolvedLiveTarget = {
  */
 export function resolveLiveTarget(
   selector: string | undefined,
-  options: { configDir?: string; modelId?: string } = {},
+  options: {
+    configDir?: string
+    modelId?: string
+    effortLevel?: string
+    disableExperimentalBetas?: boolean
+  } = {},
 ): ResolvedLiveTarget {
   const configDir = options.configDir ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
   const index = loadProviderIndex(configDir)
@@ -93,9 +101,29 @@ export function resolveLiveTarget(
     providerId: provider.id,
     providerName: provider.name,
     modelId,
+    ...(options.effortLevel ? { effortLevel: options.effortLevel } : {}),
+    ...(options.disableExperimentalBetas ? { disableExperimentalBetas: true } : {}),
     host: 'resolved by the server from the sandboxed provider config',
     source: indexPath,
   }
+}
+
+export function applyLiveTargetSandboxOverrides(
+  configDir: string,
+  target: ResolvedLiveTarget,
+): void {
+  if (!target.disableExperimentalBetas) return
+
+  const indexPath = getProviderIndexPath(configDir)
+  const index = JSON.parse(readFileSync(indexPath, 'utf8')) as {
+    providers?: Array<Record<string, unknown>>
+  }
+  const provider = index.providers?.find((candidate) => candidate.id === target.providerId)
+  if (!provider) {
+    throw new Error(`Provider ${target.providerId} is missing from sandboxed provider config`)
+  }
+  provider.disableExperimentalBetas = true
+  writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`)
 }
 
 /** The banner the operator has to read before anything is sent upstream. */
@@ -106,6 +134,10 @@ export function describeLiveTarget(target: ResolvedLiveTarget, scenarioCount: nu
     '',
     `    provider   ${target.providerName}  (${target.providerId})`,
     `    model      ${target.modelId}`,
+    ...(target.effortLevel ? [`    effort     ${target.effortLevel}`] : []),
+    ...(target.disableExperimentalBetas
+      ? ['    beta mode  disabled in the sandbox copy only']
+      : []),
     `    read from  ${target.source}`,
     `    scenarios  ${scenarioCount}`,
     '',
@@ -118,10 +150,96 @@ export function describeLiveTarget(target: ResolvedLiveTarget, scenarioCount: nu
 type LiveContext = {
   baseUrl: string
   workRoot: string
+  artifactDir: string
   target: ResolvedLiveTarget
   createSession(): Promise<string>
   openSocket(sessionId: string): Promise<SessionSocket>
   pinRuntime(socket: SessionSocket): void
+}
+
+export type LiveEffortField = {
+  path: string
+  value: string
+}
+
+export function collectLiveEffortFields(value: unknown, path = 'request.body'): LiveEffortField[] {
+  if (!value || typeof value !== 'object') return []
+
+  const snapshot = value as { contentType?: unknown; preview?: unknown }
+  if (snapshot.contentType === 'json' && typeof snapshot.preview === 'string') {
+    try {
+      return collectLiveEffortFields(JSON.parse(snapshot.preview), path)
+    } catch {
+      const fields: LiveEffortField[] = []
+      const pattern = /"(effort|reasoning_effort)"\s*:\s*"([^"]+)"/g
+      for (const match of snapshot.preview.matchAll(pattern)) {
+        fields.push({ path: `${path}.preview.${match[1]}`, value: match[2]! })
+      }
+      return fields
+    }
+  }
+
+  const fields: LiveEffortField[] = []
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = `${path}.${key}`
+    if ((key === 'effort' || key === 'reasoning_effort') && typeof child === 'string') {
+      fields.push({ path: childPath, value: child })
+    }
+    fields.push(...collectLiveEffortFields(child, childPath))
+  }
+  return fields
+}
+
+async function captureLiveEffortEvidence(ctx: LiveContext, sessionId: string): Promise<void> {
+  const expected = ctx.target.effortLevel
+  if (!expected) return
+
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    const traceResponse = await fetch(`${ctx.baseUrl}/api/sessions/${sessionId}/trace`)
+    if (traceResponse.ok) {
+      const trace = await traceResponse.json() as { calls?: Array<{ id?: string }> }
+      for (const item of [...(trace.calls ?? [])].reverse()) {
+        if (!item.id) continue
+        const detailResponse = await fetch(
+          `${ctx.baseUrl}/api/sessions/${sessionId}/trace/calls/${encodeURIComponent(item.id)}`,
+        )
+        if (!detailResponse.ok) continue
+        const detail = await detailResponse.json() as {
+          call?: {
+            source?: string
+            model?: string
+            request?: { headers?: Record<string, unknown>; body?: unknown }
+            response?: { status?: number }
+          }
+        }
+        const call = detail.call
+        const effortFields = collectLiveEffortFields(call?.request?.body)
+        if (!effortFields.some((field) => field.value === expected)) continue
+
+        const requestHeaderNames = Object.keys(call?.request?.headers ?? {}).map((name) => name.toLowerCase())
+        const anthropicBetaHeaderPresent = requestHeaderNames.includes('anthropic-beta')
+        if (ctx.target.disableExperimentalBetas && anthropicBetaHeaderPresent) {
+          throw new Error('sandbox requested disabled experimental betas, but the live request still sent anthropic-beta')
+        }
+
+        writeFileSync(join(ctx.artifactDir, 'effort-evidence.json'), `${JSON.stringify({
+          providerName: ctx.target.providerName,
+          modelId: call?.model ?? ctx.target.modelId,
+          requestedEffort: expected,
+          disableExperimentalBetas: ctx.target.disableExperimentalBetas === true,
+          traceSource: call?.source ?? null,
+          effortFields,
+          anthropicBetaHeaderPresent,
+          responseStatus: call?.response?.status ?? null,
+        }, null, 2)}\n`)
+        return
+      }
+    }
+    await Bun.sleep(200)
+  }
+
+  throw new Error(`live request completed but no captured request body carried effort=${expected}`)
 }
 
 function assistantTextCount(socket: SessionSocket) {
@@ -130,7 +248,8 @@ function assistantTextCount(socket: SessionSocket) {
 
 const runners: Record<string, (ctx: LiveContext) => Promise<void>> = {
   async 'live-first-turn'(ctx) {
-    const socket = await ctx.openSocket(await ctx.createSession())
+    const sessionId = await ctx.createSession()
+    const socket = await ctx.openSocket(sessionId)
     try {
       ctx.pinRuntime(socket)
       const turn = await runTurn(socket, 'Reply with a single short sentence confirming you are ready.', LIVE_STEP_TIMEOUT_MS)
@@ -138,6 +257,7 @@ const runners: Record<string, (ctx: LiveContext) => Promise<void>> = {
       if (streamed.length === 0) {
         throw new Error(`no assistant text streamed; saw ${turn.map((m) => m.type).join(', ')}`)
       }
+      await captureLiveEffortEvidence(ctx, sessionId)
     } finally {
       socket.close()
     }
@@ -289,6 +409,7 @@ export async function executeLiveAgentFlow(options: {
   const { rootDir, artifactDir, target } = options
   mkdirSync(artifactDir, { recursive: true })
   const serverLogPath = join(artifactDir, 'server.log')
+  rmSync(join(artifactDir, 'effort-evidence.json'), { force: true })
   writeFileSync(serverLogPath, '')
 
   const port = await getPort()
@@ -305,6 +426,13 @@ export async function executeLiveAgentFlow(options: {
     seedProviders: true,
     envOverrides: { CC_HAHA_DISABLE_TERMINAL_SHELL_ENV: '1' },
   })
+  try {
+    applyLiveTargetSandboxOverrides(sandbox.configDir, target)
+  } catch (error) {
+    sandbox.cleanup()
+    rmSync(workRoot, { recursive: true, force: true })
+    throw error
+  }
 
   const server = Bun.spawn(['bun', 'run', 'src/server/index.ts', '--host', '127.0.0.1', '--port', String(port)], {
     cwd: rootDir,
@@ -321,6 +449,7 @@ export async function executeLiveAgentFlow(options: {
     const ctx: LiveContext = {
       baseUrl,
       workRoot,
+      artifactDir,
       target,
       async createSession() {
         const response = await fetch(`${baseUrl}/api/sessions`, {
@@ -338,7 +467,12 @@ export async function executeLiveAgentFlow(options: {
         return await new SessionSocket(baseUrl, sessionId).open()
       },
       pinRuntime(socket) {
-        socket.send({ type: 'set_runtime_config', providerId: target.providerId, modelId: target.modelId })
+        socket.send({
+          type: 'set_runtime_config',
+          providerId: target.providerId,
+          modelId: target.modelId,
+          ...(target.effortLevel ? { effortLevel: target.effortLevel } : {}),
+        })
       },
     }
 

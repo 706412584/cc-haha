@@ -51,11 +51,15 @@ if (!config.feishu.appId || !config.feishu.appSecret) {
   process.exit(1)
 }
 
+/** International (Lark) tenants serve the same APIs from a different origin;
+ *  a bot provisioned there cannot authenticate against open.feishu.cn. */
+const larkDomain = config.feishu.domain === 'lark' ? Lark.Domain.Lark : Lark.Domain.Feishu
+
 const larkClient = new Lark.Client({
   appId: config.feishu.appId,
   appSecret: config.feishu.appSecret,
   appType: Lark.AppType.SelfBuild,
-  domain: Lark.Domain.Feishu,
+  domain: larkDomain,
 })
 
 const bridge = new WsBridge(config.serverUrl, 'feishu')
@@ -1242,7 +1246,7 @@ async function start(): Promise<void> {
   wsClient = new Lark.WSClient({
     appId: config.feishu.appId,
     appSecret: config.feishu.appSecret,
-    domain: Lark.Domain.Feishu,
+    domain: larkDomain,
     loggerLevel: Lark.LoggerLevel.info,
   })
 

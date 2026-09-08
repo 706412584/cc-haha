@@ -3,7 +3,10 @@ import { ImageGalleryModal } from './ImageGalleryModal'
 import { ImageAnnotationModal } from './ImageAnnotationModal'
 import { useChatStore } from '../../stores/chatStore'
 import { localImageFileUrl } from '../../lib/attachmentImages'
-import { extractAssistantOutputTargets } from '../../lib/assistantOutputTargets'
+import {
+  extractAssistantOutputTargets,
+  extractMarkdownImageSources,
+} from '../../lib/assistantOutputTargets'
 import { isAbsoluteLocalPath, previewFsUrl } from '../../lib/handlePreviewLink'
 import { getServerBaseUrl } from '../../lib/desktopRuntime'
 
@@ -112,6 +115,17 @@ type Props = {
   allowRemoteImages?: boolean
 }
 
+function normalizeImageReference(value: string): string {
+  const withoutSuffix = value.trim().split('#')[0]!.split('?')[0]!
+  let decoded = withoutSuffix
+  try {
+    decoded = decodeURIComponent(withoutSuffix)
+  } catch {
+    // Keep malformed escapes comparable without turning them into a URL.
+  }
+  return decoded.replaceAll('\\', '/').replace(/^\.\//, '')
+}
+
 export function InlineImageGallery({ text, sessionId, workDir, changedFiles, suppressManagedGeneratedImages = false, allowRemoteImages = false }: Props) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
   const [annotationTarget, setAnnotationTarget] = useState<GalleryImage | null>(null)
@@ -121,11 +135,19 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
   // — so they keep the legacy behavior and render unconditionally. changedFiles
   // only steers the relative-target extraction below, where mentions genuinely
   // need to be reconciled against what the turn actually wrote.
+  const markdownImageSources = useMemo(
+    () => new Set(extractMarkdownImageSources(text).map(normalizeImageReference)),
+    [text],
+  )
+
   const imagePaths = useMemo(
     () => extractImagePaths(text).filter(
-      (imagePath) => !suppressManagedGeneratedImages || !isManagedGeneratedImagePath(imagePath),
+      (imagePath) => (
+        !markdownImageSources.has(normalizeImageReference(imagePath)) &&
+        (!suppressManagedGeneratedImages || !isManagedGeneratedImagePath(imagePath))
+      ),
     ),
-    [suppressManagedGeneratedImages, text],
+    [markdownImageSources, suppressManagedGeneratedImages, text],
   )
 
   // Remote http(s) image URLs (e.g. an MCP tool's `previewUrl`) load directly —
@@ -174,7 +196,12 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
     //    a bespoke relative-path regex.
     const base = getServerBaseUrl()
     const relativeTargets = extractAssistantOutputTargets(text, { workDir, changedFiles: changedFileEvidence }).filter(
-      (target) => target.kind === 'image',
+      (target) => (
+        target.kind === 'image' &&
+        target.source !== 'markdown-link' &&
+        !markdownImageSources.has(normalizeImageReference(target.href)) &&
+        !markdownImageSources.has(normalizeImageReference(target.normalizedPath ?? ''))
+      ),
     )
 
     // Dedup: an absolute path inside the workspace can be caught by BOTH sources.
@@ -200,7 +227,7 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
     }
 
     return [...remote, ...absolute, ...relative]
-  }, [changedFileEvidence, imagePaths, remoteUrls, sessionId, siblingLocalPaths, text, workDir])
+  }, [changedFileEvidence, imagePaths, markdownImageSources, remoteUrls, sessionId, siblingLocalPaths, text, workDir])
 
   if (images.length === 0) return null
 

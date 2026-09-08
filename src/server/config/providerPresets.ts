@@ -5,6 +5,7 @@ import { z } from 'zod'
 
 import providerPresetsJson from './providerPresets.json'
 import { ApiFormatSchema, ProviderAuthStrategySchema } from '../types/provider.js'
+import type { ModelReasoningProviderKind } from '../../shared/modelReasoning.js'
 
 const ModelMappingSchema = z.object({
   main: z.string(),
@@ -25,6 +26,10 @@ const ProviderPresetSchema = z.object({
   baseUrl: z.string(),
   regionalEndpoints: z.array(ProviderRegionalEndpointSchema).min(1).optional(),
   apiFormat: ApiFormatSchema,
+  reasoningProviderKind: z.enum([
+    'zhipu_standard_api',
+    'zhipu_coding_plan',
+  ] satisfies readonly ModelReasoningProviderKind[]).optional(),
   defaultModels: ModelMappingSchema,
   needsApiKey: z.boolean(),
   websiteUrl: z.string(),

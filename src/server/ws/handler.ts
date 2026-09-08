@@ -32,7 +32,10 @@ import {
 } from '../services/sessionSummaryService.js'
 import { SettingsService } from '../services/settingsService.js'
 import { ProviderService } from '../services/providerService.js'
-import { getPresetDefaultEnv } from '../services/providerRuntimeEnv.js'
+import {
+  getPresetDefaultEnv,
+  getPresetReasoningProviderKind,
+} from '../services/providerRuntimeEnv.js'
 import { PROVIDER_PRESETS } from '../config/providerPresets.js'
 import { isOpenAIOfficialProviderId } from '../services/openaiOfficialProvider.js'
 import { isGrokOfficialProviderId } from '../services/grokOfficialProvider.js'
@@ -50,6 +53,7 @@ import {
   getModelReasoningCapabilityOverride,
   isModelReasoningEffort,
   normalizeModelReasoningEffort,
+  resolveModelReasoningProfile,
 } from '../../shared/modelReasoning.js'
 import { diagnosticsService } from '../services/diagnosticsService.js'
 import {
@@ -5020,6 +5024,7 @@ async function resolveRuntimeEffort(
   if (!isModelReasoningEffort(effort)) return { valid: false }
   const provider = await providerService.getProvider(providerId).catch(() => null)
   if (!provider) return { valid: false }
+  const providerKind = getPresetReasoningProviderKind(provider.presetId)
   const normalizedEffort = normalizeModelReasoningEffort(
     modelId,
     effort,
@@ -5030,11 +5035,49 @@ async function resolveRuntimeEffort(
       getPresetDefaultEnv(provider.presetId),
       PROVIDER_PRESETS.find((preset) => preset.id === provider.presetId)?.defaultModels,
     ),
+    providerKind,
   )
+  if (providerKind === 'zhipu_standard_api' && !normalizedEffort) {
+    return { valid: false }
+  }
   return {
     valid: true,
     ...(normalizedEffort ? { effort: normalizedEffort } : {}),
   }
+}
+
+async function normalizeSavedProviderRuntimeEffort(
+  providerId: string,
+  modelId: string,
+  effort: string | undefined,
+): Promise<string | undefined> {
+  const provider = await providerService.getProvider(providerId).catch(() => null)
+  if (!provider) return effort
+
+  const apiFormat = provider.apiFormat ?? 'anthropic'
+  const capabilitiesOverride = getModelReasoningCapabilityOverride(
+    modelId,
+    provider.models,
+    getPresetDefaultEnv(provider.presetId),
+    PROVIDER_PRESETS.find((preset) => preset.id === provider.presetId)?.defaultModels,
+  )
+  const providerKind = getPresetReasoningProviderKind(provider.presetId)
+  const profile = resolveModelReasoningProfile(
+    modelId,
+    apiFormat,
+    capabilitiesOverride,
+    providerKind,
+  )
+  const normalizedEffort = effort && isModelReasoningEffort(effort)
+    ? normalizeModelReasoningEffort(
+      modelId,
+      effort,
+      apiFormat,
+      capabilitiesOverride,
+      providerKind,
+    )
+    : undefined
+  return normalizedEffort ?? profile?.defaultReasoningEffort ?? effort
 }
 
 function isKnownRuntimeProviderId(
@@ -5195,6 +5238,12 @@ async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> 
       effort = effort && grokEffort.supportedEfforts.includes(effort)
         ? effort
         : grokEffort.defaultEffort
+    } else if (typeof runtimeOverride.providerId === 'string') {
+      effort = await normalizeSavedProviderRuntimeEffort(
+        runtimeOverride.providerId,
+        runtimeOverride.modelId,
+        effort,
+      )
     } else if (runtimeOverride.providerId === null) {
       const resolved = await resolveClaudeOfficialRuntimeModel(
         runtimeOverride.modelId,
@@ -5278,6 +5327,13 @@ async function getDefaultRuntimeSettings(): Promise<RuntimeSettings> {
     } else if (isGrokOfficialProviderId(resolvedActiveId)) {
       model = model || GROK_DEFAULT_MAIN_MODEL
       effort = (await getGrokReasoningEfforts(model)).defaultEffort
+    } else {
+      const activeProvider = providers.find((provider) => provider.id === resolvedActiveId)
+      effort = await normalizeSavedProviderRuntimeEffort(
+        resolvedActiveId,
+        model ?? activeProvider?.models.main ?? '',
+        effort,
+      )
     }
   } else {
     // Claude Official is represented by a null provider id. Only a valid

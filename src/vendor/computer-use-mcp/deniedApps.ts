@@ -306,6 +306,41 @@ export function isPolicyDenied(
   return false;
 }
 
+/**
+ * Apps the agent can never drive, no matter what the user grants: our own
+ * desktop shell and the Computer Use helper that executes the actions.
+ *
+ * Kept as its own set rather than folded into `POLICY_DENIED_BUNDLE_IDS`
+ * because the two mean different things. The policy sets are *product* policy
+ * (streaming, trading) — debatable, revisable, and surfaced to the user as
+ * "blocked by policy". This one is a structural invariant: driving the host
+ * lets the agent click its own approval dialogs, and driving the helper lets
+ * it reach around the very process enforcing the grants. The native
+ * `AppTargetPolicy.swift` mirrors both sets, separately, for the same reason.
+ */
+const INTRINSIC_DENIED_BUNDLE_IDS: ReadonlySet<string> = new Set([
+  "com.claude-code-haha.desktop",
+  "dev.cchaha.cu-helper",
+]);
+
+/**
+ * True when the target is the host app or its helper — a permanent denial that
+ * no grant can lift.
+ *
+ * `hostBundleId` is checked *in addition to* the baked-in set, never instead
+ * of it: it catches builds whose bundle id differs from the shipped default
+ * (dev and beta channels), while the constants still hold if a caller has no
+ * host id to pass.
+ */
+export function isIntrinsicAppDenied(
+  bundleId: string | undefined,
+  hostBundleId?: string,
+): boolean {
+  if (!bundleId) return false;
+  if (INTRINSIC_DENIED_BUNDLE_IDS.has(bundleId)) return true;
+  return hostBundleId !== undefined && bundleId === hostBundleId;
+}
+
 export function getDeniedCategory(bundleId: string): DeniedCategory | null {
   if (BROWSER_BUNDLE_IDS.has(bundleId)) return "browser";
   if (TERMINAL_BUNDLE_IDS.has(bundleId)) return "terminal";
@@ -546,6 +581,7 @@ export const _test = {
   TERMINAL_BUNDLE_IDS,
   TRADING_BUNDLE_IDS,
   POLICY_DENIED_BUNDLE_IDS,
+  INTRINSIC_DENIED_BUNDLE_IDS,
   BROWSER_NAME_SUBSTRINGS,
   TERMINAL_NAME_SUBSTRINGS,
   TRADING_NAME_SUBSTRINGS,

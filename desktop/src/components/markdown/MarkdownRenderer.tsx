@@ -28,11 +28,11 @@ type Props = {
   streaming?: boolean
   onLinkClick?: (href: string, event: ReactMouseEvent<HTMLDivElement>) => boolean | void
   /**
-   * Trusted surfaces (the workspace Markdown file preview) resolve every image
-   * source through this callback — relative paths against the document,
-   * remote URLs left to CSP. Returning null strips the image. When absent the
-   * surface is treated as untrusted assistant output and only blob:/data:
-   * sources survive, which blocks tracking pixels and loopback probes.
+   * Resolve every image source through a policy owned by the calling surface.
+   * The workspace preview permits document-relative and remote sources, while
+   * finalized assistant prose permits only session-sandboxed local paths.
+   * Returning null strips the image. Without a resolver, only blob:/data:
+   * sources survive.
    */
   resolveImageSrc?: (src: string) => string | null
 }
@@ -355,9 +355,9 @@ function enhanceMarkdownHtml(
   container.querySelectorAll<HTMLImageElement | HTMLSourceElement>('img, source').forEach((image) => {
     const src = image.getAttribute('src')
     if (resolveImageSrc) {
-      // Trusted surface: the caller maps relative/remote sources to loadable
-      // URLs (or null to strip). Resolution happens here, after sanitization,
-      // so raw HTML <img> tags get the same treatment as Markdown images.
+      // The caller maps permitted sources to loadable URLs (or null to strip).
+      // Resolution happens here, after sanitization, so raw HTML <img> tags get
+      // the same treatment as Markdown images.
       const resolved = src ? resolveImageSrc(src) : null
       if (resolved) image.setAttribute('src', resolved)
       else {

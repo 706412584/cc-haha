@@ -1,3 +1,5 @@
+import { isOpenAIReasoningModel } from '../../shared/modelReasoning.js'
+
 export const OPENAI_DEFAULT_MAIN_MODEL = 'gpt-5.6-sol'
 export const OPENAI_DEFAULT_SONNET_MODEL = 'gpt-5.6-terra'
 export const OPENAI_DEFAULT_HAIKU_MODEL = 'gpt-5.6-luna'
@@ -175,8 +177,7 @@ export function resolveOpenAIReasoningEffortWithPriority(
 }
 
 export function isOpenAIResponsesModel(model: string): boolean {
-  const normalized = model.trim().toLowerCase()
-  return normalized.startsWith('gpt-') || /^o\d/.test(normalized)
+  return isOpenAIReasoningModel(model)
 }
 
 export function resolveOpenAICodexModel(model: string): string {

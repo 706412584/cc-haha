@@ -1,11 +1,19 @@
 export type {
+  AppStateResult,
+  AppStateScreenshot,
+  AppTarget,
+  CodexComputerEngine,
+  CodexMouseButton,
   ComputerExecutor,
   DisplayGeometry,
   FrontmostApp,
   InstalledApp,
+  ProcessIdentity,
+  ResolvedAppTarget,
   ResolvePrepareCaptureResult,
   RunningApp,
   ScreenshotResult,
+  SetValueResult,
 } from "./executor.js";
 
 export type {
@@ -59,7 +67,11 @@ export type {
   CuErrorKind,
 } from "./toolCalls.js";
 
-export { bindSessionContext, createComputerUseMcpServer } from "./mcpServer.js";
+export {
+  bindSessionContext,
+  buildPlatformComputerUseTools,
+  createComputerUseMcpServer,
+} from "./mcpServer.js";
 export { buildComputerUseTools } from "./tools.js";
 
 export {

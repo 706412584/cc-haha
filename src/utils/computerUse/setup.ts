@@ -1,4 +1,4 @@
-import { buildComputerUseTools } from '../../vendor/computer-use-mcp/index.js'
+import { buildPlatformComputerUseTools } from '../../vendor/computer-use-mcp/index.js'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { buildMcpToolName } from '../../services/mcp/mcpStringUtils.js'
@@ -9,13 +9,19 @@ import {
   COMPUTER_USE_MCP_SERVER_NAME,
   getCliComputerUseCapabilities,
 } from './common.js'
-import { getChicagoCoordinateMode } from './gates.js'
+import { resolveLaunchableCuHelperBinary } from './cuHelperBridge.js'
+import { getChicagoCoordinateMode, shouldExposeComputerUseMcp } from './gates.js'
+
+type SetupComputerUseDeps = {
+  platform?: NodeJS.Platform
+  resolveMacosNativeBinary?: () => string | null
+}
 
 /**
  * Build the dynamic MCP config + allowed tool names. Mirror of
  * `setupClaudeInChrome`. The `mcp__computer-use__*` tools are added to
- * `allowedTools` so they bypass the normal permission prompt — the package's
- * `request_access` handles approval for the whole session.
+ * `allowedTools` so they bypass the normal tool prompt. The settings-page risk
+ * confirmation is the authorization boundary for the whole session.
  *
  * The MCP layer isn't ceremony: the API backend detects `mcp__computer-use__*`
  * tool names and emits a CU availability hint into the system prompt
@@ -23,11 +29,18 @@ import { getChicagoCoordinateMode } from './gates.js'
  * with different names wouldn't trigger it. Cowork uses the same names for the
  * same reason (apps/desktop/src/main/local-agent-mode/systemPrompt.ts:314).
  */
-export function setupComputerUseMCP(): {
+export function setupComputerUseMCP(deps: SetupComputerUseDeps = {}): {
   mcpConfig: Record<string, ScopedMcpServerConfig>
   allowedTools: string[]
 } {
-  const allowedTools = buildComputerUseTools(
+  const platform = deps.platform ?? process.platform
+  const macosNativeLaunchable = platform === 'darwin'
+    && (deps.resolveMacosNativeBinary ?? resolveLaunchableCuHelperBinary)() !== null
+  if (!shouldExposeComputerUseMcp(platform, macosNativeLaunchable)) {
+    return { mcpConfig: {}, allowedTools: [] }
+  }
+
+  const allowedTools = buildPlatformComputerUseTools(
     getCliComputerUseCapabilities(),
     getChicagoCoordinateMode(),
   ).map(t => buildMcpToolName(COMPUTER_USE_MCP_SERVER_NAME, t.name))

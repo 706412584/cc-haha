@@ -156,6 +156,9 @@ const baseMessages: MessageEntry[] = [
 async function renderReady(pollIntervalMs = 60_000) {
   render(<TraceSession sessionId={SESSION_ID} pollIntervalMs={pollIntervalMs} />)
   await screen.findByTestId('trace-split-layout')
+  // The overview lazily fetches the opening request header. Let that settle so
+  // its state update lands inside act() rather than warning after the test.
+  await waitFor(() => expect(screen.getByTestId('trace-detail')).toBeInTheDocument())
 }
 
 describe('TraceSession', () => {
@@ -396,6 +399,89 @@ describe('TraceSession', () => {
     // Raw section opens by default in fallback mode; semantic sections are skipped.
     await waitFor(() => expect(detail.getByText('Request body')).toBeInTheDocument())
     expect(detail.queryByRole('button', { name: /^Messages/ })).not.toBeInTheDocument()
+  })
+
+  it('renders saved DeepSeek request semantics when the raw body is truncated', async () => {
+    const semanticCall = makeCall({
+      source: 'proxy',
+      model: 'deepseek-v4-flash-vision-exp',
+      request: {
+        method: 'POST',
+        url: 'https://opencode.ai/zen/v1/chat/completions',
+        headers: {},
+        body: {
+          contentType: 'json',
+          bytes: 265_000,
+          sha256: 'd'.repeat(64),
+          preview: '{"anthropic":{"model":"deepseek-v4-flash-vision-exp","messages":[',
+          truncated: true,
+        },
+        semantic: {
+          version: 1,
+          request: {
+            model: 'deepseek-v4-flash-vision-exp',
+            system: [{ type: 'text', text: 'You are Claude Code.' }],
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    type: 'text',
+                    text: '<system-reminder>\n# Project rules\nUse AGENTS.md.\n</system-reminder>',
+                  },
+                  { type: 'text', text: '创建并校验 large-200.json 文件' },
+                ],
+              },
+              {
+                role: 'user',
+                content: [{
+                  type: 'tool_result',
+                  tool_use_id: 'computer_1',
+                  content: [{
+                    type: 'image',
+                    source: {
+                      type: 'base64',
+                      media_type: 'image/jpeg',
+                      bytes: 240_000,
+                      sha256: 'e'.repeat(64),
+                    },
+                  }],
+                }],
+              },
+            ],
+            stream: true,
+          },
+        },
+      },
+    })
+    vi.mocked(sessionsApi.getTrace).mockResolvedValue({
+      ...baseTrace,
+      summary: {
+        ...baseTrace.summary,
+        models: [{ model: 'deepseek-v4-flash-vision-exp', calls: 1 }],
+      },
+      calls: [{
+        ...semanticCall,
+        request: {
+          method: semanticCall.request.method,
+          url: semanticCall.request.url,
+          headers: semanticCall.request.headers,
+          body: semanticCall.request.body,
+        },
+      }],
+    })
+    vi.mocked(sessionsApi.getTraceCall).mockResolvedValue({ call: semanticCall })
+    await renderReady()
+
+    fireEvent.click(within(screen.getByTestId('trace-tree')).getByText('deepseek-v4-flash-vision-exp'))
+
+    const detail = within(screen.getByTestId('trace-detail'))
+    expect(await detail.findByText('Injected context')).toBeInTheDocument()
+    expect(detail.getByText('Project rules')).toBeInTheDocument()
+    expect(detail.getByText('创建并校验 large-200.json 文件')).toBeInTheDocument()
+    expect(detail.getByText('computer_1')).toBeInTheDocument()
+    expect(screen.getByTestId('trace-detail')).toHaveTextContent('image/jpeg')
+    expect(detail.queryByText('Legacy truncated record; the semantic view is unavailable. See Raw below.')).not.toBeInTheDocument()
   })
 
   it('applies poll updates and short-circuits identical snapshots', async () => {
@@ -680,6 +766,34 @@ describe('TraceSession', () => {
     expect(screen.queryByTestId('trace-split-layout')).not.toBeInTheDocument()
   })
 
+  it('separates provider input/output tokens from cache read/write tokens', async () => {
+    vi.mocked(sessionsApi.getTrace).mockResolvedValue({
+      ...baseTrace,
+      summary: {
+        ...baseTrace.summary,
+        totalInputTokens: 107_600,
+        totalOutputTokens: 11_400,
+      },
+      calls: [makeCall({
+        usage: {
+          inputTokens: 107_600,
+          outputTokens: 11_400,
+          cacheReadInputTokens: 4_971_000,
+          cacheCreationInputTokens: 10_000,
+        },
+      })],
+    })
+
+    await renderReady()
+
+    const overview = within(screen.getByTestId('trace-overview'))
+    expect(overview.getByText('Input → output')).toBeInTheDocument()
+    expect(overview.getByText('107.6k → 11.4k')).toBeInTheDocument()
+    expect(overview.getByText('Cache read → write')).toBeInTheDocument()
+    expect(overview.getByText('5m → 10k')).toBeInTheDocument()
+    expect(screen.getByText('Input + output')).toBeInTheDocument()
+  })
+
   it('uses trace session metadata when the sidebar store has not loaded the session', async () => {
     useSessionStore.setState({ sessions: [], activeSessionId: null, isLoading: false, error: null })
 
@@ -737,5 +851,87 @@ describe('TraceSession', () => {
     expect(screen.queryByRole('button', { name: 'Back to list' })).not.toBeInTheDocument()
     // The standalone window also drops "open in window" — it is already one.
     expect(screen.queryByRole('button', { name: 'Open in separate window' })).not.toBeInTheDocument()
+  })
+
+  it('answers what the system prompt is from the session overview, without opening a call', async () => {
+    await renderReady()
+
+    const overview = await screen.findByTestId('trace-overview')
+    expect(await within(overview).findByText('System prompt')).toBeInTheDocument()
+
+    // The catalog names every tool the request carried, called or not.
+    fireEvent.click(within(overview).getByText('Tools'))
+    expect(await within(overview).findByText('Bash')).toBeInTheDocument()
+  })
+
+  it('says what an assistant turn did when the provider withheld its reasoning', async () => {
+    vi.mocked(sessionsApi.getMessages).mockResolvedValue({
+      messages: [
+        baseMessages[0]!,
+        {
+          id: 'msg-reasoned',
+          type: 'assistant',
+          // OpenAI reasoning the harness stores encoded: no readable text, so
+          // the row would otherwise render as a bare "Assistant message".
+          content: [{ type: 'redacted_thinking', data: 'cc-haha:openai-reasoning:v1:{}' }],
+          timestamp: '2026-06-09T10:00:04.000Z',
+          model: 'gpt-5.6-sol',
+        },
+      ],
+    })
+
+    await renderReady()
+
+    const tree = await screen.findByTestId('trace-tree')
+    expect(await within(tree).findByText('Reasoning withheld by provider')).toBeInTheDocument()
+  })
+
+  it('separates harness-injected context from the message the person typed', async () => {
+    const injectedPreview = JSON.stringify({
+      model: 'claude-sonnet-4-5',
+      system: 'You are helpful.',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: '<available-deferred-tools> WebFetch </available-deferred-tools>' }] },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: '<system-reminder>\n# Companion\nA watcher sits beside the input box.\n</system-reminder>' },
+            { type: 'text', text: 'Hello world' },
+          ],
+        },
+      ],
+      tools: [{ name: 'Bash', description: 'Run shell commands', input_schema: { type: 'object' } }],
+      max_tokens: 4096,
+    })
+    vi.mocked(sessionsApi.getTraceCall).mockResolvedValue({
+      call: makeCall({
+        request: {
+          method: 'POST',
+          url: 'https://api.anthropic.com/v1/messages',
+          headers: { 'content-type': 'application/json' },
+          body: {
+            contentType: 'json',
+            bytes: injectedPreview.length,
+            sha256: 'c'.repeat(64),
+            preview: injectedPreview,
+            truncated: false,
+          },
+        },
+      }),
+    })
+
+    await renderReady()
+    fireEvent.click(await screen.findByRole('treeitem', { name: /claude-sonnet-4-5/ }))
+
+    const detail = await screen.findByTestId('trace-llm-detail')
+    expect(await within(detail).findByText('Injected context')).toBeInTheDocument()
+    // Each injection is named by its own content rather than its wrapper tag:
+    // the reminder is labelled by its heading, the roster by its first line.
+    expect(within(detail).getByText('Companion')).toBeInTheDocument()
+    expect(within(detail).getByText('WebFetch')).toBeInTheDocument()
+    // The kind chip is separate from that derived label.
+    expect(within(detail).getByText('Deferred tools')).toBeInTheDocument()
+    // What the person actually typed stays in the conversation.
+    expect(within(detail).getByText('Hello world')).toBeInTheDocument()
   })
 })

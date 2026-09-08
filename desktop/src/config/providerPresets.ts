@@ -1,5 +1,6 @@
 import providerPresetsJson from '../../../src/server/config/providerPresets.json'
 import type { ProviderPreset } from '../types/providerPreset'
+import type { ModelReasoningProviderKind } from '../../../src/shared/modelReasoning'
 
 // Presets ship with the desktop bundle. Provider creation must remain available
 // even when the local HTTP control plane is temporarily unavailable.
@@ -7,6 +8,13 @@ import type { ProviderPreset } from '../types/providerPreset'
 // form reads the preset for its name badge and for any field the record itself never
 // persisted (defaultEnv always; authStrategy / modelContextWindows on older records).
 export const BUNDLED_PROVIDER_PRESETS = providerPresetsJson as ProviderPreset[]
+
+export function getBundledPresetReasoningProviderKind(
+  presetId: string,
+): ModelReasoningProviderKind | undefined {
+  return BUNDLED_PROVIDER_PRESETS.find((preset) => preset.id === presetId)
+    ?.reasoningProviderKind
+}
 
 /**
  * Presets a user may pick when adding a provider. Retired ones are dropped here

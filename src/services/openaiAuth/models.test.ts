@@ -22,6 +22,7 @@ describe('openai auth model resolution', () => {
   test('accepts gpt and o-series models', () => {
     expect(isOpenAIResponsesModel('gpt-5.4')).toBe(true)
     expect(isOpenAIResponsesModel('o3-mini')).toBe(true)
+    expect(isOpenAIResponsesModel('openai/gpt-5.6-sol[1m]')).toBe(true)
   })
 
   test('maps frontier Claude aliases to the OpenAI default model', () => {

@@ -136,6 +136,68 @@ async function settlesBeforeBlockedTraceWrite<T>(promise: Promise<T>): Promise<T
   ])
 }
 
+async function captureComputerUseChatRequest(options: {
+  baseUrl: string
+  model: string
+  content: Array<Record<string, unknown>>
+}): Promise<Record<string, unknown>> {
+  const originalFetch = globalThis.fetch
+  const calls: Array<{ body: Record<string, unknown> }> = []
+  globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+    calls.push({ body: JSON.parse(String(init?.body)) as Record<string, unknown> })
+    return new Response(JSON.stringify({
+      id: 'chatcmpl-computer-use',
+      object: 'chat.completion',
+      created: 0,
+      model: options.model,
+      choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }) as typeof fetch
+
+  try {
+    const svc = new ProviderService()
+    const provider = await svc.addProvider(sampleInput({
+      apiFormat: 'openai_chat',
+      baseUrl: options.baseUrl,
+      models: {
+        main: options.model,
+        haiku: options.model,
+        sonnet: options.model,
+        opus: options.model,
+      },
+    }))
+    await svc.activateProvider(provider.id)
+
+    const req = new Request('http://localhost:3456/proxy/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: options.model,
+        max_tokens: 64,
+        messages: [{
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: 'computer_1',
+            content: options.content,
+          }],
+        }],
+      }),
+    })
+
+    const res = await handleProxyRequest(req, new URL(req.url))
+    expect(res.status).toBe(200)
+    expect(calls).toHaveLength(1)
+    return calls[0].body
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}
+
 // =============================================================================
 // ProviderService
 // =============================================================================
@@ -1317,6 +1379,50 @@ describe('ProviderService', () => {
       }
     })
 
+    test.each([
+      ['xuanshuapi', 'https://www.xuanshuapi.com', 'claude-sonnet-5'],
+      ['fennoai', 'https://api.fenno.ai', 'claude-sonnet-5'],
+      ['qiniuai', 'https://api.qnaigc.com', 'deepseek/deepseek-v4-pro'],
+    ])('keeps legacy %s providers editable and usable after retirement', async (presetId, baseUrl, model) => {
+      // This is an old on-disk record: auth/context fields were not always persisted.
+      const legacyProvider = {
+        id: `saved-${presetId}`,
+        ...sampleInput({ presetId, baseUrl, models: { main: model, haiku: model, sonnet: model, opus: model } }),
+      }
+      await fs.mkdir(path.join(tmpDir, 'cc-haha'), { recursive: true })
+      await fs.writeFile(path.join(tmpDir, 'cc-haha', 'providers.json'), JSON.stringify({
+        providers: [legacyProvider],
+        activeId: legacyProvider.id,
+      }))
+
+      const svc = new ProviderService()
+      expect((await svc.listProviders()).providers).toEqual([expect.objectContaining(legacyProvider)])
+
+      await svc.updateProvider(legacyProvider.id, { name: 'Renamed saved provider' })
+      await svc.activateProvider(legacyProvider.id)
+      const restarted = new ProviderService()
+      expect(await restarted.getProvider(legacyProvider.id)).toMatchObject({
+        ...legacyProvider,
+        name: 'Renamed saved provider',
+      })
+      expect((await restarted.listProviders()).activeId).toBe(legacyProvider.id)
+
+      const runtimeEnv = await restarted.getProviderRuntimeEnv(legacyProvider.id)
+      const settingsEnv = (await readSettings()).env as Record<string, string>
+      for (const env of [runtimeEnv, settingsEnv]) {
+        expect(env).toMatchObject({
+          ANTHROPIC_BASE_URL: baseUrl,
+          ANTHROPIC_AUTH_TOKEN: legacyProvider.apiKey,
+          ANTHROPIC_API_KEY: '',
+          ANTHROPIC_MODEL: model,
+        })
+        expect(JSON.parse(env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)[model]).toBe(1000000)
+        if (presetId === 'xuanshuapi') {
+          expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('claude-sonnet-5')
+        }
+      }
+    })
+
     test('should include preset default env on activation and runtime env', async () => {
       const svc = new ProviderService()
       const provider = await svc.addProvider(sampleInput({
@@ -1593,6 +1699,147 @@ describe('ProviderService', () => {
       }
     })
 
+    test('records DeepSeek Computer Use request semantics independently of the truncated raw body', async () => {
+      const originalFetch = globalThis.fetch
+      globalThis.fetch = mock(async () => new Response(JSON.stringify({
+        id: 'chatcmpl-trace-deepseek-computer-use',
+        object: 'chat.completion',
+        created: 0,
+        model: 'deepseek-v4-flash-vision-exp',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'validated' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 119_000, completion_tokens: 12, total_tokens: 119_012 },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch
+
+      const screenshotData = 'AQID'.repeat(80_000)
+      const injectedContext = '<system-reminder>\n# Project rules\nUse the repository instructions.\n</system-reminder>'
+
+      try {
+        const svc = new ProviderService()
+        const provider = await svc.addProvider(sampleInput({
+          apiFormat: 'openai_chat',
+          baseUrl: 'https://opencode.ai/zen',
+          name: 'DeepSeek V4 Flash',
+          models: {
+            main: 'deepseek-v4-flash-vision-exp',
+            haiku: 'deepseek-v4-flash-vision-exp',
+            sonnet: 'deepseek-v4-flash-vision-exp',
+            opus: 'deepseek-v4-flash-vision-exp',
+          },
+        }))
+        await svc.activateProvider(provider.id)
+
+        const req = new Request('http://localhost:3456/proxy/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Claude-Code-Session-Id': 'session-deepseek-computer-use-trace',
+          },
+          body: JSON.stringify({
+            model: 'deepseek-v4-flash-vision-exp',
+            max_tokens: 64,
+            system: [{ type: 'text', text: 'You are Claude Code.' }],
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  { type: 'text', text: injectedContext },
+                  { type: 'text', text: '创建并校验 large-200.json 文件' },
+                ],
+              },
+              {
+                role: 'assistant',
+                content: [{
+                  type: 'tool_use',
+                  id: 'computer_1',
+                  name: 'computer',
+                  input: { action: 'screenshot' },
+                }],
+              },
+              {
+                role: 'user',
+                content: [{
+                  type: 'tool_result',
+                  tool_use_id: 'computer_1',
+                  content: [
+                    { type: 'text', text: 'Computer Use state' },
+                    {
+                      type: 'image',
+                      source: { type: 'base64', media_type: 'image/jpeg', data: screenshotData },
+                    },
+                  ],
+                }],
+              },
+            ],
+          }),
+        })
+
+        const response = await handleProxyRequest(req, new URL(req.url))
+        const trace = await waitForCompletedProxyTrace('session-deepseek-computer-use-trace')
+        const call = trace.calls[0]
+
+        expect(response.status).toBe(200)
+        expect(call.request.body.truncated).toBe(true)
+        expect(() => JSON.parse(call.request.body.preview)).toThrow()
+        expect(call.request.semantic).toMatchObject({
+          version: 1,
+          request: {
+            model: 'deepseek-v4-flash-vision-exp',
+            system: [{ type: 'text', text: 'You are Claude Code.' }],
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  { type: 'text', text: injectedContext },
+                  { type: 'text', text: '创建并校验 large-200.json 文件' },
+                ],
+              },
+              {
+                role: 'assistant',
+                content: [{
+                  type: 'tool_use',
+                  id: 'computer_1',
+                  name: 'computer',
+                  input: { action: 'screenshot' },
+                }],
+              },
+              {
+                role: 'user',
+                content: [{
+                  type: 'tool_result',
+                  tool_use_id: 'computer_1',
+                  content: [
+                    { type: 'text', text: 'Computer Use state' },
+                    {
+                      type: 'image',
+                      source: {
+                        type: 'base64',
+                        media_type: 'image/jpeg',
+                        bytes: 240_000,
+                        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+                      },
+                    },
+                  ],
+                }],
+              },
+            ],
+          },
+        })
+        const semanticMessages = call.request.semantic?.request.messages as Array<{
+          content: Array<Record<string, unknown>>
+        }>
+        expect(semanticMessages[2]?.content[0]).toMatchObject({
+          type: 'tool_result',
+          tool_use_id: 'computer_1',
+        })
+        expect(JSON.stringify(call.request.semantic)).not.toContain(screenshotData.slice(0, 64))
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+
     test('returns a non-streaming proxy response before trace persistence finishes', async () => {
       const originalFetch = globalThis.fetch
       globalThis.fetch = mock(async () => new Response(JSON.stringify({
@@ -1761,6 +2008,89 @@ describe('ProviderService', () => {
       }
     })
 
+    test('round-trips DeepSeek reasoning by model on generic OpenAI Chat hosts', async () => {
+      const originalFetch = globalThis.fetch
+      const calls: Array<Record<string, unknown>> = []
+      globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+        calls.push(body)
+        const messages = body.messages as Array<Record<string, unknown>>
+        const assistantMessage = messages.find(message => message.role === 'assistant')
+
+        if (body.model === 'deepseek-v4-flash' && assistantMessage?.reasoning_content === undefined) {
+          return new Response(JSON.stringify({
+            error: {
+              message: 'The reasoning_content in the thinking mode must be passed back to the API',
+            },
+          }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+
+        return new Response(JSON.stringify({
+          id: 'chatcmpl-reasoning-round-trip',
+          object: 'chat.completion',
+          created: 0,
+          model: body.model,
+          choices: [{ index: 0, message: { role: 'assistant', content: 'done' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }) as typeof fetch
+
+      try {
+        const svc = new ProviderService()
+        const provider = await svc.addProvider(sampleInput({
+          apiFormat: 'openai_chat',
+          baseUrl: 'https://api.b.ai',
+        }))
+        await svc.activateProvider(provider.id)
+
+        const makeFollowUpRequest = (model: string) => new Request('http://localhost:3456/proxy/v1/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            max_tokens: 64,
+            messages: [
+              {
+                role: 'assistant',
+                content: [
+                  { type: 'thinking', thinking: 'Need to inspect the repository first.' },
+                  { type: 'tool_use', id: 'call_1', name: 'read_file', input: { path: 'README.md' } },
+                ],
+              },
+              {
+                role: 'user',
+                content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'Repository contents' }],
+              },
+            ],
+          }),
+        })
+
+        const deepSeekRequest = makeFollowUpRequest('deepseek-v4-flash')
+        const deepSeekResponse = await handleProxyRequest(deepSeekRequest, new URL(deepSeekRequest.url))
+        expect(deepSeekResponse.status).toBe(200)
+
+        const genericRequest = makeFollowUpRequest('generic-chat-model')
+        const genericResponse = await handleProxyRequest(genericRequest, new URL(genericRequest.url))
+        expect(genericResponse.status).toBe(200)
+
+        const deepSeekMessages = calls[0].messages as Array<Record<string, unknown>>
+        const deepSeekAssistant = deepSeekMessages.find(message => message.role === 'assistant')
+        expect(deepSeekAssistant?.reasoning_content).toBe('Need to inspect the repository first.')
+
+        const genericMessages = calls[1].messages as Array<Record<string, unknown>>
+        const genericAssistant = genericMessages.find(message => message.role === 'assistant')
+        expect(genericAssistant?.reasoning_content).toBeUndefined()
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+
     test('forwards a stable prompt_cache_key from client session metadata for OpenAI Responses upstreams', async () => {
       const originalFetch = globalThis.fetch
       const calls: Array<{ body: Record<string, unknown>; headers: Headers }> = []
@@ -1812,65 +2142,79 @@ describe('ProviderService', () => {
       }
     })
 
-    test('omits image_url parts for DeepSeek OpenAI Chat proxy requests', async () => {
-      const originalFetch = globalThis.fetch
-      const calls: Array<{ body: Record<string, unknown> }> = []
-      globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
-        calls.push({ body: JSON.parse(String(init?.body)) as Record<string, unknown> })
-        return new Response(JSON.stringify({
-          id: 'chatcmpl-1',
-          object: 'chat.completion',
-          created: 0,
-          model: 'deepseek-v4-pro',
-          choices: [{ index: 0, message: { role: 'assistant', content: 'I cannot view images.' }, finish_reason: 'stop' }],
-          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-        }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      }) as typeof fetch
+    test('preserves Computer Use tool images for explicit opencode vision models', async () => {
+      const body = await captureComputerUseChatRequest({
+        baseUrl: 'https://opencode.ai/zen',
+        model: 'deepseek-v4-flash-vision-exp',
+        content: [
+          { type: 'text', text: 'Computer Use state' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/AA==' } },
+          { type: 'text', text: 'After screenshot' },
+        ],
+      })
 
-      try {
-        const svc = new ProviderService()
-        const provider = await svc.addProvider(sampleInput({
-          apiFormat: 'openai_chat',
-          baseUrl: 'https://api.deepseek.com',
-          models: {
-            main: 'deepseek-v4-pro',
-            haiku: 'deepseek-v4-pro',
-            sonnet: 'deepseek-v4-pro',
-            opus: 'deepseek-v4-pro',
-          },
-        }))
-        await svc.activateProvider(provider.id)
+      const messages = body.messages as Array<Record<string, unknown>>
+      expect(messages[0]).toEqual({
+        role: 'tool',
+        tool_call_id: 'computer_1',
+        content: [
+          { type: 'text', text: 'Computer Use state' },
+          { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,/9j/AA==' } },
+          { type: 'text', text: 'After screenshot' },
+        ],
+      })
+    })
 
-        const req = new Request('http://localhost:3456/proxy/v1/messages', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: 'deepseek-v4-pro',
-            max_tokens: 64,
-            messages: [{
-              role: 'user',
-              content: [
-                { type: 'text', text: 'What is in this screenshot?' },
-                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'abc123' } },
-              ],
-            }],
-          }),
-        })
+    test.each([
+      {
+        name: 'opencode non-vision model',
+        baseUrl: 'https://opencode.ai/zen',
+        model: 'deepseek-v4-flash',
+      },
+      {
+        name: 'classic DeepSeek endpoint even with a vision-named model',
+        baseUrl: 'https://api.deepseek.com',
+        model: 'deepseek-v4-flash-vision-exp',
+      },
+    ])('uses text-only Computer Use content for $name', async ({ baseUrl, model }) => {
+      const body = await captureComputerUseChatRequest({
+        baseUrl,
+        model,
+        content: [{
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/jpeg', data: 'private-screenshot-data' },
+        }],
+      })
 
-        const res = await handleProxyRequest(req, new URL(req.url))
-        expect(res.status).toBe(200)
+      const messages = body.messages as Array<Record<string, unknown>>
+      expect(messages[0]).toEqual({
+        role: 'tool',
+        tool_call_id: 'computer_1',
+        content: '[Image omitted: this OpenAI-compatible chat endpoint only supports text content.]',
+      })
+      expect(JSON.stringify(body)).not.toContain('private-screenshot-data')
+      expect(JSON.stringify(body)).not.toContain('image_url')
+    })
 
-        const serialized = JSON.stringify(calls[0].body)
-        expect(serialized).not.toContain('image_url')
-        expect(serialized).not.toContain('abc123')
-        expect(serialized).toContain('What is in this screenshot?')
-        expect(serialized).toContain('Image omitted')
-      } finally {
-        globalThis.fetch = originalFetch
-      }
+    test('keeps generic OpenAI Chat providers vision-capable by default', async () => {
+      const body = await captureComputerUseChatRequest({
+        baseUrl: 'https://chat.example.test',
+        model: 'custom-text-named-model',
+        content: [{
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/png', data: 'generic-image-data' },
+        }],
+      })
+
+      const messages = body.messages as Array<Record<string, unknown>>
+      expect(messages[0]).toEqual({
+        role: 'tool',
+        tool_call_id: 'computer_1',
+        content: [{
+          type: 'image_url',
+          image_url: { url: 'data:image/png;base64,generic-image-data' },
+        }],
+      })
     })
 
     test('normalizes context-window suffixes before forwarding OpenAI Chat proxy requests', async () => {

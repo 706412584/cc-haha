@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { readFile, mkdir, access, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,26 +13,38 @@ const projectRoot = path.resolve(__dirname, '../../..')
 
 // All runtime state lives in ~/.claude/.runtime — writable in both dev and
 // bundled (Tauri app) modes. The setup API (or ensureRuntimeFiles below)
-// populates requirements.txt and mac_helper.py here.
+// populates requirements-win.txt and win_helper.py here.
+//
+// This bridge is Windows-only. macOS routes every command to the signed native
+// `cu-helper` daemon and `helperBridge` refuses to fall back, so the old
+// `mac_helper.py` was unreachable and has been deleted along with its
+// pyobjc requirements file. Keeping a dead darwin branch here invited the
+// reading that Python is still a supported macOS path — it is not.
 const runtimeStateRoot = path.join(getClaudeConfigHomeDir(), '.runtime')
 const venvRoot = path.join(runtimeStateRoot, 'venv')
 const installStampPath = path.join(runtimeStateRoot, 'requirements.sha256')
 
 const isWindows = process.platform === 'win32'
+const windowsInputTag = randomBytes(4).readUInt32LE(0) || 0x43434841
 
 // Always read from ~/.claude/.runtime/ — works in both dev and bundled mode.
 const requirementsPath = path.join(runtimeStateRoot, 'requirements.txt')
-const helperFileName = isWindows ? 'win_helper.py' : 'mac_helper.py'
+const helperFileName = 'win_helper.py'
 const helperPath = path.join(runtimeStateRoot, helperFileName)
+// Runs as its own process (the helper is a stateless one-shot CLI and cannot
+// own a window across actions), so it ships as a separate file.
+const cursorBadgeFileName = 'win_cursor_badge.py'
+const cursorBadgePath = path.join(runtimeStateRoot, cursorBadgeFileName)
 
 let bootstrapPromise: Promise<void> | undefined
 
-function getPythonCommandEnv(): NodeJS.ProcessEnv | undefined {
+export function getComputerUsePythonEnv(): NodeJS.ProcessEnv | undefined {
   if (!isWindows) return undefined
   return {
     ...process.env,
     PYTHONIOENCODING: 'utf-8',
     PYTHONUTF8: '1',
+    CC_HAHA_COMPUTER_USE_INPUT_TAG: String(windowsInputTag),
   }
 }
 
@@ -98,8 +110,7 @@ async function getVenvCreationPythonCommand(): Promise<string> {
 async function ensureRuntimeFiles(): Promise<void> {
   await mkdir(runtimeStateRoot, { recursive: true })
 
-  const devReqFile = isWindows ? 'requirements-win.txt' : 'requirements.txt'
-  const devRequirements = path.join(projectRoot, 'runtime', devReqFile)
+  const devRequirements = path.join(projectRoot, 'runtime', 'requirements-win.txt')
   const devHelper = path.join(projectRoot, 'runtime', helperFileName)
 
   // Always sync from dev runtime/ so source changes are reflected immediately.
@@ -112,12 +123,17 @@ async function ensureRuntimeFiles(): Promise<void> {
   if (await pathExists(devHelper)) {
     await writeFile(helperPath, await readFile(devHelper, 'utf8'), 'utf8')
   }
+
+  const devBadge = path.join(projectRoot, 'runtime', cursorBadgeFileName)
+  if (await pathExists(devBadge)) {
+    await writeFile(cursorBadgePath, await readFile(devBadge, 'utf8'), 'utf8')
+  }
 }
 
 export async function ensureBootstrapped(): Promise<void> {
   if (bootstrapPromise) return bootstrapPromise
   bootstrapPromise = (async () => {
-    // Extract runtime files (requirements.txt, mac_helper.py) to state dir
+    // Extract runtime files (requirements, helper, badge) to state dir
     await ensureRuntimeFiles()
 
     if (!(await pathExists(pythonBinPath()))) {
@@ -161,14 +177,14 @@ export async function callPythonHelper<T>(command: string, payload: Record<strin
   const { code, stdout, stderr } = await execFileNoThrow(
     pythonBinPath(),
     [helperPath, command, '--payload', JSON.stringify(payload)],
-    { useCwd: false, env: getPythonCommandEnv() },
+    { useCwd: false, env: getComputerUsePythonEnv() },
   )
 
   if (code !== 0 && !stdout.trim()) {
     throw new Error(stderr || `Python helper ${command} failed with code ${code}`)
   }
 
-  let parsed: { ok: boolean; result?: T; error?: { message?: string } }
+  let parsed: { ok: boolean; result?: T; error?: { code?: string; message?: string } }
   try {
     parsed = JSON.parse(stdout)
   } catch {
@@ -176,7 +192,14 @@ export async function callPythonHelper<T>(command: string, payload: Record<strin
   }
 
   if (!parsed.ok) {
-    throw new Error(parsed.error?.message || `Python helper ${command} failed`)
+    // Prefix the machine-readable code so callers can branch on it. The helper
+    // reports refusals such as `user_interference` and `target_window_offscreen`
+    // this way, and a bare message would flatten them into indistinguishable
+    // prose — the model would then retry an action that was deliberately
+    // refused. Mirrors how the macOS daemon surfaces `CUError.code`.
+    const code = parsed.error?.code
+    const message = parsed.error?.message || `Python helper ${command} failed`
+    throw new Error(code && code !== 'runtime_error' ? `${code}: ${message}` : message)
   }
 
   return parsed.result as T
@@ -184,4 +207,9 @@ export async function callPythonHelper<T>(command: string, payload: Record<strin
 
 export function getRuntimePaths(): { projectRoot: string; runtimeStateRoot: string; venvRoot: string } {
   return { projectRoot, runtimeStateRoot, venvRoot }
+}
+
+/** Interpreter + script path for the Windows virtual-cursor overlay. */
+export function getCursorBadgeCommand(): { python: string; script: string } {
+  return { python: pythonBinPath(), script: cursorBadgePath }
 }

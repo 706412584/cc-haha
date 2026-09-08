@@ -106,4 +106,40 @@ describe('css custom property usage', () => {
     // layering scale now settles by name.
     expect(offenders).toEqual([])
   })
+
+  it('puts every full-viewport overlay on the shared layering scale', () => {
+    // The rule above only catches ARBITRARY z values (`z-[10000]`). Tailwind's
+    // built-in utilities (`z-50`) slip past it while being exactly as opaque:
+    // a bare 50 says nothing about whether it should sit above the sidebar's
+    // dock or below a dropdown, and the `--z-*` scale is the only place that
+    // answer is written down.
+    //
+    // Scoped to `fixed inset-0` on purpose. Small local values (`z-1`, `z-2`)
+    // order siblings inside one component and carry no cross-component meaning,
+    // so forcing them onto the scale would be noise. A full-viewport overlay is
+    // the opposite: it competes with every other layer in the app.
+    const offenders: string[] = []
+
+    for (const file of sourceFiles) {
+      if (file.includes('/features/pets/')) continue
+
+      const lines = readFileSync(file, 'utf8').split('\n')
+      lines.forEach((line, index) => {
+        if (!/fixed\s+inset-0/.test(line)) return
+        const bareZ = /\bz-(\d+)\b/.exec(line)
+        if (bareZ) {
+          offenders.push(
+            `${file.replace(SRC_ROOT, 'src')}:${index + 1}  z-${bareZ[1]} (use z-[var(--z-…)])`,
+          )
+        }
+      })
+    }
+
+    // Regression: ComputerUseSettings' app picker was a hand-rolled
+    // `fixed inset-0 z-50` overlay instead of the shared Modal. Bare 50 landed
+    // it below `--z-dropdown` (70) and next to `--z-drawer`, so the sidebar's
+    // settings dock rendered on top of the scrim. It now uses Modal, which
+    // portals to body and sits on `--z-dialog`.
+    expect(offenders).toEqual([])
+  })
 })

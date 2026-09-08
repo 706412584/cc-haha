@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, render, screen } from '@testing-library/react'
 
 vi.mock('../../api/websocket', () => ({
   wsManager: {
@@ -58,11 +58,17 @@ function makeSession(overrides: Partial<PerSessionState> = {}): PerSessionState 
 
 describe('StreamingIndicator', () => {
   beforeEach(() => {
+    useChatStore.setState({ sessions: {} })
     useSettingsStore.setState({ locale: 'en' })
     useTabStore.setState({
       activeTabId: ACTIVE_TAB,
       tabs: [{ sessionId: ACTIVE_TAB, title: 'Test', type: 'session', status: 'running' }],
     })
+  })
+
+  afterEach(() => {
+    cleanup()
+    useChatStore.getState().disconnectSession(ACTIVE_TAB)
   })
 
   // issue #757: token usage is rendered with the shared compact notation and
@@ -137,6 +143,52 @@ describe('StreamingIndicator', () => {
     // api_retry 携带更具体的进度（第 N 次/倒计时），优先级高于泛化的降级提示。
     expect(screen.getByTestId('api-retry-indicator')).toBeTruthy()
     expect(screen.queryByTestId('streaming-fallback-indicator')).toBeNull()
+  })
+
+  it('explains a long rate-limit retry without reducing it to HTTP or raw seconds', () => {
+    useChatStore.getState().connectToSession(ACTIVE_TAB, {
+      minimalBootstrap: true,
+      prewarm: false,
+    })
+    useChatStore.getState().handleServerMessage(ACTIVE_TAB, {
+      type: 'api_retry',
+      attempt: 1,
+      maxRetries: 10,
+      retryDelayMs: 13_570_000,
+      errorStatus: 429,
+      errorType: 'rate_limit',
+    })
+
+    render(<StreamingIndicator />)
+
+    const banner = screen.getByTestId('api-retry-indicator')
+    expect(banner.textContent).toContain('usage or rate limit reached')
+    expect(banner.textContent).toContain('HTTP 429')
+    expect(banner.textContent).toContain('retrying in about 3h 46m')
+    expect(banner.textContent).not.toContain('13570s')
+  })
+
+  it('keeps an ordinary short retry compact and status-specific', () => {
+    useChatStore.getState().connectToSession(ACTIVE_TAB, {
+      minimalBootstrap: true,
+      prewarm: false,
+    })
+    useChatStore.getState().handleServerMessage(ACTIVE_TAB, {
+      type: 'api_retry',
+      attempt: 1,
+      maxRetries: 3,
+      retryDelayMs: 5000,
+      errorStatus: 503,
+      errorType: 'server_error',
+    })
+
+    render(<StreamingIndicator />)
+
+    const banner = screen.getByTestId('api-retry-indicator')
+    expect(banner.textContent).toContain('HTTP 503')
+    expect(banner.textContent).toContain('waiting 5s')
+    expect(banner.textContent).not.toContain('usage or rate limit reached')
+    expect(banner.textContent).not.toContain('about')
   })
 
   it('switches the retry banner from a countdown to "retrying now" once the delay elapses', () => {

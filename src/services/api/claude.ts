@@ -488,11 +488,14 @@ export function configureEffortParams(
     BetaOutputConfig,
     'effort'
   > & { effort?: EffortLevel | null }
+  const suppressExperimentalEffort = shouldSuppressEffortOutputConfig()
+  const hasExplicitOpenAIEffort =
+    typeof effortValue === 'string' && isOpenAIResponsesModel(model)
 
   if (
     !modelSupportsEffort(model) ||
     'effort' in effortOutputConfig ||
-    shouldSuppressEffortOutputConfig()
+    (suppressExperimentalEffort && !hasExplicitOpenAIEffort)
   ) {
     return
   }
@@ -508,9 +511,14 @@ export function configureEffortParams(
     effortOutputConfig.effort = 'high'
     betas.push(EFFORT_BETA_HEADER)
   } else if (typeof effortValue === 'string') {
-    // Send string effort level as is
+    // A session-scoped OpenAI effort is a user-selected runtime control, not
+    // an optional beta experiment. Preserve it in the Anthropic envelope even
+    // when a direct relay disables beta headers; OpenAI-compatible adapters
+    // translate this field to reasoning_effort / reasoning.effort downstream.
     effortOutputConfig.effort = effortValue
-    betas.push(EFFORT_BETA_HEADER)
+    if (!suppressExperimentalEffort) {
+      betas.push(EFFORT_BETA_HEADER)
+    }
   } else if (process.env.USER_TYPE === 'ant') {
     // Numeric effort override - ant-only (uses anthropic_internal)
     const existingInternal =
@@ -2237,6 +2245,9 @@ async function* queryModel(
     // 0 disables it (terminal CLI default); the desktop injects a value.
     const STREAM_MAX_DURATION_MS =
       parseInt(process.env.CLAUDE_STREAM_MAX_DURATION_MS || "", 10) || 0;
+    // Despite the legacy env name, this is an inactivity budget: each
+    // non-empty input_json_delta proves the tool call is still progressing.
+    // STREAM_MAX_DURATION_MS remains the independent total response cap.
     const STREAM_TOOL_INPUT_MAX_DURATION_MS =
       parseInt(
         process.env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS || "",
@@ -2573,6 +2584,9 @@ async function* queryModel(
                     throw new Error("Content block input is not a string");
                   }
                   contentBlock.input += delta.partial_json;
+                  if (delta.partial_json.length > 0) {
+                    toolInputDurationGuard.progress(part.index);
+                  }
                   break;
                 case "text_delta":
                   if (contentBlock.type !== "text") {
