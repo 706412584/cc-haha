@@ -511,8 +511,16 @@ describe('TraceSession', () => {
     await renderReady(20)
 
     fireEvent.click(within(screen.getByTestId('trace-tree')).getByText('claude-sonnet-4-5'))
-    await waitFor(() => expect(sessionsApi.getTraceCall).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(sessionsApi.getTraceCall).toHaveBeenCalled())
+    // Every changed poll refetches the full trace, and the selected call is
+    // refetched alongside each of those refreshes — so the call fetch count
+    // tracks the changed-poll count (≥1 from the click itself) rather than a
+    // fixed 1, which only holds on a machine fast enough to assert before the
+    // first 20ms poll lands.
     await waitFor(() => expect(vi.mocked(sessionsApi.getTrace).mock.calls.length).toBeGreaterThanOrEqual(3))
+    expect(sessionsApi.getTraceCall.mock.calls.length).toBe(
+      vi.mocked(sessionsApi.getTrace).mock.calls.length,
+    )
 
     await screen.findByText('claude-sonnet-4-5 x2')
     expect(vi.mocked(sessionsApi.getTraceCall).mock.calls.length).toBeGreaterThan(1)
