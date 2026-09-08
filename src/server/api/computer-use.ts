@@ -12,8 +12,6 @@ import { access, readFile, mkdir, writeFile, rm } from 'fs/promises'
 import { createHash } from 'crypto'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import type { CuPermissionRequest } from '../../vendor/computer-use-mcp/types.js'
-import { computerUseApprovalService } from '../services/computerUseApprovalService.js'
 import {
   detectPythonRuntime,
   getPythonUnavailableMessage,

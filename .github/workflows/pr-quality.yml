@@ -252,6 +252,21 @@ jobs:
       - name: Run desktop native checks
         run: bun run check:native
 
+  macos-swift-checks:
+    name: macos-swift-checks
+    needs: scope-plan
+    if: needs.scope-plan.outputs.desktop_native_checks == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - name: Run macOS Swift checks
+        run: bun run check:swift
+
   persistence-checks:
     name: persistence-checks
     needs: scope-plan
@@ -345,6 +360,7 @@ jobs:
       - agent-flow-checks
       - adapter-checks
       - desktop-native-checks
+      - macos-swift-checks
       - persistence-checks
       - docs-checks
       - coverage-checks
@@ -389,6 +405,7 @@ jobs:
           require_selected "agent-flow-checks" "${{ needs.scope-plan.outputs.agent_flow_checks }}" "${{ needs.agent-flow-checks.result }}"
           require_selected "adapter-checks" "${{ needs.scope-plan.outputs.adapter_checks }}" "${{ needs.adapter-checks.result }}"
           require_selected "desktop-native-checks" "${{ needs.scope-plan.outputs.desktop_native_checks }}" "${{ needs.desktop-native-checks.result }}"
+          require_selected "macos-swift-checks" "${{ needs.scope-plan.outputs.desktop_native_checks }}" "${{ needs.macos-swift-checks.result }}"
           require_selected "persistence-checks" "${{ needs.scope-plan.outputs.persistence_checks }}" "${{ needs.persistence-checks.result }}"
           require_selected "docs-checks" "${{ needs.scope-plan.outputs.docs_checks }}" "${{ needs.docs-checks.result }}"
           require_selected "coverage-checks" "${{ needs.scope-plan.outputs.coverage_checks }}" "${{ needs.coverage-checks.result }}"

@@ -427,14 +427,15 @@ describe('ProviderService', () => {
       const settings = await readSettings()
       const env = settings.env as Record<string, string>
       expect(env.CC_HAHA_SEND_DISABLED_THINKING).toBeUndefined()
+      // The fork's xhigh tier applies to DeepSeek V4 models too.
       expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
-        'thinking,effort,adaptive_thinking,max_effort',
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
       )
       expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES).toBe(
-        'thinking,effort,adaptive_thinking,max_effort',
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
       )
       expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES).toBe(
-        'thinking,effort,adaptive_thinking,max_effort',
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
       )
     })
 
@@ -2008,7 +2009,7 @@ describe('ProviderService', () => {
       }
     })
 
-    test('round-trips DeepSeek reasoning by model on generic OpenAI Chat hosts', async () => {
+    test('round-trips reasoning content on OpenAI Chat hosts, including generic models', async () => {
       const originalFetch = globalThis.fetch
       const calls: Array<Record<string, unknown>> = []
       globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
@@ -2083,9 +2084,13 @@ describe('ProviderService', () => {
         const deepSeekAssistant = deepSeekMessages.find(message => message.role === 'assistant')
         expect(deepSeekAssistant?.reasoning_content).toBe('Need to inspect the repository first.')
 
+        // Fork behavior: reasoning round-trips unconditionally on OpenAI Chat
+        // hosts — third-party Anthropic-compatible endpoints hide reasoning
+        // behind the OpenAI `thinking` toggle and `reasoning_content`, so
+        // generic models keep it too (thinking passthrough invariant).
         const genericMessages = calls[1].messages as Array<Record<string, unknown>>
         const genericAssistant = genericMessages.find(message => message.role === 'assistant')
-        expect(genericAssistant?.reasoning_content).toBeUndefined()
+        expect(genericAssistant?.reasoning_content).toBe('Need to inspect the repository first.')
       } finally {
         globalThis.fetch = originalFetch
       }

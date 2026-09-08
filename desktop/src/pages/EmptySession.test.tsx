@@ -827,26 +827,40 @@ describe('EmptySession', () => {
       modelId: 'claude-sonnet-5',
       effortLevel: 'high',
     })
-    expect(mocks.wsSend.mock.calls.slice(0, 3)).toEqual([
-      [
-        'draft-session',
-        {
-          type: 'set_runtime_config',
-          providerId: null,
-          modelId: 'claude-sonnet-5',
-          effortLevel: 'high',
-        },
-      ],
-      ['draft-session', { type: 'prewarm_session' }],
-      [
-        'draft-session',
-        {
-          type: 'user_message',
-          content: 'Claude OAuth question',
-          attachments: [],
-        },
-      ],
-    ])
+    // set_runtime_config now carries a requestId so stale acks can be
+    // dropped (see setSessionRuntime in chatStore); assert the shape instead
+    // of the generated uuid.
+    const [runtimeConfigCall] = mocks.wsSend.mock.calls
+    expect(runtimeConfigCall?.[0]).toBe('draft-session')
+    expect(runtimeConfigCall?.[1]).toMatchObject({
+      type: 'set_runtime_config',
+      providerId: null,
+      modelId: 'claude-sonnet-5',
+      effortLevel: 'high',
+    })
+    expect(typeof runtimeConfigCall?.[1]?.requestId).toBe('string')
+    // The fork replays the runtime mode alignment ahead of every user turn:
+    // connectToSession fires set_coordinator_mode(false) (+ set_pipeline_mode)
+    // before the user message, and prewarm stays the second call overall.
+    const remainingCalls = mocks.wsSend.mock.calls.slice(1).map((call) => {
+      const payload = call[1] as Record<string, unknown>
+      return { sessionId: call[0], type: payload.type, enabled: payload.enabled, flavor: payload.flavor }
+    })
+    expect(remainingCalls).toEqual(expect.arrayContaining([
+      { sessionId: 'draft-session', type: 'prewarm_session', enabled: undefined, flavor: undefined },
+    ]))
+    const messageTypes = remainingCalls.map((call) => call.type)
+    expect(messageTypes[0]).toBe('prewarm_session')
+    expect(messageTypes).toContain('set_coordinator_mode')
+    expect(remainingCalls.find((call) => call.type === 'set_coordinator_mode')?.enabled).toBe(false)
+    expect(messageTypes[messageTypes.length - 1]).toBe('user_message')
+    const userMessage = mocks.wsSend.mock.calls[mocks.wsSend.mock.calls.length - 1]
+    expect(userMessage?.[0]).toBe('draft-session')
+    expect(userMessage?.[1]).toEqual({
+      type: 'user_message',
+      content: 'Claude OAuth question',
+      attachments: [],
+    })
   })
 
   it('opens provider settings instead of creating a session when no model authentication exists', async () => {
