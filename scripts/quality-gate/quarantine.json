@@ -47,6 +47,14 @@
       "owner": "706412584",
       "reviewAfter": "2026-11-30",
       "exitCriteria": "Rewrite the assertions against agentCompletionInbox/drain semantics, then remove this entry."
+    },
+    {
+      "id": "teams-crossfile-pollution",
+      "path": "src/server/__tests__/teams.test.ts",
+      "reason": "Single-file run is green (92 pass / 0 fail) but full-suite concurrent execution pollutes inProcessRunner assertions. Cross-file state pollution, documented pre-existing. See docs/known-pre-existing-test-failures.md.",
+      "owner": "706412584",
+      "reviewAfter": "2026-11-30",
+      "exitCriteria": "Isolate the shared state leaking across team/swarm test files, then remove this entry."
     }
   ]
 }
