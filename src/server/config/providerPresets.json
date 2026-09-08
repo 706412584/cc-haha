@@ -310,8 +310,7 @@
     "authStrategy": "api_key",
     "modelContextWindows": {
       "deepseek-ai/deepseek-v4-pro": 1000000
-    },
-    "featured": true
+    }
   },
   {
     "id": "lmstudio",

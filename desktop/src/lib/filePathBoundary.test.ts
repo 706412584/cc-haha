@@ -130,7 +130,7 @@ describe('matchGitHubRef', () => {
   it('reads the owner/repo#123 form the prompt asks for', () => {
     // src/constants/prompts.ts:438 — "so they render as clickable links".
     expect(matchGitHubRef('706412584/cc-haha#1146')).toMatchObject({
-      owner: 'NanmiCoder',
+      owner: '706412584',
       repo: 'cc-haha',
       number: 1146,
       url: 'https://github.com/706412584/cc-haha/issues/1146',

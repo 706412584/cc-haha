@@ -1450,7 +1450,7 @@ export function Sidebar({
                   <EmptyState variant="inline" title={t('sidebar.noSessions')} />
                 </div>
               )}
-              {!showInitialLoading && !isMobile && orderedProjectGroups.length > 0 && (
+              {!showInitialLoading && !isMobile && (
                 <ProjectHeaderActions
                   title={isTaskView ? t('sidebar.tasks') : t('sidebar.projects')}
                   menuLabel={t('sidebar.projectMenu')}

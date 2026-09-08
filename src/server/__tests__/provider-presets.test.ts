@@ -248,7 +248,7 @@ describe('provider presets API', () => {
     expect(atlascloud?.apiKeyUrl).toBe(
       'https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=cc-haha',
     )
-    expect(atlascloud?.featured).toBe(true)
+    expect(atlascloud?.featured).toBeUndefined()
     expect(custom?.promoText).toBeUndefined()
     expect(custom?.authStrategy).toBe('auth_token')
     expect(custom?.defaultEnv).toBeUndefined()

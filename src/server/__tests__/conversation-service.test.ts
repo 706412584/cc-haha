@@ -1078,10 +1078,11 @@ describe('ConversationService', () => {
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe('provider-key')
     expect(env.ANTHROPIC_API_KEY).toBe('')
     expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
-    // Retired/third-party presets keep capabilities in preset defaultEnv
-    // (shengsuanyun pins sonnet to "none"); do not invent Claude-code caps.
-    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
+    // Slot capabilities come from the reasoning profile layer now
+    // (upstream v0.6.0 semantics); preset defaultEnv no longer pins "none".
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
+      'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+    )
     expect(env.CLAUDE_CODE_ATTRIBUTION_HEADER).toBe('1')
   })
 
@@ -1142,7 +1143,9 @@ describe('ConversationService', () => {
     })) as Record<string, string>
 
     expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
-    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
+      'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+    )
   })
 
   test('buildChildEnv drops main-model capabilities for unknown selected models', async () => {

@@ -18,6 +18,7 @@ import {
   isPythonVersionAtLeast,
 } from './computer-use-python.js'
 import { buildPipInstallAttempts } from '../../utils/computerUse/pipInstall.js'
+import { diagnosticsService } from '../services/diagnosticsService.js'
 import {
   DEFAULT_DESKTOP_GRANT_FLAGS,
   getComputerUseConfigPath,
