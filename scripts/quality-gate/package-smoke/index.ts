@@ -860,7 +860,7 @@ function inspectMacosArtifacts(rootDir: string, report: PackageSmokeReport, opti
   // refuses to ad-hoc sign); the release lane then passes
   // --allow-missing-cu-helper so the bundle-structure smoke still gates the
   // rest of the app instead of failing on the deliberately absent helper.
-  if (options.allowMissingCuHelper && !existsSync(helperApp)) {
+  if (options.allowMissingCuHelper && !existsSync(helperExecutable)) {
     report.notes.push(
       'macOS cu-helper bundle absent and --allow-missing-cu-helper set: Computer Use is unavailable in this unsigned build (expected).',
     )
