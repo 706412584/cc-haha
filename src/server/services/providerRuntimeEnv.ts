@@ -43,7 +43,12 @@ import {
   isGrokOfficialProviderId,
 } from './grokOfficialProvider.js'
 
-export const MANAGED_PROVIDER_ENV_KEYS = [
+// Lazy: evaluating the key list at module-eval time reads env-key constants
+// exported by grokOfficialProvider/openaiOfficialProvider, which sit in an
+// import cycle with this file — depending on entry order those bindings can
+// still be uninitialized (TDZ). Resolving on first use avoids that.
+export function getManagedProviderEnvKeyList(): string[] {
+  return [
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
@@ -74,7 +79,8 @@ export const MANAGED_PROVIDER_ENV_KEYS = [
   IMAGE_GENERATION_BASE_URL_ENV_KEY,
   IMAGE_GENERATION_API_KEY_ENV_KEY,
   IMAGE_GENERATION_MODEL_ENV_KEY,
-] as const
+] as unknown as string[]
+}
 
 const CUSTOM_PROVIDER_MODEL_CAPABILITIES =
   'thinking,effort,adaptive_thinking,xhigh_effort,max_effort'
@@ -471,23 +477,35 @@ export function buildProviderAuthEnv(
   }
 }
 
-const managedProviderEnvKeys = new Set<string>(
-  MANAGED_PROVIDER_ENV_KEYS.map((key) => key.toUpperCase()),
-)
-for (const preset of PROVIDER_PRESETS) {
-  for (const key of Object.keys(preset.defaultEnv ?? {})) {
-    managedProviderEnvKeys.add(key.toUpperCase())
+// Built lazily: this module participates in an import cycle with
+// grokOfficialProvider/openaiOfficialProvider (they import the env keys they
+// manage, this file imports their runtime-env builders). Eager top-level
+// evaluation hit the cycle mid-initialization and threw a TDZ
+// ReferenceError for GROK_OAUTH_PROVIDER_ENV_KEY depending on entry order.
+let managedProviderEnvKeys: Set<string> | undefined
+
+function getManagedProviderEnvKeys(): Set<string> {
+  if (!managedProviderEnvKeys) {
+    managedProviderEnvKeys = new Set<string>(
+      getManagedProviderEnvKeyList().map((key) => key.toUpperCase()),
+    )
+    for (const preset of PROVIDER_PRESETS) {
+      for (const key of Object.keys(preset.defaultEnv ?? {})) {
+        managedProviderEnvKeys.add(key.toUpperCase())
+      }
+    }
   }
+  return managedProviderEnvKeys
 }
 
 export function getManagedEnvKeys(): string[] {
-  return [...managedProviderEnvKeys]
+  return [...getManagedProviderEnvKeys()]
 }
 
 export function isManagedProviderEnvKey(key: string): boolean {
   const normalizedKey = key.toUpperCase()
   return (
-    managedProviderEnvKeys.has(normalizedKey) ||
+    getManagedProviderEnvKeys().has(normalizedKey) ||
     isProviderManagedEnvVar(normalizedKey)
   )
 }
