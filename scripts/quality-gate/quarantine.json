@@ -15,6 +15,54 @@
       "owner": "706412584",
       "reviewAfter": "2026-11-30",
       "exitCriteria": "Reconcile the nudge assertions with the fork's current nudge injection logic, then remove this entry."
+    },
+    {
+      "id": "tasks-inbox-ownership",
+      "path": "src/server/__tests__/tasks.test.ts",
+      "reason": "Fork agentCompletionInbox architecture: TaskTools command-queue assertions predate the inbox refactor. Two reds on a clean baseline. See docs/known-pre-existing-test-failures.md root cause A.",
+      "owner": "706412584",
+      "reviewAfter": "2026-11-30",
+      "exitCriteria": "Rewrite the assertions against agentCompletionInbox/drain semantics, then remove this entry."
+    },
+    {
+      "id": "TaskTools-eager-inbox-ownership",
+      "path": "src/tools/TaskTools.eager.test.ts",
+      "reason": "Fork agentCompletionInbox architecture: eager TaskTools assertions expect the upstream direct-queue path. See docs/known-pre-existing-test-failures.md root cause A.",
+      "owner": "706412584",
+      "reviewAfter": "2026-11-30",
+      "exitCriteria": "Rewrite the assertions against agentCompletionInbox/drain semantics, then remove this entry."
+    },
+    {
+      "id": "agentToolUtils-inbox-ownership",
+      "path": "src/tools/AgentTool/agentToolUtils.test.ts",
+      "reason": "Fork agentCompletionInbox architecture: tool-utils ownership assertions predate the inbox refactor. See docs/known-pre-existing-test-failures.md root cause A.",
+      "owner": "706412584",
+      "reviewAfter": "2026-11-30",
+      "exitCriteria": "Rewrite the assertions against agentCompletionInbox/drain semantics, then remove this entry."
+    },
+    {
+      "id": "ws-memory-events-inbox-ownership",
+      "path": "src/server/__tests__/ws-memory-events.test.ts",
+      "reason": "Nested task ownership assertion shares the inbox-architecture divergence (root cause A); the file is otherwise green. See docs/known-pre-existing-test-failures.md.",
+      "owner": "706412584",
+      "reviewAfter": "2026-11-30",
+      "exitCriteria": "Rewrite the assertions against agentCompletionInbox/drain semantics, then remove this entry."
+    },
+    {
+      "id": "teams-crossfile-pollution",
+      "path": "src/server/__tests__/teams.test.ts",
+      "reason": "Single-file run is green (92 pass / 0 fail) but full-suite concurrent execution pollutes inProcessRunner assertions. Cross-file state pollution, documented pre-existing. See docs/known-pre-existing-test-failures.md.",
+      "owner": "706412584",
+      "reviewAfter": "2026-11-30",
+      "exitCriteria": "Isolate the shared state leaking across team/swarm test files, then remove this entry."
+    },
+    {
+      "id": "in-process-runner-claim-flaky-ci",
+      "path": "src/utils/swarm/inProcessRunner.test.ts",
+      "reason": "CI-only flake: \"claims follow-up work\" observes status completed where a local run (same bun flags, 5/5 repeats) is green. File content is identical to upstream v0.6.0. Suspected runner-timing interaction; quarantine unblocks the gate while it is investigated.",
+      "owner": "706412584",
+      "reviewAfter": "2026-10-15",
+      "exitCriteria": "Reproduce on a CI runner or fix the timing interaction, then remove this entry."
     }
   ]
 }

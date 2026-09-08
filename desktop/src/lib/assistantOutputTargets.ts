@@ -274,6 +274,14 @@ export function extractAssistantOutputTargets(
   return results
 }
 
+/** Markdown-authored images already have a position inside the prose. */
+export function extractMarkdownImageSources(content: string): string[] {
+  const codeBlocks = extractFencedCodeBlocks(content)
+  return extractMarkdownLinks(content)
+    .filter((match) => match.isImage && !isInCodeBlock(match.start, codeBlocks))
+    .map((match) => match.href)
+}
+
 /**
  * Place a bare filename in the directory this turn actually wrote into.
  *

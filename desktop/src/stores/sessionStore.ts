@@ -56,6 +56,9 @@ type SessionStore = {
 }
 
 let fetchSessionsRequestId = 0
+// The local index can lag the create response by one refresh. Keep explicit
+// ids from that response until the list has observed them at least once.
+const pendingCreatedSessionIds = new Set<string>()
 
 export const useSessionStore = create<SessionStore>((set, get) => ({
   sessions: [],
@@ -79,10 +82,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       let syncedSessions: SessionListItem[] = []
       set((state) => {
         if (requestId !== state.sessionListRequestId) return state
+        const incomingSessions = reconcilePendingCreatedSessions(raw, state.sessions)
         const sessions = mergeSessionList(
           shouldRetainRenderedSessions(indexStatus)
-            ? [...raw, ...state.sessions]
-            : raw,
+            ? [...incomingSessions, ...state.sessions]
+            : incomingSessions,
           state.sessions,
         )
         syncedSessions = sessions
@@ -126,6 +130,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       permissionMode: requestedPermissionMode,
     }
 
+    pendingCreatedSessionIds.add(id)
     set((state) => ({
       sessions: state.sessions.some((session) => session.id === id)
         ? state.sessions
@@ -157,6 +162,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       workDirExists: true,
     }
 
+    pendingCreatedSessionIds.add(result.sessionId)
     set((state) => ({
       sessions: state.sessions.some((session) => session.id === result.sessionId)
         ? state.sessions.map((session) =>
@@ -177,6 +183,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   deleteSession: async (id: string) => {
     await sessionsApi.delete(id)
+    pendingCreatedSessionIds.delete(id)
     invalidateRecentProjectsCache()
     useSessionRuntimeStore.getState().clearSelection(id)
     set((s) => ({
@@ -193,6 +200,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       invalidateRecentProjectsCache()
     }
     for (const id of result.successes) {
+      pendingCreatedSessionIds.delete(id)
       useSessionRuntimeStore.getState().clearSelection(id)
     }
     set((s) => ({
@@ -297,6 +305,19 @@ function mergeSessionList(
   }
 
   return [...byId.values()].sort((a, b) => sessionModifiedTime(b) - sessionModifiedTime(a))
+}
+
+function reconcilePendingCreatedSessions(
+  incoming: SessionListItem[],
+  current: SessionListItem[],
+): SessionListItem[] {
+  const incomingIds = new Set(incoming.map((session) => session.id))
+  for (const id of incomingIds) pendingCreatedSessionIds.delete(id)
+
+  const pending = current.filter((session) => (
+    pendingCreatedSessionIds.has(session.id) && !incomingIds.has(session.id)
+  ))
+  return pending.length > 0 ? [...incoming, ...pending] : incoming
 }
 
 function shouldRetainRenderedSessions(indexStatus: LocalIndexStatus | null): boolean {

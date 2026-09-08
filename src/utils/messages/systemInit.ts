@@ -24,7 +24,13 @@ export function sdkCompatToolName(name: string): string {
   return name === AGENT_TOOL_NAME ? LEGACY_AGENT_TOOL_NAME : name
 }
 
-type CommandLike = { name: string; userInvocable?: boolean }
+type CommandLike = {
+  name: string
+  userInvocable?: boolean
+  // Carried on the wire for the desktop slash menu — see slash_commands below.
+  description?: string
+  argumentHint?: string
+}
 
 export type SystemInitInputs = {
   tools: ReadonlyArray<{ name: string }>
@@ -66,9 +72,16 @@ export function buildSystemInitMessage(inputs: SystemInitInputs): SDKMessage {
     })),
     model: inputs.model,
     permissionMode: inputs.permissionMode,
+    // Send name + description, not just the name. The desktop slash menu builds
+    // itself from this list, so a bare name renders with an empty description
+    // — the user cannot tell what a command does before running it.
     slash_commands: inputs.commands
       .filter(c => c.userInvocable !== false)
-      .map(c => c.name),
+      .map(c => ({
+        name: c.name,
+        description: c.description ?? '',
+        ...(c.argumentHint ? { argumentHint: c.argumentHint } : {}),
+      })),
     apiKeySource: getAnthropicApiKeyWithSource().source as ApiKeySource,
     betas: getSdkBetas(),
     claude_code_version: MACRO.VERSION,

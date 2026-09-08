@@ -16,6 +16,11 @@ export function isInlineImagePath(pathOrName: string | undefined): boolean {
   return !!pathOrName && INLINE_IMAGE_EXTENSION_RE.test(pathOrName)
 }
 
+/** Host-managed ImageGen results already render through their dedicated result card. */
+export function isManagedGeneratedImagePath(filePath: string): boolean {
+  return filePath.replaceAll('\\', '/').includes('/.claude/cc-haha/generated-images/')
+}
+
 /** Serves a local absolute image path through the local server. */
 export function localImageFileUrl(filePath: string): string {
   return `${getBaseUrl()}/api/filesystem/file?path=${encodeURIComponent(filePath)}`

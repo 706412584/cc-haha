@@ -35,13 +35,17 @@ import {
 } from '../services/grokOfficialProvider.js'
 import { hahaGrokOAuthService } from '../services/hahaGrokOAuthService.js'
 import { resolveClaudeOfficialRuntimeModel } from '../services/claudeOfficialRuntime.js'
-import { getPresetDefaultEnv } from '../services/providerRuntimeEnv.js'
+import {
+  getPresetDefaultEnv,
+  getPresetReasoningProviderKind,
+} from '../services/providerRuntimeEnv.js'
 import { PROVIDER_PRESETS } from '../config/providerPresets.js'
 import {
   getModelReasoningCapabilityOverride,
   MODEL_REASONING_EFFORTS,
   resolveModelReasoningProfile,
   type ModelReasoningApiFormat,
+  type ModelReasoningProviderKind,
 } from '../../shared/modelReasoning.js'
 
 // ─── Fallback models (used when no provider is configured) ────────────────────
@@ -119,6 +123,7 @@ function buildProviderModelList(
   },
   apiFormat?: ModelReasoningApiFormat,
   presetDefaultEnv: Record<string, string> = {},
+  providerKind?: ModelReasoningProviderKind,
   presetModels?: Partial<Record<'main' | 'fable' | 'haiku' | 'sonnet' | 'opus', string>>,
 ): ApiModelInfo[] {
   const modelList: ApiModelInfo[] = []
@@ -129,6 +134,7 @@ function buildProviderModelList(
           id,
           apiFormat,
           getModelReasoningCapabilityOverride(id, models, presetDefaultEnv, presetModels),
+          providerKind,
         )
       : undefined
     return {
@@ -314,6 +320,7 @@ async function handleModelsList(): Promise<Response> {
       activeProvider.models,
       activeProvider.apiFormat,
       getPresetDefaultEnv(activeProvider.presetId),
+      getPresetReasoningProviderKind(activeProvider.presetId),
       PROVIDER_PRESETS.find((preset) => preset.id === activeProvider.presetId)?.defaultModels,
     )
     return Response.json({
@@ -392,6 +399,7 @@ async function handleCurrentModel(req: Request): Promise<Response> {
               activeProvider.models,
               activeProvider.apiFormat,
               getPresetDefaultEnv(activeProvider.presetId),
+              getPresetReasoningProviderKind(activeProvider.presetId),
               PROVIDER_PRESETS.find((preset) => preset.id === activeProvider.presetId)?.defaultModels,
             )
           : claudeOfficialModel

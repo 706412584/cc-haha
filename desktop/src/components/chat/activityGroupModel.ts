@@ -95,10 +95,28 @@ export function activitySegmentIcon(toolName: string): LucideIcon {
 export function buildActivitySegments(steps: ActivityStep[], t: Translate): ActivitySegment[] {
   const order: string[] = []
   const counts = new Map<string, number>()
+  const editedFilePaths = new Set<string>()
 
   for (const step of steps) {
     const key = step.kind === 'thinking' ? THINKING_SEGMENT_KEY : step.toolCall.toolName
     if (!counts.has(key)) order.push(key)
+
+    // The Edit label counts files, not operations. Agents commonly refine one
+    // file through several Edit calls in a turn; count its structured path once
+    // so the summary agrees with the changed-file checkpoint below the turn.
+    // Keep counting calls whose input has no usable path rather than silently
+    // dropping activity we cannot identify.
+    if (step.kind === 'tool' && key === 'Edit') {
+      const input = step.toolCall.input
+      const filePath = input && typeof input === 'object' && !Array.isArray(input)
+        ? (input as Record<string, unknown>).file_path
+        : undefined
+      if (typeof filePath === 'string' && filePath.length > 0) {
+        if (editedFilePaths.has(filePath)) continue
+        editedFilePaths.add(filePath)
+      }
+    }
+
     counts.set(key, (counts.get(key) ?? 0) + 1)
   }
 

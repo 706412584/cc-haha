@@ -4066,6 +4066,92 @@ describe('WebSocket Chat Integration', () => {
     }
   }, 20_000)
 
+  it('should normalize default and persisted GLM 5.3 standard API effort to max', async () => {
+    const providerService = new ProviderService()
+    const settingsService = new SettingsService()
+    const previousSettings = await settingsService.getUserSettings()
+    const provider = await providerService.addProvider({
+      presetId: 'zhipuglm',
+      name: `GLM 5.3 Default ${crypto.randomUUID()}`,
+      apiKey: 'key-glm-default',
+      authStrategy: 'auth_token',
+      baseUrl: 'https://open.bigmodel.cn/api/anthropic',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'glm-5.3[1m]',
+        haiku: 'glm-5.3-flash[1m]',
+        sonnet: 'glm-5.3[1m]',
+        opus: 'glm-5.3[1m]',
+      },
+    })
+    await providerService.activateProvider(provider.id)
+    await settingsService.updateUserSettings({ effort: 'medium' })
+
+    const createRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir: process.cwd() }),
+    })
+    expect(createRes.status).toBe(201)
+    const { sessionId } = await createRes.json() as { sessionId: string }
+    const persistedCreateRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir: process.cwd() }),
+    })
+    expect(persistedCreateRes.status).toBe(201)
+    const { sessionId: persistedSessionId } = await persistedCreateRes.json() as { sessionId: string }
+    await sessionService.appendSessionMetadata(persistedSessionId, {
+      workDir: process.cwd(),
+      runtimeProviderId: provider.id,
+      runtimeModelId: 'glm-5.3-flash[1m]',
+      effortLevel: 'medium',
+    })
+    const originalStartSession = conversationService.startSession.bind(conversationService)
+    const startCalls: Array<{
+      options?: { model?: string; effort?: string; providerId?: string | null }
+    }> = []
+    conversationService.startSession = (async function patchedStartSession(
+      sid: string,
+      workDir: string,
+      sdkUrl: string,
+      options?: { permissionMode?: string; model?: string; effort?: string; thinking?: 'enabled' | 'adaptive' | 'disabled'; providerId?: string | null },
+    ) {
+      startCalls.push({ options })
+      return originalStartSession(sid, workDir, sdkUrl, options)
+    }) as typeof conversationService.startSession
+
+    try {
+      const messages = await runTurn(sessionId, 'use the GLM default effort')
+      const persistedMessages = await runTurn(
+        persistedSessionId,
+        'resume the old GLM effort selection',
+      )
+
+      expect(messages.some((message) => message.type === 'message_complete')).toBe(true)
+      expect(persistedMessages.some((message) => message.type === 'message_complete')).toBe(true)
+      expect(startCalls).toHaveLength(2)
+      expect(startCalls.map((call) => call.options)).toEqual([
+        expect.objectContaining({ providerId: provider.id, effort: 'max' }),
+        expect.objectContaining({
+          providerId: provider.id,
+          model: 'glm-5.3-flash[1m]',
+          effort: 'max',
+        }),
+      ])
+    } finally {
+      conversationService.startSession = originalStartSession
+      conversationService.stopSession(sessionId)
+      conversationService.stopSession(persistedSessionId)
+      await providerService.activateOfficial()
+      await fs.writeFile(
+        path.join(tmpDir, 'settings.json'),
+        JSON.stringify(previousSettings, null, 2),
+        'utf-8',
+      )
+    }
+  }, 20_000)
+
   it('should isolate provider runtime overrides across parallel sessions', async () => {
     const providerService = new ProviderService()
     const providerA = await providerService.addProvider({
@@ -6483,6 +6569,56 @@ describe('WebSocket Chat Integration', () => {
       }
       ws.onerror = () => reject(new Error('WebSocket failed for invalid OpenAI effort'))
     })
+  }, 10_000)
+
+  it('should reject unsupported GLM 5.3 standard API effort aliases', async () => {
+    const providerService = new ProviderService()
+    const provider = await providerService.addProvider({
+      presetId: 'zhipuglm',
+      name: `Zhipu GLM 5.3 ${crypto.randomUUID()}`,
+      apiKey: 'test-zhipu-key',
+      authStrategy: 'auth_token',
+      baseUrl: 'https://open.bigmodel.cn/api/anthropic',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'glm-5.3-flash[1m]',
+        haiku: 'glm-5.3-flash[1m]',
+        sonnet: 'glm-5.3[1m]',
+        opus: 'glm-5.3[1m]',
+      },
+    })
+    const sessionId = `chat-glm-5-3-invalid-effort-${crypto.randomUUID()}`
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+        const timeout = setTimeout(() => {
+          ws.close()
+          reject(new Error('Timed out waiting for invalid GLM 5.3 effort rejection'))
+        }, 5_000)
+
+        ws.onmessage = (event) => {
+          const message = JSON.parse(event.data as string)
+          if (message.type === 'connected') {
+            ws.send(JSON.stringify({
+              type: 'set_runtime_config',
+              providerId: provider.id,
+              modelId: 'glm-5.3-flash[1m]',
+              effortLevel: 'medium',
+            }))
+          } else if (message.type === 'error') {
+            clearTimeout(timeout)
+            expect(message).toMatchObject({ code: 'RUNTIME_CONFIG_INVALID' })
+            ws.close()
+            resolve()
+          }
+        }
+        ws.onerror = () => reject(new Error('WebSocket failed for invalid GLM 5.3 effort'))
+      })
+    } finally {
+      conversationService.stopSession(sessionId)
+      await providerService.deleteProvider(provider.id)
+    }
   }, 10_000)
 
   it('should resume streaming to a reconnected client during an active turn', async () => {

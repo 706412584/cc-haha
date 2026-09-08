@@ -739,6 +739,46 @@ describe('Models API', () => {
     }])
   })
 
+  it('GET /api/models should expose only standard API effort for GLM 5.3', async () => {
+    const providerSvc = new ProviderService()
+    const provider = await providerSvc.addProvider({
+      presetId: 'zhipuglm',
+      name: 'Zhipu GLM',
+      baseUrl: 'https://open.bigmodel.cn/api/anthropic',
+      apiKey: 'test-key',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'glm-5.3-flash[1m]',
+        haiku: 'glm-5.3-flash[1m]',
+        sonnet: 'glm-5.3[1m]',
+        opus: 'glm-5.3[1m]',
+      },
+    })
+    await providerSvc.activateProvider(provider.id)
+
+    const { req, url, segments } = makeRequest('GET', '/api/models')
+    const res = await handleModelsApi(req, url, segments)
+    const body = await res.json() as { models: Array<{
+      id: string
+      defaultReasoningEffort?: string
+      supportedReasoningEfforts?: string[]
+    }> }
+
+    expect(res.status).toBe(200)
+    expect(body.models).toEqual([
+      expect.objectContaining({
+        id: 'glm-5.3-flash[1m]',
+        defaultReasoningEffort: 'max',
+        supportedReasoningEfforts: ['low', 'high', 'max'],
+      }),
+      expect.objectContaining({
+        id: 'glm-5.3[1m]',
+        defaultReasoningEffort: 'max',
+        supportedReasoningEfforts: ['low', 'high', 'max'],
+      }),
+    ])
+  })
+
   it('GET /api/models should keep generic effort for compatible preset models', async () => {
     const providerSvc = new ProviderService()
     const provider = await providerSvc.addProvider({

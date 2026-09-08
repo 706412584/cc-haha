@@ -22,8 +22,86 @@ export type WorkspaceMarkdownImageContext = {
   workDir?: string | null
 }
 
+export type AssistantMarkdownImageContext = {
+  /** Base URL of the local server (see `getServerBaseUrl`). */
+  baseUrl: string
+  sessionId: string
+}
+
 function splitPathSegments(value: string): string[] {
   return value.replace(/\\/g, '/').split('/')
+}
+
+function normalizeAssistantLocalImagePath(value: string): string | null {
+  const slashed = value.replace(/\\/g, '/')
+  const isPosixAbsolute = slashed.startsWith('/')
+  const driveMatch = /^([A-Za-z]:)\/?/.exec(slashed)
+  const isAbsolute = isPosixAbsolute || Boolean(driveMatch)
+  const prefix = driveMatch?.[1]
+    ? `${driveMatch[1]}/`
+    : isPosixAbsolute
+      ? '/'
+      : ''
+  const body = driveMatch?.[0]
+    ? slashed.slice(driveMatch[0].length)
+    : slashed.replace(/^\/+/, '')
+  const stack: string[] = []
+
+  for (const segment of splitPathSegments(body)) {
+    if (!segment || segment === '.') continue
+    if (segment === '..') {
+      if (stack.length > 0) {
+        stack.pop()
+        continue
+      }
+      // Absolute paths remain subject to the server's canonical workdir check.
+      // A relative path must never make the browser normalize out of /preview-fs.
+      if (!isAbsolute) return null
+      continue
+    }
+    stack.push(segment)
+  }
+
+  if (stack.length === 0) return null
+  return `${prefix}${stack.join('/')}`
+}
+
+/**
+ * Create an image resolver for finalized assistant prose.
+ *
+ * Unlike the trusted workspace-document resolver below, this accepts no network
+ * URL at all. Local relative paths and absolute paths are both sent through the
+ * session-scoped `/preview-fs` route; the server canonicalizes the target and
+ * rejects anything outside that session's workdir. The caller must only attach
+ * this resolver after streaming finishes so an unfinished path cannot trigger a
+ * request.
+ */
+export function createAssistantMarkdownImageResolver(
+  context: AssistantMarkdownImageContext,
+): (src: string) => string | null {
+  return (src: string): string | null => {
+    const trimmed = src.trim()
+    if (!trimmed) return null
+    if (isSafeMarkdownImageSource(trimmed)) return trimmed
+    if (trimmed.startsWith('#') || trimmed.startsWith('//')) return null
+    if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return null
+
+    const withoutSuffix = trimmed.split('#')[0]!.split('?')[0]!
+    let decoded = withoutSuffix
+    try {
+      decoded = decodeURIComponent(withoutSuffix)
+    } catch {
+      // A malformed escape cannot name a stable local file.
+      return null
+    }
+
+    const localPath = normalizeAssistantLocalImagePath(
+      decoded.split('#')[0]!.split('?')[0]!,
+    )
+    return localPath
+      ? previewFsUrl(context.baseUrl, context.sessionId, localPath)
+      : null
+  }
 }
 
 /**

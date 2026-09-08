@@ -30,6 +30,7 @@ export type {
   TraceEventRecord,
   TraceEventSeverity,
   TraceProviderInfo,
+  TraceRequestSemantic,
   TraceResponseCapture,
   TraceSession,
   TraceSessionDeleteResult,

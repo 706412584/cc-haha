@@ -66,6 +66,11 @@ export type TraceCallUsage = {
   cacheCreationInputTokens?: number
 }
 
+export type TraceRequestSemantic = {
+  version: 1
+  request: Record<string, unknown>
+}
+
 export type TraceCallRecord = {
   id: string
   sessionId: string
@@ -84,6 +89,7 @@ export type TraceCallRecord = {
     url: string
     headers: Record<string, string>
     body: TraceBodySnapshot
+    semantic?: TraceRequestSemantic
   }
   response?: {
     status: number
@@ -360,12 +366,21 @@ export function trimTraceCallPreviews(
   const responseBody = call.response
     ? trimBodySnapshotPreview(call.response.body, maxPreviewChars)
     : undefined
-  if (requestBody === call.request.body && (!call.response || responseBody === call.response.body)) {
+  if (
+    requestBody === call.request.body &&
+    call.request.semantic === undefined &&
+    (!call.response || responseBody === call.response.body)
+  ) {
     return call
   }
   return {
     ...call,
-    request: { ...call.request, body: requestBody },
+    request: {
+      method: call.request.method,
+      url: call.request.url,
+      headers: call.request.headers,
+      body: requestBody,
+    },
     ...(call.response && responseBody ? { response: { ...call.response, body: responseBody } } : {}),
   }
 }
@@ -378,6 +393,98 @@ function trimBodySnapshotPreview(body: TraceBodySnapshot, maxPreviewChars: numbe
     truncated: true,
   }
 }
+
+type TraceJsonRecord = Record<string, unknown>
+
+function createRequestSemanticField(
+  body: unknown,
+  source: TraceCallRecord['source'],
+): { semantic: TraceRequestSemantic } | Record<string, never> {
+  const semantic = createTraceRequestSemantic(body, source)
+  return semantic ? { semantic } : {}
+}
+
+/**
+ * Preserve the structured request before its raw preview is truncated. The
+ * desktop owns semantic parsing and context classification; capture only
+ * removes binary image payloads so that parser stays the single source of
+ * truth for Anthropic, Chat Completions, and Responses request shapes.
+ */
+export function createTraceRequestSemantic(
+  body: unknown,
+  source: TraceCallRecord['source'],
+): TraceRequestSemantic | null {
+  const parsed = parseTraceRequestValue(body)
+  if (!parsed) return null
+  const request = source === 'proxy' && isTraceRecord(parsed.anthropic)
+    ? parsed.anthropic
+    : parsed
+  if (
+    !Array.isArray(request.messages) &&
+    !Array.isArray(request.input) &&
+    request.system === undefined &&
+    request.instructions === undefined
+  ) {
+    return null
+  }
+  return {
+    version: 1,
+    request: compactTraceSemanticValue(request) as TraceJsonRecord,
+  }
+}
+
+function parseTraceRequestValue(body: unknown): TraceJsonRecord | null {
+  if (isTraceRecord(body)) return body
+  if (typeof body !== 'string') return null
+  const trimmed = body.trim()
+  if (!trimmed.startsWith('{')) return null
+  try {
+    const parsed = JSON.parse(trimmed) as unknown
+    return isTraceRecord(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function compactTraceSemanticValue(value: unknown, key = ''): unknown {
+  if (SENSITIVE_KEY_RE.test(key)) return '[redacted]'
+  if (Array.isArray(value)) return value.map(entry => compactTraceSemanticValue(entry))
+  if (!isTraceRecord(value)) {
+    return typeof value === 'string' ? redactSecretsInText(value) : value
+  }
+
+  if (value.type === 'image' && isTraceRecord(value.source)) {
+    const source = value.source
+    if (source.type === 'base64' && typeof source.data === 'string') {
+      const decoded = Buffer.from(source.data, 'base64')
+      return {
+        ...Object.fromEntries(
+          Object.entries(value)
+            .filter(([entryKey]) => entryKey !== 'source')
+            .map(([entryKey, entryValue]) => [entryKey, compactTraceSemanticValue(entryValue, entryKey)]),
+        ),
+        source: {
+          type: 'base64',
+          ...(typeof source.media_type === 'string' ? { media_type: source.media_type } : {}),
+          bytes: decoded.byteLength,
+          sha256: createHash('sha256').update(decoded).digest('hex'),
+        },
+      }
+    }
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([entryKey, entryValue]) => [
+      entryKey,
+      compactTraceSemanticValue(entryValue, entryKey),
+    ]),
+  )
+}
+
+function isTraceRecord(value: unknown): value is TraceJsonRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 
 export async function clearTraceCaptureStateForTests(): Promise<void> {
   await Promise.allSettled([...traceWriteQueues.values()])
@@ -449,6 +556,7 @@ class TraceCaptureService {
         url: sanitizeUrl(input.request.url ?? ''),
         headers: sanitizeHeaders(input.request.headers),
         body: input.request.bodySnapshot ?? createTraceBodySnapshot(input.request.body ?? null),
+        ...createRequestSemanticField(input.request.body, input.source),
       },
       ...(input.response
         ? {

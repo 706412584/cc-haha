@@ -169,7 +169,7 @@ describe('AssistantMessage output-target cards', () => {
     expect(screen.queryByText('assistantOutputs.kind.image')).toBeNull()
   })
 
-  it('hands a Markdown image to the inline gallery without leaving a source-less duplicate', () => {
+  it('keeps a finalized Markdown image in the prose without a gallery duplicate', () => {
     const { container, rerender } = render(
       <AssistantMessage
         sessionId="s1"
@@ -194,6 +194,7 @@ describe('AssistantMessage output-target cards', () => {
       'src',
       'http://127.0.0.1:4321/preview-fs/s1/outputs/foo/preview_frame.png',
     )
+    expect(container.querySelector('.markdown-prose')).toContainElement(images[0]!)
     expect(container.querySelector('img:not([src])')).toBeNull()
   })
 

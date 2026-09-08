@@ -1,6 +1,6 @@
 import { useRef, useEffect, useMemo, memo, useState, useCallback, useDeferredValue, useLayoutEffect, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { ArrowDown, BookMarked, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleStop, FileStack, LoaderCircle, MessageCircle, Settings, Target, XCircle } from 'lucide-react'
+import { ArrowDown, BookMarked, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleStop, FileStack, LoaderCircle, MessageCircle, Settings, Target, Undo2, XCircle } from 'lucide-react'
 import { ApiError } from '../../api/client'
 import { sessionsApi, type SessionRewindMode, type SessionTurnCheckpoint } from '../../api/sessions'
 import { listPendingPermissions, useChatStore } from '../../stores/chatStore'
@@ -1256,7 +1256,10 @@ function buildTurnCardInsertionMap(
   turnChangeCards.forEach((card) => {
     // An unverified-only turn has no structured files to list, but still needs
     // the card for conversation rewind and the warning about changes left on disk.
+    // A conversation-only turn also has no files, but gets a lightweight action
+    // instead of pretending to be a file-change card.
     if (
+      card.checkpoint.code.available &&
       card.checkpoint.code.filesChanged.length === 0 &&
       (card.checkpoint.unverifiedChangeSources?.length ?? 0) === 0
     ) return
@@ -3073,25 +3076,29 @@ export function MessageList({
   // Undo is not reversible, so the dialog — not just the card — has to say which
   // changes it will leave behind when the checkpoint could not cover them all.
   const confirmUnverifiedSources = confirmTurnCard?.checkpoint.unverifiedChangeSources ?? []
-  const confirmCanRestoreCode = confirmTurnCard?.checkpoint.restoreAvailable !== false
+  const confirmHasCodeCheckpoint = Boolean(confirmTurnCard?.checkpoint.code.available)
+  const confirmCanRestoreCode = confirmHasCodeCheckpoint &&
+    confirmTurnCard?.checkpoint.restoreAvailable !== false
   const confirmBodyText = confirmTurnCard?.isLatest
     ? t('chat.turnChangesLatestConfirmBody')
     : t('chat.turnChangesHistoricalConfirmBody')
-  const confirmCaution = !confirmCanRestoreCode
+  const confirmCaution = confirmHasCodeCheckpoint && !confirmCanRestoreCode
     ? t('chat.turnChangesConversationOnlyConfirmBody')
     : confirmUnverifiedSources.length > 0
       ? t('chat.turnChangesPartialCoverageConfirmBody', {
           sources: confirmUnverifiedSources.join(', '),
         })
       : null
-  const confirmBody = confirmCaution === null
-    ? confirmBodyText
-    : (
-        <div className="space-y-2 text-sm leading-6 text-[var(--color-text-secondary)]">
-          {confirmCanRestoreCode ? <p>{confirmBodyText}</p> : null}
-          <p className="text-[var(--color-warning)]">{confirmCaution}</p>
-        </div>
-      )
+  const confirmBody = !confirmHasCodeCheckpoint
+    ? t('chat.conversationRewindConfirmBody')
+    : confirmCaution === null
+      ? confirmBodyText
+      : (
+          <div className="space-y-2 text-sm leading-6 text-[var(--color-text-secondary)]">
+            {confirmCanRestoreCode ? <p>{confirmBodyText}</p> : null}
+            <p className="text-[var(--color-warning)]">{confirmCaution}</p>
+          </div>
+        )
 
   useEffect(() => {
     const liveKeys = new Set(renderItemKeys)
@@ -3153,7 +3160,7 @@ export function MessageList({
             const target =
               targetByMessageId.get(checkpoint.target.targetUserMessageId) ??
               targetByUserMessageIndex.get(checkpoint.target.userMessageIndex)
-            if (!target || !checkpoint.code.available) {
+            if (!target) {
               return []
             }
             return [{
@@ -3637,20 +3644,47 @@ export function MessageList({
           />
         )}
 
-        {resolvedSessionId && cardsForItem.map((card) => (
-          <CurrentTurnChangeCard
-            key={`turn-change-${card.target.messageId}`}
-            sessionId={resolvedSessionId}
-            checkpoint={card.checkpoint}
-            workDir={card.workDir}
-            error={turnActionErrors[card.target.messageId] ?? null}
-            isUndoing={rewindingTurnId === card.target.messageId}
-            isLatest={card.isLatest}
-            onUndo={() => {
-              setTurnUndoConfirmTargetId(card.target.messageId)
-            }}
-          />
-        ))}
+        {resolvedSessionId && cardsForItem.map((card) => {
+          const error = turnActionErrors[card.target.messageId] ?? null
+          const openUndoDialog = () => {
+            setTurnUndoConfirmTargetId(card.target.messageId)
+          }
+          if (!card.checkpoint.code.available) {
+            return (
+              <div
+                key={`conversation-rewind-${card.target.messageId}`}
+                className="mt-1 flex flex-wrap items-center gap-2 px-1"
+              >
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  loading={rewindingTurnId === card.target.messageId}
+                  onClick={openUndoDialog}
+                  icon={<Undo2 size={13} strokeWidth={2} aria-hidden="true" />}
+                >
+                  {t('chat.conversationRewindAction')}
+                </Button>
+                {error ? (
+                  <span role="alert" className="text-xs text-[var(--color-error)]">
+                    {error}
+                  </span>
+                ) : null}
+              </div>
+            )
+          }
+          return (
+            <CurrentTurnChangeCard
+              key={`turn-change-${card.target.messageId}`}
+              sessionId={resolvedSessionId}
+              checkpoint={card.checkpoint}
+              workDir={card.workDir}
+              error={error}
+              isUndoing={rewindingTurnId === card.target.messageId}
+              isLatest={card.isLatest}
+              onUndo={openUndoDialog}
+            />
+          )
+        })}
       </>
     )
   }

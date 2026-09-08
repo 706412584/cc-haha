@@ -29,10 +29,7 @@
     "apiKeyUrl": "https://platform.deepseek.com/api_keys",
     "authStrategy": "auth_token",
     "defaultEnv": {
-      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
-      "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": "thinking,effort,adaptive_thinking,max_effort",
-      "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "thinking,effort,adaptive_thinking,max_effort",
-      "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES": "thinking,effort,adaptive_thinking,max_effort"
+      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"
     },
     "modelContextWindows": {
       "deepseek-v4-pro[1m]": 1000000,
@@ -57,11 +54,12 @@
       }
     ],
     "apiFormat": "anthropic",
+    "reasoningProviderKind": "zhipu_standard_api",
     "defaultModels": {
-      "main": "glm-5.2[1m]",
-      "haiku": "glm-4.7",
-      "sonnet": "glm-5.2[1m]",
-      "opus": "glm-5.2[1m]"
+      "main": "glm-5.3[1m]",
+      "haiku": "glm-5.3-flash[1m]",
+      "sonnet": "glm-5.3[1m]",
+      "opus": "glm-5.3[1m]"
     },
     "needsApiKey": true,
     "websiteUrl": "https://open.bigmodel.cn",
@@ -72,6 +70,10 @@
       "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"
     },
     "modelContextWindows": {
+      "glm-5.3[1m]": 1000000,
+      "glm-5.3": 1000000,
+      "glm-5.3-flash[1m]": 1000000,
+      "glm-5.3-flash": 1000000,
       "glm-5.2[1m]": 1000000,
       "glm-5.2": 1000000,
       "glm-5.1": 200000,
@@ -95,11 +97,7 @@
     "websiteUrl": "https://www.kimi.com/code",
     "apiKeyUrl": "https://www.kimi.com/code/console",
     "authStrategy": "api_key",
-    "defaultEnv": {
-      "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": "thinking,required_thinking,effort,xhigh_effort,max_effort",
-      "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "thinking,required_thinking,effort,xhigh_effort,max_effort",
-      "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES": "thinking,required_thinking,effort,xhigh_effort,max_effort"
-    },
+    "defaultEnv": {},
     "modelContextWindows": {
       "k3": 262144,
       "kimi-for-coding": 262144,
@@ -136,10 +134,7 @@
     "apiKeyUrl": "https://platform.minimaxi.com/subscribe/token-plan?code=1TG2Cseab2&source=link",
     "authStrategy": "auth_token",
     "defaultEnv": {
-      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
-      "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": "thinking,adaptive_thinking",
-      "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "thinking,adaptive_thinking",
-      "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES": "thinking,adaptive_thinking"
+      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"
     },
     "modelContextWindows": {
       "MiniMax-M3[1m]": 1000000,
@@ -162,9 +157,7 @@
     "needsApiKey": true,
     "websiteUrl": "https://jiekou.ai",
     "authStrategy": "auth_token",
-    "defaultEnv": {
-      "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "none"
-    },
+    "defaultEnv": {},
     "modelContextWindows": {
       "claude-sonnet-4-6": 1000000,
       "claude-haiku-4-5-20251001": 200000,
@@ -189,8 +182,7 @@
     "authStrategy": "auth_token",
     "defaultEnv": {
       "API_TIMEOUT_MS": "3000000",
-      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-      "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "none"
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
     },
     "modelContextWindows": {
       "anthropic/claude-sonnet-4.6": 1000000,
@@ -214,8 +206,7 @@
     "deprecated": true,
     "authStrategy": "auth_token",
     "defaultEnv": {
-      "CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5",
-      "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "none"
+      "CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5"
     },
     "modelContextWindows": {
       "claude-opus-4-8": 1000000,
@@ -240,11 +231,7 @@
     "deprecated": true,
     "authStrategy": "auth_token",
     "defaultEnv": {
-      "CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5",
-      "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": "thinking,effort,adaptive_thinking,xhigh_effort,max_effort",
-      "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "thinking,effort,adaptive_thinking,xhigh_effort,max_effort",
-      "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES": "thinking,effort,adaptive_thinking,xhigh_effort,max_effort",
-      "ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES": "thinking,effort,adaptive_thinking,xhigh_effort,max_effort"
+      "CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5"
     },
     "modelContextWindows": {
       "claude-opus-5": 1000000,

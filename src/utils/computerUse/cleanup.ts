@@ -14,9 +14,17 @@ import { unregisterEscHotkey } from './escHotkey.js'
 // background regardless; we just stop blocking on it.
 const UNHIDE_TIMEOUT_MS = 5000
 
+// The macOS cu-helper daemon's cursor overlay must drop at every turn
+// boundary. overlayHide() rides the daemon's 20s REQUEST_TIMEOUT_MS; on an
+// abort path a wedged daemon could otherwise stall lock release for that long,
+// so we cap the wait here (same non-blocking discipline as UNHIDE_TIMEOUT_MS).
+// overlayHide swallows its own rejection, so this race only guards latency.
+const OVERLAY_HIDE_TIMEOUT_MS = 2000
+
 /**
- * Turn-end cleanup for the chicago MCP surface: auto-unhide apps that
- * `prepareForAction` hid, then release the file-based lock.
+ * Turn-end cleanup for the chicago MCP surface: drop the activity indicator
+ * (macOS cu-helper overlay, or the Windows virtual cursor), auto-unhide apps
+ * that `prepareForAction` hid, then release the file-based lock.
  *
  * Called from three sites: natural turn end (`stopHooks.ts`), abort during
  * streaming (`query.ts` aborted_streaming), abort during tool execution
@@ -25,14 +33,56 @@ const UNHIDE_TIMEOUT_MS = 5000
  * modules) is dynamic-imported below so non-CU turns don't load native
  * modules just to no-op.
  *
- * No-ops cheaply on non-CU turns: both gate checks are zero-syscall.
+ * No-ops cheaply on non-CU turns: the gate checks are zero-syscall and
+ * overlayHide early-returns when nothing was ever shown (Windows, no daemon).
+ *
+ * NOTE: shutdownDaemon() (INTEGRATION.md §3.4 — kill the warm daemon on session
+ * archive/stop) is intentionally NOT done here; per-turn shutdown would defeat
+ * the long-lived-daemon optimization. The daemon self-parks on client
+ * disconnect and dies with the CLI process; a session-archive hook is a
+ * separate follow-up.
+ *
+ * `deps` is injectable for unit tests only.
  */
 export async function cleanupComputerUseAfterTurn(
   ctx: Pick<
     ToolUseContext,
     'getAppState' | 'setAppState' | 'sendOSNotification'
   >,
+  deps: {
+    overlayHide?: () => Promise<void>
+    hideCursorBadge?: () => void
+  } = {},
 ): Promise<void> {
+  // Windows counterpart to the macOS overlay. Synchronous, no-throw, and a
+  // no-op off-Windows, so it goes first and unconditionally: an orphaned badge
+  // would sit on screen claiming the agent is holding the mouse after the turn
+  // has ended, which is a worse lie than showing nothing at all.
+  const hideBadge =
+    deps.hideCursorBadge ??
+    (() => {
+      void import('./winCursorBadge.js').then(m => m.hideCursorBadge()).catch(() => {})
+    })
+  hideBadge()
+
+  // Drop the daemon overlay FIRST — before the hidden-apps block and before the
+  // isLockHeldLocally early-return below — so the cursor drops promptly even on a
+  // turn that hid no apps and whose lock-release short-circuits. overlayHide
+  // self-guards on its module-level `overlayShown`, so calling it unconditionally
+  // is a single bool check (a pure no-op) off-daemon / on Windows.
+  const overlayHide =
+    deps.overlayHide ??
+    (async () => {
+      const m = await import('./cuHelperDaemon.js')
+      await m.overlayHide()
+    })
+  const overlayTimeout = withResolvers<void>()
+  const overlayTimer = setTimeout(overlayTimeout.resolve, OVERLAY_HIDE_TIMEOUT_MS)
+  await Promise.race([
+    overlayHide().catch(() => {}),
+    overlayTimeout.promise,
+  ]).finally(() => clearTimeout(overlayTimer))
+
   const appState = ctx.getAppState()
 
   const hidden = appState.computerUseMcpState?.hiddenDuringTurn

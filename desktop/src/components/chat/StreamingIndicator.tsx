@@ -42,6 +42,8 @@ function formatRetrySeconds(ms: number): number {
   return Math.max(0, Math.ceil(ms / 1000))
 }
 
+const HUMAN_READABLE_RETRY_THRESHOLD_MS = 60_000
+
 function formatErrorType(errorType: string | undefined): string | null {
   if (!errorType) return null
   return errorType
@@ -75,12 +77,22 @@ export function StreamingIndicator() {
   if (apiRetry) {
     const remainingMs = Math.max(0, apiRetry.retryDelayMs - (now - apiRetry.receivedAt))
     const isStreamDisconnect = apiRetry.errorType === 'stream_disconnect'
-    const statusText = apiRetry.errorStatus !== null
+    const httpStatusText = apiRetry.errorStatus !== null
       ? t('chat.retry.httpStatus', { status: apiRetry.errorStatus })
+      : null
+    const statusText = apiRetry.errorType === 'rate_limit'
+      ? [t('chat.retry.rateLimit'), httpStatusText].filter(Boolean).join(' · ')
       : isStreamDisconnect
         ? t('chat.retry.streamDisconnect')
-        : formatErrorType(apiRetry.errorType) ?? t('chat.retry.networkError')
+        : httpStatusText ?? formatErrorType(apiRetry.errorType) ?? t('chat.retry.networkError')
     const detailText = apiRetry.errorMessage?.trim()
+    const waitText = remainingMs <= 0
+      ? t('chat.retry.retrying')
+      : remainingMs >= HUMAN_READABLE_RETRY_THRESHOLD_MS
+        ? t('chat.retry.waitingLong', {
+            duration: formatDurationSeconds(remainingMs / 1000, t, 1),
+          })
+        : t('chat.retry.waiting', { seconds: formatRetrySeconds(remainingMs) })
     return (
       <div
         data-testid="api-retry-indicator"
@@ -104,11 +116,7 @@ export function StreamingIndicator() {
         <Badge mono pill={false} bordered className="leading-none">
           {statusText}
         </Badge>
-        <span>
-          {remainingMs > 0
-            ? t('chat.retry.waiting', { seconds: formatRetrySeconds(remainingMs) })
-            : t('chat.retry.retrying')}
-        </span>
+        <span>{waitText}</span>
         {detailText && (
           <span className="min-w-0 max-w-full truncate opacity-80" title={detailText}>
             {detailText}

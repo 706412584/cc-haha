@@ -18,6 +18,11 @@ export class StreamToolInputDurationGuard {
     }, this.options.timeoutMs))
   }
 
+  progress(index: number): void {
+    if (!this.timers.has(index)) return
+    this.start(index)
+  }
+
   stop(index: number): void {
     const timer = this.timers.get(index)
     if (timer === undefined) return

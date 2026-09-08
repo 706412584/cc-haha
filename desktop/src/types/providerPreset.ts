@@ -1,4 +1,5 @@
 import type { ApiFormat, ProviderAuthStrategy } from './provider'
+import type { ModelReasoningProviderKind } from '../../../src/shared/modelReasoning'
 
 export type ModelMapping = {
   main: string
@@ -19,6 +20,7 @@ export type ProviderPreset = {
   baseUrl: string
   regionalEndpoints?: ProviderRegionalEndpoint[]
   apiFormat: ApiFormat
+  reasoningProviderKind?: ModelReasoningProviderKind
   defaultModels: ModelMapping
   needsApiKey: boolean
   websiteUrl: string

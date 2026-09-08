@@ -129,11 +129,11 @@ describe('splitTextByFilePaths', () => {
 describe('matchGitHubRef', () => {
   it('reads the owner/repo#123 form the prompt asks for', () => {
     // src/constants/prompts.ts:438 — "so they render as clickable links".
-    expect(matchGitHubRef('NanmiCoder/cc-haha#1146')).toMatchObject({
-      owner: 'NanmiCoder',
+    expect(matchGitHubRef('706412584/cc-haha#1146')).toMatchObject({
+      owner: '706412584',
       repo: 'cc-haha',
       number: 1146,
-      url: 'https://github.com/NanmiCoder/cc-haha/issues/1146',
+      url: 'https://github.com/706412584/cc-haha/issues/1146',
     })
   })
 
@@ -148,8 +148,8 @@ describe('matchGitHubRef', () => {
   })
 
   it('is picked over the path matcher when splitting prose', () => {
-    const segments = splitTextByFilePaths('见 NanmiCoder/cc-haha#1146 和 src/app.ts:4')
-    expect(segments.filter((s) => s.type === 'github').map((s) => s.value)).toEqual(['NanmiCoder/cc-haha#1146'])
+    const segments = splitTextByFilePaths('见 706412584/cc-haha#1146 和 src/app.ts:4')
+    expect(segments.filter((s) => s.type === 'github').map((s) => s.value)).toEqual(['706412584/cc-haha#1146'])
     expect(segments.filter((s) => s.type === 'path').map((s) => s.value)).toEqual(['src/app.ts:4'])
   })
 })

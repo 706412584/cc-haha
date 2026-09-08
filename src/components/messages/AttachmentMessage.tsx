@@ -141,6 +141,11 @@ export function AttachmentMessage({
             Read <Text bold>{attachment.displayPath}</Text> (unchanged)
           </Line>;
       }
+      if (attachment.content.type === 'generated_image_ref') {
+        return <Line>
+            Referenced generated image <Text bold>{attachment.displayPath}</Text>
+          </Line>;
+      }
       return <Line>
           Read <Text bold>{attachment.displayPath}</Text> (
           {attachment.content.type === 'text' ? `${attachment.content.file.numLines}${attachment.truncated ? '+' : ''} lines` : formatFileSize(attachment.content.file.originalSize)}

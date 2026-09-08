@@ -83,7 +83,15 @@ function DetailBody({
     case 'event':
       return <EventDetail span={span} />
     default:
-      return <SessionOverview span={span} viewModel={viewModel} onSelect={onSelect} />
+      return (
+        <SessionOverview
+          span={span}
+          viewModel={viewModel}
+          onSelect={onSelect}
+          sessionId={sessionId}
+          revisionKey={revisionKey}
+        />
+      )
   }
 }
 

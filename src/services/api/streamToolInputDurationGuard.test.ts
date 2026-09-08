@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { StreamToolInputDurationGuard } from './streamToolInputDurationGuard.js'
 
 describe('StreamToolInputDurationGuard', () => {
-  test('fires once when a tool input exceeds its generation budget', async () => {
+  test('fires once when a tool input makes no progress before its deadline', async () => {
     const timedOut: number[] = []
     const guard = new StreamToolInputDurationGuard({
       enabled: true,
@@ -38,5 +38,28 @@ describe('StreamToolInputDurationGuard', () => {
     expect(timedOut).toEqual([])
     guard.clear()
     disabled.clear()
+  })
+
+  test('allows continued progress but times out after progress stops', async () => {
+    const timedOut: number[] = []
+    const guard = new StreamToolInputDurationGuard({
+      enabled: true,
+      timeoutMs: 100,
+      onTimeout: index => timedOut.push(index),
+    })
+
+    guard.start(4)
+    await Bun.sleep(30)
+    guard.progress(4)
+    await Bun.sleep(30)
+    guard.progress(4)
+    await Bun.sleep(50)
+
+    expect(timedOut).toEqual([])
+
+    await Bun.sleep(70)
+
+    expect(timedOut).toEqual([4])
+    guard.clear()
   })
 })

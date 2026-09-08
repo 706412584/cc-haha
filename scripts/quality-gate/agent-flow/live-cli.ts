@@ -36,7 +36,11 @@ async function main() {
 
   const rootDir = resolve(import.meta.dir, '../../..')
   const only = flag(argv, 'only')
-  const target = resolveLiveTarget(flag(argv, 'provider'), { modelId: flag(argv, 'model') || undefined })
+  const target = resolveLiveTarget(flag(argv, 'provider'), {
+    modelId: flag(argv, 'model') || undefined,
+    effortLevel: flag(argv, 'effort') || undefined,
+    disableExperimentalBetas: argv.includes('--disable-experimental-betas'),
+  })
   const selected = only
     ? LIVE_AGENT_FLOW_SCENARIOS.filter((scenario) => scenario.id === only)
     : LIVE_AGENT_FLOW_SCENARIOS

@@ -17,6 +17,7 @@ import type {
   SDKControlResponse,
 } from '../entrypoints/sdk/controlTypes.js'
 import type { SDKResultSuccess } from '../entrypoints/sdk/coreTypes.js'
+import { installDesktopApprovalToken } from '../utils/computerUse/desktopApprovalAuth.js'
 import { logEvent } from '../services/analytics/index.js'
 import { EMPTY_USAGE } from '../services/api/emptyUsage.js'
 import type { Message } from '../types/message.js'
@@ -324,6 +325,33 @@ export function handleServerControlRequest(
         },
       }
       break
+
+    case 'set_computer_use_approval_token': {
+      // One-shot: the desktop shell hands this session the capability that
+      // authenticates its Computer Use approval callbacks. Installing twice
+      // with a different value throws — surface that as an error response
+      // rather than letting a second shell silently take over the session.
+      try {
+        installDesktopApprovalToken(request.request.token)
+        response = {
+          type: 'control_response',
+          response: {
+            subtype: 'success',
+            request_id: request.request_id,
+          },
+        }
+      } catch (error) {
+        response = {
+          type: 'control_response',
+          response: {
+            subtype: 'error',
+            request_id: request.request_id,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        }
+      }
+      break
+    }
 
     case 'set_permission_mode': {
       // The callback returns a policy verdict so we can send an error

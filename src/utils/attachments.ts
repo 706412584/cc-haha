@@ -2084,8 +2084,14 @@ async function processAtMentionedFiles(
         )
         // Naming an image with @ is what authorizes ImageEdit to upload it to
         // the image provider. A path the model found on its own stays
-        // off-limits — see utils/userProvidedImages.ts.
-        if (attachment?.type === 'file' && attachment.content.type === 'image') {
+        // off-limits — see utils/userProvidedImages.ts. A generated image read
+        // as a path-only reference (generated_image_ref) is still a user-named
+        // image, so authorize it too.
+        if (
+          attachment?.type === 'file' &&
+          (attachment.content.type === 'image' ||
+            attachment.content.type === 'generated_image_ref')
+        ) {
           await registerUserProvidedImage(absoluteFilename)
         }
         return attachment

@@ -8,21 +8,17 @@
 import { Bot, InlineKeyboard, type Context } from 'grammy'
 import * as path from 'node:path'
 import { WsBridge, type ServerMessage } from '../common/ws-bridge.js'
-import { MessageBuffer } from '../common/message-buffer.js'
 import { MessageDedup } from '../common/message-dedup.js'
 import { enqueue } from '../common/chat-queue.js'
 import { loadConfig } from '../common/config.js'
 import {
   formatImStatus,
   formatPermissionRequest,
-  splitMessage,
 } from '../common/format.js'
 import {
   buildTelegramThinkingUpdate,
-  formatTelegramOutboundText,
-  formatTelegramStreamingText,
-  planTelegramStreamingUpdate,
 } from './format.js'
+import { TelegramStreamDelivery } from './stream-delivery.js'
 import {
   formatPermissionDecisionStatus,
   formatPermissionInstructions,
@@ -44,9 +40,6 @@ import { sendSafeOutboundImage } from '../common/attachment/outbound-image.js'
 import { syncTelegramBotCommands } from './menu.js'
 import { createTelegramRuntimeCommandController, registerAuthorizedTelegramCommand, registerTelegramExtendedCommands, shouldProcessTelegramMessage, tryHandleTelegramSelectionCallback } from './commands.js'
 
-const TELEGRAM_TEXT_LIMIT = 4000 // leave margin below 4096
-const TELEGRAM_STREAMING_TEXT_LIMIT = TELEGRAM_TEXT_LIMIT - 2 // reserve room for cursor
-
 // ---------- init ----------
 
 const config = loadConfig()
@@ -57,6 +50,7 @@ if (!config.telegram.botToken) {
 
 const bot = new Bot(config.telegram.botToken)
 const bridge = new WsBridge(config.serverUrl, 'tg')
+const streamDelivery = new TelegramStreamDelivery(bot.api)
 const dedup = new MessageDedup()
 const sessionStore = new SessionStore()
 const { httpClient, defaultWorkDir } = createAdapterClient(config, config.telegram)
@@ -66,13 +60,7 @@ attachmentStore.gc().catch((err) => {
   console.warn('[Telegram] AttachmentStore.gc failed:', err instanceof Error ? err.message : err)
 })
 
-// Track placeholder messages for streaming updates
-const placeholders = new Map<string, { chatId: string; messageId: number }>()
-// Track accumulated text per chat for streaming
-const accumulatedText = new Map<string, string>()
 const accumulatedThinkingText = new Map<string, string>()
-// Message buffers per chat
-const buffers = new Map<string, MessageBuffer>()
 // Track chats waiting for project selection
 const pendingProjectSelection = new Map<string, boolean>()
 const runtimeStates = new Map<string, ChatRuntimeState>()
@@ -100,17 +88,6 @@ const commandController = createTelegramRuntimeCommandController({ botApi: bot.a
 
 // ---------- helpers ----------
 
-function getBuffer(chatId: string): MessageBuffer {
-  let buf = buffers.get(chatId)
-  if (!buf) {
-    buf = new MessageBuffer(async (text, isComplete) => {
-      await flushToTelegram(chatId, text, isComplete)
-    })
-    buffers.set(chatId, buf)
-  }
-  return buf
-}
-
 function getRuntimeState(chatId: string): ChatRuntimeState {
   let state = runtimeStates.get(chatId)
   if (!state) {
@@ -121,10 +98,8 @@ function getRuntimeState(chatId: string): ChatRuntimeState {
 }
 
 function clearTransientChatState(chatId: string): void {
-  placeholders.delete(chatId)
-  accumulatedText.delete(chatId)
+  streamDelivery.clear(chatId)
   accumulatedThinkingText.delete(chatId)
-  buffers.get(chatId)?.reset()
   const runtime = getRuntimeState(chatId)
   runtime.state = 'idle'
   runtime.verb = undefined
@@ -215,72 +190,6 @@ async function buildStatusText(chatId: string): Promise<string> {
   })
 }
 
-async function flushToTelegram(chatId: string, newText: string, isComplete: boolean): Promise<void> {
-  const numericChatId = Number(chatId)
-  const prev = accumulatedText.get(chatId) ?? ''
-
-  const placeholder = placeholders.get(chatId)
-
-  if (placeholder) {
-    if (isComplete) {
-      const fullText = prev + newText
-      accumulatedText.set(chatId, fullText)
-      const chunks = splitMessage(formatTelegramOutboundText(fullText), TELEGRAM_TEXT_LIMIT)
-      try {
-        await bot.api.editMessageText(numericChatId, placeholder.messageId, chunks[0]!)
-      } catch { /* ignore */ }
-      for (let i = 1; i < chunks.length; i++) {
-        await bot.api.sendMessage(numericChatId, chunks[i]!)
-      }
-    } else {
-      const { sealedChunks, activeChunk } = planTelegramStreamingUpdate(
-        prev,
-        newText,
-        TELEGRAM_STREAMING_TEXT_LIMIT,
-      )
-      accumulatedText.set(chatId, activeChunk)
-      try {
-        const firstSealedChunk = sealedChunks.shift()
-        if (firstSealedChunk) {
-          const firstSealedFormattedChunks = splitMessage(
-            formatTelegramOutboundText(firstSealedChunk),
-            TELEGRAM_TEXT_LIMIT,
-          )
-          await bot.api.editMessageText(numericChatId, placeholder.messageId, firstSealedFormattedChunks[0]!)
-          for (let i = 1; i < firstSealedFormattedChunks.length; i++) {
-            await bot.api.sendMessage(numericChatId, firstSealedFormattedChunks[i]!)
-          }
-          for (const chunk of sealedChunks) {
-            const formattedChunks = splitMessage(formatTelegramOutboundText(chunk), TELEGRAM_TEXT_LIMIT)
-            for (const formattedChunk of formattedChunks) {
-              await bot.api.sendMessage(numericChatId, formattedChunk)
-            }
-          }
-          const sent = await bot.api.sendMessage(numericChatId, formatTelegramStreamingText(activeChunk))
-          placeholders.set(chatId, { chatId, messageId: sent.message_id })
-        } else {
-          await bot.api.editMessageText(numericChatId, placeholder.messageId, formatTelegramStreamingText(activeChunk))
-        }
-      } catch { /* ignore */ }
-    }
-  } else if (isComplete && (prev + newText).trim()) {
-    const fullText = prev + newText
-    accumulatedText.set(chatId, fullText)
-    const chunks = splitMessage(formatTelegramOutboundText(fullText), TELEGRAM_TEXT_LIMIT)
-    for (const chunk of chunks) {
-      await bot.api.sendMessage(numericChatId, chunk)
-    }
-  } else {
-    accumulatedText.set(chatId, prev + newText)
-  }
-
-  if (isComplete) {
-    placeholders.delete(chatId)
-    accumulatedText.delete(chatId)
-    buffers.get(chatId)?.reset()
-  }
-}
-
 // ---------- session management ----------
 
 async function ensureSession(chatId: string): Promise<boolean> {
@@ -365,7 +274,6 @@ async function dispatchOutboundMedia(chatId: string, pending: PendingUpload): Pr
 
 async function handleServerMessage(chatId: string, msg: ServerMessage): Promise<void> {
   const numericChatId = Number(chatId)
-  const buf = getBuffer(chatId)
   const runtime = getRuntimeState(chatId)
 
   switch (msg.type) {
@@ -375,10 +283,8 @@ async function handleServerMessage(chatId: string, msg: ServerMessage): Promise<
     case 'status':
       runtime.state = msg.state
       runtime.verb = typeof msg.verb === 'string' ? msg.verb : undefined
-      if (msg.state === 'thinking' && !placeholders.has(chatId)) {
-        const sent = await bot.api.sendMessage(numericChatId, '💭 思考中...')
-        placeholders.set(chatId, { chatId, messageId: sent.message_id })
-        accumulatedText.set(chatId, '')
+      if (msg.state === 'thinking' && !streamDelivery.hasState(chatId)) {
+        await streamDelivery.ensurePlaceholder(chatId, '💭 思考中...')
         accumulatedThinkingText.set(chatId, '')
       }
       break
@@ -386,38 +292,18 @@ async function handleServerMessage(chatId: string, msg: ServerMessage): Promise<
     case 'content_start':
       if (msg.blockType === 'text') {
         accumulatedThinkingText.delete(chatId)
-        if (!placeholders.has(chatId)) {
-          const sent = await bot.api.sendMessage(numericChatId, '▍')
-          placeholders.set(chatId, { chatId, messageId: sent.message_id })
-          accumulatedText.set(chatId, '')
-        }
+        await streamDelivery.handleEvent(chatId, { type: 'content_start', blockType: msg.blockType })
       } else if (msg.blockType === 'tool_use') {
         // Finalize current text placeholder before tool calls,
         // so text after tools gets a fresh message
-        await buf.complete()
-        // If placeholder still exists (buffer was already empty), clean up directly
-        if (placeholders.has(chatId)) {
-          const text = accumulatedText.get(chatId)
-          if (text?.trim()) {
-            try {
-              await bot.api.editMessageText(
-                numericChatId,
-                placeholders.get(chatId)!.messageId,
-                formatTelegramOutboundText(text),
-              )
-            } catch { /* ignore */ }
-          }
-          placeholders.delete(chatId)
-          accumulatedText.delete(chatId)
-          buffers.get(chatId)?.reset()
-        }
+        await streamDelivery.complete(chatId)
       }
       break
 
     case 'content_delta':
       if (msg.text) {
         accumulatedThinkingText.delete(chatId)
-        buf.append(msg.text)
+        await streamDelivery.handleEvent(chatId, { type: 'content_delta', text: msg.text })
         const newUploads = getTgWatcher(chatId).feed(msg.text)
         for (const pending of newUploads) {
           void dispatchOutboundMedia(chatId, pending)
@@ -426,7 +312,7 @@ async function handleServerMessage(chatId: string, msg: ServerMessage): Promise<
       break
 
     case 'thinking':
-      if (placeholders.has(chatId)) {
+      if (streamDelivery.getPlaceholderMessageId(chatId) !== undefined) {
         const update = buildTelegramThinkingUpdate(
           accumulatedThinkingText.get(chatId) ?? '',
           msg.text,
@@ -435,7 +321,7 @@ async function handleServerMessage(chatId: string, msg: ServerMessage): Promise<
         try {
           await bot.api.editMessageText(
             numericChatId,
-            placeholders.get(chatId)!.messageId,
+            streamDelivery.getPlaceholderMessageId(chatId)!,
             update.messageText,
           )
         } catch { /* ignore */ }
@@ -470,24 +356,8 @@ async function handleServerMessage(chatId: string, msg: ServerMessage): Promise<
     case 'message_complete':
       runtime.state = 'idle'
       runtime.verb = undefined
-      await buf.complete()
-      // Ensure placeholder is always cleaned up even if buffer was already empty
-      if (placeholders.has(chatId)) {
-        const text = accumulatedText.get(chatId)
-        if (text?.trim()) {
-          try {
-            const chunks = splitMessage(formatTelegramOutboundText(text), TELEGRAM_TEXT_LIMIT)
-            await bot.api.editMessageText(numericChatId, placeholders.get(chatId)!.messageId, chunks[0]!)
-            for (let i = 1; i < chunks.length; i++) {
-              await bot.api.sendMessage(numericChatId, chunks[i]!)
-            }
-          } catch { /* ignore */ }
-        }
-        placeholders.delete(chatId)
-        accumulatedText.delete(chatId)
-        accumulatedThinkingText.delete(chatId)
-        buffers.get(chatId)?.reset()
-      }
+      await streamDelivery.handleEvent(chatId, { type: 'message_complete' })
+      accumulatedThinkingText.delete(chatId)
       break
 
     case 'error':
@@ -541,10 +411,7 @@ async function startNewSession(chatId: string, query?: string): Promise<void> {
 
   bridge.resetSession(chatId)
   sessionStore.delete(chatId)
-  placeholders.delete(chatId)
-  accumulatedText.delete(chatId)
-  buffers.get(chatId)?.reset()
-  buffers.delete(chatId)
+  streamDelivery.clear(chatId)
   pendingProjectSelection.delete(chatId)
   commandController.clearPendingSelections(chatId)
   pendingPermissions.delete(chatId)

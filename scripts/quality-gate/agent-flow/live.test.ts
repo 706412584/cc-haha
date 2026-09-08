@@ -3,7 +3,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describeLiveTarget, resolveLiveTarget } from './live.ts'
+import {
+  applyLiveTargetSandboxOverrides,
+  collectLiveEffortFields,
+  describeLiveTarget,
+  resolveLiveTarget,
+} from './live.ts'
 import { LIVE_AGENT_FLOW_SCENARIOS, LIVE_FLOW_COVERAGE, LIVE_FLOW_EXCLUSIONS } from './liveScenarios.ts'
 
 /**
@@ -54,9 +59,54 @@ describe('live target resolution', () => {
   })
 
   test('resolves by id, and an explicit model wins over the configured one', () => {
-    const target = resolveLiveTarget('aaaaaaaa-0000-4000-8000-000000000002', { configDir, modelId: 'override' })
+    const target = resolveLiveTarget('aaaaaaaa-0000-4000-8000-000000000002', {
+      configDir,
+      modelId: 'override',
+      effortLevel: 'xhigh',
+      disableExperimentalBetas: true,
+    })
     expect(target.providerName).toBe('DeepSeek')
     expect(target.modelId).toBe('override')
+    expect(target.effortLevel).toBe('xhigh')
+    expect(target.disableExperimentalBetas).toBe(true)
+  })
+
+  test('changes beta handling only in the sandboxed provider copy', () => {
+    const sandboxConfigDir = configDirWith([
+      { id: 'provider-id', name: 'Gateway', models: { main: 'gpt-5.6-sol' } },
+    ])
+    const target = resolveLiveTarget('Gateway', {
+      configDir: sandboxConfigDir,
+      disableExperimentalBetas: true,
+    })
+
+    applyLiveTargetSandboxOverrides(sandboxConfigDir, target)
+
+    const stored = JSON.parse(readFileSync(join(sandboxConfigDir, 'cc-haha', 'providers.json'), 'utf8')) as {
+      providers: Array<{ disableExperimentalBetas?: boolean }>
+    }
+    expect(stored.providers[0]?.disableExperimentalBetas).toBe(true)
+  })
+
+  test('finds effort in Anthropic, Chat Completions and Responses request shapes', () => {
+    expect(collectLiveEffortFields({
+      anthropic: { output_config: { effort: 'xhigh' } },
+      chat: { reasoning_effort: 'high' },
+      responses: { reasoning: { effort: 'medium' } },
+    })).toEqual([
+      { path: 'request.body.anthropic.output_config.effort', value: 'xhigh' },
+      { path: 'request.body.chat.reasoning_effort', value: 'high' },
+      { path: 'request.body.responses.reasoning.effort', value: 'medium' },
+    ])
+  })
+
+  test('finds effort inside the JSON snapshot stored by trace capture', () => {
+    expect(collectLiveEffortFields({
+      contentType: 'json',
+      preview: JSON.stringify({ output_config: { effort: 'xhigh' } }),
+    })).toEqual([
+      { path: 'request.body.output_config.effort', value: 'xhigh' },
+    ])
   })
 
   test('names the configured providers when nothing matches', () => {
@@ -78,10 +128,16 @@ describe('confirmation banner', () => {
   }
 
   test('states the cost, the target and how to proceed', () => {
-    const banner = describeLiveTarget(target, 6)
+    const banner = describeLiveTarget({
+      ...target,
+      effortLevel: 'xhigh',
+      disableExperimentalBetas: true,
+    }, 6)
     expect(banner).toContain('real money')
     expect(banner).toContain('LM Studio')
     expect(banner).toContain('local-model')
+    expect(banner).toContain('xhigh')
+    expect(banner).toContain('sandbox copy only')
     expect(banner).toContain('--yes')
   })
 

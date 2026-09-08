@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { getChicagoEnabled } from './gates.js'
+import { getChicagoEnabled, shouldExposeComputerUseMcp } from './gates.js'
 
 const ORIGINAL_ENABLED = process.env.CLAUDE_COMPUTER_USE_ENABLED
 
@@ -23,5 +23,17 @@ describe('getChicagoEnabled', () => {
 
     process.env.CLAUDE_COMPUTER_USE_ENABLED = 'false'
     expect(getChicagoEnabled()).toBe(false)
+  })
+})
+
+describe('shouldExposeComputerUseMcp', () => {
+  test('requires the canonical native helper on macOS', () => {
+    expect(shouldExposeComputerUseMcp('darwin', true)).toBe(true)
+    expect(shouldExposeComputerUseMcp('darwin', false)).toBe(false)
+  })
+
+  test('keeps Windows compatibility independent and rejects other platforms', () => {
+    expect(shouldExposeComputerUseMcp('win32', false)).toBe(true)
+    expect(shouldExposeComputerUseMcp('linux', true)).toBe(false)
   })
 })

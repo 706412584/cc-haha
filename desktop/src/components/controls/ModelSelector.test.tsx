@@ -783,7 +783,7 @@ describe('ModelSelector', () => {
     expect(screen.getAllByTestId('reasoning-effort-stop')).toHaveLength(5)
   })
 
-  it('does not offer an effort control that a direct provider has explicitly disabled', () => {
+  it('keeps effort editable for a GPT relay even when beta headers are disabled', async () => {
     useSettingsStore.setState({
       locale: 'en',
       availableModels: [],
@@ -820,6 +820,48 @@ describe('ModelSelector', () => {
     render(<ModelSelector runtimeKey="session-direct-disabled-effort" />)
 
     expect(screen.getByRole('button', { name: 'gpt-5.6-sol, Direct GPT Gateway' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Effort: X-High' })).toBeInTheDocument()
+    await clickByRole('Effort: X-High')
+    expect(screen.getAllByTestId('reasoning-effort-stop')).toHaveLength(5)
+  })
+
+  it('does not offer an effort control that a non-GPT direct provider has explicitly disabled', () => {
+    useSettingsStore.setState({
+      locale: 'en',
+      availableModels: [],
+      currentModel: null,
+      activeProviderName: 'Direct Claude Gateway',
+      effortLevel: 'high',
+    })
+    useProviderStore.setState({
+      providers: [{
+        id: 'direct-claude-provider',
+        presetId: 'custom',
+        name: 'Direct Claude Gateway',
+        apiKey: '***',
+        baseUrl: 'https://api.example.com',
+        apiFormat: 'anthropic',
+        disableExperimentalBetas: true,
+        models: {
+          main: 'claude-opus-4-8',
+          haiku: 'claude-opus-4-8',
+          sonnet: 'claude-opus-4-8',
+          opus: 'claude-opus-4-8',
+        },
+      }],
+      activeId: 'direct-claude-provider',
+      hasLoadedProviders: true,
+      isLoading: false,
+    })
+    useSessionRuntimeStore.getState().setSelection('session-direct-disabled-claude-effort', {
+      providerId: 'direct-claude-provider',
+      modelId: 'claude-opus-4-8',
+      effortLevel: 'high',
+    })
+
+    render(<ModelSelector runtimeKey="session-direct-disabled-claude-effort" />)
+
+    expect(screen.getByRole('button', { name: 'claude-opus-4-8, Direct Claude Gateway' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Effort:/ })).not.toBeInTheDocument()
   })
 
@@ -1025,6 +1067,44 @@ describe('ModelSelector', () => {
     )
     expect(setSessionRuntime).toHaveBeenCalledWith('session-kimi-switch', expectedSelection)
     expect(screen.getByRole('button', { name: 'Effort: X-High' })).toBeInTheDocument()
+  })
+
+  it('shows only low, high, and max for the GLM 5.3 standard API profile', async () => {
+    useSettingsStore.setState({
+      locale: 'en',
+      effortLevel: 'medium',
+    })
+    useProviderStore.setState({
+      providers: [{
+        id: 'zhipu-provider',
+        presetId: 'zhipuglm',
+        name: 'Zhipu GLM',
+        apiKey: '***',
+        baseUrl: 'https://open.bigmodel.cn/api/anthropic',
+        apiFormat: 'anthropic',
+        models: {
+          main: 'glm-5.3-flash[1m]',
+          haiku: 'glm-5.3-flash[1m]',
+          sonnet: 'glm-5.3[1m]',
+          opus: 'glm-5.3[1m]',
+        },
+      }],
+      activeId: 'zhipu-provider',
+      hasLoadedProviders: true,
+      isLoading: false,
+    })
+    useSessionRuntimeStore.getState().setSelection('session-zhipu-5-3', {
+      providerId: 'zhipu-provider',
+      modelId: 'glm-5.3-flash[1m]',
+      effortLevel: 'medium',
+    })
+
+    render(<ModelSelector runtimeKey="session-zhipu-5-3" />)
+
+    expect(screen.getByRole('button', { name: 'Effort: Max' })).toBeInTheDocument()
+    await clickByRole('Effort: Max')
+    expect(screen.getByRole('slider', { name: 'Effort' })).toHaveAttribute('aria-valuemax', '2')
+    expect(screen.getAllByTestId('reasoning-effort-stop')).toHaveLength(3)
   })
 
   it('selects Grok Official models for a logged-in runtime', async () => {

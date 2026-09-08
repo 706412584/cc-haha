@@ -8,6 +8,9 @@ export const MODEL_REASONING_EFFORTS = [
 
 export type ModelReasoningEffort = (typeof MODEL_REASONING_EFFORTS)[number]
 export type ModelReasoningApiFormat = 'anthropic' | 'openai_chat' | 'openai_responses'
+export type ModelReasoningProviderKind =
+  | 'zhipu_standard_api'
+  | 'zhipu_coding_plan'
 
 export const MODEL_REASONING_CAPABILITY_TIERS = [
   {
@@ -39,6 +42,7 @@ export type ModelReasoningProfile = {
     | 'deepseek-v4'
     | 'kimi-k3'
     | 'kimi-coding'
+    | 'glm-5.3'
     | 'glm-5.2'
     | 'glm-legacy'
     | 'minimax'
@@ -52,6 +56,15 @@ type ModelReasoningCapabilityEntry = Pick<
   ModelReasoningProfile,
   'family' | 'apiFormats' | 'claudeCodeCapabilities'
 > & {
+  supportedReasoningEfforts?: readonly ModelReasoningEffort[]
+  defaultReasoningEffort?: ModelReasoningEffort
+  providerProfiles?: Partial<Record<
+    ModelReasoningProviderKind,
+    Partial<Pick<
+      ModelReasoningProfile,
+      'supportedReasoningEfforts' | 'defaultReasoningEffort' | 'claudeCodeCapabilities'
+    >>
+  >>
   matches: (modelId: string) => boolean
 }
 
@@ -67,8 +80,27 @@ const GENERIC_REASONING_PROFILE: ModelReasoningProfile = {
   claudeCodeCapabilities: 'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
 }
 
-// These entries preserve thinking-mode compatibility only. Effort levels are
-// always inherited from Claude Code and are never remapped by model name.
+const GLM_53_CODING_PLAN_PROFILE = {
+  supportedReasoningEfforts: MODEL_REASONING_EFFORTS,
+  defaultReasoningEffort: 'max',
+  claudeCodeCapabilities: 'thinking,required_thinking,effort,xhigh_effort,max_effort',
+} as const satisfies Pick<
+  ModelReasoningProfile,
+  'supportedReasoningEfforts' | 'defaultReasoningEffort' | 'claudeCodeCapabilities'
+>
+
+const GLM_53_STANDARD_API_PROFILE = {
+  supportedReasoningEfforts: ['low', 'high', 'max'],
+  defaultReasoningEffort: 'max',
+  claudeCodeCapabilities: 'thinking,required_thinking,effort,max_effort',
+} as const satisfies Pick<
+  ModelReasoningProfile,
+  'supportedReasoningEfforts' | 'defaultReasoningEffort' | 'claudeCodeCapabilities'
+>
+
+// Known families inherit Claude Code effort levels unless a documented provider
+// contract narrows them. Provider-specific profiles keep standard API contracts
+// from accidentally disabling aliases accepted by coding-plan runtimes.
 const MODEL_REASONING_CAPABILITY_REGISTRY: readonly ModelReasoningCapabilityEntry[] = [
   {
     family: 'deepseek-v4',
@@ -99,6 +131,19 @@ const MODEL_REASONING_CAPABILITY_REGISTRY: readonly ModelReasoningCapabilityEntr
       modelId.startsWith('kimi-for-coding') ||
       modelId.startsWith('kimi-k2.')
     ),
+  },
+  {
+    family: 'glm-5.3',
+    apiFormats: ['anthropic', 'openai_chat'],
+    ...GLM_53_CODING_PLAN_PROFILE,
+    providerProfiles: {
+      zhipu_standard_api: GLM_53_STANDARD_API_PROFILE,
+      zhipu_coding_plan: GLM_53_CODING_PLAN_PROFILE,
+    },
+    // normalizeReasoningModelId() rewrites version dots to dashes
+    // (preset alias matching), so compare against the normalized ids —
+    // 'glm-5.3' as written never reaches this predicate unchanged.
+    matches: modelId => modelId === 'glm-5-3' || modelId === 'glm-5-3-flash',
   },
   {
     family: 'glm-5.2',
@@ -141,6 +186,11 @@ function normalizeReasoningModelId(modelId: string): string {
     ? normalized.slice(namespaceSeparator + 1)
     : normalized
   return unqualified.replace(/(\d)\.(\d)/g, '$1-$2')
+}
+
+export function isOpenAIReasoningModel(modelId: string): boolean {
+  const normalizedModelId = normalizeReasoningModelId(modelId)
+  return normalizedModelId.startsWith('gpt-') || /^o\d/.test(normalizedModelId)
 }
 
 export function getModelReasoningCapabilityOverride(
@@ -199,6 +249,7 @@ export function resolveModelReasoningProfile(
   modelId: string,
   apiFormat?: ModelReasoningApiFormat,
   capabilitiesOverride?: string,
+  providerKind?: ModelReasoningProviderKind,
 ): ModelReasoningProfile | undefined {
   if (capabilitiesOverride !== undefined) {
     return profileFromCapabilityOverride(capabilitiesOverride, apiFormat)
@@ -213,12 +264,25 @@ export function resolveModelReasoningProfile(
     candidate.matches(normalizedModelId) &&
     (apiFormat === undefined || candidate.apiFormats.includes(apiFormat))
   ))
+  const providerProfile = providerKind
+    ? entry?.providerProfiles?.[providerKind]
+    : undefined
   return entry
     ? {
         family: entry.family,
         apiFormats: entry.apiFormats,
-        supportedReasoningEfforts: MODEL_REASONING_EFFORTS,
-        claudeCodeCapabilities: entry.claudeCodeCapabilities,
+        supportedReasoningEfforts:
+          providerProfile?.supportedReasoningEfforts ??
+          entry.supportedReasoningEfforts ??
+          MODEL_REASONING_EFFORTS,
+        ...((providerProfile?.defaultReasoningEffort ?? entry.defaultReasoningEffort)
+          ? {
+              defaultReasoningEffort:
+                providerProfile?.defaultReasoningEffort ?? entry.defaultReasoningEffort,
+            }
+          : {}),
+        claudeCodeCapabilities:
+          providerProfile?.claudeCodeCapabilities ?? entry.claudeCodeCapabilities,
       }
     : GENERIC_REASONING_PROFILE
 }
@@ -228,9 +292,15 @@ export function normalizeModelReasoningEffort(
   requestedEffort: ModelReasoningEffort | undefined,
   apiFormat?: ModelReasoningApiFormat,
   capabilitiesOverride?: string,
+  providerKind?: ModelReasoningProviderKind,
 ): ModelReasoningEffort | undefined {
   if (requestedEffort === undefined) return undefined
-  const profile = resolveModelReasoningProfile(modelId, apiFormat, capabilitiesOverride)
+  const profile = resolveModelReasoningProfile(
+    modelId,
+    apiFormat,
+    capabilitiesOverride,
+    providerKind,
+  )
   if (!profile || profile.supportedReasoningEfforts.length === 0) return undefined
   return profile.supportedReasoningEfforts.includes(requestedEffort)
     ? requestedEffort
@@ -241,10 +311,12 @@ export function getClaudeCodeModelCapabilities(
   modelId: string,
   apiFormat?: ModelReasoningApiFormat,
   capabilitiesOverride?: string,
+  providerKind?: ModelReasoningProviderKind,
 ): string {
   return resolveModelReasoningProfile(
     modelId,
     apiFormat,
     capabilitiesOverride,
+    providerKind,
   )?.claudeCodeCapabilities ?? 'none'
 }

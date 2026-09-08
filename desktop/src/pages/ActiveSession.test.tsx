@@ -409,13 +409,13 @@ describe('ActiveSession task polling', () => {
     expect(screen.getByTestId('chat-input')).toHaveAttribute('data-variant', 'default')
   })
 
-  it('shows the session token badge when usage is cache-only', () => {
-    const sessionId = 'cache-only-token-session'
+  it('labels result usage that includes cache tokens without implying the Trace input/output total', async () => {
+    const sessionId = 'deepseek-cache-token-session'
 
     useSessionStore.setState({
       sessions: [{
         id: sessionId,
-        title: 'Cache Only Token Session',
+        title: 'DeepSeek Cache Token Session',
         createdAt: '2026-05-07T00:00:00.000Z',
         modifiedAt: '2026-05-07T00:00:00.000Z',
         messageCount: 1,

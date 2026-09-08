@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   getClaudeCodeModelCapabilities,
   getModelReasoningCapabilityOverride,
+  isOpenAIReasoningModel,
   normalizeModelReasoningEffort,
   resolveModelReasoningProfile,
 } from './modelReasoning.js'
@@ -41,6 +42,61 @@ describe('model reasoning capability pass-through', () => {
     expect(getClaudeCodeModelCapabilities('gpt-5.6-sol', 'openai_responses')).toBe(
       'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
     )
+  })
+
+  test('requires enabled thinking for exact GLM 5.3 model ids', () => {
+    for (const modelId of ['glm-5.3', 'glm-5.3-flash', 'zai/glm-5.3-flash[1m]']) {
+      expect(resolveModelReasoningProfile(modelId, 'anthropic')).toMatchObject({
+        family: 'glm-5.3',
+        defaultReasoningEffort: 'max',
+      })
+      expect(getClaudeCodeModelCapabilities(modelId, 'anthropic')).toBe(
+        'thinking,required_thinking,effort,xhigh_effort,max_effort',
+      )
+    }
+
+    expect(resolveModelReasoningProfile('glm-5.30', 'anthropic')?.family).toBe('generic')
+  })
+
+  test('narrows standard API effort without disabling Coding Plan aliases', () => {
+    expect(resolveModelReasoningProfile(
+      'glm-5.3-flash',
+      'anthropic',
+      undefined,
+      'zhipu_standard_api',
+    )).toMatchObject({
+      supportedReasoningEfforts: ['low', 'high', 'max'],
+      defaultReasoningEffort: 'max',
+      claudeCodeCapabilities: 'thinking,required_thinking,effort,max_effort',
+    })
+    expect(normalizeModelReasoningEffort(
+      'glm-5.3-flash',
+      'medium',
+      'anthropic',
+      undefined,
+      'zhipu_standard_api',
+    )).toBeUndefined()
+
+    expect(resolveModelReasoningProfile(
+      'glm-5.3-flash',
+      'anthropic',
+      undefined,
+      'zhipu_coding_plan',
+    )?.supportedReasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(normalizeModelReasoningEffort(
+      'glm-5.3-flash',
+      'xhigh',
+      'anthropic',
+      undefined,
+      'zhipu_coding_plan',
+    )).toBe('xhigh')
+  })
+
+  test('recognizes GPT and o-series reasoning models behind provider namespaces', () => {
+    expect(isOpenAIReasoningModel('gpt-5.6-sol[1m]')).toBe(true)
+    expect(isOpenAIReasoningModel('openai/gpt-5.6-sol')).toBe(true)
+    expect(isOpenAIReasoningModel('openrouter/o3-mini')).toBe(true)
+    expect(isOpenAIReasoningModel('claude-opus-4-8')).toBe(false)
   })
 
   test('applies explicit slot capabilities before model profiles', () => {

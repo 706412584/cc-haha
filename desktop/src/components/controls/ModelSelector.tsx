@@ -1,6 +1,9 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { BUNDLED_PROVIDER_PRESETS } from '../../config/providerPresets'
+import {
+  BUNDLED_PROVIDER_PRESETS,
+  getBundledPresetReasoningProviderKind,
+} from '../../config/providerPresets'
 import { OFFICIAL_MODELS } from '../../constants/modelCatalog'
 import {
   OPENAI_OFFICIAL_MODELS,
@@ -34,6 +37,7 @@ import { useUIStore } from '../../stores/uiStore'
 import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
 import {
   getModelReasoningCapabilityOverride,
+  isOpenAIReasoningModel,
   isModelReasoningEffort,
   normalizeModelReasoningEffort,
   resolveModelReasoningProfile,
@@ -154,6 +158,7 @@ function buildProviderModels(
       entry.id,
       provider.apiFormat,
       getProviderModelCapabilityOverride(provider, entry.id),
+      getBundledPresetReasoningProviderKind(provider.presetId),
     )
     return {
       id: entry.id,
@@ -440,7 +445,8 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
     : null
   const runtimeEffortSuppressedByProvider =
     selectedRuntimeProvider?.disableExperimentalBetas === true &&
-    (selectedRuntimeProvider.apiFormat ?? 'anthropic') === 'anthropic'
+    (selectedRuntimeProvider.apiFormat ?? 'anthropic') === 'anthropic' &&
+    !isOpenAIReasoningModel(selectedRuntimeModel?.id ?? '')
 
   const needsProviderConfiguration = isRuntimeScoped && providerChoices.length === 0
   const buttonModelLabel = isRuntimeScoped
@@ -451,12 +457,13 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
     ? selectedProviderChoice?.providerName ?? null
     : null
   const supportedRuntimeEfforts = selectedRuntimeModel?.supportedReasoningEfforts
+  const requestedRuntimeEffort = activeRuntimeSelection?.effortLevel ?? effortLevel
   const selectedRuntimeEffort = selectedRuntimeModel && !runtimeEffortSuppressedByProvider
     ? supportedRuntimeEfforts?.length === 0
       ? undefined
-      : activeRuntimeSelection?.effortLevel
-        ?? selectedRuntimeModel.defaultReasoningEffort
-        ?? effortLevel
+      : supportedRuntimeEfforts === undefined || supportedRuntimeEfforts.includes(requestedRuntimeEffort)
+        ? requestedRuntimeEffort
+        : selectedRuntimeModel.defaultReasoningEffort ?? supportedRuntimeEfforts[0]
     : undefined
   const runtimeEffortOptions = supportedRuntimeEfforts === undefined
     ? EFFORT_OPTIONS.filter((option) => option.value !== 'xhigh')
@@ -540,8 +547,12 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   }), [openSelector])
 
   const handleRuntimeSelect = (selection: RuntimeSelection, options?: { keepOpen?: boolean }) => {
-    const apiFormat = providers.find((provider) => provider.id === selection.providerId)?.apiFormat
-    const normalizedSelection = normalizeRuntimeSelection(selection, apiFormat)
+    const provider = providers.find((entry) => entry.id === selection.providerId)
+    const normalizedSelection = normalizeRuntimeSelection(
+      selection,
+      provider?.apiFormat,
+      provider ? getBundledPresetReasoningProviderKind(provider.presetId) : undefined,
+    )
     onRuntimeSelectionChange?.(normalizedSelection)
     if (runtimeKey) {
       useSessionRuntimeStore.getState().setSelection(runtimeKey, normalizedSelection)
@@ -617,6 +628,9 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
                                 selectedProvider?.apiFormat,
                                 selectedProvider
                                   ? getProviderModelCapabilityOverride(selectedProvider, model.id)
+                                  : undefined,
+                                selectedProvider
+                                  ? getBundledPresetReasoningProviderKind(selectedProvider.presetId)
                                   : undefined,
                               )
                             : undefined

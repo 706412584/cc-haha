@@ -112,6 +112,106 @@ describe('parseTraceRequestBody', () => {
   })
 })
 
+describe('parseTraceRequestBody (Responses format)', () => {
+  it('reads the system prompt from instructions and the turns from input', () => {
+    const parsed = parseTraceRequestBody(
+      JSON.stringify({
+        model: 'gpt-5.6-sol',
+        instructions: 'You are a Claude agent.',
+        input: [
+          { type: 'message', role: 'user', content: '<system-reminder>ctx</system-reminder>' },
+          { type: 'message', role: 'user', content: 'hello' },
+        ],
+        tools: [{ type: 'function', name: 'Bash', description: 'run', parameters: { type: 'object' } }],
+        store: false,
+      }),
+      'anthropic',
+    )
+
+    expect(parsed?.system).toBe('You are a Claude agent.')
+    expect(parsed?.messages).toHaveLength(2)
+    expect(parsed?.messages[1]).toEqual({ role: 'user', content: [{ type: 'text', text: 'hello' }] })
+    expect(parsed?.tools[0]?.name).toBe('Bash')
+    // The turn and header keys are not repeated as loose parameters.
+    expect(Object.keys(parsed?.params ?? {})).toEqual(['store'])
+  })
+
+  it('keeps the tool round trip that Responses splits into sibling entries', () => {
+    const parsed = parseTraceRequestBody(
+      JSON.stringify({
+        model: 'gpt-5.6-sol',
+        input: [
+          { type: 'message', role: 'user', content: 'list the repo root' },
+          { type: 'reasoning', summary: [] },
+          {
+            type: 'function_call',
+            name: 'Bash',
+            arguments: '{"command":"ls -la"}',
+            call_id: 'call_1',
+          },
+          { type: 'function_call_output', call_id: 'call_1', output: 'file.txt' },
+        ],
+      }),
+      'anthropic',
+    )
+
+    // Reasoning holds no model-visible turn; the tool call and its result do.
+    expect(parsed?.messages).toHaveLength(3)
+    expect(parsed?.messages[1]).toEqual({
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: 'call_1', name: 'Bash', input: { command: 'ls -la' } }],
+    })
+    expect(parsed?.messages[2]).toEqual({
+      role: 'user',
+      content: [{ type: 'tool_result', toolUseId: 'call_1', content: 'file.txt' }],
+    })
+  })
+
+  it('reads a flat Responses tool schema', () => {
+    const parsed = parseTraceRequestBody(
+      JSON.stringify({
+        model: 'gpt-5.6-sol',
+        input: [],
+        tools: [{ type: 'function', name: 'Bash', description: 'run', parameters: { type: 'object' } }],
+      }),
+      'anthropic',
+    )
+
+    expect(parsed?.tools[0]?.schema).toEqual({ type: 'object' })
+  })
+
+  it('falls back to instructions when system is present but empty', () => {
+    const parsed = parseTraceRequestBody(
+      JSON.stringify({
+        model: 'gpt-5.6-sol',
+        system: [],
+        instructions: 'the real prompt',
+        input: [],
+      }),
+      'anthropic',
+    )
+
+    expect(parsed?.system).toBe('the real prompt')
+  })
+
+  it('still prefers the Anthropic spelling when both are present', () => {
+    const parsed = parseTraceRequestBody(
+      JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        system: 'anthropic system',
+        instructions: 'responses instructions',
+        messages: [{ role: 'user', content: 'from messages' }],
+        input: [{ type: 'message', role: 'user', content: 'from input' }],
+      }),
+      'anthropic',
+    )
+
+    expect(parsed?.system).toBe('anthropic system')
+    expect(parsed?.messages).toHaveLength(1)
+    expect(parsed?.messages[0]?.content).toEqual([{ type: 'text', text: 'from messages' }])
+  })
+})
+
 describe('parseTraceResponseBody', () => {
   it('parses an anthropic json message response', () => {
     const parsed = parseTraceResponseBody(JSON.stringify(anthropicResponse), 'anthropic')

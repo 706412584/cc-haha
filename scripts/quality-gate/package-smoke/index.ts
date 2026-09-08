@@ -278,6 +278,190 @@ function addMatchCheck(
   })
 }
 
+type MachOArch = 'arm64' | 'x86_64'
+
+const MACHO_CPU_TYPES: Record<number, MachOArch> = {
+  [0x0100000c]: 'arm64',
+  [0x01000007]: 'x86_64',
+}
+
+export function parseMachOArchitectures(bytes: Uint8Array): MachOArch[] {
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  if (buffer.length < 8) return []
+  const architectures = new Set<MachOArch>()
+  const addCpu = (value: number) => {
+    const arch = MACHO_CPU_TYPES[value >>> 0]
+    if (arch) architectures.add(arch)
+  }
+
+  const littleMagic = buffer.readUInt32LE(0)
+  const bigMagic = buffer.readUInt32BE(0)
+  if (littleMagic === 0xfeedface || littleMagic === 0xfeedfacf) {
+    addCpu(buffer.readUInt32LE(4))
+    return [...architectures]
+  }
+  if (bigMagic === 0xfeedface || bigMagic === 0xfeedfacf) {
+    addCpu(buffer.readUInt32BE(4))
+    return [...architectures]
+  }
+
+  const fat64 = bigMagic === 0xcafebabf || littleMagic === 0xcafebabf
+  const fat32 = bigMagic === 0xcafebabe || littleMagic === 0xcafebabe
+  if (!fat32 && !fat64) return []
+  const bigEndian = bigMagic === 0xcafebabe || bigMagic === 0xcafebabf
+  const readU32 = (offset: number) => bigEndian
+    ? buffer.readUInt32BE(offset)
+    : buffer.readUInt32LE(offset)
+  const count = readU32(4)
+  const stride = fat64 ? 32 : 20
+  for (let index = 0; index < count; index += 1) {
+    const offset = 8 + index * stride
+    if (offset + 4 > buffer.length) return []
+    addCpu(readU32(offset))
+  }
+  return [...architectures].sort()
+}
+
+function decodeMachOVersion(encoded: number): string {
+  const major = (encoded >>> 16) & 0xffff
+  const minor = (encoded >>> 8) & 0xff
+  const patch = encoded & 0xff
+  return patch > 0 ? `${major}.${minor}.${patch}` : `${major}.${minor}`
+}
+
+function parseThinMachOMinimumVersion(
+  buffer: Buffer,
+  start: number,
+  length: number,
+): string | null {
+  if (length < 28 || start < 0 || start + length > buffer.length) return null
+  const littleMagic = buffer.readUInt32LE(start)
+  const bigMagic = buffer.readUInt32BE(start)
+  const littleEndian = littleMagic === 0xfeedface || littleMagic === 0xfeedfacf
+  const bigEndian = bigMagic === 0xfeedface || bigMagic === 0xfeedfacf
+  if (!littleEndian && !bigEndian) return null
+  const readU32 = (offset: number) => littleEndian
+    ? buffer.readUInt32LE(offset)
+    : buffer.readUInt32BE(offset)
+  const is64Bit = (littleEndian ? littleMagic : bigMagic) === 0xfeedfacf
+  const commandCount = readU32(start + 16)
+  let cursor = start + (is64Bit ? 32 : 28)
+  const end = start + length
+  for (let index = 0; index < commandCount; index += 1) {
+    if (cursor + 8 > end) return null
+    const command = readU32(cursor)
+    const commandSize = readU32(cursor + 4)
+    if (commandSize < 8 || cursor + commandSize > end) return null
+    if (command === 0x32 && commandSize >= 24) {
+      // LC_BUILD_VERSION.minos
+      return decodeMachOVersion(readU32(cursor + 12))
+    }
+    if (command === 0x24 && commandSize >= 16) {
+      // Legacy LC_VERSION_MIN_MACOSX.version
+      return decodeMachOVersion(readU32(cursor + 8))
+    }
+    cursor += commandSize
+  }
+  return null
+}
+
+export function parseMachOMinimumMacosVersions(bytes: Uint8Array): string[] {
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  if (buffer.length < 8) return []
+  const bigMagic = buffer.readUInt32BE(0)
+  const fat64 = bigMagic === 0xcafebabf || bigMagic === 0xbfbafeca
+  const fat32 = bigMagic === 0xcafebabe || bigMagic === 0xbebafeca
+  if (!fat32 && !fat64) {
+    const version = parseThinMachOMinimumVersion(buffer, 0, buffer.length)
+    return version ? [version] : []
+  }
+
+  const bigEndian = bigMagic === 0xcafebabe || bigMagic === 0xcafebabf
+  const readU32 = (offset: number) => bigEndian
+    ? buffer.readUInt32BE(offset)
+    : buffer.readUInt32LE(offset)
+  const readU64 = (offset: number) => Number(bigEndian
+    ? buffer.readBigUInt64BE(offset)
+    : buffer.readBigUInt64LE(offset))
+  const count = readU32(4)
+  const stride = fat64 ? 32 : 20
+  const versions = new Set<string>()
+  for (let index = 0; index < count; index += 1) {
+    const entry = 8 + index * stride
+    if (entry + stride > buffer.length) return []
+    const offset = fat64 ? readU64(entry + 8) : readU32(entry + 8)
+    const size = fat64 ? readU64(entry + 16) : readU32(entry + 12)
+    const version = parseThinMachOMinimumVersion(buffer, offset, size)
+    if (!version) return []
+    versions.add(version)
+  }
+  return [...versions].sort()
+}
+
+function addExactMachOArchitectureCheck(
+  report: PackageSmokeReport,
+  rootDir: string,
+  label: string,
+  targetPath: string,
+  expected: MachOArch,
+) {
+  const record = { label, path: toRelative(rootDir, targetPath) }
+  try {
+    const actual = parseMachOArchitectures(readFileSync(targetPath))
+    if (actual.length === 1 && actual[0] === expected) {
+      report.passedChecks.push(record)
+      return
+    }
+    report.notes.push(`${label} expected ${expected}, found ${actual.join(', ') || 'not Mach-O'}.`)
+  } catch (error) {
+    report.notes.push(`${label} could not be inspected: ${String(error)}`)
+  }
+  report.missingChecks.push(record)
+}
+
+function addHelperMinimumSystemCheck(
+  report: PackageSmokeReport,
+  rootDir: string,
+  infoPlistPath: string,
+) {
+  const label = 'macOS cu-helper minimum system version (14.4)'
+  const record = { label, path: toRelative(rootDir, infoPlistPath) }
+  try {
+    const plist = readFileSync(infoPlistPath, 'utf8')
+    const version = plist.match(
+      /<key>LSMinimumSystemVersion<\/key>\s*<string>([^<]+)<\/string>/,
+    )?.[1]?.trim()
+    if (version === '14.4') {
+      report.passedChecks.push(record)
+      return
+    }
+    report.notes.push(`${label} expected 14.4, found ${version ?? 'missing'}.`)
+  } catch (error) {
+    report.notes.push(`${label} could not be inspected: ${String(error)}`)
+  }
+  report.missingChecks.push(record)
+}
+
+function addHelperMachOMinimumSystemCheck(
+  report: PackageSmokeReport,
+  rootDir: string,
+  helperExecutable: string,
+) {
+  const label = 'macOS cu-helper Mach-O deployment target (14.4)'
+  const record = { label, path: toRelative(rootDir, helperExecutable) }
+  try {
+    const versions = parseMachOMinimumMacosVersions(readFileSync(helperExecutable))
+    if (versions.length > 0 && versions.every(version => version === '14.4')) {
+      report.passedChecks.push(record)
+      return
+    }
+    report.notes.push(`${label} expected 14.4, found ${versions.join(', ') || 'missing'}.`)
+  } catch (error) {
+    report.notes.push(`${label} could not be inspected: ${String(error)}`)
+  }
+  report.missingChecks.push(record)
+}
+
 function parseUpdateMetadataReferences(content: string) {
   const references = [] as string[]
   const pattern = /^\s*(?:url|path):\s*['"]?([^'"\n]+?)['"]?\s*$/gm
@@ -415,6 +599,104 @@ function addCommandDiagnostics(
   report.notes.push(`${label} exited with status ${status}: ${lines.join(' | ')}`)
 }
 
+type CodesignMetadata = {
+  identifier: string | null
+  authority: string | null
+  team: string | null
+  timestamp: string | null
+}
+
+export function parseCodesignMetadata(output: string): CodesignMetadata {
+  const first = (prefix: string) => output
+    .split(/\r?\n/)
+    .find(line => line.startsWith(prefix))
+    ?.slice(prefix.length)
+    .trim() ?? null
+  const team = first('TeamIdentifier=')
+  return {
+    identifier: first('Identifier='),
+    authority: first('Authority='),
+    team: team === 'not set' ? null : team,
+    timestamp: first('Timestamp='),
+  }
+}
+
+function addMacosComputerUseAttestationCheck(
+  report: PackageSmokeReport,
+  rootDir: string,
+  appBundle: string,
+  sidecar: string,
+  helperApp: string,
+  commandRunner: PackageSmokeCommandRunner,
+) {
+  const label = 'macOS Computer Use signing attestation chain'
+  const record = { label, path: toRelative(rootDir, helperApp) }
+  if (report.hostPlatform !== 'macos') {
+    report.notes.push(`${label} was requested but skipped because host platform is ${report.hostPlatform}.`)
+    return
+  }
+
+  const targets = [
+    { name: 'host', path: appBundle, identifier: 'com.claude-code-haha.desktop', deep: true },
+    { name: 'sidecar', path: sidecar, identifier: 'com.claude-code-haha.desktop.sidecar', deep: false },
+    { name: 'helper', path: helperApp, identifier: 'dev.cchaha.cu-helper', deep: true },
+  ] as const
+  const metadata: CodesignMetadata[] = []
+  for (const target of targets) {
+    const verifyArgs = ['--verify', ...(target.deep ? ['--deep'] : []), '--strict', '--verbose=2', target.path]
+    const verify = commandRunner('/usr/bin/codesign', verifyArgs)
+    if (verify.status !== 0) {
+      report.missingChecks.push(record)
+      addCommandDiagnostics(report, `${target.name} codesign verification`, verify)
+      return
+    }
+    const details = commandRunner('/usr/bin/codesign', ['-dv', '--verbose=4', target.path])
+    if (details.status !== 0) {
+      report.missingChecks.push(record)
+      addCommandDiagnostics(report, `${target.name} codesign details`, details)
+      return
+    }
+    const parsed = parseCodesignMetadata(`${details.stdout ?? ''}${details.stderr ?? ''}`)
+    if (
+      parsed.identifier !== target.identifier
+      || !parsed.authority?.startsWith('Developer ID Application:')
+      || !parsed.team
+      || !parsed.timestamp
+    ) {
+      report.missingChecks.push(record)
+      report.notes.push(
+        `${label} rejected ${target.name}: identifier=${parsed.identifier ?? 'missing'}, `
+        + `authority=${parsed.authority ?? 'missing'}, team=${parsed.team ?? 'missing'}, `
+        + `timestamp=${parsed.timestamp ? 'present' : 'missing'}.`,
+      )
+      return
+    }
+    metadata.push(parsed)
+  }
+
+  if (metadata.length !== targets.length) {
+    report.missingChecks.push(record)
+    report.notes.push(`${label} could not collect metadata for every required executable.`)
+    return
+  }
+  const [host, sidecarMetadata, helper] = metadata as [
+    CodesignMetadata,
+    CodesignMetadata,
+    CodesignMetadata,
+  ]
+  if (
+    host.authority !== sidecarMetadata.authority
+    || host.authority !== helper.authority
+    || host.team !== sidecarMetadata.team
+    || host.team !== helper.team
+  ) {
+    report.missingChecks.push(record)
+    report.notes.push(`${label} rejected mismatched Developer ID authority/team values.`)
+    return
+  }
+  report.passedChecks.push(record)
+}
+
 function addMacosGatekeeperCheck(
   report: PackageSmokeReport,
   rootDir: string,
@@ -543,9 +825,13 @@ function inspectMacosArtifacts(rootDir: string, report: PackageSmokeReport, opti
   const nodePtyDir = join(unpackedDir, 'node_modules', 'node-pty')
   const prebuildsDir = join(nodePtyDir, 'prebuilds')
   const sidecarDir = join(unpackedDir, 'src-tauri', 'binaries')
+  const helperApp = join(sidecarDir, 'cc-haha-computer-use.app')
+  const helperInfoPlist = join(helperApp, 'Contents', 'Info.plist')
+  const helperExecutable = join(helperApp, 'Contents', 'MacOS', 'cc-haha-computer-use')
+  const hostExecutable = join(contentsDir, 'MacOS', report.productName)
 
   addPresenceCheck(report, rootDir, 'macOS Info.plist', join(contentsDir, 'Info.plist'))
-  addPresenceCheck(report, rootDir, 'macOS app executable', join(contentsDir, 'MacOS', report.productName))
+  addPresenceCheck(report, rootDir, 'macOS app executable', hostExecutable)
   addPresenceCheck(report, rootDir, 'macOS app.asar', join(resourcesDir, 'app.asar'))
   addPresenceCheck(report, rootDir, 'macOS unpacked H5 shell', join(unpackedDir, 'dist', 'index.html'))
   addInstalledUpdateMetadataCheck(
@@ -562,13 +848,10 @@ function inspectMacosArtifacts(rootDir: string, report: PackageSmokeReport, opti
     'macOS unpacked cc-haha-builtin plugin seed',
     join(unpackedDir, 'plugin-seed', 'marketplaces', 'cc-haha-builtin', '.claude-plugin', 'marketplace.json'),
   )
-  addMatchCheck(
-    report,
-    rootDir,
-    'macOS unpacked sidecar binary',
-    findMatches(sidecarDir, (candidate) => normalizePath(candidate).includes('/claude-sidecar-')),
-    sidecarDir,
-  )
+  addPresenceCheck(report, rootDir, 'macOS cu-helper app bundle', helperApp)
+  addPresenceCheck(report, rootDir, 'macOS cu-helper Info.plist', helperInfoPlist)
+  addPresenceCheck(report, rootDir, 'macOS cu-helper executable', helperExecutable)
+  if (existsSync(helperInfoPlist)) addHelperMinimumSystemCheck(report, rootDir, helperInfoPlist)
   addBundledRipgrepLicenseChecks(report, rootDir, sidecarDir, 'macOS')
   addMatchCheck(
     report,
@@ -578,23 +861,77 @@ function inspectMacosArtifacts(rootDir: string, report: PackageSmokeReport, opti
       normalizePath(candidate).endsWith(bundledRipgrepNeedle('macos'))),
     sidecarDir,
   )
-  addMatchCheck(
-    report,
-    rootDir,
-    'macOS node-pty native module',
-    findMatches(prebuildsDir, (candidate) => normalizePath(candidate).includes('/darwin-') && normalizePath(candidate).endsWith('/pty.node')),
-    prebuildsDir,
-  )
-  addMatchCheck(
-    report,
-    rootDir,
-    'macOS node-pty spawn-helper',
-    findMatches(prebuildsDir, (candidate) => normalizePath(candidate).includes('/darwin-') && normalizePath(candidate).endsWith('/spawn-helper')),
-    prebuildsDir,
-  )
+  if (report.arch) {
+    const expectedMachOArch: MachOArch = report.arch === 'arm64' ? 'arm64' : 'x86_64'
+    const targetTriple = report.arch === 'arm64'
+      ? 'aarch64-apple-darwin'
+      : 'x86_64-apple-darwin'
+    const nodePtyArch = report.arch === 'arm64' ? 'darwin-arm64' : 'darwin-x64'
+    const sidecar = join(sidecarDir, `claude-sidecar-${targetTriple}`)
+    const pty = join(prebuildsDir, nodePtyArch, 'pty.node')
+    const spawnHelper = join(prebuildsDir, nodePtyArch, 'spawn-helper')
+    addPresenceCheck(report, rootDir, `macOS ${report.arch} unpacked sidecar binary`, sidecar)
+    addPresenceCheck(report, rootDir, `macOS ${report.arch} node-pty native module`, pty)
+    addPresenceCheck(report, rootDir, `macOS ${report.arch} node-pty spawn-helper`, spawnHelper)
+    if (existsSync(helperExecutable)) {
+      addHelperMachOMinimumSystemCheck(report, rootDir, helperExecutable)
+    }
+    for (const [label, target] of [
+      ['app executable', hostExecutable],
+      ['sidecar', sidecar],
+      ['cu-helper', helperExecutable],
+      ['node-pty native module', pty],
+      ['node-pty spawn-helper', spawnHelper],
+    ] as const) {
+      if (existsSync(target)) {
+        addExactMachOArchitectureCheck(
+          report,
+          rootDir,
+          `macOS ${report.arch} ${label} Mach-O architecture`,
+          target,
+          expectedMachOArch,
+        )
+      }
+    }
+  } else {
+    addMatchCheck(
+      report,
+      rootDir,
+      'macOS unpacked sidecar binary',
+      findMatches(sidecarDir, (candidate) => normalizePath(candidate).includes('/claude-sidecar-')),
+      sidecarDir,
+    )
+    addMatchCheck(
+      report,
+      rootDir,
+      'macOS node-pty native module',
+      findMatches(prebuildsDir, (candidate) => normalizePath(candidate).includes('/darwin-') && normalizePath(candidate).endsWith('/pty.node')),
+      prebuildsDir,
+    )
+    addMatchCheck(
+      report,
+      rootDir,
+      'macOS node-pty spawn-helper',
+      findMatches(prebuildsDir, (candidate) => normalizePath(candidate).includes('/darwin-') && normalizePath(candidate).endsWith('/spawn-helper')),
+      prebuildsDir,
+    )
+  }
 
   report.notes.push('No GUI launch was attempted. This command only inspects packaged bundle structure and key unpacked resources.')
   if (options.requireMacosGatekeeper) {
+    if (report.arch) {
+      const targetTriple = report.arch === 'arm64'
+        ? 'aarch64-apple-darwin'
+        : 'x86_64-apple-darwin'
+      addMacosComputerUseAttestationCheck(
+        report,
+        rootDir,
+        appBundle,
+        join(sidecarDir, `claude-sidecar-${targetTriple}`),
+        helperApp,
+        options.commandRunner ?? defaultCommandRunner,
+      )
+    }
     addMacosGatekeeperCheck(report, rootDir, appBundle, options.commandRunner)
   } else if (report.hostPlatform === 'macos') {
     report.notes.push('macOS Gatekeeper launch approval was not assessed. Add --require-macos-gatekeeper for release-readiness launch policy checks.')

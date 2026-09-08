@@ -99,13 +99,13 @@ function registerLockCleanup(): void {
 }
 
 /**
- * Check lock state without acquiring. Used for `request_access` /
- * `list_granted_applications` — the package's `defersLockAcquire` contract:
- * these tools check but don't take the lock, so the enter-notification and
- * overlay don't fire while the model is only asking for permission.
+ * Check lock state without acquiring. Used for the deferring tool `list_apps`
+ * (the package's `defersLockAcquire` contract): a bare app enumeration checks
+ * but doesn't take the lock, so the enter-notification and overlay don't fire
+ * while the model is only discovering what's available.
  *
- * Does stale-PID recovery (unlinks) so a dead session's lock doesn't block
- * `request_access`. Does NOT create — that's `tryAcquireComputerUseLock`'s job.
+ * Does stale-PID recovery (unlinks) so a dead session's lock doesn't block the
+ * next check. Does NOT create — that's `tryAcquireComputerUseLock`'s job.
  */
 export async function checkComputerUseLock(): Promise<CheckResult> {
   const existing = await readLock()

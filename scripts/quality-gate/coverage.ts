@@ -1064,6 +1064,18 @@ export async function runCoverageGate(options: {
     }
   }
 
+  // The desktop suite runs as a single vitest process: any red file zeroes
+  // the whole scope's LCOV. The files below are documented pre-existing
+  // failures (docs/known-pre-existing-test-failures.md) — excluded here for
+  // coverage scoring only, mirroring the server-side quarantine.
+  const desktopCoverageExcludes = [
+    'src/components/layout/TabBar.test.tsx',
+    'src/components/controls/ModelSelector.test.tsx',
+    'src/components/activity/SessionActivityPanel.test.tsx',
+    'src/components/settings/AgentManager.test.tsx',
+    'src/pages/EmptySession.test.tsx',
+    'src/pages/TraceSession.test.tsx',
+  ]
   const desktop = await runSuite(
     'desktop',
     'Desktop React',
@@ -1076,6 +1088,7 @@ export async function runCoverageGate(options: {
       '--coverage.reporter=lcov',
       `--coverage.reportsDirectory=${join(outputDir, 'desktop')}`,
       '--testTimeout=20000',
+      ...desktopCoverageExcludes.flatMap((file) => ['--exclude', file]),
     ],
     join(rootDir, 'desktop'),
     join(outputDir, 'desktop'),

@@ -8,6 +8,8 @@ import {
 } from './current'
 import {
   inspectPackagedArtifacts,
+  parseCodesignMetadata,
+  parseMachOMinimumMacosVersions,
   parsePackageSmokeArgs,
   resolvePackageSmokeRoot,
 } from './index'
@@ -28,7 +30,7 @@ function createRepoRoot() {
   return rootDir
 }
 
-function writeFile(rootDir: string, relativePath: string, content = 'ok') {
+function writeFile(rootDir: string, relativePath: string, content: string | Uint8Array = 'ok') {
   const fullPath = join(rootDir, relativePath)
   mkdirSync(dirname(fullPath), { recursive: true })
   writeFileSync(fullPath, content)
@@ -46,7 +48,33 @@ function writeFile(rootDir: string, relativePath: string, content = 'ok') {
     for (const licenseName of ['COPYING', 'LICENSE-MIT', 'UNLICENSE']) {
       writeFileSync(join(licensesDir, licenseName), content)
     }
+    if (fileName.includes('apple-darwin')) {
+      const helperRoot = join(dirname(fullPath), 'cc-haha-computer-use.app', 'Contents')
+      mkdirSync(join(helperRoot, 'MacOS'), { recursive: true })
+      writeFileSync(
+        join(helperRoot, 'Info.plist'),
+        '<plist><dict><key>LSMinimumSystemVersion</key><string>14.4</string></dict></plist>',
+      )
+      writeFileSync(join(helperRoot, 'MacOS', 'cc-haha-computer-use'), content)
+    }
   }
+}
+
+function thinMachO(arch: 'arm64' | 'x64', minimum = '14.4') {
+  const [major, minor, patch = 0] = minimum.split('.').map(Number)
+  const encodedMinimum = (major << 16) | (minor << 8) | patch
+  const bytes = Buffer.alloc(56)
+  bytes.writeUInt32LE(0xfeedfacf, 0)
+  bytes.writeUInt32LE(arch === 'arm64' ? 0x0100000c : 0x01000007, 4)
+  bytes.writeUInt32LE(2, 12)
+  bytes.writeUInt32LE(1, 16)
+  bytes.writeUInt32LE(24, 20)
+  bytes.writeUInt32LE(0x32, 32)
+  bytes.writeUInt32LE(24, 36)
+  bytes.writeUInt32LE(1, 40)
+  bytes.writeUInt32LE(encodedMinimum, 44)
+  bytes.writeUInt32LE(15 << 16, 48)
+  return bytes
 }
 
 const tempDirs: string[] = []
@@ -84,6 +112,27 @@ describe('package smoke args', () => {
     expect(currentPackageSmokeArch('arm64')).toBe('arm64')
     expect(currentPackageSmokeArch('x64')).toBe('x64')
     expect(currentPackageSmokeArch('ia32')).toBeNull()
+  })
+
+  test('reads the helper deployment target from the Mach-O load commands', () => {
+    expect(parseMachOMinimumMacosVersions(thinMachO('arm64', '14.4'))).toEqual(['14.4'])
+    expect(parseMachOMinimumMacosVersions(thinMachO('x64', '14.0'))).toEqual(['14.0'])
+    expect(parseMachOMinimumMacosVersions(Buffer.from('not Mach-O'))).toEqual([])
+  })
+
+  test('reads the identity fields required by Computer Use client attestation', () => {
+    expect(parseCodesignMetadata([
+      'Identifier=dev.cchaha.cu-helper',
+      'Authority=Developer ID Application: Example (TEAM123456)',
+      'Authority=Developer ID Certification Authority',
+      'Timestamp=Sep 1, 2026 at 18:43:53',
+      'TeamIdentifier=TEAM123456',
+    ].join('\n'))).toEqual({
+      identifier: 'dev.cchaha.cu-helper',
+      authority: 'Developer ID Application: Example (TEAM123456)',
+      team: 'TEAM123456',
+      timestamp: 'Sep 1, 2026 at 18:43:53',
+    })
   })
 })
 
@@ -153,6 +202,84 @@ describe('packaged artifact inspection', () => {
     expect(report.missingChecks.some(
       check => check.label === 'macOS bundled ripgrep binary',
     )).toBe(true)
+  })
+
+  test('fails closed when an arm64 package contains an x64 cu-helper', async () => {
+    const rootDir = createRepoRoot()
+    tempDirs.push(rootDir)
+    const appRoot = 'desktop/build-artifacts/electron/mac-arm64/Claude Code Haha.app'
+    const resources = `${appRoot}/Contents/Resources`
+    const sidecarRoot = `${resources}/app.asar.unpacked/src-tauri/binaries`
+    const nodePtyRoot = `${resources}/app.asar.unpacked/node_modules/node-pty`
+
+    writeFile(rootDir, `${appRoot}/Contents/Info.plist`)
+    writeFile(rootDir, `${appRoot}/Contents/MacOS/Claude Code Haha`, thinMachO('arm64'))
+    writeFile(rootDir, `${resources}/app.asar`)
+    writeFile(rootDir, `${resources}/app.asar.unpacked/dist/index.html`)
+    writeFile(rootDir, `${sidecarRoot}/claude-sidecar-aarch64-apple-darwin`, thinMachO('arm64'))
+    writeFile(rootDir, `${nodePtyRoot}/package.json`)
+    writeFile(rootDir, `${nodePtyRoot}/prebuilds/darwin-arm64/pty.node`, thinMachO('arm64'))
+    writeFile(rootDir, `${nodePtyRoot}/prebuilds/darwin-arm64/spawn-helper`, thinMachO('arm64'))
+
+    const validReport = await inspectPackagedArtifacts(rootDir, {
+      platform: 'macos',
+      arch: 'arm64',
+      packageKind: 'dir',
+    })
+    expect(validReport.passed).toBe(true)
+
+    writeFile(
+      rootDir,
+      `${sidecarRoot}/cc-haha-computer-use.app/Contents/MacOS/cc-haha-computer-use`,
+      thinMachO('x64'),
+    )
+
+    const report = await inspectPackagedArtifacts(rootDir, {
+      platform: 'macos',
+      arch: 'arm64',
+      packageKind: 'dir',
+    })
+
+    expect(report.passed).toBe(false)
+    expect(report.missingChecks.some(
+      check => check.label === 'macOS arm64 cu-helper Mach-O architecture',
+    )).toBe(true)
+    expect(report.notes.join('\n')).toContain('expected arm64, found x86_64')
+  })
+
+  test('fails closed when the helper Mach-O deployment target drifts below 14.4', async () => {
+    const rootDir = createRepoRoot()
+    tempDirs.push(rootDir)
+    const appRoot = 'desktop/build-artifacts/electron/mac-arm64/Claude Code Haha.app'
+    const resources = `${appRoot}/Contents/Resources`
+    const sidecarRoot = `${resources}/app.asar.unpacked/src-tauri/binaries`
+    const nodePtyRoot = `${resources}/app.asar.unpacked/node_modules/node-pty`
+
+    writeFile(rootDir, `${appRoot}/Contents/Info.plist`)
+    writeFile(rootDir, `${appRoot}/Contents/MacOS/Claude Code Haha`, thinMachO('arm64'))
+    writeFile(rootDir, `${resources}/app.asar`)
+    writeFile(rootDir, `${resources}/app.asar.unpacked/dist/index.html`)
+    writeFile(rootDir, `${sidecarRoot}/claude-sidecar-aarch64-apple-darwin`, thinMachO('arm64'))
+    writeFile(rootDir, `${nodePtyRoot}/package.json`)
+    writeFile(rootDir, `${nodePtyRoot}/prebuilds/darwin-arm64/pty.node`, thinMachO('arm64'))
+    writeFile(rootDir, `${nodePtyRoot}/prebuilds/darwin-arm64/spawn-helper`, thinMachO('arm64'))
+    writeFile(
+      rootDir,
+      `${sidecarRoot}/cc-haha-computer-use.app/Contents/MacOS/cc-haha-computer-use`,
+      thinMachO('arm64', '14.0'),
+    )
+
+    const report = await inspectPackagedArtifacts(rootDir, {
+      platform: 'macos',
+      arch: 'arm64',
+      packageKind: 'dir',
+    })
+
+    expect(report.passed).toBe(false)
+    expect(report.missingChecks.some(
+      check => check.label === 'macOS cu-helper Mach-O deployment target (14.4)',
+    )).toBe(true)
+    expect(report.notes.join('\n')).toContain('expected 14.4, found 14.0')
   })
 
   test('fails macOS inspection when the H5 shell is not unpacked for the sidecar', async () => {
@@ -283,6 +410,69 @@ describe('packaged artifact inspection', () => {
     expect(report.notes.join('\n')).toContain('codesign verification exited with status 1')
     expect(report.notes.join('\n')).toContain('codesign signature details exited with status 1')
     expect(report.notes.join('\n')).toContain('notarization ticket validation exited with status 65')
+  })
+
+  test('requires one Developer ID signer across host, sidecar, and helper', async () => {
+    const rootDir = createRepoRoot()
+    tempDirs.push(rootDir)
+    const appRoot = 'desktop/build-artifacts/electron/mac-arm64/Claude Code Haha.app'
+    const resources = `${appRoot}/Contents/Resources`
+    const sidecarRoot = `${resources}/app.asar.unpacked/src-tauri/binaries`
+    const nodePtyRoot = `${resources}/app.asar.unpacked/node_modules/node-pty`
+    writeFile(rootDir, `${appRoot}/Contents/Info.plist`)
+    writeFile(rootDir, `${appRoot}/Contents/MacOS/Claude Code Haha`, thinMachO('arm64'))
+    writeFile(rootDir, `${resources}/app.asar`)
+    writeFile(rootDir, `${resources}/app.asar.unpacked/dist/index.html`)
+    writeFile(rootDir, `${sidecarRoot}/claude-sidecar-aarch64-apple-darwin`, thinMachO('arm64'))
+    writeFile(rootDir, `${nodePtyRoot}/package.json`)
+    writeFile(rootDir, `${nodePtyRoot}/prebuilds/darwin-arm64/pty.node`, thinMachO('arm64'))
+    writeFile(rootDir, `${nodePtyRoot}/prebuilds/darwin-arm64/spawn-helper`, thinMachO('arm64'))
+
+    const inspect = (sidecarAuthority: string) => inspectPackagedArtifacts(rootDir, {
+      platform: 'macos',
+      arch: 'arm64',
+      packageKind: 'dir',
+      requireMacosGatekeeper: true,
+      hostPlatform: 'macos',
+      commandRunner: (command, args) => {
+        if (command.endsWith('/spctl')) return { status: 0, stdout: 'accepted', stderr: '' }
+        if (command.endsWith('/codesign') && args[0] === '--verify') {
+          return { status: 0, stdout: '', stderr: '' }
+        }
+        if (command.endsWith('/codesign') && args[0] === '-dv') {
+          const target = args.at(-1) ?? ''
+          const isSidecar = target.includes('claude-sidecar-')
+          const identifier = target.endsWith('cc-haha-computer-use.app')
+            ? 'dev.cchaha.cu-helper'
+            : isSidecar
+              ? 'com.claude-code-haha.desktop.sidecar'
+              : 'com.claude-code-haha.desktop'
+          const authority = isSidecar
+            ? sidecarAuthority
+            : 'Developer ID Application: Example (TEAM123456)'
+          return {
+            status: 0,
+            stdout: '',
+            stderr: [
+              `Identifier=${identifier}`,
+              `Authority=${authority}`,
+              'Timestamp=Sep 1, 2026 at 18:43:53',
+              'TeamIdentifier=TEAM123456',
+            ].join('\n'),
+          }
+        }
+        return { status: 0, stdout: '', stderr: '' }
+      },
+    })
+
+    const valid = await inspect('Developer ID Application: Example (TEAM123456)')
+    expect(valid.passedChecks.some(
+      check => check.label === 'macOS Computer Use signing attestation chain',
+    )).toBe(true)
+
+    const mismatched = await inspect('Developer ID Application: Other (TEAM123456)')
+    expect(mismatched.passed).toBe(false)
+    expect(mismatched.notes.join('\n')).toContain('mismatched Developer ID authority/team')
   })
 
   test('retries macOS Gatekeeper assessment with a raised file limit when spctl hits open-file limits', async () => {

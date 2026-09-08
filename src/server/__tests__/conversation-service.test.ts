@@ -291,9 +291,8 @@ describe('ConversationService', () => {
       // 240s apart keeps it alive forever. The overall-duration cap is NOT reset
       // by chunks and is what actually frees that case (#766).
       expect(env.CLAUDE_STREAM_MAX_DURATION_MS).toBe('600000')
-      // Tool JSON is not user-visible and should normally finish in seconds.
-      // Bound it separately so a model cannot spend the full response budget
-      // streaming a truncated Write payload (#1237).
+      // Tool JSON gets a shorter inactivity budget. Progress resets it, while
+      // the overall response cap still bounds a stream that trickles forever.
       expect(env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS).toBe('120000')
       // Non-streaming fallback stays off — its retry loop also hangs the UI (#766).
       expect(env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK).toBe('1')
@@ -1079,10 +1078,11 @@ describe('ConversationService', () => {
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe('provider-key')
     expect(env.ANTHROPIC_API_KEY).toBe('')
     expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
-    // Retired/third-party presets keep capabilities in preset defaultEnv
-    // (shengsuanyun pins sonnet to "none"); do not invent Claude-code caps.
-    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
+    // Slot capabilities come from the reasoning profile layer now
+    // (upstream v0.6.0 semantics); preset defaultEnv no longer pins "none".
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
+      'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+    )
     expect(env.CLAUDE_CODE_ATTRIBUTION_HEADER).toBe('1')
   })
 
@@ -1143,7 +1143,9 @@ describe('ConversationService', () => {
     })) as Record<string, string>
 
     expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
-    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
+      'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+    )
   })
 
   test('buildChildEnv drops main-model capabilities for unknown selected models', async () => {

@@ -69,6 +69,28 @@ describe('normalizeRuntimeSelection', () => {
     expect(normalizeRuntimeSelection(selection)).toBe(selection)
   })
 
+  it('uses the GLM 5.3 standard API default for an unsupported global effort', () => {
+    expect(normalizeRuntimeSelection({
+      providerId: 'zhipu-provider',
+      modelId: 'glm-5.3-flash[1m]',
+      effortLevel: 'medium',
+    }, 'anthropic', 'zhipu_standard_api')).toEqual({
+      providerId: 'zhipu-provider',
+      modelId: 'glm-5.3-flash[1m]',
+      effortLevel: 'max',
+    })
+
+    expect(normalizeRuntimeSelection({
+      providerId: 'zhipu-plan-provider',
+      modelId: 'glm-5.3-flash[1m]',
+      effortLevel: 'xhigh',
+    }, 'anthropic', 'zhipu_coding_plan')).toEqual({
+      providerId: 'zhipu-plan-provider',
+      modelId: 'glm-5.3-flash[1m]',
+      effortLevel: 'xhigh',
+    })
+  })
+
   it('uses the Grok model default when xhigh is unsupported', () => {
     expect(normalizeRuntimeSelection({
       providerId: 'grok-official',

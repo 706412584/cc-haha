@@ -5,6 +5,7 @@ import type { TraceSpan } from '../../../lib/traceViewModel'
 import { formatTraceJson } from '../../../lib/traceViewModel'
 import { fetchTraceCallDetail } from '../../../lib/trace/callCache'
 import { parseTraceRequestBody, parseTraceResponseBody } from '../../../lib/trace/requestParse'
+import { splitRequestMessages, type LocatedInjection } from '../../../lib/trace/semanticTimeline'
 import type { NormalizedMessage } from '../../../lib/trace/types'
 import { formatBytes } from '../../../lib/formatBytes'
 import { CodeViewer } from '../../chat/CodeViewer'
@@ -58,15 +59,27 @@ export function LlmCallDetail({
   const effectiveCall = detail && detail.id === callId ? detail : call
   const parsed = useMemo(() => {
     if (!effectiveCall) return { request: null, response: null }
+    const semantic = effectiveCall.request.semantic
+    const requestBody = semantic
+      ? JSON.stringify(semantic.request)
+      : effectiveCall.request.body.preview
     return {
-      request: effectiveCall.request.body.preview
-        ? parseTraceRequestBody(effectiveCall.request.body.preview, effectiveCall.source)
+      request: requestBody
+        ? parseTraceRequestBody(requestBody, semantic ? 'anthropic' : effectiveCall.source)
         : null,
       response: effectiveCall.response?.body.preview
         ? parseTraceResponseBody(effectiveCall.response.body.preview, effectiveCall.source)
         : null,
     }
   }, [effectiveCall])
+
+  // The harness sends its assembled context as user-role text. Reading it
+  // beside the real exchange is what makes a request legible, so the two are
+  // split apart rather than rendered as one message list.
+  const split = useMemo(
+    () => splitRequestMessages(parsed.request?.messages ?? []),
+    [parsed.request],
+  )
 
   if (!call || !effectiveCall) return null
 
@@ -99,14 +112,25 @@ export function LlmCallDetail({
         />
       </Section>
 
-      {parsed.request && parsed.request.messages.length > 0 ? (
+      {split.injections.length > 0 ? (
+        <Section
+          sectionKey="llm.context"
+          title={t('trace.section.context')}
+          badge={split.injections.length}
+          defaultOpen
+        >
+          <ContextInjectionList injections={split.injections} />
+        </Section>
+      ) : null}
+
+      {split.conversation.length > 0 ? (
         <Section
           sectionKey="llm.messages"
           title={t('trace.section.messages')}
-          badge={parsed.request.messages.length}
+          badge={split.conversation.length}
           defaultOpen
         >
-          <MessageList messages={parsed.request.messages} />
+          <MessageList messages={split.conversation} />
         </Section>
       ) : null}
 
@@ -258,6 +282,57 @@ function MessageList({ messages }: { messages: NormalizedMessage[] }) {
         {t('trace.detail.earlierMessages', { count: hiddenCount })}
       </button>
       {tail.map((message, index) => <MessageBlocks key={`tail-${index}`} message={message} />)}
+    </div>
+  )
+}
+
+const CONTEXT_KIND_LABEL = {
+  'system-reminder': 'trace.context.systemReminder',
+  'deferred-tools': 'trace.context.deferredTools',
+  other: 'trace.context.other',
+} as const satisfies Record<LocatedInjection['kind'], string>
+
+/**
+ * The context the harness assembled for this request, one row per injection.
+ * Collapsed rows carry the kind and size so a scan shows what was added
+ * without opening anything.
+ */
+function ContextInjectionList({ injections }: { injections: LocatedInjection[] }) {
+  const t = useTranslation()
+  // Keyed by content, not position: a live session re-renders on every poll and
+  // an index would then point at whichever injection landed in that slot.
+  const [expanded, setExpanded] = useState<string | null>(null)
+  return (
+    <div className="flex flex-col gap-1.5">
+      {injections.map((injection) => {
+        const key = `${injection.messageIndex}:${injection.kind}:${injection.label}`
+        const open = expanded === key
+        return (
+          <div key={key} className="rounded-[var(--radius-md)] border border-[var(--color-border)]">
+            <button
+              type="button"
+              onClick={() => setExpanded((current) => (current === key ? null : key))}
+              aria-expanded={open}
+              className="flex w-full min-w-0 items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-surface-container)]"
+            >
+              <span className="shrink-0 rounded-full bg-[var(--color-surface-container)] px-2 py-0.5 text-[11px] text-[var(--color-text-tertiary)]">
+                {t(CONTEXT_KIND_LABEL[injection.kind])}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-[12.5px] text-[var(--color-text-primary)]">
+                {injection.label}
+              </span>
+              <span className="shrink-0 font-mono text-[11px] text-[var(--color-text-tertiary)]">
+                {t('trace.detail.chars', { count: injection.text.length })}
+              </span>
+            </button>
+            {open ? (
+              <pre className="max-h-[320px] overflow-y-auto whitespace-pre-wrap break-words border-t border-[var(--color-border)] px-2.5 py-2 text-[12.5px] leading-[1.7] text-[var(--color-text-secondary)]">
+                {injection.text}
+              </pre>
+            ) : null}
+          </div>
+        )
+      })}
     </div>
   )
 }

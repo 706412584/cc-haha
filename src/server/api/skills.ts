@@ -433,11 +433,68 @@ export async function collectUserSkillNames(): Promise<Set<string>> {
   return new Set(skills.map((skill) => skill.name))
 }
 
-export async function listSkillSlashCommands(cwd?: string): Promise<SkillSlashCommand[]> {
+/**
+ * Built-ins and bundled skills, shaped like the slash-command list.
+ *
+ * These exist only inside the binary, so no amount of directory scanning finds
+ * them. Loaded on first use rather than at module scope: pulling in the command
+ * graph costs a few hundred milliseconds, and a server that never serves a
+ * slash-command request should not pay it.
+ */
+async function collectCompiledInSlashCommands(): Promise<SkillSlashCommand[]> {
+  try {
+    const [{ getCompiledInCommands }, { supportsHeadlessSlashCommand }] =
+      await Promise.all([
+        import('../../commands.js'),
+        import('../../commands/headless.js'),
+      ])
+    return getCompiledInCommands()
+      .filter(
+        command =>
+          command.userInvocable !== false &&
+          // The session this list stands in for runs the CLI headlessly, so a
+          // command it could not execute must not be offered.
+          supportsHeadlessSlashCommand(command),
+      )
+      .map(command => ({
+        name: command.name,
+        description: command.description || '',
+        ...(command.argumentHint ? { argumentHint: command.argumentHint } : {}),
+      }))
+  } catch (error) {
+    // A fallback that throws would blank the whole slash menu, so degrade to
+    // disk-only skills — the behaviour this function was added to improve on.
+    // It must be loud, though: the failure mode is a menu that is quietly
+    // missing entries, which reads as "that command does not exist".
+    console.warn(
+      `[skills] built-in slash commands unavailable, listing disk skills only: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    )
+    return []
+  }
+}
+
+export async function listSkillSlashCommands(
+  cwd?: string,
+  options: {
+    /**
+     * Include the commands compiled into the binary. Only correct while no CLI
+     * has spoken for the session: this process evaluates each command's
+     * availability against its own state, which is close to the CLI's but not
+     * identical, so once the real list arrives it must win outright rather than
+     * be topped up with guesses.
+     */
+    includeCompiledIn?: boolean
+  } = {},
+): Promise<SkillSlashCommand[]> {
   const requestedCwd = cwd || getCwd()
-  const [skills, legacyCommands] = await Promise.all([
+  const [skills, legacyCommands, compiledInCommands] = await Promise.all([
     collectAllSkills(requestedCwd),
     collectLegacySlashCommands(requestedCwd),
+    options.includeCompiledIn === false
+      ? Promise.resolve([])
+      : collectCompiledInSlashCommands(),
   ])
 
   // Same precedence the CLI loader applies, so the composer menu and the
@@ -468,6 +525,14 @@ export async function listSkillSlashCommands(cwd?: string): Promise<SkillSlashCo
   }
 
   for (const command of legacyCommands) {
+    if (!byName.has(command.name)) {
+      byName.set(command.name, { command, flavor: undefined })
+    }
+  }
+
+  // Last, and only to fill gaps: a same-named skill on disk is what the CLI
+  // would actually run, so it keeps the entry.
+  for (const command of compiledInCommands) {
     if (!byName.has(command.name)) {
       byName.set(command.name, { command, flavor: undefined })
     }

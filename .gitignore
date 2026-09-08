@@ -100,3 +100,6 @@ graphify-out/
 desktop/plugin-seed/
 
 .learnings/
+
+# Computer Use native helper build output (SwiftPM)
+native/cu-helper/.build/

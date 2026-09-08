@@ -1743,9 +1743,9 @@ export class ConversationService {
       // no completion (#766: "卡住" with slowly growing tokens). This independent
       // cap frees such a stream after a fixed duration regardless of trickle.
       CLAUDE_STREAM_MAX_DURATION_MS: cleanEnv.CLAUDE_STREAM_MAX_DURATION_MS || '600000',
-      // A local tool call should finish generating its JSON arguments quickly.
-      // Bound this separately from the full response so a truncated, continuously
-      // streaming Write payload cannot occupy the session for the full 10 minutes.
+      // Abort a local tool call when its JSON arguments stop making progress.
+      // Healthy input_json_delta events reset this budget; the independent full
+      // response cap above still bounds a stream that trickles forever.
       CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS:
         cleanEnv.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS || '120000',
       // Time-to-first-token budget: how long to wait for the FIRST streamed

@@ -36,6 +36,12 @@ export type TelegramStreamingUpdate = {
   activeChunk: string
 }
 
+export type TelegramStreamingChunk = {
+  text: string
+  remainder: string
+  consumedLength: number
+}
+
 export function planTelegramStreamingUpdate(
   currentText: string,
   deltaText: string,
@@ -50,9 +56,9 @@ export function planTelegramStreamingUpdate(
   let remaining = fullText
 
   while (formatTelegramOutboundText(remaining).length > limit) {
-    const [sealed, rest] = splitOneStreamingChunk(remaining, limit)
-    sealedChunks.push(sealed)
-    remaining = rest
+    const chunk = splitTelegramStreamingChunk(remaining, limit)
+    sealedChunks.push(chunk.text)
+    remaining = chunk.remainder
 
     if (!remaining) break
   }
@@ -60,7 +66,10 @@ export function planTelegramStreamingUpdate(
   return { sealedChunks, activeChunk: remaining }
 }
 
-function splitOneStreamingChunk(text: string, limit: number): [string, string] {
+export function splitTelegramStreamingChunk(
+  text: string,
+  limit: number,
+): TelegramStreamingChunk {
   const roughLimit = Math.min(limit, text.length)
   const candidates = [
     text.lastIndexOf('\n\n', roughLimit),
@@ -73,20 +82,36 @@ function splitOneStreamingChunk(text: string, limit: number): [string, string] {
     const splitAt = includeDelimiter(text, candidate)
     const sealed = text.slice(0, splitAt).trimEnd()
     if (sealed && formatTelegramOutboundText(sealed).length <= limit) {
-      return [sealed, text.slice(splitAt).trimStart()]
+      return buildStreamingChunk(text, sealed, splitAt)
     }
   }
 
   const chunks = splitMessage(formatTelegramOutboundText(text), limit)
   const firstFormattedChunk = chunks[0] ?? text.slice(0, limit)
   if (firstFormattedChunk.length < text.length && text.startsWith(firstFormattedChunk)) {
-    return [firstFormattedChunk.trimEnd(), text.slice(firstFormattedChunk.length).trimStart()]
+    return buildStreamingChunk(text, firstFormattedChunk.trimEnd(), firstFormattedChunk.length)
   }
 
   const splitAt = Math.max(1, Math.min(limit, text.length))
-  return [text.slice(0, splitAt).trimEnd(), text.slice(splitAt).trimStart()]
+  return buildStreamingChunk(text, text.slice(0, splitAt).trimEnd(), splitAt)
 }
 
 function includeDelimiter(text: string, splitAt: number): number {
   return text[splitAt] === '\n' || text[splitAt] === '.' ? splitAt + 1 : splitAt
+}
+
+function buildStreamingChunk(
+  source: string,
+  text: string,
+  splitAt: number,
+): TelegramStreamingChunk {
+  let consumedLength = splitAt
+  while (consumedLength < source.length && /\s/.test(source[consumedLength]!)) {
+    consumedLength += 1
+  }
+  return {
+    text,
+    remainder: source.slice(consumedLength),
+    consumedLength,
+  }
 }

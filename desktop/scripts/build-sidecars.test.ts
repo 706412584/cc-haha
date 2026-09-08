@@ -8,6 +8,7 @@ import path, { join as joinPath } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 import {
+  ADAPTER_FLAGS,
   reserveLocalPort,
   resolveHostTriple,
   resolveSidecarExecutable,
@@ -688,4 +689,101 @@ describe.skipIf(!compiledSidecarSmokeEnabled)('compiled sidecar local-index smok
 
     expect(await stat(rootDir).then(() => true, () => false)).toBe(false)
   }, Math.max(90_000, compiledSidecarSmokeStarts * 10_000))
+})
+
+describe('build-sidecars cu-helper macOS gating', () => {
+  it('guards the cu-helper build behind a darwin platform check so Windows/Linux skip it', () => {
+    const source = readBuildScript()
+    // The cu-helper build entrypoint must be wrapped in a `process.platform === 'darwin'`
+    // guard, so non-macOS sidecar builds keep using the Python helper instead of
+    // attempting a macOS-only Swift build.
+    const guarded = source.match(
+      /if \(process\.platform === 'darwin' && cuHelperArch\) \{\s*await buildCuHelper\(cuHelperArch\)\s*\}/,
+    )
+    expect(guarded).not.toBeNull()
+  })
+
+  it('invokes native/cu-helper/build.sh from the cu-helper build step', () => {
+    const source = readBuildScript()
+    expect(source).toMatch(/'native',\s*'cu-helper',\s*'build\.sh'/)
+    expect(source).toContain('env: createCuHelperBuildEnv(targetTriple, process.env)')
+  })
+
+  it('copies the cu-helper binary and its resource bundle into the binaries dir', () => {
+    const source = readBuildScript()
+    // Both the bare binary AND the SwiftPM resource bundle must be copied, or the
+    // LensSequence overlay assets fail to load at runtime via Bundle.module.
+    expect(source).toContain('cu-helper_cc-haha-computer-use.bundle')
+    expect(source).toMatch(/binariesDir,\s*'cc-haha-computer-use'/)
+  })
+
+  it('does NOT ad-hoc re-sign cu-helper (would rotate its stable TCC identity)', () => {
+    const source = readBuildScript()
+    // adHocSignMacBinary must only be applied to the bun-compiled sidecar, never
+    // to cu-helper (build.sh already signs it with a stable hardened-runtime identity).
+    const buildCuHelperBody = source.slice(source.indexOf('async function buildCuHelper()'))
+    expect(buildCuHelperBody).not.toContain('adHocSignMacBinary')
+  })
+})
+
+/**
+ * The adapters mode is the one launcher path no unit test can reach: nothing
+ * imports `claude-sidecar.ts`, and its module body runs `runAdapters` before
+ * the rest of the file is evaluated. A `const` declared below that call sits in
+ * its temporal dead zone, which crashed every adapter sidecar in the packaged
+ * app while every other check stayed green — so this exercises the real binary.
+ */
+describe.skipIf(!compiledSidecarSmokeEnabled)('compiled sidecar adapters mode', () => {
+  async function runAdaptersMode(args: string[]): Promise<{ code: number | null; output: string }> {
+    const desktopRoot = path.resolve(import.meta.dirname, '..')
+    const repoRoot = path.resolve(import.meta.dirname, '../..')
+    const executable = resolveSidecarExecutable(desktopRoot, resolveHostTriple())
+    await stat(executable)
+
+    // An isolated HOME/CLAUDE_CONFIG_DIR: the launcher reads adapters.json, and
+    // this must never see the developer's real credentials.
+    const rootDir = await mkdtemp(joinPath(tmpdir(), 'cc-haha-adapters-smoke-'))
+    try {
+      const child = spawn(executable, ['adapters', '--app-root', repoRoot, ...args], {
+        env: {
+          ...process.env,
+          HOME: rootDir,
+          USERPROFILE: rootDir,
+          CLAUDE_CONFIG_DIR: joinPath(rootDir, '.claude'),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }) as ChildProcessWithoutNullStreams
+
+      let output = ''
+      child.stdout.on('data', (chunk) => { output += String(chunk) })
+      child.stderr.on('data', (chunk) => { output += String(chunk) })
+
+      const code = await new Promise<number | null>((resolve) => {
+        child.on('exit', (exitCode) => resolve(exitCode))
+      })
+      return { code, output }
+    } finally {
+      await rm(rootDir, { recursive: true, force: true })
+    }
+  }
+
+  it('recognises every adapter flag and skips the ones without credentials', async () => {
+    const { code, output } = await runAdaptersMode([...ADAPTER_FLAGS])
+
+    // Each flag must be reported by name: one the launcher does not know would
+    // fall through to the "ignoring unknown arg" branch instead.
+    for (const flag of ADAPTER_FLAGS) {
+      expect(output).toContain(`${flag} requested but`)
+    }
+    expect(output).not.toContain('ignoring unknown arg')
+    expect(output).toContain('no adapter could be started')
+    expect(code).toBe(1)
+  }, 60_000)
+
+  it('rejects an invocation with no adapter flag at all', async () => {
+    const { code, output } = await runAdaptersMode([])
+
+    expect(output).toContain('must enable at least one of')
+    expect(code).toBe(2)
+  }, 60_000)
 })

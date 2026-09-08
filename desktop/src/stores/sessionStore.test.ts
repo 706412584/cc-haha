@@ -128,6 +128,33 @@ describe('sessionStore', () => {
     expect(listMock).toHaveBeenCalledOnce()
   })
 
+  it('retains a locally created session until the refreshed list has observed it', async () => {
+    const existing = makeSession('session-existing', '2026-05-07T00:00:00.000Z')
+    const created = {
+      ...makeSession('session-created', '2026-05-07T00:00:01.000Z'),
+      messageCount: 0,
+      title: 'New Session',
+    }
+    createMock.mockResolvedValue({ sessionId: created.id, workDir: created.workDir })
+    listMock
+      .mockResolvedValueOnce({ sessions: [existing], total: 1 })
+      .mockResolvedValueOnce({ sessions: [created, existing], total: 2 })
+      .mockResolvedValueOnce({ sessions: [existing], total: 1 })
+
+    await useSessionStore.getState().createSession(created.workDir)
+    await delay(0)
+
+    expect(useSessionStore.getState().sessions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: created.id, workDir: created.workDir }),
+    ]))
+
+    await useSessionStore.getState().fetchSessions()
+    await useSessionStore.getState().fetchSessions()
+
+    expect(useSessionStore.getState().sessions.map((session) => session.id))
+      .toEqual([existing.id])
+  })
+
   it('keeps an optimistic local title when a background refresh still returns a placeholder', async () => {
     const refresh = createDeferred<{
       sessions: Array<{

@@ -12,14 +12,13 @@ import { access, readFile, mkdir, writeFile, rm } from 'fs/promises'
 import { createHash } from 'crypto'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import type { CuPermissionRequest } from '../../vendor/computer-use-mcp/types.js'
-import { computerUseApprovalService } from '../services/computerUseApprovalService.js'
 import {
   detectPythonRuntime,
   getPythonUnavailableMessage,
   isPythonVersionAtLeast,
 } from './computer-use-python.js'
 import { buildPipInstallAttempts } from '../../utils/computerUse/pipInstall.js'
+import { diagnosticsService } from '../services/diagnosticsService.js'
 import {
   DEFAULT_DESKTOP_GRANT_FLAGS,
   getComputerUseConfigPath,
@@ -28,13 +27,19 @@ import {
   normalizePythonPath,
   saveStoredComputerUseConfig,
 } from '../../utils/computerUse/preauthorizedConfig.js'
-// Embed helper scripts at compile time so they're available in bundled mode
-// @ts-ignore — Bun text import
-import MAC_HELPER_CONTENT from '../../../runtime/mac_helper.py' with { type: 'text' }
+import {
+  callCuHelper,
+  isMacosComputerUseRuntimeSupported,
+  resolveLaunchableCuHelperBinary,
+} from '../../utils/computerUse/cuHelperBridge.js'
+// Embed the runtime scripts at compile time so bundled mode has them without
+// shipping loose files. Windows only: macOS drives Computer Use through the
+// signed native `cu-helper` daemon, and `helperBridge` refuses to fall back to
+// Python there, so a macOS helper script would be dead weight in the binary.
 // @ts-ignore — Bun text import
 import WIN_HELPER_CONTENT from '../../../runtime/win_helper.py' with { type: 'text' }
 // @ts-ignore — Bun text import
-import REQUIREMENTS_DARWIN from '../../../runtime/requirements.txt' with { type: 'text' }
+import WIN_CURSOR_BADGE_CONTENT from '../../../runtime/win_cursor_badge.py' with { type: 'text' }
 // @ts-ignore — Bun text import
 import REQUIREMENTS_WIN32 from '../../../runtime/requirements-win.txt' with { type: 'text' }
 
@@ -50,9 +55,10 @@ const installStampPath = join(runtimeStateRoot, 'requirements.sha256')
 const baseInterpreterMarkerPath = join(runtimeStateRoot, 'venv-base-interpreter.txt')
 const MIN_PYTHON_MAJOR = 3
 const MIN_PYTHON_MINOR = 9
+export const MIN_MACOS_COMPUTER_USE_VERSION = '14.4'
 
 const isWindows = process.platform === 'win32'
-const REQUIREMENTS_CONTENT = isWindows ? REQUIREMENTS_WIN32 : REQUIREMENTS_DARWIN
+const REQUIREMENTS_CONTENT = REQUIREMENTS_WIN32
 
 function getPythonCommandEnv(): Record<string, string> | undefined {
   if (!isWindows) return undefined
@@ -69,7 +75,12 @@ function getRequirementsPath(): string {
 }
 
 function getHelperFileName(): string {
-  return isWindows ? 'win_helper.py' : 'mac_helper.py'
+  return 'win_helper.py'
+}
+
+/** The agent-activity badge runs as its own process, so it ships separately. */
+function getCursorBadgePath(): string {
+  return join(runtimeStateRoot, 'win_cursor_badge.py')
 }
 
 function getHelperPath(): string {
@@ -147,26 +158,47 @@ export async function runPipInstallWithFallback(
 }
 
 /**
- * Ensure runtime source files (requirements.txt, mac_helper.py) exist in
- * ~/.claude/.runtime/. In dev mode they are copied from the project's
- * runtime/ directory; in bundled mode requirements.txt is written from the
- * embedded constant and mac_helper.py is copied from the project dir (if
- * available) or skipped (it will already have been extracted on a prior run).
+ * Ensure the Windows runtime files exist in ~/.claude/.runtime/.
+ *
+ * All three are written from constants embedded at compile time, so dev and
+ * bundled mode behave identically and a stale copy from an earlier version is
+ * always overwritten rather than left in place.
+ *
+ * Windows only, in the same sense as the imports above: macOS never reaches
+ * the Python path.
  */
 async function ensureRuntimeFiles(): Promise<void> {
   await mkdir(runtimeStateRoot, { recursive: true })
 
-  // requirements.txt — always write from embedded constant (authoritative)
   await writeFile(getRequirementsPath(), REQUIREMENTS_CONTENT, 'utf8')
-
-  // helper script — write the platform-appropriate version
-  const helperContent = isWindows ? WIN_HELPER_CONTENT : MAC_HELPER_CONTENT
-  await writeFile(getHelperPath(), helperContent, 'utf8')
+  await writeFile(getHelperPath(), WIN_HELPER_CONTENT, 'utf8')
+  // Ships alongside the helper because the helper is a stateless one-shot CLI
+  // and cannot own a window across actions; the badge needs its own process.
+  await writeFile(getCursorBadgePath(), WIN_CURSOR_BADGE_CONTENT, 'utf8')
 }
 
 type EnvStatus = {
   platform: string
   supported: boolean
+  engine: 'macos-native' | 'windows-compat' | 'unsupported'
+  systemVersion: string | null
+  arch: string
+  /**
+   * Native cu-helper engine availability. `available` is true only on macOS
+   * AND when the Swift `cu-helper` binary resolves. The desktop UI branches on
+   * this to drop the Python setup flow in favor of the native permission card.
+   */
+  cuHelper: {
+    available: boolean
+    supported: boolean
+    minimumMacosVersion: typeof MIN_MACOS_COMPUTER_USE_VERSION
+    reason:
+      | 'unsupported_platform'
+      | 'system_version_unknown'
+      | 'os_too_old'
+      | 'helper_missing'
+      | null
+  }
   python: {
     installed: boolean
     version: string | null
@@ -185,12 +217,358 @@ type EnvStatus = {
   permissions: {
     accessibility: boolean | null
     screenRecording: boolean | null
+    error: string | null
   }
 }
 
-async function checkStatus(): Promise<EnvStatus> {
-  const platform = process.platform
-  const supported = platform === 'darwin' || platform === 'win32'
+type ComputerUseCapability = Pick<EnvStatus, 'supported' | 'engine'> & {
+  cuHelper: EnvStatus['cuHelper']
+}
+
+export function isVersionAtLeast(version: string, minimum: string): boolean {
+  const parse = (value: string) => value.split('.').map((part) => {
+    const parsed = Number.parseInt(part, 10)
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+  })
+  const actual = parse(version)
+  const floor = parse(minimum)
+  const length = Math.max(actual.length, floor.length)
+  for (let index = 0; index < length; index += 1) {
+    const left = actual[index] ?? 0
+    const right = floor[index] ?? 0
+    if (left !== right) return left > right
+  }
+  return true
+}
+
+/**
+ * Choose the implementation from platform/OS eligibility first. A missing
+ * native helper is a runtime failure on the native path, never a reason to
+ * fall back to the obsolete macOS Python page.
+ */
+export function resolveComputerUseCapability(
+  platform: string,
+  systemVersion: string | null,
+  helperPresent: boolean,
+  kernelVersionEligible = false,
+): ComputerUseCapability {
+  const baseHelper = {
+    minimumMacosVersion: MIN_MACOS_COMPUTER_USE_VERSION,
+  } as const
+  if (platform === 'win32') {
+    return {
+      supported: true,
+      engine: 'windows-compat',
+      cuHelper: {
+        ...baseHelper,
+        available: false,
+        supported: false,
+        reason: 'unsupported_platform',
+      },
+    }
+  }
+  if (platform !== 'darwin') {
+    return {
+      supported: false,
+      engine: 'unsupported',
+      cuHelper: {
+        ...baseHelper,
+        available: false,
+        supported: false,
+        reason: 'unsupported_platform',
+      },
+    }
+  }
+  if (!systemVersion && !kernelVersionEligible) {
+    return {
+      supported: false,
+      engine: 'unsupported',
+      cuHelper: {
+        ...baseHelper,
+        available: false,
+        supported: false,
+        reason: 'system_version_unknown',
+      },
+    }
+  }
+  if (systemVersion && !isVersionAtLeast(systemVersion, MIN_MACOS_COMPUTER_USE_VERSION)) {
+    return {
+      supported: false,
+      engine: 'unsupported',
+      cuHelper: {
+        ...baseHelper,
+        available: false,
+        supported: false,
+        reason: 'os_too_old',
+      },
+    }
+  }
+  return {
+    supported: true,
+    engine: 'macos-native',
+    cuHelper: {
+      ...baseHelper,
+      available: helperPresent,
+      supported: true,
+      reason: helperPresent ? null : 'helper_missing',
+    },
+  }
+}
+
+/**
+ * macOS permission snapshot result shape from `cu-helper check_permissions`
+ * (Permissions.snapshot()). Booleans only — `screenRecording` may be reported
+ * as a boolean by the snapshot; we coerce anything missing to null.
+ */
+type CuHelperPermissions = {
+  accessibility?: boolean
+  screenRecording?: boolean
+}
+
+/**
+ * True only on macOS AND when the native `cu-helper` can be launched from its
+ * canonical installation. This also verifies/install-repairs the packaged
+ * helper instead of reporting a nested app-bundle binary as healthy.
+ */
+function isCuHelperAvailableForServer(): boolean {
+  return process.platform === 'darwin' && resolveLaunchableCuHelperBinary() !== null
+}
+
+/**
+ * Read macOS Accessibility / Screen Recording status via the native engine,
+ * with NO Python prerequisite. Returns nulls on any failure so the caller can
+ * surface "unknown" instead of throwing.
+ */
+export async function checkCuHelperPermissions(
+  // Injected the same way `callCuHelper` injects its own exec, so the failure
+  // branch below is reachable from a test without a real helper binary.
+  call: typeof callCuHelper = callCuHelper,
+): Promise<{
+  accessibility: boolean | null
+  screenRecording: boolean | null
+  error: string | null
+}> {
+  try {
+    const result = await call<CuHelperPermissions>('check_permissions')
+    return {
+      accessibility: result.accessibility ?? null,
+      screenRecording: result.screenRecording ?? null,
+      error: null,
+    }
+  } catch (error) {
+    // Nulls reach the settings page as a permanent "checking…" — the UI cannot
+    // tell "not probed yet" from "probe failed". Swallowing the reason silently
+    // once cost a long investigation to rediscover that the shipped sidecar had
+    // been re-signed and the helper was answering `unauthorized_client`.
+    //
+    // This is an error, not a warning: the caller only gets here when the helper
+    // binary IS present, so the user did nothing wrong and the check still did
+    // not complete. A helper that is merely un-granted answers with `false`.
+    void diagnosticsService.recordEvent({
+      type: 'computer_use_permission_probe_failed',
+      severity: 'error',
+      summary:
+        error instanceof Error
+          ? error.message
+          : 'cu-helper check_permissions failed',
+      details: {
+        command: 'check_permissions',
+        // `unauthorized_client` means the process chain failed attestation —
+        // usually a signing-identity mismatch somewhere in helper -> sidecar
+        // -> desktop, not a missing OS grant.
+        hint: 'permissions stay unknown until this call succeeds',
+      },
+    })
+    return {
+      accessibility: null,
+      screenRecording: null,
+      error: error instanceof Error
+        ? error.message
+        : 'cu-helper check_permissions failed',
+    }
+  }
+}
+
+/**
+ * List installed macOS apps via the native engine (no Python prerequisite).
+ * Mirrors the Python list_installed_apps shape but drops any icon field so the
+ * picker payload stays small. Returns [] on failure.
+ */
+async function listInstalledAppsViaCuHelper(): Promise<
+  { bundleId: string; displayName: string; path: string }[]
+> {
+  try {
+    const apps = await callCuHelper<
+      { bundleId: string; displayName: string; path: string }[]
+    >('list_installed_apps')
+    if (!Array.isArray(apps)) return []
+    return apps.map((app) => ({
+      bundleId: app.bundleId,
+      displayName: app.displayName,
+      path: app.path,
+    }))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Spawn the native permission card (`cu-helper request-access`) and await the
+ * single stdout snapshot line the card prints when the user closes it
+ * (PermissionCard.swift windowWillClose -> `{ok:true,result:{accessibility,
+ * screenRecording}}`). Unlike the fire-and-forget nativePermissionCard.ts in
+ * the CLI process, the settings page WANTS the post-close snapshot, so we read
+ * stdout here. Resolves only when the window closes (hence the caller uses a
+ * long client timeout). Returns nulls off macOS / when the binary is missing.
+ */
+async function openNativePermissionCard(): Promise<{
+  ok: boolean
+  reason?: string
+  accessibility: boolean | null
+  screenRecording: boolean | null
+}> {
+  if (process.platform !== 'darwin') {
+    return { ok: false, reason: 'unsupported', accessibility: null, screenRecording: null }
+  }
+  // Launch from the standalone-installed helper so the card drags the same `.app`
+  // the daemon runs from (its own Screen Recording subject). See cuHelperInstall.ts.
+  const bin = resolveLaunchableCuHelperBinary()
+  if (!bin) {
+    return { ok: false, reason: 'helper-missing', accessibility: null, screenRecording: null }
+  }
+
+  // `request-access` is its OWN process mode (not a `--payload` CLI command):
+  // it owns an NSApplication run loop and blocks until the card window closes,
+  // then prints exactly one `{ok,result}` line. runCommand spawns + reads
+  // stdout + awaits exit, which is exactly what we need.
+  const result = await runCommand(bin, ['request-access'])
+  return resolvePermissionCardCommandResult(result)
+}
+
+export function resolvePermissionCardCommandResult(result: {
+  ok: boolean
+  stdout: string
+  stderr: string
+  code: number
+}): {
+  ok: boolean
+  reason?: string
+  accessibility: boolean | null
+  screenRecording: boolean | null
+} {
+  if (!result.ok) {
+    return {
+      ok: false,
+      reason: result.stderr || `permission card exited with code ${result.code}`,
+      accessibility: null,
+      screenRecording: null,
+    }
+  }
+
+  // Parse the final snapshot line. The card always exits 0; tolerate trailing
+  // log chatter by scanning lines for the last valid JSON envelope.
+  const perms = parsePermissionSnapshot(result.stdout)
+  if (perms.accessibility === null && perms.screenRecording === null) {
+    return {
+      ok: false,
+      reason: 'permission card returned no permission snapshot',
+      accessibility: null,
+      screenRecording: null,
+    }
+  }
+  return { ok: true, accessibility: perms.accessibility, screenRecording: perms.screenRecording }
+}
+
+/**
+ * Extract `{accessibility, screenRecording}` from the cu-helper card's stdout.
+ * Scans from the LAST line backwards for a parseable `{ok,result}` envelope so
+ * any incidental earlier output is ignored. Returns nulls when none is found.
+ */
+export function parsePermissionSnapshot(stdout: string): {
+  accessibility: boolean | null
+  screenRecording: boolean | null
+} {
+  const lines = stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const parsed = JSON.parse(lines[i]) as {
+        ok?: boolean
+        result?: CuHelperPermissions
+      }
+      if (parsed.ok && parsed.result) {
+        return {
+          accessibility: parsed.result.accessibility ?? null,
+          screenRecording: parsed.result.screenRecording ?? null,
+        }
+      }
+    } catch {
+      // not JSON — keep scanning earlier lines
+    }
+  }
+  return { accessibility: null, screenRecording: null }
+}
+
+async function detectMacosProductVersion(): Promise<string | null> {
+  if (process.platform !== 'darwin') return null
+  const result = await runCommand('/usr/bin/sw_vers', ['-productVersion'])
+  return result.ok && result.stdout ? result.stdout : null
+}
+
+type CheckStatusDependencies = {
+  platform?: string
+  arch?: string
+  detectMacosProductVersion?: () => Promise<string | null>
+  isMacosRuntimeSupported?: (platform: string) => boolean
+  isCuHelperAvailable?: () => boolean
+  checkPermissions?: typeof checkCuHelperPermissions
+}
+
+export async function checkStatus(
+  dependencies: CheckStatusDependencies = {},
+): Promise<EnvStatus> {
+  const platform = dependencies.platform ?? process.platform
+  const arch = dependencies.arch ?? process.arch
+  const systemVersion = platform === 'darwin'
+    ? await (dependencies.detectMacosProductVersion ?? detectMacosProductVersion)()
+    : null
+  const kernelVersionEligible = platform === 'darwin'
+    && (dependencies.isMacosRuntimeSupported ?? isMacosComputerUseRuntimeSupported)(platform)
+  const macosEligible = platform === 'darwin'
+    && (systemVersion !== null
+      ? isVersionAtLeast(systemVersion, MIN_MACOS_COMPUTER_USE_VERSION)
+      : kernelVersionEligible)
+  const helperPresent = macosEligible
+    && (dependencies.isCuHelperAvailable ?? isCuHelperAvailableForServer)()
+  const capability = resolveComputerUseCapability(
+    platform,
+    systemVersion,
+    helperPresent,
+    kernelVersionEligible,
+  )
+  const supported = capability.supported
+
+  // macOS has a self-contained native runtime. Its status must never wait for
+  // a stale custom Python executable or expose the retired setup flow.
+  if (platform === 'darwin') {
+    const permissions = capability.cuHelper.available
+      ? await (dependencies.checkPermissions ?? checkCuHelperPermissions)()
+      : { accessibility: null, screenRecording: null, error: null }
+    return {
+      platform,
+      supported,
+      engine: capability.engine,
+      systemVersion,
+      arch,
+      cuHelper: capability.cuHelper,
+      python: { installed: false, version: null, path: null, source: null, error: null },
+      venv: { created: false, path: venvRoot },
+      dependencies: { installed: false, requirementsFound: false },
+      permissions,
+    }
+  }
 
   // Check venv — different paths on Windows vs Unix
   const venvPython = isWindows
@@ -232,12 +610,23 @@ async function checkStatus(): Promise<EnvStatus> {
     }
   }
 
-  // Check macOS permissions without triggering a system prompt. The helper
-  // uses preflight + visible-window metadata as a passive fallback because
-  // plain preflight can misreport child processes launched by the desktop app.
+  // Check OS permissions without triggering a system prompt.
   let accessibility: boolean | null = null
   let screenRecording: boolean | null = null
-  if (supported && effectiveVenvCreated && depsInstalled) {
+
+  // macOS-native path: when the Swift cu-helper is present, report permissions
+  // straight from its `check_permissions` snapshot, with NO Python prerequisite.
+  // This is what lets the new settings UI show 辅助功能 / 屏幕录制 status even
+  // before (or entirely without) a Python venv.
+  const cuHelperAvailable = capability.cuHelper.available
+  if (cuHelperAvailable) {
+    const perms = await checkCuHelperPermissions()
+    accessibility = perms.accessibility
+    screenRecording = perms.screenRecording
+  } else if (capability.engine === 'windows-compat' && effectiveVenvCreated && depsInstalled) {
+    // Python path (Windows, or macOS without cu-helper). The helper uses
+    // preflight + visible-window metadata as a passive fallback because plain
+    // preflight can misreport child processes launched by the desktop app.
     try { await ensureRuntimeFiles() } catch {}
     const helperPath = getHelperPath()
     if (await pathExists(helperPath)) {
@@ -257,6 +646,10 @@ async function checkStatus(): Promise<EnvStatus> {
   return {
     platform,
     supported,
+    engine: capability.engine,
+    systemVersion,
+    arch,
+    cuHelper: capability.cuHelper,
     python: {
       installed: pythonRuntime.installed,
       version: pythonRuntime.version,
@@ -266,7 +659,7 @@ async function checkStatus(): Promise<EnvStatus> {
     },
     venv: { created: effectiveVenvCreated, path: venvRoot },
     dependencies: { installed: depsInstalled, requirementsFound: requirementsFound || true },
-    permissions: { accessibility, screenRecording },
+    permissions: { accessibility, screenRecording, error: null },
   }
 }
 
@@ -308,6 +701,16 @@ export async function installSetupDependencies(
 
 async function runSetup(): Promise<SetupResult> {
   const steps: SetupResult['steps'] = []
+  if (process.platform === 'darwin') {
+    return {
+      success: false,
+      steps: [{
+        name: 'native_runtime',
+        ok: false,
+        message: 'Computer Use on macOS uses the built-in native runtime and does not require Python setup.',
+      }],
+    }
+  }
   const unsupportedPlatformStep = getUnsupportedComputerUsePlatformStep(process.platform)
   if (unsupportedPlatformStep) {
     return { success: false, steps: [unsupportedPlatformStep] }
@@ -505,13 +908,8 @@ export type ComputerUseConfigPatch = {
   pythonPath?: string | null
 }
 
-type RequestAccessBody = {
-  sessionId?: string
-  request?: CuPermissionRequest
-}
-
 const DEFAULT_CONFIG: ComputerUseConfig = {
-  enabled: true,
+  enabled: false,
   authorizedApps: [],
   grantFlags: DEFAULT_DESKTOP_GRANT_FLAGS,
   pythonPath: null,
@@ -523,6 +921,10 @@ async function loadConfig(): Promise<ComputerUseConfig> {
 
 async function saveConfig(config: ComputerUseConfig): Promise<void> {
   await saveStoredComputerUseConfig(config)
+  // Deliberately no cache invalidation here. This runs in the SERVER process;
+  // the `computer-use` skill's gate and the memoized command list both live in
+  // the CLI child process, so clearing anything from here reaches nothing.
+  // The CLI picks the change up by watching this file — see skillChangeDetector.
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -634,6 +1036,18 @@ export async function openComputerUseSettings(
 }
 
 async function listInstalledApps(): Promise<{ bundleId: string; displayName: string; path: string }[]> {
+  // macOS: enumerate the application roots directly. This needs neither a
+  // Python venv nor a running helper, so the app picker populates on a cold
+  // install — before Computer Use has ever been granted anything.
+  if (process.platform === 'darwin') {
+    const apps = await listInstalledMacApps()
+    if (apps.length > 0) return apps
+    // The native helper is the only macOS fallback. Never cross into the
+    // retired Python runtime when native app enumeration is temporarily empty.
+    if (isCuHelperAvailableForServer()) return listInstalledAppsViaCuHelper()
+    return []
+  }
+
   const helperPath = getHelperPath()
   const pythonBin = isWindows
     ? join(venvRoot, 'Scripts', 'python.exe')
@@ -654,13 +1068,62 @@ async function listInstalledApps(): Promise<{ bundleId: string; displayName: str
   }
 }
 
+/**
+ * Map a bundle id to its installed bundle path.
+ *
+ * Enumerating applications walks several directory trees, and the picker asks
+ * for one icon per visible row, so the mapping is cached briefly. The window is
+ * short enough that an app installed while the picker is open still appears on
+ * the next open, and long enough that a scroll through hundreds of rows scans
+ * once rather than once per row.
+ */
+const APP_PATH_CACHE_TTL_MS = 30_000
+let appPathCache: { at: number; byBundleId: Map<string, string> } | null = null
+let appPathScan: Promise<Map<string, string>> | null = null
+
+export async function resolveInstalledAppPath(
+  bundleId: string,
+  // Injected so a test can count scans without walking the real disk.
+  lister: () => Promise<{ bundleId: string; path: string }[]> = listInstalledApps,
+): Promise<string | null> {
+  const cached = appPathCache
+  if (cached && Date.now() - cached.at <= APP_PATH_CACHE_TTL_MS) {
+    return cached.byBundleId.get(bundleId) ?? null
+  }
+
+  // Share one scan across concurrent callers. Opening the picker fires an icon
+  // request per visible row at once, and a plain check-then-fill cache is still
+  // cold for all of them — each would launch its own enumeration of every
+  // application root.
+  if (!appPathScan) {
+    appPathScan = (async () => {
+      try {
+        const apps = await lister()
+        const byBundleId = new Map(apps.map(app => [app.bundleId, app.path]))
+        appPathCache = { at: Date.now(), byBundleId }
+        return byBundleId
+      } finally {
+        appPathScan = null
+      }
+    })()
+  }
+
+  return (await appPathScan).get(bundleId) ?? null
+}
+
+/** Test hook: forget the bundle-id mapping between cases. */
+export function __resetInstalledAppPathCacheForTests(): void {
+  appPathCache = null
+  appPathScan = null
+}
+
 // ============================================================================
 // Route handler
 // ============================================================================
 
 export async function handleComputerUseApi(
   req: Request,
-  _url: URL,
+  url: URL,
   segments: string[],
 ): Promise<Response> {
   const action = segments[2]
@@ -679,6 +1142,39 @@ export async function handleComputerUseApi(
   if (action === 'apps' && req.method === 'GET') {
     const apps = await listInstalledApps()
     return Response.json({ apps })
+  }
+
+  // GET /api/computer-use/app-icon?bundleId=…&size=… — the app's own icon.
+  //
+  // The parameter is a bundle id, never a path: the server resolves it against
+  // the installed-app enumeration, so a caller cannot name an arbitrary file
+  // and have it rasterised and returned.
+  if (action === 'app-icon' && req.method === 'GET') {
+    if (process.platform !== 'darwin') {
+      return new Response('Not found', { status: 404 })
+    }
+    const bundleId = url.searchParams.get('bundleId')?.trim()
+    if (!bundleId) {
+      return Response.json({ error: 'bundleId is required' }, { status: 400 })
+    }
+
+    const appPath = await resolveInstalledAppPath(bundleId)
+    if (!appPath) return new Response('Not found', { status: 404 })
+
+    const size = normalizeIconSize(url.searchParams.get('size'))
+    const png = await readAppIconPng(appPath, size)
+    // A bundle with no icon is an ordinary outcome, not a failure — the row
+    // renders its letter placeholder when this 404s.
+    if (!png) return new Response('Not found', { status: 404 })
+
+    return new Response(png as unknown as BodyInit, {
+      headers: {
+        'Content-Type': 'image/png',
+        // Icons change only when an app is reinstalled; the server keeps its
+        // own cache too, this just stops the picker refetching while scrolling.
+        'Cache-Control': 'private, max-age=3600',
+      },
+    })
   }
 
   // GET /api/computer-use/authorized-apps — current authorized app config
@@ -784,27 +1280,27 @@ export async function handleComputerUseApi(
     return Response.json({ ok: true })
   }
 
-  if (action === 'request-access' && req.method === 'POST') {
-    try {
-      const body = (await req.json()) as RequestAccessBody
-      if (!body.sessionId || !body.request?.requestId) {
-        return Response.json(
-          { error: 'BAD_REQUEST', message: 'sessionId and request are required' },
-          { status: 400 },
-        )
-      }
+  // POST /api/computer-use/permission-card (alias: open-permission-card)
+  // macOS only: pop the native cu-helper authorization card and await its
+  // post-close snapshot. The promise resolves only when the user CLOSES the
+  // card, so the client uses a long timeout. No-op { ok:false, reason } off
+  // darwin or when the binary is missing.
+  if (
+    (action === 'permission-card' || action === 'open-permission-card') &&
+    req.method === 'POST'
+  ) {
+    const result = await openNativePermissionCard()
+    return Response.json(result)
+  }
 
-      const response = await computerUseApprovalService.requestApproval(
-        body.sessionId,
-        body.request,
-      )
-      return Response.json(response)
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Computer Use approval failed'
-      const status = message.includes('not connected') ? 409 : 500
-      return Response.json({ error: 'COMPUTER_USE_APPROVAL_FAILED', message }, { status })
-    }
+  if (action === 'request-access' && req.method === 'POST') {
+    return Response.json(
+      {
+        error: 'APP_AUTHORIZATION_REMOVED',
+        message: 'Per-application Computer Use authorization is no longer required.',
+      },
+      { status: 410 },
+    )
   }
 
   return Response.json(

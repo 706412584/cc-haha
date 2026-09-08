@@ -1,7 +1,7 @@
 {
   "name": "claude-code-desktop",
   "private": true,
-  "version": "0.5.65",
+  "version": "0.6.0",
   "description": "Desktop coding agent workbench for Code Council.",
   "homepage": "https://github.com/706412584/cc-haha",
   "author": {
@@ -48,7 +48,9 @@
       "entitlementsInherit": "build/entitlements.mac.inherit.plist",
       "signIgnore": [
         "/Contents/Frameworks/.+\\.(?:pak|bin|dat|nib)$",
-        "/Contents/Resources/.+\\.(?:asar|pak|bin|dat|icns|png|jpg|jpeg|gif|svg|ttf|woff|woff2)$"
+        "/Contents/Resources/.+\\.(?:asar|pak|bin|dat|icns|png|jpg|jpeg|gif|svg|ttf|woff|woff2)$",
+        "cc-haha-computer-use\\.app",
+        "claude-sidecar-[^/]+$"
       ],
       "notarize": true
     },

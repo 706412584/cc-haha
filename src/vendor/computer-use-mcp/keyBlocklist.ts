@@ -43,6 +43,24 @@ const CANONICAL_MODIFIER: Readonly<Record<string, string>> = {
   // both Force Quit.
   alt: "alt",
   option: "alt",
+  opt: "alt",
+};
+
+/**
+ * Non-modifier key aliases. Same purpose as CANONICAL_MODIFIER: a blocklist
+ * entry names one spelling, but callers reach the same physical key by several.
+ * `cmd+opt+esc` and `cmd+option+escape` are the same Force Quit chord.
+ *
+ * `backspace` is deliberately NOT mapped to `delete` — on Windows they are
+ * different keys, and Ctrl+Alt+Backspace is not the Secure Attention Sequence.
+ */
+const CANONICAL_KEY: Readonly<Record<string, string>> = {
+  esc: "escape",
+  spacebar: "space",
+  del: "delete",
+  forwarddelete: "delete",
+  forward_delete: "delete",
+  deletef: "delete",
 };
 
 /** Sort order for canonicals. ctrl < alt < shift < meta. */
@@ -88,7 +106,7 @@ function partitionKeys(seq: string): { mods: string[]; keys: string[] } {
     if (canonical !== undefined) {
       mods.push(canonical);
     } else {
-      keys.push(p);
+      keys.push(CANONICAL_KEY[p] ?? p);
     }
   }
   // Dedupe: "cmd+command+q" → "meta+q", not "meta+meta+q".
@@ -121,25 +139,73 @@ export function normalizeKeySequence(seq: string): string {
  * that falls through to false. Covers the click-modifier case where
  * `left_click(text="cmd")` is legitimate.
  */
+/** A blocklist entry split into the modifiers it needs and the key it fires. */
+interface BlockedChord {
+  mods: string[];
+  key: string;
+}
+
+/** Parse the canonical-form blocklist strings once, at module load. */
+function parseBlocklist(entries: ReadonlySet<string>): BlockedChord[] {
+  const chords: BlockedChord[] = [];
+  for (const entry of entries) {
+    const { mods, keys } = partitionKeys(entry);
+    // Every entry is "<mods…>+<one key>"; a modifier-only entry has no chord
+    // to fire and is skipped rather than silently matching everything.
+    if (keys.length === 1) chords.push({ mods, key: keys[0] });
+  }
+  return chords;
+}
+
+const BLOCKED_DARWIN_CHORDS = parseBlocklist(BLOCKED_DARWIN);
+const BLOCKED_WIN32_CHORDS = parseBlocklist(BLOCKED_WIN32);
+
+/**
+ * Split a request into the chords it will actually press.
+ *
+ * Two spellings collide here and both must work:
+ *   "cmd + q"                    → ONE chord (spaces padding a `+`)
+ *   "super+a cmd+opt+esc ctrl+v" → THREE chords (spaces separating them)
+ *
+ * Collapsing whitespace around `+` first disambiguates them: after that, any
+ * remaining whitespace is a chord separator.
+ */
+function splitChords(seq: string): string[] {
+  return seq
+    .replace(/\s*\+\s*/g, "+")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/**
+ * True if the sequence would fire a blocked OS shortcut.
+ *
+ * Matching is by SUBSET, not equality: a blocked chord fires whenever its
+ * modifiers are all held and its key is pressed, regardless of what else is
+ * held. `shift+cmd+tab` still switches apps, so `meta+tab` must catch it —
+ * exact-matching "shift+meta+tab" against the blocklist would let the extra
+ * modifier walk straight through the gate.
+ *
+ * Each non-modifier key is checked separately for the same reason: `cmd+q+a`
+ * presses Cmd, then Q (Cmd+Q fires right there), then A.
+ *
+ * A modifiers-only sequence ("cmd+shift", e.g. click modifiers) has no key to
+ * pair with and falls through to false.
+ */
 export function isSystemKeyCombo(
   seq: string,
   platform: "darwin" | "win32",
 ): boolean {
-  const blocklist = platform === "darwin" ? BLOCKED_DARWIN : BLOCKED_WIN32;
-  const { mods, keys } = partitionKeys(seq);
-  const prefix = mods.length > 0 ? mods.join("+") + "+" : "";
+  const blocklist =
+    platform === "darwin" ? BLOCKED_DARWIN_CHORDS : BLOCKED_WIN32_CHORDS;
 
-  // No non-modifier keys (e.g. "cmd+shift" as click-modifiers) — check the
-  // whole thing. Never matches (no blocklist entry is modifier-only) but
-  // keeps the contract simple: every call reaches a .has().
-  if (keys.length === 0) {
-    return blocklist.has(mods.join("+"));
-  }
-
-  // mods + each key. Any hit blocks the whole sequence.
-  for (const key of keys) {
-    if (blocklist.has(prefix + key)) {
-      return true;
+  for (const chord of splitChords(seq)) {
+    const { mods, keys } = partitionKeys(chord);
+    if (keys.length === 0) continue;
+    const held = new Set(mods);
+    for (const blocked of blocklist) {
+      if (!blocked.mods.every((mod) => held.has(mod))) continue;
+      if (keys.includes(blocked.key)) return true;
     }
   }
   return false;

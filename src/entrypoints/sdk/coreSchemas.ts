@@ -1506,7 +1506,21 @@ export const SDKSystemMessageSchema = lazySchema(() =>
     ),
     model: z.string(),
     permissionMode: PermissionModeSchema(),
-    slash_commands: z.array(z.string()),
+    // Widened, not replaced: a bare name stays valid, so every existing client
+    // keeps working. The object form carries the description the desktop slash
+    // menu renders — without it that menu shows command names with blank
+    // descriptions, since the desktop reads this list rather than the CLI's own
+    // typeahead source.
+    slash_commands: z.array(
+      z.union([
+        z.string(),
+        z.object({
+          name: z.string(),
+          description: z.string().optional(),
+          argumentHint: z.string().optional(),
+        }),
+      ]),
+    ),
     output_style: z.string(),
     skills: z.array(z.string()),
     plugins: z.array(

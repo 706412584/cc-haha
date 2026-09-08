@@ -14,4 +14,16 @@ describe('app mode restart lifecycle', () => {
 
     expect(handler).toContain('getServerRuntime().stopAll(true)')
   })
+
+  it('keeps the Electron host alive until graceful server shutdown finishes', () => {
+    const desktopDir = path.basename(process.cwd()) === 'desktop'
+      ? process.cwd()
+      : path.join(process.cwd(), 'desktop')
+    const source = readFileSync(path.join(desktopDir, 'electron', 'main.ts'), 'utf8')
+    const handler = source.match(/app\.on\('before-quit',[\s\S]*\n\}\)\s*$/)?.[0]
+
+    expect(handler).toContain('event.preventDefault()')
+    expect(handler).toContain('getServerRuntime().stopAllAndWait()')
+    expect(handler).toMatch(/stopAllAndWait\(\)[\s\S]*app\.quit\(\)/)
+  })
 })
