@@ -518,7 +518,7 @@ describe('TraceSession', () => {
     // fixed 1, which only holds on a machine fast enough to assert before the
     // first 20ms poll lands.
     await waitFor(() => expect(vi.mocked(sessionsApi.getTrace).mock.calls.length).toBeGreaterThanOrEqual(3))
-    expect(sessionsApi.getTraceCall.mock.calls.length).toBe(
+    expect(vi.mocked(sessionsApi.getTraceCall).mock.calls.length).toBe(
       vi.mocked(sessionsApi.getTrace).mock.calls.length,
     )
 
