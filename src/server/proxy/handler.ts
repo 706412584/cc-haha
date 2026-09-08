@@ -422,13 +422,6 @@ async function handleOpenaiChat(
   return Response.json(anthropicResponse)
 }
 
-function shouldUseDeepSeekReasoningCompat(baseUrl: string): boolean {
-  return (
-    /(^|[./-])deepseek([./-]|$)/i.test(baseUrl) ||
-    /(^|[./-])opencode\.ai([:/]|$)/i.test(baseUrl)
-  )
-}
-
 function shouldUseTextOnlyOpenAIChatContent(baseUrl: string, model: string): boolean {
   // DeepSeek's classic Chat endpoint accepts string content only.
   if (/(^|[./-])deepseek([./-]|$)/i.test(baseUrl)) return true
