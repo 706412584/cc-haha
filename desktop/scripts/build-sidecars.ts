@@ -72,7 +72,19 @@ console.log(`[build-sidecars] Built desktop sidecar for ${targetTriple} (${bunTa
 // identity, dropping the user's Accessibility + Screen Recording grants.
 const cuHelperArch = resolveCuHelperArch(targetTriple)
 if (process.platform === 'darwin' && cuHelperArch) {
-  await buildCuHelper(cuHelperArch)
+  // build.sh refuses to ad-hoc sign (a rotated/ad-hoc identity breaks the
+  // helper's TCC lineage), so without a stable identity the helper cannot be
+  // produced. Skip it for unsigned builds instead of failing the whole
+  // sidecar build — helperBridge falls back to an "unavailable" answer and
+  // the rest of the app ships. The signing lane keeps the hard requirement.
+  if (process.env.CC_HAHA_SIGN_IDENTITY) {
+    await buildCuHelper(cuHelperArch)
+  } else {
+    console.warn(
+      '[build-sidecars] CC_HAHA_SIGN_IDENTITY is not set — skipping the native cu-helper build. ' +
+      'Computer Use will be unavailable in this unsigned macOS build.',
+    )
+  }
 }
 
 async function stageHostRipgrepForOfflineBuild() {

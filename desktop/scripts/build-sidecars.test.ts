@@ -698,9 +698,14 @@ describe('build-sidecars cu-helper macOS gating', () => {
     // guard, so non-macOS sidecar builds keep using the Python helper instead of
     // attempting a macOS-only Swift build.
     const guarded = source.match(
-      /if \(process\.platform === 'darwin' && cuHelperArch\) \{\s*await buildCuHelper\(cuHelperArch\)\s*\}/,
+      /if \(process\.platform === 'darwin' && cuHelperArch\) \{[\s\S]*?\n\}/,
     )
     expect(guarded).not.toBeNull()
+    // The unsigned lane skips the helper entirely instead of failing: the
+    // guard must mention CC_HAHA_SIGN_IDENTITY (stable-identity requirement)
+    // and warn rather than throw when it is absent.
+    expect(guarded?.[0]).toContain("process.env.CC_HAHA_SIGN_IDENTITY")
+    expect(guarded?.[0]).toContain('skipping the native cu-helper build')
   })
 
   it('invokes native/cu-helper/build.sh from the cu-helper build step', () => {
