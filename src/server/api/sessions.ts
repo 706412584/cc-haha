@@ -191,33 +191,6 @@ export async function handleSessionsApi(
         : await getSessionTrace(sessionId)
     }
 
-    if (subResource === 'subagents') {
-      if (req.method !== 'GET') {
-        return Response.json(
-          { error: 'METHOD_NOT_ALLOWED', message: `Method ${req.method} not allowed` },
-          { status: 405 }
-        )
-      }
-      if (segments[4] !== 'by-tool' || !segments[5] || segments.length !== 6) {
-        return Response.json({ error: 'NOT_FOUND', message: 'Not found' }, { status: 404 })
-      }
-
-      let toolUseId: string
-      try {
-        toolUseId = decodeURIComponent(segments[5])
-      } catch {
-        return Response.json({ error: 'NOT_FOUND', message: 'SubAgent run not found' }, { status: 404 })
-      }
-      const result = await getSubagentRunByTool(
-        sessionId,
-        toolUseId,
-        url.searchParams.get('taskId') ?? undefined,
-      )
-      return result
-        ? Response.json(result)
-        : Response.json({ error: 'NOT_FOUND', message: 'SubAgent run not found' }, { status: 404 })
-    }
-
     if (subResource === 'git-info') {
       if (req.method !== 'GET') {
         return Response.json(

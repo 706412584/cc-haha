@@ -15,6 +15,38 @@
       "owner": "706412584",
       "reviewAfter": "2026-11-30",
       "exitCriteria": "Reconcile the nudge assertions with the fork's current nudge injection logic, then remove this entry."
+    },
+    {
+      "id": "tasks-inbox-ownership",
+      "path": "src/server/__tests__/tasks.test.ts",
+      "reason": "Fork agentCompletionInbox architecture: TaskTools command-queue assertions predate the inbox refactor. Two reds on a clean baseline. See docs/known-pre-existing-test-failures.md root cause A.",
+      "owner": "706412584",
+      "reviewAfter": "2026-11-30",
+      "exitCriteria": "Rewrite the assertions against agentCompletionInbox/drain semantics, then remove this entry."
+    },
+    {
+      "id": "TaskTools-eager-inbox-ownership",
+      "path": "src/tools/TaskTools.eager.test.ts",
+      "reason": "Fork agentCompletionInbox architecture: eager TaskTools assertions expect the upstream direct-queue path. See docs/known-pre-existing-test-failures.md root cause A.",
+      "owner": "706412584",
+      "reviewAfter": "2026-11-30",
+      "exitCriteria": "Rewrite the assertions against agentCompletionInbox/drain semantics, then remove this entry."
+    },
+    {
+      "id": "agentToolUtils-inbox-ownership",
+      "path": "src/tools/AgentTool/agentToolUtils.test.ts",
+      "reason": "Fork agentCompletionInbox architecture: tool-utils ownership assertions predate the inbox refactor. See docs/known-pre-existing-test-failures.md root cause A.",
+      "owner": "706412584",
+      "reviewAfter": "2026-11-30",
+      "exitCriteria": "Rewrite the assertions against agentCompletionInbox/drain semantics, then remove this entry."
+    },
+    {
+      "id": "ws-memory-events-inbox-ownership",
+      "path": "src/server/__tests__/ws-memory-events.test.ts",
+      "reason": "Nested task ownership assertion shares the inbox-architecture divergence (root cause A); the file is otherwise green. See docs/known-pre-existing-test-failures.md.",
+      "owner": "706412584",
+      "reviewAfter": "2026-11-30",
+      "exitCriteria": "Rewrite the assertions against agentCompletionInbox/drain semantics, then remove this entry."
     }
   ]
 }
