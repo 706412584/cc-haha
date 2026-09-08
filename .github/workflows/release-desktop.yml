@@ -653,7 +653,14 @@ jobs:
         run: powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./scripts/windows-installer-smoke.ps1 -ArtifactsDir ./build-artifacts/electron -Arch x64
 
       - name: Verify packaged app structure
+        # Unsigned macOS builds omit the native cu-helper (build.sh refuses to
+        # ad-hoc sign), so the bundle-structure smoke must not require it.
+        if: matrix.smoke_platform != 'macos' || needs.signing-preflight.outputs.macos_signed == 'true'
         run: bun run test:package-smoke --platform ${{ matrix.smoke_platform }} --arch ${{ matrix.arch }} --package-kind release --artifacts-dir desktop/build-artifacts/electron
+
+      - name: Verify packaged app structure (unsigned macOS)
+        if: matrix.smoke_platform == 'macos' && needs.signing-preflight.outputs.macos_signed != 'true'
+        run: bun run test:package-smoke --platform macos --arch ${{ matrix.arch }} --package-kind release --artifacts-dir desktop/build-artifacts/electron --allow-missing-cu-helper
 
       - name: Verify macOS launch policy
         if: matrix.smoke_platform == 'macos' && needs.signing-preflight.outputs.macos_signed == 'true' && (github.event_name != 'workflow_dispatch' || inputs.notarize_macos == true)

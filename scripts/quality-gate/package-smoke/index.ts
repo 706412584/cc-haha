@@ -20,6 +20,7 @@ type InspectOptions = {
   artifactsDir?: string
   requireMacosGatekeeper?: boolean
   packageKind?: PackageKind
+  allowMissingCuHelper?: boolean
   commandRunner?: PackageSmokeCommandRunner
   hostPlatform?: string
 }
@@ -30,6 +31,7 @@ export type PackageSmokeArgs = {
   artifactsDir?: string
   requireMacosGatekeeper?: boolean
   packageKind?: PackageKind
+  allowMissingCuHelper?: boolean
 }
 
 export type PackageSmokeReport = {
@@ -79,6 +81,7 @@ export function parsePackageSmokeArgs(argv: string[]): PackageSmokeArgs {
   let arch: PackageSmokeArch | undefined
   let artifactsDir: string | undefined
   let requireMacosGatekeeper = false
+  let allowMissingCuHelper = false
   let packageKind: PackageKind = 'auto'
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -119,6 +122,11 @@ export function parsePackageSmokeArgs(argv: string[]): PackageSmokeArgs {
         throw new Error(`Unsupported --package-kind value: ${value}. Expected auto|dir|release.\n${usage()}`)
       }
       index += 1
+      continue
+    }
+
+    if (arg === '--allow-missing-cu-helper') {
+      allowMissingCuHelper = true
       continue
     }
 
@@ -848,10 +856,20 @@ function inspectMacosArtifacts(rootDir: string, report: PackageSmokeReport, opti
     'macOS unpacked cc-haha-builtin plugin seed',
     join(unpackedDir, 'plugin-seed', 'marketplaces', 'cc-haha-builtin', '.claude-plugin', 'marketplace.json'),
   )
-  addPresenceCheck(report, rootDir, 'macOS cu-helper app bundle', helperApp)
-  addPresenceCheck(report, rootDir, 'macOS cu-helper Info.plist', helperInfoPlist)
-  addPresenceCheck(report, rootDir, 'macOS cu-helper executable', helperExecutable)
-  if (existsSync(helperInfoPlist)) addHelperMinimumSystemCheck(report, rootDir, helperInfoPlist)
+  // Unsigned macOS builds skip the native cu-helper entirely (build.sh
+  // refuses to ad-hoc sign); the release lane then passes
+  // --allow-missing-cu-helper so the bundle-structure smoke still gates the
+  // rest of the app instead of failing on the deliberately absent helper.
+  if (options.allowMissingCuHelper && !existsSync(helperApp)) {
+    report.notes.push(
+      'macOS cu-helper bundle absent and --allow-missing-cu-helper set: Computer Use is unavailable in this unsigned build (expected).',
+    )
+  } else {
+    addPresenceCheck(report, rootDir, 'macOS cu-helper app bundle', helperApp)
+    addPresenceCheck(report, rootDir, 'macOS cu-helper Info.plist', helperInfoPlist)
+    addPresenceCheck(report, rootDir, 'macOS cu-helper executable', helperExecutable)
+    if (existsSync(helperInfoPlist)) addHelperMinimumSystemCheck(report, rootDir, helperInfoPlist)
+  }
   addBundledRipgrepLicenseChecks(report, rootDir, sidecarDir, 'macOS')
   addMatchCheck(
     report,

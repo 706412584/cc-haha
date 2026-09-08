@@ -220,11 +220,13 @@ describe('packaged artifact inspection', () => {
     writeFile(rootDir, `${nodePtyRoot}/package.json`)
     writeFile(rootDir, `${nodePtyRoot}/prebuilds/darwin-arm64/pty.node`, thinMachO('arm64'))
     writeFile(rootDir, `${nodePtyRoot}/prebuilds/darwin-arm64/spawn-helper`, thinMachO('arm64'))
+    writeFile(rootDir, `${resources}/app.asar.unpacked/plugin-seed/marketplaces/cc-haha-builtin/.claude-plugin/marketplace.json`)
 
     const validReport = await inspectPackagedArtifacts(rootDir, {
       platform: 'macos',
       arch: 'arm64',
       packageKind: 'dir',
+      allowMissingCuHelper: true,
     })
     expect(validReport.passed).toBe(true)
 
