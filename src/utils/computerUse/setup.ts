@@ -41,7 +41,7 @@ export function setupComputerUseMCP(deps: SetupComputerUseDeps = {}): {
   }
 
   const allowedTools = buildPlatformComputerUseTools(
-    getCliComputerUseCapabilities(),
+    getCliComputerUseCapabilities(platform),
     getChicagoCoordinateMode(),
   ).map(t => buildMcpToolName(COMPUTER_USE_MCP_SERVER_NAME, t.name))
 
