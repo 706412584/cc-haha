@@ -941,7 +941,10 @@ test('allows a progressing tool input to outlive its inactivity budget', async (
       CLAUDE_ENABLE_STREAM_WATCHDOG: '1',
       CLAUDE_STREAM_IDLE_TIMEOUT_MS: '1000',
       CLAUDE_STREAM_MAX_DURATION_MS: '1000',
-      CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS: '40',
+      // The fixture streams ~10 events at ~10ms each; give the overall
+      // tool-input budget enough headroom that a slow CI scheduler cannot
+      // exhaust it between deltas (every delta resets the inactivity clock).
+      CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS: '2000',
     },
   })
 
