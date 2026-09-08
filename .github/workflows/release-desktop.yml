@@ -660,6 +660,8 @@ jobs:
 
       - name: Verify packaged app structure (unsigned macOS)
         if: matrix.smoke_platform == 'macos' && needs.signing-preflight.outputs.macos_signed != 'true'
+        env:
+          PACKAGE_SMOKE_ALLOW_MISSING_CU_HELPER: '1'
         run: bun run test:package-smoke --platform macos --arch ${{ matrix.arch }} --package-kind release --artifacts-dir desktop/build-artifacts/electron --allow-missing-cu-helper
 
       - name: Verify macOS launch policy

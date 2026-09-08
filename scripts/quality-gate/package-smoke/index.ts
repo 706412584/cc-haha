@@ -81,7 +81,9 @@ export function parsePackageSmokeArgs(argv: string[]): PackageSmokeArgs {
   let arch: PackageSmokeArch | undefined
   let artifactsDir: string | undefined
   let requireMacosGatekeeper = false
-  let allowMissingCuHelper = false
+  // Env override: some CI wrappers do not forward trailing CLI flags to
+  // `bun run` scripts reliably; the workflow sets the env form instead.
+  const allowMissingCuHelper = process.env.PACKAGE_SMOKE_ALLOW_MISSING_CU_HELPER === '1'
   let packageKind: PackageKind = 'auto'
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -125,11 +127,6 @@ export function parsePackageSmokeArgs(argv: string[]): PackageSmokeArgs {
       continue
     }
 
-    if (arg === '--allow-missing-cu-helper') {
-      allowMissingCuHelper = true
-      continue
-    }
-
     if (arg === '--require-macos-gatekeeper') {
       requireMacosGatekeeper = true
       continue
@@ -146,6 +143,7 @@ export function parsePackageSmokeArgs(argv: string[]): PackageSmokeArgs {
     artifactsDir,
     requireMacosGatekeeper,
     packageKind,
+    allowMissingCuHelper,
   }
 }
 
