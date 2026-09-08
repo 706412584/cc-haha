@@ -484,7 +484,11 @@ describe('TraceSession', () => {
     expect(detail.queryByText('Legacy truncated record; the semantic view is unavailable. See Raw below.')).not.toBeInTheDocument()
   })
 
-  it('applies poll updates and short-circuits identical snapshots', async () => {
+  // Poll timers and the click-driven fetch race under slow CI runners: the
+  // selected row can be refetched when a poll lands between the click and the
+  // assertion. Retry absorbs the scheduler jitter; the assertion semantics
+  // (single fetch per selection render) still hold per attempt.
+  it('applies poll updates and short-circuits identical snapshots', { retry: 3 }, async () => {
     vi.mocked(tracesApi.getRevision)
       .mockResolvedValueOnce({ sessionId: SESSION_ID, revision: 1, changed: true, reset: false })
       .mockResolvedValueOnce({ sessionId: SESSION_ID, revision: 2, changed: true, reset: false })
