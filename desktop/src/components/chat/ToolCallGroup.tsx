@@ -752,7 +752,7 @@ function AgentCallCard({
                   <div className="mt-3 flex items-center justify-between gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3 py-2 text-[12px] text-[var(--color-text-secondary)]">
                     <span>
                       {t('agentStatus.previewTruncated', {
-                        shown: AGENT_PREVIEW_MAX_CHARS,
+                        shown: text.length,
                         total: body.length,
                       })}
                     </span>
