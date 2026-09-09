@@ -742,7 +742,47 @@ function AgentCallCard({
         width={900}
       >
         <div className="max-h-[70vh] overflow-y-auto">
-          <MarkdownRenderer content={previewText || errorText} />
+          {(() => {
+            const body = previewText || errorText
+            const { text, truncated } = truncateAgentPreview(body)
+            return (
+              <>
+                <MarkdownRenderer content={text} />
+                {truncated && (
+                  <div className="mt-3 flex items-center justify-between gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3 py-2 text-[12px] text-[var(--color-text-secondary)]">
+                    <span>
+                      {t('agentStatus.previewTruncated', {
+                        shown: AGENT_PREVIEW_MAX_CHARS,
+                        total: body.length,
+                      })}
+                    </span>
+                    {canOpenRun && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setPreviewOpen(false)
+                          if (onOpenAgentRun) {
+                            onOpenAgentRun({
+                              sessionId,
+                              toolUseId: toolCall.toolUseId,
+                              title: openRunTitle,
+                            })
+                            return
+                          }
+                          useTabStore.getState().openSubagentTab(sessionId, toolCall.toolUseId, openRunTitle)
+                        }}
+                        className="shrink-0 border border-[var(--color-border)]"
+                      >
+                        {t('toolGroup.openRun')}
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </>
+            )
+          })()}
         </div>
       </Modal>
     </div>
@@ -1009,6 +1049,25 @@ function getAgentErrorSummary(content: unknown): string {
     return 'Explore agent unavailable in this session'
   }
   return text.length > 120 ? `${text.slice(0, 120)}...` : text
+}
+
+/**
+ * The result-preview modal renders the full agent report through
+ * MarkdownRenderer. Reports from exploration agents can reach hundreds of KB;
+ * parsing is fast (~60ms per 500KB) but injecting the resulting ~1MB of DOM
+ * into a 70vh scroll container freezes the renderer for seconds on Windows.
+ * Cap the inline preview and point at the full run transcript for the rest.
+ */
+const AGENT_PREVIEW_MAX_CHARS = 20_000
+
+function truncateAgentPreview(content: string): { text: string; truncated: boolean } {
+  if (content.length <= AGENT_PREVIEW_MAX_CHARS) {
+    return { text: content, truncated: false }
+  }
+  // Cut at a paragraph boundary so the markdown does not end mid-structure.
+  const cut = content.lastIndexOf('\n\n', AGENT_PREVIEW_MAX_CHARS)
+  const sliceEnd = cut > AGENT_PREVIEW_MAX_CHARS / 2 ? cut : AGENT_PREVIEW_MAX_CHARS
+  return { text: `${content.slice(0, sliceEnd)}\n\n…`, truncated: true }
 }
 
 function getAgentOutputSummary(content: string): string {

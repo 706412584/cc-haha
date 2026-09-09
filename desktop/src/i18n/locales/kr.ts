@@ -2718,6 +2718,7 @@ export const kr: Record<TranslationKey, string> = {
   'agentStatus.stopped': '중지됨',
   'agentStatus.noActivity': '아직 도구 활동이 없습니다',
   'agentStatus.viewResult': '결과 보기',
+  'agentStatus.previewTruncated': '결과가 매우 큽니다(총 {total}자) — 앞 {shown}자만 표시합니다. 전체 내용은 "실행 기록 열기"에서 확인하세요.',
   'agentStatus.resultTitle': '에이전트 결과',
   'toolGroup.searchedWeb': '웹을 검색했습니다',
   'toolGroup.fetchedOne': '페이지 1개를 가져왔습니다',

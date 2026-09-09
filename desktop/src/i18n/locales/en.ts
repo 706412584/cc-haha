@@ -2749,6 +2749,7 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   'agentStatus.stopped': 'Stopped',
   'agentStatus.noActivity': 'No tool activity yet',
   'agentStatus.viewResult': 'View result',
+  'agentStatus.previewTruncated': 'Result is very large ({total} characters) — showing the first {shown}. Open the full run record to read everything.',
   'agentStatus.resultTitle': 'Agent result',
   'toolGroup.searchedWeb': 'searched the web',
   'toolGroup.fetchedOne': 'fetched a page',

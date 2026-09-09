@@ -2719,6 +2719,7 @@ export const zh: Record<TranslationKey, string> = {
   'agentStatus.stopped': '已停止',
   'agentStatus.noActivity': '暂时还没有工具活动',
   'agentStatus.viewResult': '查看结果',
+  'agentStatus.previewTruncated': '结果内容非常大（共 {total} 字符），此处仅显示前 {shown} 字符。点击「打开运行记录」查看完整内容。',
   'agentStatus.resultTitle': 'Agent 结果',
   'toolGroup.searchedWeb': '搜索了网页',
   'toolGroup.fetchedOne': '获取了一个页面',

@@ -2718,6 +2718,7 @@ export const jp: Record<TranslationKey, string> = {
   'agentStatus.stopped': '停止',
   'agentStatus.noActivity': 'まだツールの動作がありません',
   'agentStatus.viewResult': '結果を表示',
+  'agentStatus.previewTruncated': '結果は非常に大きい（全 {total} 文字）ため、先頭の {shown} 文字のみ表示しています。完全な内容は「実行記録を開く」でご覧ください。',
   'agentStatus.resultTitle': 'エージェントの結果',
   'toolGroup.searchedWeb': 'ウェブを検索しました',
   'toolGroup.fetchedOne': 'ページを 1 件取得しました',
