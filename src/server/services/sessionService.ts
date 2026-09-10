@@ -3761,6 +3761,12 @@ export class SessionService {
   ): Promise<SessionMessagesWithEvidence> {
     const found = await this.findSessionFile(sessionId)
     if (!found) {
+      // Retention-zero sessions intentionally have no transcript. The desktop
+      // still asks for turn checkpoints after each live reply; lack of saved
+      // evidence is not a missing session, nor proof of an empty history.
+      if (this.memoryLaunchInfo.has(this.memorySessionKey(sessionId))) {
+        return { messages: [], transcriptEvidenceComplete: false }
+      }
       throw ApiError.notFound(`Session not found: ${sessionId}`)
     }
 
