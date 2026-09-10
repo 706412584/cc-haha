@@ -63,6 +63,29 @@ beforeEach(() => {
 })
 
 describe('ModelSelector', () => {
+  it.each([true, false])('sends each provider slot with 1M=%s and preserves reasoning controls', async (enabled) => {
+    useSettingsStore.setState({ locale: 'en', effortLevel: 'high' })
+    useProviderStore.setState({
+      activeId: 'provider-1m', hasLoadedProviders: true, isLoading: false,
+      providers: [{
+        id: 'provider-1m', presetId: 'custom', name: 'Provider 1M',
+        apiFormat: 'anthropic', apiKey: 'fixture', baseUrl: 'http://127.0.0.1:9999',
+        models: { main: 'main-model', haiku: 'haiku-model', sonnet: 'sonnet-model', opus: 'opus-model' },
+        model1mSupport: { main: enabled, haiku: enabled, sonnet: enabled, opus: enabled },
+      }],
+    })
+    const runtimeChange = vi.fn()
+    render(<ModelSelector runtimeKey="__draft__" onRuntimeSelectionChange={runtimeChange} />)
+    for (const slot of ['main', 'haiku', 'sonnet', 'opus']) {
+      await clickByRole(/, Provider 1M$/)
+      fireEvent.click(within(screen.getByTestId('model-selector-dropdown')).getByRole('button', { name: new RegExp(`^${slot}-model`) }))
+      expect(runtimeChange).toHaveBeenLastCalledWith({
+        providerId: 'provider-1m', modelId: `${slot}-model${enabled ? '[1m]' : ''}`, effortLevel: 'high',
+      })
+      expect(screen.getByRole('button', { name: /High/ })).toBeInTheDocument()
+    }
+  })
+
   it.each(['unknown', 'mixed', 'anthropic'] as const)(
     'allows cross-protocol selection despite retained %s session metadata', async (sessionApiFormat) => {
       const sessionId = 'protocol-rollback-session'

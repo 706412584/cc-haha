@@ -647,7 +647,7 @@ describe('EmptySession', () => {
     })
   })
 
-  it('materializes the active provider runtime and visible default effort before the first draft message', async () => {
+  it.each([true, false])('materializes raw provider models with 1M=%s before the first draft message', async (enabled) => {
     useProviderStore.setState({
       providers: [{
         id: 'provider-minimax',
@@ -658,11 +658,12 @@ describe('EmptySession', () => {
         apiFormat: 'anthropic',
         runtimeKind: 'anthropic_compatible',
         models: {
-          main: 'MiniMax-M3[1m]',
-          haiku: 'MiniMax-M3[1m]',
-          sonnet: 'MiniMax-M3[1m]',
-          opus: 'MiniMax-M3[1m]',
+          main: 'MiniMax-M3',
+          haiku: 'MiniMax-M3',
+          sonnet: 'MiniMax-M3',
+          opus: 'MiniMax-M3',
         },
+        model1mSupport: { main: enabled, haiku: enabled, sonnet: enabled, opus: enabled },
         toolSearchEnabled: true,
       }],
       activeId: 'provider-minimax',
@@ -682,7 +683,7 @@ describe('EmptySession', () => {
 
     expect(useSessionRuntimeStore.getState().selections['draft-session']).toEqual({
       providerId: 'provider-minimax',
-      modelId: 'MiniMax-M3[1m]',
+      modelId: enabled ? 'MiniMax-M3[1m]' : 'MiniMax-M3',
       effortLevel: 'max',
     })
     expect(mocks.wsSend.mock.calls.slice(0, 3)).toEqual([
@@ -691,7 +692,7 @@ describe('EmptySession', () => {
         {
           type: 'set_runtime_config',
           providerId: 'provider-minimax',
-          modelId: 'MiniMax-M3[1m]',
+          modelId: enabled ? 'MiniMax-M3[1m]' : 'MiniMax-M3',
           effortLevel: 'max',
         },
       ],

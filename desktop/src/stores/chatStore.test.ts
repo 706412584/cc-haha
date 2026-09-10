@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentTaskNotification } from '../types/chat'
 import type { MessageEntry } from '../types/session'
+import type { SavedProvider } from '../types/provider'
 import {
   buildMainSessionActivityModel,
   buildSessionActivityModel,
@@ -34,6 +35,7 @@ const {
   connectionStateHandlers,
   sendSubagentMessageMock,
   tabStoreSnapshot,
+  providerStoreSnapshot,
 } = vi.hoisted(() => ({
   sendMock: vi.fn(),
   getMemberBySessionIdMock: vi.fn<(sessionId: string) => any>(() => null),
@@ -74,6 +76,11 @@ const {
   connectionStateHandlers: new Map<string, (state: 'connecting' | 'connected' | 'reconnecting' | 'disconnected') => void>(),
   sendSubagentMessageMock: vi.fn(async () => ({ ok: true })),
   tabStoreSnapshot: { tabs: [] as Array<Record<string, unknown>> },
+  providerStoreSnapshot: { providers: [] as SavedProvider[], activeId: null as string | null },
+}))
+
+vi.mock('./providerStore', () => ({
+  useProviderStore: { getState: () => providerStoreSnapshot },
 }))
 
 vi.mock('../lib/desktopNotifications', () => ({
@@ -462,6 +469,8 @@ describe('chatStore background agent activity interleaving', () => {
 
 describe('chatStore history mapping', () => {
   beforeEach(() => {
+    providerStoreSnapshot.providers = []
+    providerStoreSnapshot.activeId = null
     sendMock.mockReset()
     getMemberBySessionIdMock.mockReset()
     getMemberBySessionIdMock.mockReturnValue(null)
@@ -5146,6 +5155,46 @@ describe('chatStore history mapping', () => {
         },
       ],
       [TEST_SESSION_ID, { type: 'prewarm_session' }],
+    ])
+  })
+
+  it.each([true, false])('reconciles restored raw runtime models before reconnect and the next turn (1m=%s)', (enabled) => {
+    const model = 'deepseek-v4.1-flash-expires-on-0910'
+    providerStoreSnapshot.providers = [{
+      id: 'provider-1', presetId: 'custom', name: 'DeepSeek', apiKey: 'fixture',
+      baseUrl: 'http://127.0.0.1:1', apiFormat: 'anthropic',
+      models: { main: model, haiku: '', sonnet: '', opus: '' },
+      model1mSupport: { main: enabled, haiku: false, sonnet: false, opus: false },
+    }]
+    const staleSelection = { providerId: 'provider-1', modelId: `${model}${enabled ? '' : '[1m]'}`, effortLevel: 'high' as const }
+    const expectedSelection = { ...staleSelection, modelId: `${model}${enabled ? '[1m]' : ''}` }
+    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, staleSelection)
+    useChatStore.getState().connectToSession(TEST_SESSION_ID, { prewarm: false, minimalBootstrap: true })
+    expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, { type: 'set_runtime_config', ...expectedSelection })
+
+    // An edit during a busy turn is deferred until the next user message.
+    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, staleSelection)
+    sendMock.mockClear()
+    useChatStore.getState().sendMessage(TEST_SESSION_ID, 'continue')
+    expect(sendMock.mock.calls.slice(0, 2)).toEqual([
+      [TEST_SESSION_ID, { type: 'set_runtime_config', ...expectedSelection }],
+      [TEST_SESSION_ID, { type: 'user_message', content: 'continue', attachments: undefined }],
+    ])
+    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(expectedSelection)
+  })
+
+  it('pins current provider capabilities before sending an older implicit-default session', () => {
+    providerStoreSnapshot.activeId = 'provider-1'
+    providerStoreSnapshot.providers = [{
+      id: 'provider-1', presetId: 'custom', name: 'DeepSeek', apiKey: 'fixture',
+      baseUrl: 'http://127.0.0.1:1', apiFormat: 'anthropic',
+      models: { main: 'deepseek-v4.1', haiku: '', sonnet: '', opus: '' },
+      model1mSupport: { main: true, haiku: false, sonnet: false, opus: false },
+    }]
+    useChatStore.getState().sendMessage(TEST_SESSION_ID, 'continue')
+    expect(sendMock.mock.calls.slice(0, 2)).toEqual([
+      [TEST_SESSION_ID, { type: 'set_runtime_config', providerId: 'provider-1', modelId: 'deepseek-v4.1[1m]' }],
+      [TEST_SESSION_ID, { type: 'user_message', content: 'continue', attachments: undefined }],
     ])
   })
 

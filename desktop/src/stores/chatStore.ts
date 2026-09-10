@@ -7,6 +7,8 @@ import { useSessionStore } from './sessionStore'
 import { useCLITaskStore } from './cliTaskStore'
 import { useWorkflowStore } from './workflowStore'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
+import { useProviderStore } from './providerStore'
+import { resolveActiveProviderRuntimeSelection, resolveProviderRuntimeModelId } from '../lib/runtimeSelection'
 import { useTabStore } from './tabStore'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import { notifyDesktop } from '../lib/desktopNotifications'
@@ -49,6 +51,13 @@ import type {
 } from '../types/slashCommand'
 
 type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting'
+
+function reconcileProviderRuntimeSelection(selection: RuntimeSelection): RuntimeSelection {
+  const provider = useProviderStore.getState().providers.find((entry) => entry.id === selection.providerId)
+  if (!provider) return selection
+  const modelId = resolveProviderRuntimeModelId(provider, selection.modelId)
+  return modelId === selection.modelId ? selection : { ...selection, modelId }
+}
 type ToolCall = Extract<UIMessage, { type: 'tool_use' }>
 type CompactSummaryMessage = Extract<UIMessage, { type: 'compact_summary' }>
 
@@ -2765,7 +2774,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     const runtimeSelection = useSessionRuntimeStore.getState().selections[sessionId]
     if (runtimeSelection && options?.applyRuntimeSelection !== false) {
-      wsManager.send(sessionId, { type: 'set_runtime_config', ...runtimeSelection })
+      get().setSessionRuntime(sessionId, runtimeSelection)
     }
     if (
       options?.prewarm !== false &&
@@ -2979,6 +2988,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return
     }
 
+    const selection = useSessionRuntimeStore.getState().selections[sessionId]
+    if (selection) {
+      const reconciled = reconcileProviderRuntimeSelection(selection)
+      if (reconciled !== selection) get().setSessionRuntime(sessionId, selection)
+    } else {
+      const providers = useProviderStore.getState()
+      const defaultSelection = resolveActiveProviderRuntimeSelection(
+        providers.activeId, null, providers.providers, undefined,
+      )
+      if (defaultSelection) {
+        useSessionRuntimeStore.getState().setSelection(sessionId, defaultSelection)
+        get().setSessionRuntime(sessionId, defaultSelection)
+      }
+    }
     wsManager.send(sessionId, { type: 'user_message', content, attachments })
   },
 
@@ -3038,9 +3061,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   setSessionRuntime: (sessionId, selection) => {
+    const reconciled = reconcileProviderRuntimeSelection(selection)
+    if (reconciled !== selection) {
+      useSessionRuntimeStore.getState().setSelection(sessionId, reconciled)
+    }
     wsManager.send(sessionId, {
       type: 'set_runtime_config',
-      ...selection,
+      ...reconciled,
     })
   },
 
