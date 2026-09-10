@@ -1,32 +1,53 @@
 import { expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createSandboxedTestEnvironment } from '../../../scripts/pr/test-environment.js'
 
-// Exercise the registered runtime shutdown callback in another process. That
-// process caches enabled settings and never observes the parent's 365→0→365.
-for (const deleted of [true, false]) {
-  test(`runtime exit ${deleted ? 'does not recreate a deleted transcript' : 'preserves metadata for an existing transcript'}`, async () => {
+// Exercise the registered shutdown callback in another process. It caches
+// enabled settings and never observes the parent's intervening 365→0→365.
+const scenarios = [
+  'deleted-idle',
+  'kept-idle',
+  'deleted-queued',
+  'first-turn-exit',
+  'deleted-then-new-turn',
+  'deleted-queued-then-new-turn',
+  'replaced-queued-then-new-turn',
+] as const
+for (const scenario of scenarios) {
+  test(`runtime exit retention lifecycle: ${scenario}`, async () => {
     const directory = await mkdtemp('/tmp/session-exit-retention-')
     const env = createSandboxedTestEnvironment(directory, { TEST_ENABLE_SESSION_PERSISTENCE: '1' })
     const configDir = env.CLAUDE_CONFIG_DIR!
     await mkdir(configDir, { recursive: true })
     await writeFile(join(configDir, 'settings.json'), JSON.stringify({ cleanupPeriodDays: 365 }))
     const source = `
-      import { mkdir } from 'node:fs/promises'
       import { switchSession } from './src/bootstrap/state.ts'
       import { getSettings_DEPRECATED } from './src/utils/settings/settings.ts'
       import { runCleanupFunctions } from './src/utils/cleanupRegistry.ts'
       import { cacheSessionTitle, flushSessionStorage, getTranscriptPathForSession, recordTranscript } from './src/utils/sessionStorage.ts'
+      const originalSetTimeout = globalThis.setTimeout
+      // Hold the normal 100 ms transcript queue until the real exit callback
+      // drains it, making the external deletion race deterministic.
+      globalThis.setTimeout = (callback, delay, ...args) => originalSetTimeout(callback, delay === 100 ? 60000 : delay, ...args)
+      const scenario = ${JSON.stringify(scenario)}
       const id = 'deadbeef-0000-4000-8000-000000000001'
+      const old = {type:'user', uuid:'deadbeef-0000-4000-8000-000000000002', timestamp:'2026-09-10T00:00:00.000Z', message:{role:'user',content:'CACHED EXIT PRIVATE PROMPT'}}
+      const queued = {type:'user', uuid:'deadbeef-0000-4000-8000-000000000003', timestamp:'2026-09-10T00:00:01.000Z', message:{role:'user',content:'QUEUED BEFORE DELETE'}}
+      const fresh = {type:'user', uuid:'deadbeef-0000-4000-8000-000000000004', timestamp:'2026-09-10T00:00:02.000Z', message:{role:'user',content:'FRESH EXPLICIT TURN'}}
       switchSession(id)
-      await mkdir(process.env.CLAUDE_CONFIG_DIR, { recursive: true })
       getSettings_DEPRECATED()
-      cacheSessionTitle('CACHED EXIT TITLE')
-      await recordTranscript([{type:'user', uuid:'deadbeef-0000-4000-8000-000000000002', timestamp:'2026-09-10T00:00:00.000Z', message:{role:'user',content:'CACHED EXIT PRIVATE PROMPT'}}])
-      await flushSessionStorage()
-      process.stdout.write(JSON.stringify({ path: getTranscriptPathForSession(id) }) + '\\n')
+      if (scenario.endsWith('idle')) cacheSessionTitle('CACHED EXIT TITLE')
+      if (scenario !== 'first-turn-exit') {
+        await recordTranscript([old])
+        await flushSessionStorage()
+      }
+      if (scenario.includes('queued')) await recordTranscript([old, queued])
+      if (scenario === 'first-turn-exit') await recordTranscript([fresh])
+      process.stdout.write(JSON.stringify({ path: getTranscriptPathForSession(id), cachedDays: getSettings_DEPRECATED().cleanupPeriodDays }) + '\\n')
       await new Promise(resolve => process.stdin.once('data', resolve))
+      if (scenario.endsWith('new-turn')) await recordTranscript(scenario.includes('queued') ? [old, queued, fresh] : [old, fresh])
+      if (getSettings_DEPRECATED().cleanupPeriodDays !== 365) throw new Error('Child observed disabled settings')
       // This is the same cleanup registry invoked by gracefulShutdown.
       await runCleanupFunctions()
       process.exit(0)
@@ -43,26 +64,41 @@ for (const deleted of [true, false]) {
         if (result.done) throw new Error(`Runtime exited before ready: ${await errorOutput}`)
         ready += new TextDecoder().decode(result.value)
       }
-      const { path } = JSON.parse(ready.trim()) as { path: string }
-      const initial = await readFile(path, 'utf8')
-      expect(initial).toContain('CACHED EXIT PRIVATE PROMPT')
-      expect(initial).toContain('CACHED EXIT TITLE')
+      const { path, cachedDays } = JSON.parse(ready.trim()) as { path: string; cachedDays: number }
+      expect(cachedDays).toBe(365)
+      const initial = await readFile(path, 'utf8').catch(() => '')
+      expect(initial).not.toContain('QUEUED BEFORE DELETE')
+      if (scenario === 'first-turn-exit') expect(initial).toBe('')
+      else expect(initial).toContain('CACHED EXIT PRIVATE PROMPT')
+      if (scenario.endsWith('idle')) expect(initial).toContain('CACHED EXIT TITLE')
       expect(initial).not.toContain('last-prompt')
-      if (deleted) {
+      if (scenario.startsWith('deleted')) {
         await writeFile(join(configDir, 'settings.json'), JSON.stringify({ cleanupPeriodDays: 0 }))
         await unlink(path)
         await writeFile(join(configDir, 'settings.json'), JSON.stringify({ cleanupPeriodDays: 365 }))
+      }
+      if (scenario.startsWith('replaced')) {
+        // Keep the old inode allocated so replacement detection is deterministic.
+        await rename(path, path + '.removed')
+        await writeFile(path, '')
       }
       child.stdin.write('exit\n')
       child.stdin.end()
       expect(await child.exited).toBe(0)
       expect(await errorOutput).toBe('')
-      if (deleted) {
-        expect(await readFile(path, 'utf8').catch(() => null)).toBeNull()
-      } else {
+      if (scenario === 'deleted-idle' || scenario === 'deleted-queued') {
+        await expect(readFile(path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+      } else if (scenario === 'kept-idle') {
         const final = await readFile(path, 'utf8')
         expect(final).toContain('"lastPrompt":"CACHED EXIT PRIVATE PROMPT"')
         expect(final.match(/CACHED EXIT TITLE/g)).toHaveLength(2)
+      } else {
+        const final = await readFile(path, 'utf8')
+        expect(final).not.toContain('CACHED EXIT PRIVATE PROMPT')
+        expect(final).not.toContain('QUEUED BEFORE DELETE')
+        const messages = final.trim().split('\n').map(line => JSON.parse(line)).filter(entry => entry.type === 'user')
+        expect(messages).toHaveLength(1)
+        expect(messages[0]).toMatchObject({ uuid: 'deadbeef-0000-4000-8000-000000000004', parentUuid: null })
       }
     } finally {
       child.kill()
