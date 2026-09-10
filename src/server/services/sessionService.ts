@@ -588,6 +588,10 @@ export class SessionService {
   // Keep launch state available when retention disables or removes transcripts.
   // Scope keys by config directory so test/embedded server instances cannot mix state.
   private readonly memoryLaunchInfo = new Map<string, SessionLaunchInfo>()
+  // Creation or a valid runtime metadata update establishes a session lifetime
+  // independently of its transcript. Cleanup can remove that file before the
+  // next runtime update supplies memoryLaunchInfo.
+  private readonly knownSessionKeys = new Set<string>()
   private readonly privateTitles = new Map<string, Set<string>>()
 
   shouldPersistSession(): boolean {
@@ -3764,7 +3768,8 @@ export class SessionService {
       // Retention-zero sessions intentionally have no transcript. The desktop
       // still asks for turn checkpoints after each live reply; lack of saved
       // evidence is not a missing session, nor proof of an empty history.
-      if (this.memoryLaunchInfo.has(this.memorySessionKey(sessionId))) {
+      if (this.memoryLaunchInfo.has(this.memorySessionKey(sessionId)) ||
+        this.knownSessionKeys.has(this.memorySessionKey(sessionId))) {
         return { messages: [], transcriptEvidenceComplete: false }
       }
       throw ApiError.notFound(`Session not found: ${sessionId}`)
@@ -4071,6 +4076,7 @@ export class SessionService {
     if (persist && this.shouldPersistSession()) {
       await fs.writeFile(filePath, JSON.stringify(initialEntry) + '\n' + JSON.stringify(metaEntry) + '\n', 'utf-8')
     }
+    this.knownSessionKeys.add(this.memorySessionKey(sessionId))
     this.invalidateSessionListCache()
 
     return { sessionId, workDir: absWorkDir }
@@ -4081,11 +4087,13 @@ export class SessionService {
    */
   async deleteSession(sessionId: string): Promise<void> {
     const found = await this.findSessionFile(sessionId)
-    if (!found && !this.memoryLaunchInfo.has(this.memorySessionKey(sessionId))) {
+    if (!found && !this.memoryLaunchInfo.has(this.memorySessionKey(sessionId)) &&
+      !this.knownSessionKeys.has(this.memorySessionKey(sessionId))) {
       throw ApiError.notFound(`Session not found: ${sessionId}`)
     }
 
     if (found) await fs.unlink(found.filePath)
+    this.knownSessionKeys.delete(this.memorySessionKey(sessionId))
     this.memoryLaunchInfo.delete(this.memorySessionKey(sessionId))
     this.privateTitles.delete(this.memorySessionKey(sessionId))
     if (found) this.sessionListSummaryCache.delete(found.filePath)
@@ -4399,6 +4407,7 @@ export class SessionService {
   ): Promise<void> {
     const persist = this.shouldPersistSession()
     const storedInfo = await this.getSessionLaunchInfo(sessionId)
+    if (storedInfo) this.knownSessionKeys.add(this.memorySessionKey(sessionId))
     const workDir = normalizeDriveRootPathForPlatform(metadata.workDir)
     const projectDir = this.sanitizePath(workDir)
     const previousInfo = storedInfo ?? (!persist ? {
