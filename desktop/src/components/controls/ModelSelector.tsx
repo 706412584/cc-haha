@@ -23,6 +23,8 @@ import { isDesktopRuntime } from '../../lib/desktopRuntime'
 import {
   normalizeRuntimeSelection,
   resolveDefaultRuntimeSelection,
+  resolveProviderRuntimeModelId,
+  resolveProviderSlotModelId,
 } from '../../lib/runtimeSelection'
 import { useHahaOAuthStore } from '../../stores/hahaOAuthStore'
 import { useHahaOpenAIOAuthStore } from '../../stores/hahaOpenAIOAuthStore'
@@ -97,7 +99,12 @@ function getProviderModelCapabilityOverride(
 ): string | undefined {
   return getModelReasoningCapabilityOverride(
     modelId,
-    provider.models,
+    {
+      ...provider.models,
+      haiku: resolveProviderSlotModelId(provider, 'haiku'),
+      sonnet: resolveProviderSlotModelId(provider, 'sonnet'),
+      opus: resolveProviderSlotModelId(provider, 'opus'),
+    },
     PROVIDER_PRESET_DEFAULT_ENVS.get(provider.presetId) ?? {},
   )
 }
@@ -133,10 +140,10 @@ function buildProviderModels(
   labels: Record<'main' | 'haiku' | 'sonnet' | 'opus', string>,
 ): ModelInfo[] {
   const entries: Array<{ id: string; label: string }> = [
-    { id: provider.models.main.trim(), label: labels.main },
-    { id: provider.models.haiku.trim(), label: labels.haiku },
-    { id: provider.models.sonnet.trim(), label: labels.sonnet },
-    { id: provider.models.opus.trim(), label: labels.opus },
+    { id: resolveProviderSlotModelId(provider, 'main'), label: labels.main },
+    { id: resolveProviderSlotModelId(provider, 'haiku'), label: labels.haiku },
+    { id: resolveProviderSlotModelId(provider, 'sonnet'), label: labels.sonnet },
+    { id: resolveProviderSlotModelId(provider, 'opus'), label: labels.opus },
   ]
 
   const byId = new Map<string, { id: string; labels: string[] }>()
@@ -442,10 +449,21 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
       storeModel?.id,
     )
     : null
+  const requestedRuntimeProvider = providers.find(
+    (provider) => provider.id === requestedRuntimeSelection?.providerId,
+  )
   const activeRuntimeSelection = requestedRuntimeSelection && providerChoices.some(
     (choice) => choice.providerId === requestedRuntimeSelection.providerId,
   )
-    ? requestedRuntimeSelection
+    ? {
+      ...requestedRuntimeSelection,
+      modelId: requestedRuntimeProvider
+        ? resolveProviderRuntimeModelId(
+          requestedRuntimeProvider,
+          requestedRuntimeSelection.modelId,
+        )
+        : requestedRuntimeSelection.modelId,
+    }
     : null
 
   const selectedProviderChoice = activeRuntimeSelection

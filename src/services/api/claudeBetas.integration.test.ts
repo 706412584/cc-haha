@@ -3,6 +3,9 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createSandboxedTestEnvironment } from '../../../scripts/pr/test-environment.js'
+import { resolveDefaultRuntimeSelection } from '../../../desktop/src/lib/runtimeSelection.js'
+import { buildProviderManagedEnv } from '../../server/services/providerRuntimeEnv.js'
+import type { SavedProvider } from '../../server/types/provider.js'
 
 const contextBeta = 'context-1m-2025-08-07'
 const root = resolve(import.meta.dir, '../../..')
@@ -12,9 +15,17 @@ async function runRelay(options: {
   injectHeader?: boolean
   env?: Record<string, string>
   args?: string[]
+  provider?: SavedProvider
+  requireContextBeta?: boolean
 } = {}) {
   const sandbox = await mkdtemp(join(tmpdir(), 'cc-haha-context-beta-'))
-  const requests: { model: string, beta: string, status: number }[] = []
+  const requests: {
+    model: string
+    beta: string
+    status: number
+    thinking?: unknown
+    outputConfig?: unknown
+  }[] = []
   const server = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
@@ -22,14 +33,18 @@ async function runRelay(options: {
       if (!new URL(request.url).pathname.endsWith('/messages')) {
         return new Response('Unexpected route', { status: 404 })
       }
-      const body = await request.json() as { model: string }
+      const body = await request.json() as { model: string, thinking?: unknown, output_config?: unknown }
       const beta = request.headers.get('anthropic-beta') ?? ''
       const forwardedHeaders = new Headers(request.headers)
       if (options.injectHeader) {
         forwardedHeaders.set('anthropic-beta', [beta, contextBeta].filter(Boolean).join(','))
       }
-      const accepted = forwardedHeaders.get('anthropic-beta')?.split(',').includes(contextBeta)
-      requests.push({ model: body.model, beta, status: accepted ? 200 : 400 })
+      const accepted = options.requireContextBeta === false ||
+        forwardedHeaders.get('anthropic-beta')?.split(',').includes(contextBeta)
+      requests.push({
+        model: body.model, beta, status: accepted ? 200 : 400,
+        thinking: body.thinking, outputConfig: body.output_config,
+      })
       if (!accepted) {
         return Response.json({ type: 'error', error: {
           type: 'invalid_request_error', message: '1m 上下文已经全量可用，请启用 1m 上下文后重试',
@@ -67,9 +82,14 @@ async function runRelay(options: {
       CALLER_DIR: sandbox,
       ANTHROPIC_API_KEY: 'loopback-test-key',
       ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.port}`,
-      ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-5[1m]',
-      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort',
-      CLAUDE_CODE_MODEL_CONTEXT_WINDOWS: '{"claude-opus-5":1000000}',
+      ...(options.provider ? buildProviderManagedEnv({
+        ...options.provider,
+        baseUrl: `http://127.0.0.1:${server.port}`,
+      }) : {
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-5[1m]',
+        ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort',
+        CLAUDE_CODE_MODEL_CONTEXT_WINDOWS: '{"claude-opus-5":1000000}',
+      }),
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       CLAUDE_CODE_SKIP_UPDATE_CHECK: '1',
       ...options.env,
@@ -132,3 +152,48 @@ test('real CLI sends the opted-in 1M beta to third-party Anthropic relays', asyn
   expect(result.requests[0]?.model).toBe('claude-opus-5')
   expect(result.requests[0]?.beta.split(',')).toContain(contextBeta)
 }, 40_000)
+
+for (const { enabled, disableBetas } of [
+  { enabled: true, disableBetas: false },
+  { enabled: false, disableBetas: false },
+  { enabled: true, disableBetas: true },
+]) {
+  test(`desktop provider selection reaches explicit CLI model and native relay (1M: ${enabled}, disable betas: ${disableBetas})`, async () => {
+    const model = 'deepseek-v4.1-flash-expires-on-0910'
+    const provider: SavedProvider = {
+      id: 'desktop-context-fixture',
+      name: 'Desktop context fixture',
+      presetId: 'custom',
+      apiKey: 'loopback-test-key',
+      baseUrl: 'http://127.0.0.1:1',
+      apiFormat: 'anthropic',
+      runtimeKind: 'anthropic_compatible',
+      models: { main: model, haiku: model, sonnet: model, opus: model },
+      model1mSupport: { main: enabled, haiku: enabled, sonnet: enabled, opus: enabled },
+      modelContextWindows: { [model]: 1_000_000 },
+      disableExperimentalBetas: disableBetas,
+    }
+    // Follow new-conversation selection into the same explicit --model used by
+    // conversationService. The managed environment alone cannot repair a raw ID.
+    const selection = resolveDefaultRuntimeSelection(provider.id, provider.name, [provider], undefined)
+    const result = await runRelay({
+      model: selection.modelId,
+      provider,
+      requireContextBeta: false,
+      env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
+    })
+    expect(result.exitCode, JSON.stringify(result)).toBe(0)
+    expect(result.stdout).toContain('relay-ok')
+    expect(result.requests).toHaveLength(1)
+    const request = result.requests[0]!
+    expect(request.model).toBe(model)
+    expect(request.beta.split(',').includes(contextBeta)).toBe(enabled && !disableBetas)
+    expect(selection.modelId).toBe(enabled ? `${model}[1m]` : model)
+    // Direct Anthropic relays suppress experimental effort when betas are
+    // disabled, while the model's existing thinking capability is independent.
+    expect(request.outputConfig).toEqual(disableBetas ? undefined : { effort: 'high' })
+    expect(request.thinking).toMatchObject({ type: 'adaptive' })
+    if (disableBetas) expect(request.beta).toBe('')
+    else expect(request.beta).toContain('effort-2025-11-24')
+  }, 40_000)
+}
