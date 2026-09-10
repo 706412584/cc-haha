@@ -492,10 +492,15 @@ function looksLikeStructuredTitleFragment(text: string): boolean {
  * Returns false when a user custom title exists, because custom titles are
  * intentional and must not be replaced by automatic title refreshes.
  */
-export async function saveAiTitle(sessionId: string, title: string): Promise<boolean> {
+export async function saveAiTitle(
+  sessionId: string,
+  title: string,
+  persist = sessionService.shouldPersistSession(),
+): Promise<boolean> {
   if (await sessionService.getCustomTitle(sessionId)) {
     return false
   }
-  await sessionService.appendAiTitle(sessionId, title)
+  if (persist) await sessionService.appendAiTitle(sessionId, title)
+  else await sessionService.appendAiTitle(sessionId, title, false)
   return true
 }

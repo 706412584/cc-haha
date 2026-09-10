@@ -5,7 +5,7 @@
  * 确保 Desktop App 与 CLI 的数据完全互通。
  */
 
-import { createReadStream, type Stats } from 'node:fs'
+import { constants, createReadStream, type Stats } from 'node:fs'
 import { createHash } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
@@ -47,6 +47,7 @@ import {
 import { ProviderService } from './providerService.js'
 import { shouldHideCommandMetadataContent } from '../../utils/commandMetadata.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
+import { getSettings_DEPRECATED } from '../../utils/settings/settings.js'
 import {
   extractGoalCreationTitle,
   extractTranscriptUserTitle,
@@ -584,6 +585,31 @@ function getSharedSessionMutationState(
 
 export class SessionService {
   private providerService = new ProviderService()
+  // Keep launch state available when retention disables or removes transcripts.
+  // Scope keys by config directory so test/embedded server instances cannot mix state.
+  private readonly memoryLaunchInfo = new Map<string, SessionLaunchInfo>()
+  private readonly privateTitles = new Map<string, Set<string>>()
+
+  shouldPersistSession(): boolean {
+    return getSettings_DEPRECATED()?.cleanupPeriodDays !== 0
+  }
+
+  private memorySessionKey(sessionId: string): string {
+    return `${this.getConfigDir()}:${sessionId}`
+  }
+
+  private rememberPrivateTitle(sessionId: string, title: string): void {
+    const key = this.memorySessionKey(sessionId)
+    const titles = this.privateTitles.get(key) ?? new Set<string>()
+    titles.add(title)
+    this.privateTitles.set(key, titles)
+  }
+
+  private canPersistTitle(sessionId: string, title: string): boolean {
+    return this.shouldPersistSession() &&
+      !this.privateTitles.get(this.memorySessionKey(sessionId))?.has(title)
+  }
+
   private readonly pendingTaskNotificationWrites = new Map<
     string,
     Set<{
@@ -1443,16 +1469,24 @@ export class SessionService {
     entry: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<void> {
+    if (!this.shouldPersistSession()) return
     const line = JSON.stringify(entry) + '\n'
-    if (signal) {
-      await fs.writeFile(filePath, line, {
-        encoding: 'utf-8',
-        flag: 'a',
-        signal,
-      })
-      return
+    // A delayed title/notification must not recreate a transcript removed by
+    // retention cleanup after lookup. Metadata relocation opts into creation.
+    let handle: fs.FileHandle
+    try {
+      handle = await fs.open(filePath, constants.O_WRONLY | constants.O_APPEND |
+        (entry.type === 'session-meta' ? constants.O_CREAT : 0))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
     }
-    await fs.appendFile(filePath, line, 'utf-8')
+    try {
+      if (!this.shouldPersistSession()) return
+      await handle.writeFile(line, { encoding: 'utf-8', signal })
+    } finally {
+      await handle.close()
+    }
   }
 
   private resolveWorkDirFromEntries(
@@ -3965,6 +3999,7 @@ export class SessionService {
     permissionMode?: string,
   ): Promise<{ sessionId: string; workDir: string }> {
     // Default to user home directory when no workDir specified
+    const persist = this.shouldPersistSession()
     const resolvedWorkDir = workDir || os.homedir()
     const sessionId = crypto.randomUUID()
 
@@ -3991,7 +4026,7 @@ export class SessionService {
     const dirPath = path.join(this.getProjectsDir(), sanitized)
 
     // Ensure the project directory exists
-    await fs.mkdir(dirPath, { recursive: true })
+    if (persist && this.shouldPersistSession()) await fs.mkdir(dirPath, { recursive: true })
 
     const filePath = path.join(dirPath, `${sessionId}.jsonl`)
     const now = new Date().toISOString()
@@ -4020,7 +4055,16 @@ export class SessionService {
       timestamp: now,
     }
 
-    await fs.writeFile(filePath, JSON.stringify(initialEntry) + '\n' + JSON.stringify(metaEntry) + '\n', 'utf-8')
+    if (!persist || !this.shouldPersistSession()) this.memoryLaunchInfo.set(this.memorySessionKey(sessionId), {
+      filePath, projectDir: sanitized, workDir: absWorkDir,
+      repository: preparedWorkspace.repository, transcriptMessageCount: 0,
+      customTitle: null,
+      ...(permissionMode && VALID_SESSION_PERMISSION_MODES.has(permissionMode)
+        ? { permissionMode } : {}),
+    })
+    if (persist && this.shouldPersistSession()) {
+      await fs.writeFile(filePath, JSON.stringify(initialEntry) + '\n' + JSON.stringify(metaEntry) + '\n', 'utf-8')
+    }
     this.invalidateSessionListCache()
 
     return { sessionId, workDir: absWorkDir }
@@ -4031,12 +4075,14 @@ export class SessionService {
    */
   async deleteSession(sessionId: string): Promise<void> {
     const found = await this.findSessionFile(sessionId)
-    if (!found) {
+    if (!found && !this.memoryLaunchInfo.has(this.memorySessionKey(sessionId))) {
       throw ApiError.notFound(`Session not found: ${sessionId}`)
     }
 
-    await fs.unlink(found.filePath)
-    this.sessionListSummaryCache.delete(found.filePath)
+    if (found) await fs.unlink(found.filePath)
+    this.memoryLaunchInfo.delete(this.memorySessionKey(sessionId))
+    this.privateTitles.delete(this.memorySessionKey(sessionId))
+    if (found) this.sessionListSummaryCache.delete(found.filePath)
     this.invalidateSessionListCache()
   }
 
@@ -4081,10 +4127,18 @@ export class SessionService {
       throw ApiError.badRequest('title is required')
     }
 
-    const found = await this.findSessionFile(sessionId)
-    if (!found) {
-      throw ApiError.notFound(`Session not found: ${sessionId}`)
+    const persist = this.shouldPersistSession()
+    const info = await this.getSessionLaunchInfo(sessionId)
+    if (!info) throw ApiError.notFound(`Session not found: ${sessionId}`)
+    if (!persist || !this.shouldPersistSession() || this.memoryLaunchInfo.has(this.memorySessionKey(sessionId))) {
+      this.memoryLaunchInfo.set(this.memorySessionKey(sessionId), { ...info, customTitle: title })
     }
+    if (!persist || !this.shouldPersistSession()) {
+      this.rememberPrivateTitle(sessionId, title)
+      return
+    }
+    const found = await this.findSessionFile(sessionId)
+    if (!found || !this.canPersistTitle(sessionId, title)) return
 
     const entry = {
       type: 'custom-title',
@@ -4099,9 +4153,13 @@ export class SessionService {
   /**
    * Append an AI-generated title entry to a session's JSONL file.
    */
-  async appendAiTitle(sessionId: string, title: string): Promise<void> {
+  async appendAiTitle(sessionId: string, title: string, persist = this.shouldPersistSession()): Promise<void> {
+    if (!persist || !this.shouldPersistSession()) {
+      this.rememberPrivateTitle(sessionId, title)
+      return
+    }
     const found = await this.findSessionFile(sessionId)
-    if (!found) return
+    if (!found || !this.canPersistTitle(sessionId, title)) return
 
     await this.appendJsonlEntry(found.filePath, {
       type: 'ai-title',
@@ -4112,6 +4170,8 @@ export class SessionService {
   }
 
   async getCustomTitle(sessionId: string): Promise<string | null> {
+    const memory = this.memoryLaunchInfo.get(this.memorySessionKey(sessionId))
+    if (memory?.customTitle) return memory.customTitle
     const found = await this.findSessionFile(sessionId)
     if (!found) return null
 
@@ -4130,6 +4190,8 @@ export class SessionService {
    * First checks for stored session-meta entry, then falls back to desanitizePath.
    */
   async getSessionWorkDir(sessionId: string): Promise<string | null> {
+    const memory = this.memoryLaunchInfo.get(this.memorySessionKey(sessionId))
+    if (memory) return memory.workDir
     const found = await this.findSessionFile(sessionId)
     if (!found) return null
 
@@ -4154,8 +4216,9 @@ export class SessionService {
    * Placeholder desktop-created sessions have zero transcript messages.
    */
   async getSessionLaunchInfo(sessionId: string): Promise<SessionLaunchInfo | null> {
+    const memory = this.memoryLaunchInfo.get(this.memorySessionKey(sessionId))
     const found = await this.findSessionFile(sessionId)
-    if (!found) return null
+    if (!found) return memory ? { ...memory, transcriptMessageCount: 0 } : null
 
     const entries = await this.readJsonlFile(found.filePath)
     const workDir = this.resolveWorkDirFromEntries(entries, found.projectDir) || process.cwd()
@@ -4195,12 +4258,13 @@ export class SessionService {
       workDir,
       repository,
       worktreeSession,
-      transcriptMessageCount,
       customTitle,
       permissionMode,
       ...(runtimeProviderId !== undefined ? { runtimeProviderId } : {}),
       ...(runtimeModelId ? { runtimeModelId } : {}),
       ...(effortLevel ? { effortLevel } : {}),
+      ...memory,
+      transcriptMessageCount,
     }
   }
 
@@ -4216,6 +4280,7 @@ export class SessionService {
     fallbackWorkDir?: string,
     preservedPermissionMode?: string,
   ): Promise<void> {
+    const persist = this.shouldPersistSession()
     const nextEpoch = (this.taskNotificationMutationEpochs.get(sessionId) ?? 0) + 1
     this.taskNotificationMutationEpochs.set(sessionId, nextEpoch)
     this.clearingTaskNotificationSessions.add(sessionId)
@@ -4225,6 +4290,23 @@ export class SessionService {
     try {
       await Promise.allSettled(pendingWrites.map((pending) => pending.promise))
 
+      if (!persist || !this.shouldPersistSession()) {
+        const storedInfo = await this.getSessionLaunchInfo(sessionId)
+        const workDir = fallbackWorkDir && normalizeDriveRootPathForPlatform(fallbackWorkDir)
+        const projectDir = workDir && this.sanitizePath(workDir)
+        const info = storedInfo ?? (workDir && projectDir ? {
+          filePath: path.join(this.getProjectsDir(), projectDir, `${sessionId}.jsonl`),
+          projectDir, workDir, transcriptMessageCount: 0, customTitle: null,
+        } : null)
+        if (info) {
+          this.memoryLaunchInfo.set(this.memorySessionKey(sessionId), {
+            ...info, transcriptMessageCount: 0, customTitle: null,
+            ...(preservedPermissionMode && VALID_SESSION_PERMISSION_MODES.has(preservedPermissionMode)
+              ? { permissionMode: preservedPermissionMode } : {}),
+          })
+        }
+        return
+      }
       let found = await this.findSessionFile(sessionId)
       if (!found && fallbackWorkDir) {
         const resolvedPath = path.resolve(normalizeDriveRootPathForPlatform(fallbackWorkDir))
@@ -4271,6 +4353,8 @@ export class SessionService {
         timestamp: now,
       }
 
+      if (!this.shouldPersistSession()) return
+      this.memoryLaunchInfo.delete(this.memorySessionKey(sessionId))
       await fs.writeFile(
         found.filePath,
         `${JSON.stringify(initialEntry)}\n${JSON.stringify(metaEntry)}\n`,
@@ -4307,6 +4391,35 @@ export class SessionService {
       effortLevel?: string
     }
   ): Promise<void> {
+    const persist = this.shouldPersistSession()
+    const storedInfo = await this.getSessionLaunchInfo(sessionId)
+    const workDir = normalizeDriveRootPathForPlatform(metadata.workDir)
+    const projectDir = this.sanitizePath(workDir)
+    const previousInfo = storedInfo ?? (!persist ? {
+      filePath: path.join(this.getProjectsDir(), projectDir, `${sessionId}.jsonl`),
+      projectDir, workDir, transcriptMessageCount: 0, customTitle: null,
+    } : null)
+    if (previousInfo && (!persist || !this.shouldPersistSession() || this.memoryLaunchInfo.has(this.memorySessionKey(sessionId)))) {
+      const normalizedWorkDir = normalizeDriveRootPathForPlatform(metadata.workDir)
+      const projectDir = this.sanitizePath(normalizedWorkDir)
+      this.memoryLaunchInfo.set(this.memorySessionKey(sessionId), {
+        ...previousInfo,
+        workDir: normalizedWorkDir, projectDir,
+        filePath: path.join(this.getProjectsDir(), projectDir, `${sessionId}.jsonl`),
+        ...(metadata.repository ? { repository: metadata.repository } : {}),
+        ...(metadata.customTitle ? { customTitle: metadata.customTitle } : {}),
+        ...(metadata.permissionMode && VALID_SESSION_PERMISSION_MODES.has(metadata.permissionMode)
+          ? { permissionMode: metadata.permissionMode } : {}),
+        ...(metadata.runtimeProviderId !== undefined ? { runtimeProviderId: metadata.runtimeProviderId } : {}),
+        ...(metadata.runtimeModelId ? { runtimeModelId: metadata.runtimeModelId } : {}),
+        ...(metadata.effortLevel && VALID_SESSION_EFFORT_LEVELS.has(metadata.effortLevel)
+          ? { effortLevel: metadata.effortLevel } : {}),
+      })
+    }
+    if (!persist || !this.shouldPersistSession()) {
+      if (metadata.customTitle) this.rememberPrivateTitle(sessionId, metadata.customTitle)
+      return
+    }
     const matches = await this.findSessionFiles(sessionId)
     if (matches.length === 0) return
 
@@ -4325,9 +4438,8 @@ export class SessionService {
     const targetProjectDir = this.sanitizePath(normalizedWorkDir)
     const targetFilePath = path.join(this.getProjectsDir(), targetProjectDir, `${sessionId}.jsonl`)
 
-    if (!metadata.customTitle) {
-      const launchInfo = await this.getSessionLaunchInfo(sessionId)
-      if (this.metadataMatchesLaunchInfo(launchInfo, {
+    if (!metadata.customTitle && !this.memoryLaunchInfo.has(this.memorySessionKey(sessionId))) {
+      if (this.metadataMatchesLaunchInfo(previousInfo, {
         ...metadata,
         workDir: normalizedWorkDir,
         repository,
@@ -4356,7 +4468,7 @@ export class SessionService {
       timestamp: new Date().toISOString(),
     })
 
-    if (metadata.customTitle) {
+    if (metadata.customTitle && this.canPersistTitle(sessionId, metadata.customTitle)) {
       await this.appendJsonlEntry(targetFilePath, {
         type: 'custom-title',
         customTitle: metadata.customTitle,
@@ -4517,7 +4629,7 @@ export class SessionService {
       notification,
       notification.timestamp ?? new Date(this.now()).toISOString(),
     )
-    if (!normalized) return
+    if (!normalized || !this.shouldPersistSession()) return
     if (this.clearingTaskNotificationSessions.has(sessionId)) return
 
     const epoch = this.taskNotificationMutationEpochs.get(sessionId) ?? 0

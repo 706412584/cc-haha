@@ -600,6 +600,48 @@ class Project {
   // Entries buffered while sessionFile is null. Flushed by materializeSessionFile
   // on the first user/assistant message — prevents metadata-only session files.
   private pendingEntries: Entry[] = []
+  // UUIDs observed while recording was disabled must never be backfilled by
+  // growing-history callers. Keep these separate from the on-disk dedup cache:
+  // excluded messages cannot become parents, even after cache invalidation.
+  private excludedMessages = new Map<string, Set<UUID>>()
+
+  isMessageExcluded(uuid: UUID, sessionId = getSessionId()): boolean {
+    return this.excludedMessages.get(sessionId)?.has(uuid) ?? false
+  }
+
+  private excludeMessageUuids(uuids: Iterable<UUID>, sessionId = getSessionId()): void {
+    let excluded = this.excludedMessages.get(sessionId)
+    if (!excluded) {
+      excluded = new Set()
+      this.excludedMessages.set(sessionId, excluded)
+    }
+    for (const uuid of uuids) excluded.add(uuid)
+  }
+
+  filterPersistableMessages(messages: Transcript, sessionId = getSessionId()): Transcript {
+    if (this.shouldSkipPersistence()) {
+      this.excludeMessageUuids(messages.map(message => message.uuid), sessionId)
+      this.pendingEntries = []
+      this.currentSessionLastPrompt = undefined
+      return []
+    }
+    return messages.filter(message => !this.isMessageExcluded(message.uuid, sessionId))
+  }
+
+  async discardDeletedTranscriptHistory(messageSet: Set<UUID>, sessionId: UUID): Promise<void> {
+    const filePath = this.sessionFile ?? getTranscriptPathForSession(sessionId)
+    // An unflushed first turn has UUIDs in the dedup cache before its file
+    // exists. Only treat a missing file as cleanup when no writes are pending.
+    if (messageSet.size === 0 || this.activeDrain || this.writeQueues.get(filePath)?.length) return
+    try {
+      await stat(filePath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return
+      this.excludeMessageUuids(messageSet, sessionId)
+      messageSet.clear()
+      this.currentSessionLastPrompt = undefined
+    }
+  }
   private remoteIngressUrl: string | null = null
   private internalEventWriter: InternalEventWriter | null = null
   private internalEventReader: InternalEventReader | null = null
@@ -698,6 +740,16 @@ class Project {
         continue
       }
       const batch = queue.splice(0)
+      // Cleanup can disable recording while a batch is waiting for its timer.
+      // Discard it instead of recreating a transcript removed by cleanup.
+      if (this.shouldSkipPersistence()) {
+        for (const { entry, resolve } of batch) {
+          if ('uuid' in entry) this.filterPersistableMessages([entry as TranscriptMessage], entry.sessionId as SessionId)
+          resolve()
+        }
+        this.currentSessionLastPrompt = undefined
+        continue
+      }
 
       let content = ''
       const resolvers: Array<() => void> = []
@@ -769,7 +821,7 @@ class Project {
    * external-writer concern — their caches are authoritative.
    */
   reAppendSessionMetadata(skipTitleRefresh = false): void {
-    if (!this.sessionFile) return
+    if (!this.sessionFile || this.shouldSkipPersistence()) return
     const sessionId = getSessionId() as UUID
     if (!sessionId) return
 
@@ -1058,8 +1110,13 @@ class Project {
     startingParentUuid?: UUID | null,
     teamInfo?: { teamName?: string; agentName?: string },
   ) {
+    // Capture the policy before any async work: a later settings change must
+    // not make the history submitted while disabled eligible for persistence.
+    messages = this.filterPersistableMessages(messages)
     return this.trackWrite(async () => {
-      let parentUuid: UUID | null = startingParentUuid ?? null
+      if (messages.length === 0) return
+      let parentUuid: UUID | null = startingParentUuid && !this.isMessageExcluded(startingParentUuid)
+        ? startingParentUuid : null
 
       // First user/assistant message materializes the session file.
       // Hook progress/attachment messages alone stay buffered.
@@ -1084,6 +1141,7 @@ class Project {
       const slug = getPlanSlugCache().get(sessionId)
 
       for (const message of messages) {
+        if (this.filterPersistableMessages([message]).length === 0) continue
         const isCompactBoundary = isCompactBoundaryMessage(message)
 
         // For tool_result messages, use the assistant message UUID from the message
@@ -1092,7 +1150,8 @@ class Project {
         if (
           message.type === 'user' &&
           'sourceToolAssistantUUID' in message &&
-          message.sourceToolAssistantUUID
+          message.sourceToolAssistantUUID &&
+          !this.isMessageExcluded(message.sourceToolAssistantUUID)
         ) {
           effectiveParentUuid = message.sourceToolAssistantUUID
         }
@@ -1124,7 +1183,7 @@ class Project {
           slug,
         }
         await this.appendEntry(transcriptMessage)
-        if (isChainParticipant(message)) {
+        if (isChainParticipant(message) && !this.isMessageExcluded(message.uuid)) {
           parentUuid = message.uuid
         }
       }
@@ -1132,8 +1191,10 @@ class Project {
       // Cache this turn's user prompt for reAppendSessionMetadata —
       // the --resume picker shows what the user was last doing.
       // Overwritten every turn by design.
-      if (!isSidechain) {
-        const text = getFirstMeaningfulUserMessageTextContent(messages)
+      if (!isSidechain && !this.shouldSkipPersistence()) {
+        const text = getFirstMeaningfulUserMessageTextContent(
+          this.filterPersistableMessages(messages),
+        )
         if (text) {
           const flat = text.replace(/\n/g, ' ').trim()
           this.currentSessionLastPrompt =
@@ -1188,6 +1249,7 @@ class Project {
 
   async appendEntry(entry: Entry, sessionId: UUID = getSessionId() as UUID) {
     if (this.shouldSkipPersistence()) {
+      if ('uuid' in entry) this.filterPersistableMessages([entry as TranscriptMessage], sessionId as SessionId)
       return
     }
 
@@ -1472,13 +1534,21 @@ export async function recordTranscript(
   startingParentUuidHint?: UUID,
   allMessages?: readonly Message[],
 ): Promise<UUID | null> {
-  const cleanedMessages = cleanMessagesForLogging(messages, allMessages)
+  const project = getProject()
+  const cleanedMessages = project.filterPersistableMessages(
+    cleanMessagesForLogging(messages, allMessages),
+  )
+  if (cleanedMessages.length === 0) return null
   const sessionId = getSessionId() as UUID
   const messageSet = await getSessionMessages(sessionId)
+  await project.discardDeletedTranscriptHistory(messageSet, sessionId)
   const newMessages: typeof cleanedMessages = []
-  let startingParentUuid: UUID | undefined = startingParentUuidHint
+  let startingParentUuid: UUID | undefined = startingParentUuidHint &&
+    !project.isMessageExcluded(startingParentUuidHint) && messageSet.has(startingParentUuidHint)
+    ? startingParentUuidHint : undefined
   let seenNewMessage = false
   for (const m of cleanedMessages) {
+    if (project.isMessageExcluded(m.uuid)) continue
     if (messageSet.has(m.uuid as UUID)) {
       // Only track skipped messages that form a prefix. After compaction,
       // messagesToKeep appear AFTER new CB/summary, so this skips them.
@@ -1505,7 +1575,9 @@ export async function recordTranscript(
   // slice is all-recorded (rewind, /resume scenarios where every message is
   // already in messageSet). Progress is skipped — it's written to the JSONL
   // but nothing chains TO it (see isChainParticipant).
-  const lastRecorded = newMessages.findLast(isChainParticipant)
+  const lastRecorded = newMessages.findLast(m =>
+    isChainParticipant(m) && !project.isMessageExcluded(m.uuid),
+  )
   return (lastRecorded?.uuid as UUID | undefined) ?? startingParentUuid ?? null
 }
 
