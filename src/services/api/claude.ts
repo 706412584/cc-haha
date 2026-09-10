@@ -1,4 +1,5 @@
-﻿import type {
+﻿import { OpenAICodexTurnState } from '../openaiAuth/turnState.js';
+import type {
   BetaContentBlock,
   BetaContentBlockParam,
   BetaImageBlockParam,
@@ -754,6 +755,7 @@ export function assistantMessageToMessageParam(
 }
 
 export type Options = {
+  openAITurnState?: OpenAICodexTurnState;
   getToolPermissionContext: () => Promise<ToolPermissionContext>;
   model: string;
   toolChoice?: BetaToolChoiceTool | BetaToolChoiceAuto | undefined;
@@ -802,6 +804,8 @@ export async function queryModelWithoutStreaming({
   signal: AbortSignal;
   options: Options;
 }): Promise<AssistantMessage> {
+  using ownedOpenAITurnState = options.openAITurnState ? undefined : new OpenAICodexTurnState(signal);
+  options = { ...options, openAITurnState: options.openAITurnState ?? ownedOpenAITurnState };
   // Store the assistant message but continue consuming the generator to ensure
   // logAPISuccessAndDuration gets called (which happens after all yields)
   let assistantMessage: AssistantMessage | undefined;
@@ -853,6 +857,8 @@ export async function* queryModelWithStreaming({
   StreamEvent | AssistantMessage | SystemAPIErrorMessage | SystemStreamingFallbackMessage,
   void
 > {
+  using ownedOpenAITurnState = options.openAITurnState ? undefined : new OpenAICodexTurnState(signal);
+  options = { ...options, openAITurnState: options.openAITurnState ?? ownedOpenAITurnState };
   return yield* withStreamingVCR(messages, async function* () {
     yield* withStreamRetry(
       () =>
@@ -911,6 +917,8 @@ export async function* executeNonStreamingRequest(
     model: string;
     fetchOverride?: Options["fetchOverride"];
     source: string;
+    openAITurnState?: OpenAICodexTurnState;
+    agentId?: AgentId;
   },
   retryOptions: {
     model: string;
@@ -938,6 +946,8 @@ export async function* executeNonStreamingRequest(
         model: clientOptions.model,
         fetchOverride: clientOptions.fetchOverride,
         source: clientOptions.source,
+        openAITurnState: clientOptions.openAITurnState,
+        agentId: clientOptions.agentId,
       }),
     async (anthropic, attempt, context) => {
       const start = Date.now();
@@ -1956,6 +1966,8 @@ async function* queryModel(
           model: options.model,
           fetchOverride: options.fetchOverride,
           source: options.querySource,
+          openAITurnState: options.openAITurnState,
+          agentId: options.agentId,
         }),
       async (anthropic, attempt, context) => {
         attemptNumber = attempt;
@@ -3001,7 +3013,7 @@ async function* queryModel(
           : "other") as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       });
       const result = yield* executeNonStreamingRequest(
-        { model: options.model, source: options.querySource },
+        { model: options.model, source: options.querySource, openAITurnState: options.openAITurnState, agentId: options.agentId },
         {
           model: options.model,
           fallbackModel: options.fallbackModel,
@@ -3111,7 +3123,7 @@ async function* queryModel(
       try {
         // Fall back to non-streaming mode
         const result = yield* executeNonStreamingRequest(
-          { model: options.model, source: options.querySource },
+          { model: options.model, source: options.querySource, openAITurnState: options.openAITurnState, agentId: options.agentId },
           {
             model: options.model,
             fallbackModel: options.fallbackModel,

@@ -81,6 +81,10 @@ export function anthropicToOpenaiResponses(
         name: t.name,
         description: t.description,
         parameters: t.input_schema,
+        // Responses otherwise normalizes optional properties to required.
+        // Preserve Anthropic/MCP omission semantics, including alternative
+        // selectors and compatibility aliases that cannot coexist.
+        strict: false,
       }))
     if (tools.length > 0) {
       result.tools = tools

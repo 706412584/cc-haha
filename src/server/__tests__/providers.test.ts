@@ -16,6 +16,7 @@ import {
   traceCaptureService,
 } from '../services/traceCaptureService.js'
 import type { CreateProviderInput } from '../types/provider.js'
+import { buildComputerUseTools } from '../../vendor/computer-use-mcp/tools.js'
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 
@@ -1605,6 +1606,67 @@ describe('ProviderService', () => {
   })
 
   describe('handleProxyRequest', () => {
+    test('preserves optional Computer Use parameters in the final Responses proxy request', async () => {
+      const originalFetch = globalThis.fetch
+      const computerTools = buildComputerUseTools().filter(tool =>
+        ['get_app_state', 'click'].includes(tool.name),
+      )
+      const originalSchemas = structuredClone(computerTools.map(tool => tool.inputSchema))
+      const calls: Array<{ url: string; body: Record<string, unknown> }> = []
+      globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(input), body: JSON.parse(String(init?.body)) })
+        return Response.json({
+          id: 'resp_computer_schema',
+          object: 'response',
+          created_at: 0,
+          model: 'gpt-6-astra',
+          status: 'completed',
+          output: [],
+        })
+      }) as typeof fetch
+
+      try {
+        const svc = new ProviderService()
+        const provider = await svc.addProvider(sampleInput({ apiFormat: 'openai_responses' }))
+        await svc.activateProvider(provider.id)
+        const req = new Request('http://localhost:3456/proxy/v1/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'gpt-6-astra',
+            max_tokens: 64,
+            messages: [{ role: 'user', content: 'Inspect Blender' }],
+            tools: computerTools.map(tool => ({
+              name: tool.name,
+              description: tool.description,
+              input_schema: tool.inputSchema,
+            })),
+          }),
+        })
+
+        const response = await handleProxyRequest(req, new URL(req.url))
+        expect(response.status).toBe(200)
+        await response.text()
+        expect(calls).toHaveLength(1)
+        expect(calls[0].url).toBe('https://api.example.com/v1/responses')
+        const outboundTools = calls[0].body.tools as Array<{
+          name: string
+          strict?: boolean
+          parameters: Record<string, unknown>
+        }>
+        expect(outboundTools).toHaveLength(computerTools.length)
+        for (const [index, tool] of outboundTools.entries()) {
+          expect(tool.name).toBe(computerTools[index].name)
+          expect(tool.strict).toBe(false)
+          expect(tool.parameters).toEqual(originalSchemas[index])
+          expect(tool.parameters.required).toEqual(['app'])
+        }
+        expect(computerTools.map(tool => tool.inputSchema)).toEqual(originalSchemas)
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+
     test('records a session trace for proxied OpenAI Chat calls', async () => {
       const originalFetch = globalThis.fetch
       const upstreamHeaders: Headers[] = []
