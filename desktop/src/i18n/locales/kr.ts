@@ -1062,7 +1062,7 @@ export const kr: Record<TranslationKey, string> = {
   'settings.mcp.empty': '아직 구성된 MCP 서버가 없습니다',
   'settings.mcp.emptyHint': '사용자 지정 stdio, HTTP 또는 SSE MCP 서버를 추가하여 도구 액세스 확장을 시작하세요.',
   'settings.mcp.stats.total': '총 서버',
-  'settings.mcp.stats.connected': '현재 채팅에 연결됨',
+  'settings.mcp.stats.connected': '현재 프로젝트 연결 확인',
   'settings.mcp.stats.attention': '주의 필요',
   'settings.mcp.status.configured': '구성됨',
   'settings.mcp.status.configuredElsewhere': '현재 채팅에는 로드되지 않았습니다. 이 프로젝트에서 채팅을 열어 사용하세요.',
@@ -1142,6 +1142,11 @@ export const kr: Record<TranslationKey, string> = {
   'settings.mcp.toast.deleteFailed': 'MCP 서버를 삭제하지 못했습니다',
   'settings.mcp.toast.toggleFailed': 'MCP 서버 상태를 업데이트하지 못했습니다',
   'settings.mcp.toast.reconnectFailed': 'MCP 서버를 다시 연결하지 못했습니다',
+  'settings.mcp.toast.syncFailed': '채팅 동기화 실패: {error}',
+  'settings.mcp.toast.syncNotRunning': '현재 채팅이 실행 중이 아닙니다. 시작 시 설정이 적용됩니다.',
+  'settings.mcp.toast.syncDifferentProject': '현재 채팅은 다른 프로젝트를 사용하므로 도구가 업데이트되지 않았습니다.',
+  'settings.mcp.toast.syncNoSession': '선택한 채팅이 없습니다. 설정을 저장했습니다.',
+  'settings.mcp.toast.syncUnconfirmed': '현재 채팅 업데이트가 확인되지 않았습니다.',
 
   // Settings > Agents
   'settings.tab.agents': '에이전트',

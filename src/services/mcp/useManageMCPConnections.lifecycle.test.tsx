@@ -1,10 +1,20 @@
-import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import '../../../preload.ts'
+import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test'
 import React from 'react'
 import { render } from 'ink'
 import { PassThrough } from 'node:stream'
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import {
+  ToolListChangedNotificationSchema,
+  PromptListChangedNotificationSchema,
+  ResourceListChangedNotificationSchema,
+} from '@modelcontextprotocol/sdk/types.js'
+import { runWithCwdOverride } from '../../utils/cwd.js'
 import type { AppState } from '../../state/AppState.js'
 import { getDefaultAppState } from '../../state/AppStateStore.js'
-import type { ConnectedMCPServer } from './types.js'
+import type { ConnectedMCPServer, ScopedMcpServerConfig } from './types.js'
 
 const appStateModule = { ...await import('../../state/AppState.js') }
 const clientModule = { ...await import('./client.js') }
@@ -58,8 +68,8 @@ const { useManageMCPConnections } = await import('./useManageMCPConnections.js')
 
 let actions: ReturnType<typeof useManageMCPConnections>
 
-function Harness() {
-  actions = useManageMCPConnections(undefined)
+function Harness({ configs }: { configs?: Record<string, ScopedMcpServerConfig> }) {
+  actions = useManageMCPConnections(configs)
   return null
 }
 
@@ -292,4 +302,121 @@ test('ignores a previous connection close after an explicit reconnect', async ()
   } finally {
     app.unmount()
   }
+})
+
+
+describe('MCP list change notification cache isolation', () => {
+  test.each(['tools', 'prompts', 'resources'] as const)(
+    '%s notification refreshes only the originating project for same-name servers',
+    async (kind) => {
+      isDisabled = false
+      const root = mkdtempSync(join(tmpdir(), 'qa005-notification-'))
+      const firstProject = join(root, 'first')
+      const secondProject = join(root, 'second')
+      mkdirSync(firstProject)
+      mkdirSync(secondProject)
+      const connections: ConnectedMCPServer[] = []
+      const fetchers = {
+        tools: clientModule.fetchToolsForClient,
+        prompts: clientModule.fetchCommandsForClient,
+        resources: clientModule.fetchResourcesForClient,
+      }
+      const schemas = {
+        tools: ToolListChangedNotificationSchema,
+        prompts: PromptListChangedNotificationSchema,
+        resources: ResourceListChangedNotificationSchema,
+      }
+      let app: ReturnType<typeof render> | undefined
+      let notificationSpy: ReturnType<typeof spyOn> | undefined
+      try {
+        async function createFixture(project: string, label: string) {
+          let version = 1
+          const requests: string[] = []
+          const result = await runWithCwdOverride(project, () => clientModule.setupSdkMcpClients(
+            { 'test-server': { type: 'sdk', name: 'test-server' } },
+            async (_name, message) => {
+              if (!('method' in message) || !('id' in message)) return message
+              const method = message.method
+              requests.push(method)
+              const itemName = `${label}-v${version}`
+              const result = method === 'initialize'
+                ? {
+                    protocolVersion: '2024-11-05',
+                    capabilities: {
+                      tools: { listChanged: true },
+                      prompts: { listChanged: true },
+                      resources: { listChanged: true },
+                    },
+                    serverInfo: { name: 'notification-fixture', version: '1' },
+                  }
+                : method === 'tools/list'
+                  ? { tools: [{ name: itemName, inputSchema: { type: 'object' } }] }
+                  : method === 'prompts/list'
+                    ? { prompts: [{ name: itemName }] }
+                    : { resources: [{ name: itemName, uri: `fixture://${itemName}` }] }
+              return { jsonrpc: '2.0', id: message.id, result }
+            },
+          ))
+          const client = result.clients[0]
+          if (!client || client.type !== 'connected') throw new Error(`Fixture must connect: ${JSON.stringify(client)}`)
+          connections.push(client)
+          return { client, requests, advance: () => { version++ } }
+        }
+
+        const first = await createFixture(firstProject, 'first')
+        const second = await createFixture(secondProject, 'second')
+        const fetchList = fetchers[kind]
+        const firstBefore = await fetchList(first.client)
+        const secondBefore = await fetchList(second.client)
+        const firstRequestsBefore = first.requests.filter(method => method === `${kind}/list`).length
+        const secondRequestsBefore = second.requests.filter(method => method === `${kind}/list`).length
+        expect(firstBefore).not.toBe(secondBefore)
+
+        let notify: (() => Promise<void>) | undefined
+        const setNotificationHandler = first.client.client.setNotificationHandler.bind(first.client.client)
+        notificationSpy = spyOn(first.client.client, 'setNotificationHandler').mockImplementation((schema, handler) => {
+          if (schema === schemas[kind]) notify = handler as () => Promise<void>
+          setNotificationHandler(schema, handler)
+        })
+        state = { ...state, mcp: { ...state.mcp, clients: [first.client] } }
+        reconnectMcpServerImpl.mockResolvedValue({
+          name: 'test-server', client: first.client, tools: [], commands: [], resources: [],
+        })
+        app = render(<Harness configs={{ 'test-server': first.client.config }} />, {
+          stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(),
+          exitOnCtrlC: false, patchConsole: false,
+        })
+        await Bun.sleep(0)
+        await actions.reconnectMcpServer('test-server')
+        expect(notify).toBeDefined()
+
+        first.advance()
+        second.advance()
+        // Delivery can occur while a different project is active. The client
+        // that registered the handler still owns this notification's cache.
+        await runWithCwdOverride(secondProject, () => notify!())
+        await Bun.sleep(20)
+        const firstAfter = await fetchList(first.client)
+        const secondAfter = await fetchList(second.client)
+        expect(firstAfter).not.toBe(firstBefore)
+        expect(firstAfter[0]?.name).toContain('first-v2')
+        expect(secondAfter).toBe(secondBefore)
+        expect(secondAfter[0]?.name).toContain('second-v1')
+        expect(first.requests.filter(method => method === `${kind}/list`)).toHaveLength(firstRequestsBefore + 1)
+        expect(second.requests.filter(method => method === `${kind}/list`)).toHaveLength(secondRequestsBefore)
+        const published = kind === 'tools'
+          ? state.mcp.tools
+          : kind === 'prompts'
+            ? state.mcp.commands
+            : state.mcp.resources['test-server']
+        expect(published?.[0]?.name).toContain('first-v2')
+      } finally {
+        app?.unmount()
+        notificationSpy?.mockRestore()
+        await Promise.all(connections.map(connection => connection.cleanup()))
+        for (const fetchList of Object.values(fetchers)) fetchList.cache.clear()
+        rmSync(root, { recursive: true, force: true })
+      }
+    },
+  )
 })

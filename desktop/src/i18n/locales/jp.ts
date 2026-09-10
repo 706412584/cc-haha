@@ -1062,7 +1062,7 @@ export const jp: Record<TranslationKey, string> = {
   'settings.mcp.empty': 'MCP サーバーはまだ設定されていません',
   'settings.mcp.emptyHint': 'カスタムの stdio、HTTP、または SSE の MCP サーバーを追加して、ツールアクセスの拡張を始めましょう。',
   'settings.mcp.stats.total': 'サーバー総数',
-  'settings.mcp.stats.connected': '現在のチャットで接続中',
+  'settings.mcp.stats.connected': '現在のプロジェクトの接続確認',
   'settings.mcp.stats.attention': '要対応',
   'settings.mcp.status.configured': '設定済み',
   'settings.mcp.status.configuredElsewhere': '現在のチャットでは読み込まれていません。このプロジェクトでチャットを開いて使用してください。',
@@ -1142,6 +1142,11 @@ export const jp: Record<TranslationKey, string> = {
   'settings.mcp.toast.deleteFailed': 'MCP サーバーの削除に失敗しました',
   'settings.mcp.toast.toggleFailed': 'MCP サーバーの状態の更新に失敗しました',
   'settings.mcp.toast.reconnectFailed': 'MCP サーバーの再接続に失敗しました',
+  'settings.mcp.toast.syncFailed': 'チャットの同期に失敗しました：{error}',
+  'settings.mcp.toast.syncNotRunning': '現在のチャットは実行中ではありません。開始時に設定が適用されます。',
+  'settings.mcp.toast.syncDifferentProject': '現在のチャットは別のプロジェクトを使用しているため、ツールは更新されませんでした。',
+  'settings.mcp.toast.syncNoSession': 'チャットが選択されていません。設定を保存しました。',
+  'settings.mcp.toast.syncUnconfirmed': '現在のチャットの更新を確認できませんでした。',
 
   // Settings > Agents
   'settings.tab.agents': 'エージェント',

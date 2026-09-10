@@ -6,6 +6,7 @@ import {
   connectToServer,
   fetchToolsForClient,
   getServerCacheKey,
+  getMcpClientCacheKey,
   setMcpConnectionClosedHandler,
 } from './client.js'
 
@@ -85,7 +86,7 @@ describe('MCP connection ownership', () => {
     setMcpConnectionClosedHandler(closed)
     active.client.onclose?.()
     expect(connectToServer.cache.has(getServerCacheKey(name, config))).toBe(false)
-    expect(fetchToolsForClient.cache.has(name)).toBe(false)
+    expect(fetchToolsForClient.cache.has(getMcpClientCacheKey(active))).toBe(false)
     expect(closed).toHaveBeenCalledWith(name, active.client)
   })
 
