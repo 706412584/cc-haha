@@ -4,7 +4,7 @@ import type { Dirent } from 'fs'
 // Sync fs primitives for readFileTailSync — separate from fs/promises
 // imports above. Named (not wildcard) per CLAUDE.md style; no collisions
 // with the async-suffixed names.
-import { closeSync, fstatSync, openSync, readSync } from 'fs'
+import { appendFileSync as fsAppendFileSync, closeSync, constants, fchmodSync, fstatSync, openSync, readSync } from 'fs'
 import {
   appendFile as fsAppendFile,
   open as fsOpen,
@@ -820,7 +820,7 @@ class Project {
    * the SDK cannot touch (last-prompt, agent-*, mode, pr-link) have no
    * external-writer concern — their caches are authoritative.
    */
-  reAppendSessionMetadata(skipTitleRefresh = false): void {
+  reAppendSessionMetadata(skipTitleRefresh = false, allowCreate = false): void {
     if (!this.sessionFile || this.shouldSkipPersistence()) return
     const sessionId = getSessionId() as UUID
     if (!sessionId) return
@@ -871,7 +871,7 @@ class Project {
         type: 'last-prompt',
         lastPrompt: this.currentSessionLastPrompt,
         sessionId,
-      })
+      }, allowCreate)
     }
     // Unconditional: cache was refreshed from tail above; re-append keeps
     // the entry at EOF so compaction-pushed content doesn't evict it.
@@ -880,49 +880,49 @@ class Project {
         type: 'custom-title',
         customTitle: this.currentSessionTitle,
         sessionId,
-      })
+      }, allowCreate)
     }
     if (this.currentSessionTag) {
       appendEntryToFile(this.sessionFile, {
         type: 'tag',
         tag: this.currentSessionTag,
         sessionId,
-      })
+      }, allowCreate)
     }
     if (this.currentSessionAgentName) {
       appendEntryToFile(this.sessionFile, {
         type: 'agent-name',
         agentName: this.currentSessionAgentName,
         sessionId,
-      })
+      }, allowCreate)
     }
     if (this.currentSessionAgentColor) {
       appendEntryToFile(this.sessionFile, {
         type: 'agent-color',
         agentColor: this.currentSessionAgentColor,
         sessionId,
-      })
+      }, allowCreate)
     }
     if (this.currentSessionAgentSetting) {
       appendEntryToFile(this.sessionFile, {
         type: 'agent-setting',
         agentSetting: this.currentSessionAgentSetting,
         sessionId,
-      })
+      }, allowCreate)
     }
     if (this.currentSessionMode) {
       appendEntryToFile(this.sessionFile, {
         type: 'mode',
         mode: this.currentSessionMode,
         sessionId,
-      })
+      }, allowCreate)
     }
     if (this.currentSessionWorktree !== undefined) {
       appendEntryToFile(this.sessionFile, {
         type: 'worktree-state',
         worktreeSession: this.currentSessionWorktree,
         sessionId,
-      })
+      }, allowCreate)
     }
     if (
       this.currentSessionPrNumber !== undefined &&
@@ -936,7 +936,7 @@ class Project {
         prUrl: this.currentSessionPrUrl,
         prRepository: this.currentSessionPrRepository,
         timestamp: new Date().toISOString(),
-      })
+      }, allowCreate)
     }
   }
 
@@ -1092,8 +1092,9 @@ class Project {
     // and create a metadata-only file despite --no-session-persistence.
     if (this.shouldSkipPersistence()) return
     this.ensureCurrentSessionFile()
-    // mode/agentSetting are cache-only pre-materialization; write them now.
-    this.reAppendSessionMetadata()
+    // Only a new user/assistant turn may create a transcript. Exit/compaction
+    // metadata refreshes must never resurrect a file removed by cleanup.
+    this.reAppendSessionMetadata(false, true)
     if (this.pendingEntries.length > 0) {
       const buffered = this.pendingEntries
       this.pendingEntries = []
@@ -2699,15 +2700,35 @@ export async function fetchLogs(limit?: number): Promise<LogOption[]> {
 }
 
 /**
- * Append an entry to a session file. Creates the parent dir if missing.
+ * Append an entry to a session file. Metadata refreshes opt out of creation:
+ * a stale process may not have observed retention-zero before it was restored.
  */
 /* eslint-disable custom-rules/no-sync-fs -- sync callers (exit cleanup, materialize) */
 function appendEntryToFile(
   fullPath: string,
   entry: Record<string, unknown>,
+  allowCreate = true,
 ): void {
   const fs = getFsImplementation()
   const line = jsonStringify(entry) + '\n'
+  if (!allowCreate) {
+    let fd: number
+    try {
+      const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW
+      fd = openSync(fullPath, constants.O_WRONLY | constants.O_APPEND | noFollow)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    try {
+      if (!fstatSync(fd).isFile()) throw new Error(`Refusing non-regular append target: ${fullPath}`)
+      if (process.platform !== 'win32') fchmodSync(fd, 0o600)
+      fsAppendFileSync(fd, line)
+    } finally {
+      closeSync(fd)
+    }
+    return
+  }
   try {
     fs.appendFileSync(fullPath, line, { mode: 0o600 })
   } catch {
