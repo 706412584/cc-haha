@@ -619,7 +619,7 @@ public enum AXAction {
         }
     }
 
-    /// Coordinate click that PREFERS the AX path (Codex parity). The model gives a
+    /// Coordinate click that prefers the AX path. The model gives a
     /// point in the get_app_state screenshot; we map it to a GLOBAL point (caller's
     /// job) and hit-test the AX element under it, then press what's there. This is
     /// the load-bearing fix for Chromium/CEF apps (e.g. NeteaseMusic): the tree
@@ -627,9 +627,10 @@ public enum AXAction {
     /// `AXUIElementCopyElementAtPosition` makes Chromium instantiate the a11y node
     /// for THAT point on demand — so we get a real, pressable element and call
     /// `AXPress`, with NO synthetic mouse event, without stealing the pointer, and
-    /// while the app stays in the background. This is exactly what Codex does
-    /// (its service imports `AXUIElementCopyElementAtPosition` + `…PerformAction`
-    /// and posts ZERO `CGEvent`s). Falls back to the synthetic `postToPid` click
+    /// while the app stays in the background. Only the exact hit is pressed:
+    /// a canvas hit may return a window whose descendants include its close
+    /// button, so index-click descendant traversal is not valid here.
+    /// Falls back to the synthetic `postToPid` click
     /// (`clickPoint`) when no AX element answers or the press finds no action.
     /// Returns a tag naming the path taken, for diagnostics. Left button only takes
     /// the AX path; other buttons have no clean per-point AX analogue and go
@@ -647,22 +648,17 @@ public enum AXAction {
 
         if button == .left {
             nudgeChromiumAccessibility(pid: pid)
-            if let hit = hitTest(pid: pid, at: point) {
-                if let tag = pressPrimary(hit, times: reps) {
-                    settle()
-                    return "ax:point:\(tag)"
-                }
-                if let descendant = firstActionableDescendant(of: hit, depth: descendantScanDepth),
-                   let tag = pressPrimary(descendant, times: reps) {
-                    settle()
-                    return "ax:point:descendant:\(tag)"
-                }
-            }
         }
-
-        // No AX element answered (or a non-left button): synthetic pointer click.
-        try await clickPoint(pid: pid, x: x, y: y, clickCount: reps, button: button)
-        return "synthetic:point"
+        return try await CoordinateClickRouting.click(
+            point: point,
+            preferAccessibility: button == .left,
+            hitTest: { hitTest(pid: pid, at: $0) },
+            press: { pressPrimary($0, times: reps) },
+            settle: { settle() },
+            syntheticClick: { target in
+                try await clickPoint(pid: pid, x: target.x, y: target.y, clickCount: reps, button: button)
+            }
+        )
     }
 
     /// Best-effort nudge so a Chromium/Electron/CEF app exposes its accessibility
@@ -992,7 +988,14 @@ public enum AXAction {
         pid: pid_t, _ key: String,
         validateBeforePosting: () throws -> Void = {}
     ) async throws {
-        let chords = try KeyMapping.parse(key)
+        try await pressKey(pid: pid, chords: KeyMapping.parse(key), validateBeforePosting: validateBeforePosting)
+    }
+
+    /// Receives already validated chords from the semantic command router.
+    static func pressKey(
+        pid: pid_t, chords: [KeyMapping.Chord],
+        validateBeforePosting: () throws -> Void = {}
+    ) async throws {
         guard !chords.isEmpty else {
             throw CUError(CUError.Code.unknownKey, "Empty key sequence")
         }

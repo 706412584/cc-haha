@@ -20,7 +20,7 @@ import { bindSessionContext, type ComputerUseSessionContext, type CuCallToolResu
 import { getSessionId } from '../../bootstrap/state.js';
 import type { Tool, ToolUseContext } from '../../Tool.js';
 import { logForDebugging } from '../debug.js';
-import { checkComputerUseLock, tryAcquireComputerUseLock } from './computerUseLock.js';
+import { checkComputerUseLock, tryAcquireComputerUseLock, releaseComputerUseLock } from './computerUseLock.js';
 import { registerEscHotkey } from './escHotkey.js';
 import { getChicagoCoordinateMode } from './gates.js';
 import { getComputerUseHostAdapter } from './hostAdapter.js';
@@ -42,6 +42,10 @@ type Binding = {
  */
 let binding: Binding | undefined;
 const toolUseContexts = new AsyncLocalStorage<ToolUseContext>();
+/** Preserve the originating turn context across queued/native awaits. */
+export function withComputerUseToolContext<T>(context: ToolUseContext, run: () => T): T {
+  return toolUseContexts.run(context, run);
+}
 const ENABLED_GRANT_FLAGS = {
   clipboardRead: true,
   clipboardWrite: true,
@@ -74,6 +78,7 @@ export function buildSessionContext(): ComputerUseSessionContext {
     // returning the legacy shapes for protocol compatibility, but do not
     // consume persisted app grants or open runtime permission prompts.
     getAllowedApps: () => [],
+    isAborted: () => tuc().abortController.signal.aborted,
     getGrantFlags: () => ENABLED_GRANT_FLAGS,
     getUserDeniedBundleIds: () => [],
     getSelectedDisplayId: () => tuc().getAppState().computerUseMcpState?.selectedDisplayId,
@@ -196,7 +201,13 @@ export function buildSessionContext(): ComputerUseSessionContext {
     // but is possible under parallel tool-use interleaving — don't spam the
     // notification in that case.
     acquireCuLock: async () => {
+      const signal = tuc().abortController.signal;
+      if (signal.aborted) throw new Error("Computer Use cancelled before lock acquisition");
       const r = await tryAcquireComputerUseLock();
+      if (signal.aborted) {
+        if (r.kind === 'acquired' && r.fresh) await releaseComputerUseLock();
+        throw new Error("Computer Use cancelled during lock acquisition");
+      }
       if (r.kind === 'blocked') {
         throw new Error(formatLockHeld(r.by));
       }

@@ -736,4 +736,110 @@ describe('Computer Use platform routing', () => {
       await connection.close()
     }
   })
+
+  test('win32 retries a legacy clipboard stash restore without clearing clipboard by app', async () => {
+    const calls: string[] = []
+    const adapter = makeWindowsAdapter(calls)
+    let stash: string | undefined = 'preserved clipboard'
+    let clipboard = 'current clipboard'
+    let writeAttempts = 0
+    adapter.executor.getFrontmostApp = async () => ({
+      bundleId: 'powershell.exe', displayName: 'PowerShell',
+    })
+    adapter.executor.readClipboard = async () => clipboard
+    adapter.executor.writeClipboard = async text => {
+      writeAttempts += 1
+      if (writeAttempts === 1) throw new Error('clipboard temporarily busy')
+      clipboard = text
+    }
+    const getSubGates = adapter.getSubGates
+    adapter.getSubGates = () => ({ ...getSubGates(), clipboardGuard: true })
+    const connection = await connect(adapter, makeSessionContext({
+      getClipboardStash: () => stash,
+      onClipboardStashChanged: value => { stash = value },
+      getGrantFlags: () => ({ clipboardRead: true, clipboardWrite: true, systemKeyCombos: true }),
+    }))
+    try {
+      expect((await connection.client.callTool({ name: 'read_clipboard' })).isError).toBeFalsy()
+      expect(stash).toBe('preserved clipboard')
+      expect(clipboard).toBe('current clipboard')
+      expect((await connection.client.callTool({ name: 'read_clipboard' })).isError).toBeFalsy()
+      expect(stash).toBeUndefined()
+      expect(clipboard).toBe('preserved clipboard')
+      expect(writeAttempts).toBe(2)
+
+      expect((await connection.client.callTool({
+        name: 'write_clipboard', arguments: { text: 'new clipboard' },
+      })).isError).toBeFalsy()
+      expect((await connection.client.callTool({
+        name: 'key', arguments: { text: 'ctrl+v' },
+      })).isError).toBeFalsy()
+      expect(clipboard).toBe('new clipboard')
+      expect(stash).toBeUndefined()
+      expect(writeAttempts).toBe(3)
+      expect(calls).toContain('key:ctrl+v')
+    } finally {
+      await connection.close()
+    }
+  })
+
+  test.each([
+    ['chrome.exe', 'Google Chrome'],
+    ['powershell.exe', 'PowerShell'],
+    ['spotify.exe', 'Spotify'],
+    ['tradingview.exe', 'TradingView'],
+    ['com.example.host', 'Claude Code Haha'],
+    ['dev.cchaha.cu-helper', 'Computer Use Helper'],
+  ])('win32 global consent permits input, launch, and clipboard for %s', async (bundleId, displayName) => {
+    const calls: string[] = []
+    const adapter = makeWindowsAdapter(calls)
+    const app = { bundleId, displayName }
+    let frontmost = app
+    let clipboard = 'existing clipboard'
+    adapter.executor.getFrontmostApp = async () => frontmost
+    adapter.executor.appUnderPoint = async () => app
+    adapter.executor.listInstalledApps = async () => [{ ...app, path: `C:\\Apps\\${bundleId}` }]
+    adapter.executor.readClipboard = async () => clipboard
+    adapter.executor.writeClipboard = async text => { clipboard = text }
+    const getSubGates = adapter.getSubGates
+    adapter.getSubGates = () => ({ ...getSubGates(), clipboardGuard: true })
+    const connection = await connect(adapter, makeSessionContext({
+      // Cached state from the old app-specific model cannot narrow the
+      // feature-wide consent given when Computer Use was enabled.
+      getAllowedApps: () => [{ ...app, grantedAt: 1, tier: 'read' }],
+      getUserDeniedBundleIds: () => [bundleId],
+      getGrantFlags: () => ({ clipboardRead: true, clipboardWrite: true, systemKeyCombos: true }),
+    }))
+    try {
+      for (const request of [
+        { name: 'screenshot' },
+        { name: 'open_application', arguments: { app: displayName } },
+        { name: 'key', arguments: { text: 'ctrl+a' } },
+        { name: 'type', arguments: { text: 'ok' } },
+        { name: 'read_clipboard' },
+      ]) {
+        const result = await connection.client.callTool(request)
+        expect(result.isError, `${request.name}: ${JSON.stringify(result.content)}`).toBeFalsy()
+      }
+      expect(clipboard).toBe('existing clipboard')
+      expect((await connection.client.callTool({
+        name: 'write_clipboard', arguments: { text: 'new clipboard' },
+      })).isError).toBeFalsy()
+      expect(clipboard).toBe('new clipboard')
+
+      // Coordinate clicks remain authorized regardless of which application
+      // is foreground or owns the window receiving the click.
+      frontmost = { bundleId: 'notepad.exe', displayName: 'Notepad' }
+      expect((await connection.client.callTool({
+        name: 'right_click', arguments: { coordinate: [10, 20] },
+      })).isError).toBeFalsy()
+      expect(calls).toContain(`openApp:${bundleId}`)
+      expect(calls).toContain('key:ctrl+a')
+      expect(calls).toContain('type:ok')
+      expect(calls).toContain('click:10,20,right,1')
+      expect(clipboard).toBe('new clipboard')
+    } finally {
+      await connection.close()
+    }
+  })
 })

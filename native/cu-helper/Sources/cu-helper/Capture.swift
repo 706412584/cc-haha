@@ -60,12 +60,73 @@ struct WindowShot: Sendable {
     /// Uniform capture fit before integer pixel-buffer rounding. Legacy shots
     /// may omit this and retain their dimension-derived transform.
     var pixelsPerPoint: Double? = nil
-    var mimeType: String { NativeScreenshotPolicy.mimeType }
+    var mimeType: String = "image/png"
+}
+
+struct ModelWindowImage: Sendable {
+    let base64: String
+    let mimeType: String
 }
 
 @available(macOS 14.0, *)
 @MainActor
 public enum Capture {
+
+    /// Apply the model image budget after capture freshness has been validated.
+    /// Window geometry stays in points; returned dimensions name actual pixels.
+    static func boundedModelWindowShot(_ shot: WindowShot) -> WindowShot? {
+        guard shot.width > 0, shot.height > 0,
+              shot.pointWidth.isFinite, shot.pointWidth > 0,
+              shot.pointHeight.isFinite, shot.pointHeight > 0 else { return nil }
+        let target = NativeScreenshotPolicy.pixelSize(
+            pointSize: CGSize(width: shot.pointWidth, height: shot.pointHeight),
+            backingScale: 1
+        )
+        // The production capture already applies this same policy. Preserve
+        // its exact pre-rounding transform and pixels without a second resize.
+        guard shot.width > Int(target.width) || shot.height > Int(target.height) else {
+            return shot
+        }
+        guard let data = Data(base64Encoded: shot.base64),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
+        let scale = min(1, target.width / Double(image.width),
+                        target.height / Double(image.height))
+        guard let bounded = try? scaleImage(image, scale: scale),
+              let encoded = pngBase64WithSize(bounded) else {
+            // Keep the existing AX-only degradation; never leak an unbounded
+            // image after an allocation/encoding failure.
+            return nil
+        }
+        return WindowShot(
+            base64: encoded.base64, width: encoded.width, height: encoded.height,
+            originX: shot.originX, originY: shot.originY,
+            pointWidth: shot.pointWidth, pointHeight: shot.pointHeight,
+            windowID: shot.windowID, source: shot.source,
+            pixelsPerPoint: shot.pixelsPerPoint.map { $0 * scale }, mimeType: "image/png"
+        )
+    }
+
+    /// Presentation encoding only: keep the bounded lossless shot as the
+    /// freshness/identical-capture evidence and retain its coordinate geometry.
+    static func modelWindowImage(
+        _ shot: WindowShot,
+        quality: Double = NativeScreenshotPolicy.jpegQuality,
+        encodeJPEG: @MainActor (CGImage, Double) -> String? = jpegBase64
+    ) -> ModelWindowImage {
+        let lossless = ModelWindowImage(base64: shot.base64, mimeType: shot.mimeType)
+        guard quality.isFinite, (0...1).contains(quality),
+              let data = Data(base64Encoded: shot.base64),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              image.width == shot.width, image.height == shot.height,
+              let base64 = encodeJPEG(image, quality), !base64.isEmpty else {
+            return lossless
+        }
+        return ModelWindowImage(base64: base64, mimeType: "image/jpeg")
+    }
 
     // MARK: - Permission gates
 
@@ -421,7 +482,7 @@ public enum Capture {
     //  A *window-locked* capture used by the daemon's `get_app_state`: it pins the
     //  target app's single most-relevant window, captures only that window (not the
     //  full display, not the desktop, not other apps), downscales by `scale`
-    //  (default 0.5), and returns PNG base64 in the screenshot-pixel space (top-left
+    //  (default native App fit), and returns lossless PNG base64 in the screenshot-pixel space (top-left
     //  origin) for the server's affine map. It is the only capture path tied to a
     //  *pid* rather than a *display*.
     //
@@ -449,7 +510,7 @@ public enum Capture {
     ///   - scale: an explicit factor applied to native pixels; nil uses the
     ///     native App policy (point resolution, long/short side limits).
     /// - Returns: `(base64, width, height, originX, originY, pointWidth,
-    ///   pointHeight, windowID)` — the JPEG in screenshot-pixel space (top-left origin)
+    ///   pointHeight, windowID)` — lossless PNG capture evidence in screenshot-pixel space (top-left origin)
     ///   PLUS the captured window's GLOBAL Quartz top-left origin and its size
     ///   in POINTS. The caller uses the uniform `pixelsPerPoint` capture fit
     ///   to invert image-pixel coordinates back into the
@@ -485,7 +546,7 @@ public enum Capture {
             frame: target.frame,
             scale: outputScale
         ) {
-            if let encoded = appScreenshotBase64WithSize(image) {
+            if let encoded = pngBase64WithSize(image) {
                 return WindowShot(
                     base64: encoded.base64,
                     width: encoded.width,
@@ -509,7 +570,7 @@ public enum Capture {
         if let raw = screencaptureWindow(windowID: target.windowID) {
             let scaledImage = try? scaleImage(raw, scale: outputScale)
             let scaled = scaledImage ?? raw
-            if let encoded = appScreenshotBase64WithSize(scaled) {
+            if let encoded = pngBase64WithSize(scaled) {
                 return WindowShot(
                     base64: encoded.base64,
                     width: encoded.width,
@@ -799,6 +860,20 @@ public enum Capture {
             throw CUError("encode_failed", "windowShot: failed to materialize downscaled image")
         }
         return scaled
+    }
+
+    /// Keep capture/freshness evidence lossless. The model attachment is JPEG
+    /// encoded only after the bound window and captured frame are validated.
+    static func pngBase64WithSize(
+        _ image: CGImage
+    ) -> (base64: String, width: Int, height: Int)? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data, UTType.png.identifier as CFString, 1, nil
+        ) else { return nil }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return ((data as Data).base64EncodedString(), image.width, image.height)
     }
 
     /// Native App screenshots use the official default JPEG quality. The

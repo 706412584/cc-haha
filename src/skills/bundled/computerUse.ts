@@ -48,6 +48,16 @@ Do not add a fixed sleep before an observation. The observation path waits
 for UI changes when needed. Read its result before deciding whether more context
 is necessary.
 
+## Blender keyboard input
+
+For Blender, ordinary \`app.typeText\` can leave text unchanged. Use
+\`await app.pressKey("s x 1 period 3 5 Return")\` for a known numeric transform,
+or \`await app.pressKey("a d d space c u b e")\` in a known search field.
+These send actual key presses. Use short macros and observe through the JS App
+after opening an unfamiliar dialog; never replay the whole batch after failure.
+Use \`space\` for a literal space, \`period\` for a decimal point, and
+\`minus\` for a negative sign.
+
 ## Naming the app
 
 Pass the app name straight to \`cua.getApp\` — display name, bundle identifier,

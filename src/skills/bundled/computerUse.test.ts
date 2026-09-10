@@ -182,3 +182,21 @@ describe('computer-use observation batching', () => {
     expect(getComputerUsePrompt('win32')).not.toContain('cua.getApp')
   })
 })
+
+test('macOS advertises bounded sequence and real key macros without changing Windows tools', () => {
+  expect(getComputerUseToolAllowlist('darwin')).toContain('mcp__computer-use__js')
+  expect(getComputerUseToolAllowlist('win32')).not.toContain('mcp__computer-use__sequence')
+  const prompt = getComputerUsePrompt('darwin')
+  expect(prompt).toContain('s x 1 period 3 5 Return')
+  expect(prompt).toContain('account for actions that already ran')
+  expect(prompt).toContain('never replay the whole batch')
+})
+
+test('uses the sequence observation without an extra model round trip', () => {
+  // Live Blender trial: individual click -> receipt -> model -> get_app_state
+  // added a full provider round trip just to observe a single known action.
+  const prompt = getComputerUsePrompt('darwin')
+  expect(prompt).toContain('then observe at the next')
+  expect(prompt).toContain('Do not force one model round trip per click')
+  expect(prompt).toContain('Observe through the JS')
+})

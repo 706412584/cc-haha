@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import { EventEmitter } from 'node:events'
 import { lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -173,6 +173,33 @@ describe('cu-helper daemon system commands', () => {
 })
 
 describe('cu-helper daemon failure classification', () => {
+  test('only multi-chord keyboard requests extend both native deadline and response timer to a bounded budget', async () => {
+    const socket = new FakeSocket()
+    __setDaemonSocketForTests(socket as never)
+    const timerSpy = spyOn(globalThis, 'setTimeout')
+    try {
+      const cases = [
+        ['press_key', { key: 'a b c d' }, 60_000],
+        ['press_key', { key: 'ctrl + a' }, 20_000],
+        ['press_key', { key: 'Return' }, 20_000],
+        ['get_app_state', { key: 'a b' }, 20_000],
+      ] as const
+      for (const [index, [command, payload, budget]] of cases.entries()) {
+        const before = Date.now()
+        const request = callDaemon(command, payload)
+        await waitForWriteCount(socket, index + 1)
+        const envelope = JSON.parse(socket.writes[index]!)
+        expect(envelope.deadlineUnixMilliseconds).toBeGreaterThanOrEqual(before + budget)
+        expect(envelope.deadlineUnixMilliseconds).toBeLessThanOrEqual(Date.now() + budget)
+        expect(timerSpy.mock.calls.at(-1)?.[1]).toBe(budget)
+        reply(socket, index, { ok: true, result: true })
+        await expect(request).resolves.toBe(true)
+      }
+    } finally {
+      timerSpy.mockRestore()
+    }
+  })
+
   test('helper installation/start resolution failure is daemon infrastructure failure', async () => {
     // A bare executable can satisfy the availability probe but cannot be
     // launched as the helper .app daemon. The bridge must be allowed to use the

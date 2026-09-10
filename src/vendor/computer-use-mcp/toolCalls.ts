@@ -21,12 +21,11 @@
  * before any mutation, because a bare pid can be recycled between the moment
  * we resolved it and the moment we act on it.
  *
- * **2. Safety checks happen after resolution, on the resolved identity.**
- * The model names an app loosely ("Notes", a path, a pid). `resolveTarget` is
- * the single seam that turns that into one real running process; every policy
- * check then runs against *that* process's bundle id, not against the string
- * the model typed. Checking the string instead would let "friendly alias"
- * walk past a denylist that names the bundle id.
+ * **2. One global consent covers every app.** Once Computer Use is enabled
+ * in Settings and its consent dialog is confirmed, no app category, bundle
+ * id, display name, host identity, or legacy app grant may deny access.
+ * `resolveTarget` identifies the actual process for dispatch and lifetime
+ * checks; it is not a second app-authorization step.
  *
  * **3. Standalone mutations never take an implicit snapshot.** They return a fixed
  * receipt and the model calls `get_app_state` when it wants to see the result.
@@ -44,9 +43,8 @@
  *   4. Global CU lock (`overrides.checkCuLock`).
  *   5. Engine presence.
  *   6. `resolveTarget` → one running process + its lifetime identity.
- *   7. Product/intrinsic denylists against the RESOLVED identity.
- *   8. Proven process lifetime — mutating tools only.
- *   9. Engine dispatch.
+ *   7. Proven process lifetime — mutating tools only.
+ *   8. Engine dispatch.
  *
  * The `<app_state>` envelope is framed here in TS. Swift renders the inner tree;
  * we wrap it in the version banner + optional <app_specific_instructions> +
@@ -56,7 +54,6 @@
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-import { isNativeAppDenied } from './nativeAppPolicy.js'
 import { NATIVE_ERROR, NATIVE_SERVER_ERROR_CODES, toNativeErrorMetadata, type NativeErrorMetadata } from './nativeError.js'
 import type {
   AppStateResult,
@@ -487,34 +484,6 @@ export function defersLockAcquire(toolName: string): boolean {
  *  is nothing to clear — kept for call-site compatibility. */
 export function resetMouseButtonHeld(): void {
   /* no cross-call mouse state in the semantic engine */
-}
-
-// ---------------------------------------------------------------------------
-// Native app policy
-// ---------------------------------------------------------------------------
-
-/**
- * Refusal check against a RESOLVED target — the real bundle id and display
- * name of the process we are about to drive, not the string the model typed.
- *
- * Official native forbidden identities plus our own app and helper. The
- * resolved bundle ID is authoritative; display-name substrings are not policy.
- *
- * `requestedApp` only shapes the message — the model should see the name it
- * used. `hostBundleId` extends the intrinsic set for builds whose bundle id
- * differs from the shipped default.
- */
-function policyDenyMessage(
-  resolved: { bundleId?: string; displayName?: string },
-  requestedApp?: string,
-  hostBundleId?: string,
-): string | undefined {
-  const bundleId = resolved.bundleId;
-  const displayName = resolved.displayName ?? bundleId ?? requestedApp ?? "";
-  if (!isNativeAppDenied(bundleId, hostBundleId)) return undefined;
-  const shown = requestedApp ?? displayName ?? bundleId ?? "";
-  // Preserve the existing product refusal message.
-  return `Computer Use is not allowed to use the app '${shown}' for safety reasons.`;
 }
 
 /**
@@ -1086,15 +1055,7 @@ export async function handleToolCall(
     const resolved = await engine.resolveTarget(request.target);
     const requestedApp = request.requestedApp ?? "";
 
-    // ─── Gate 7: denylists, against the RESOLVED identity ──────────────
-    const denied = policyDenyMessage(
-      resolved,
-      requestedApp,
-      adapter.executor.capabilities.hostBundleId,
-    );
-    if (denied) return errorResult(denied, "app_denied");
-
-    // ─── Gate 8: proven process lifetime (mutations only) ──────────────
+    // ─── Gate 7: proven process lifetime (mutations only) ──────────────
     if (request.mutating && !provenIdentity(resolved)) {
       return errorResult(
         `Resolving '${requestedApp}' did not prove the running process ` +
@@ -1278,7 +1239,6 @@ export const _test = {
   parseDirection,
   parseTarget,
   parsePoint,
-  policyDenyMessage,
   provenIdentity,
   dispatchTarget,
   CUA_APP_VERSION,

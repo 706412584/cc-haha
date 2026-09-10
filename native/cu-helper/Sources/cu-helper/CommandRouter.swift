@@ -618,14 +618,6 @@ public final class CommandRouter {
             return .object(object)
 
         case .installed(let installed):
-            guard AppTargetPolicy.decision(
-                bundleID: installed.bundleIdentifier
-            ) == .allow else {
-                throw CUError(
-                    "app_denied",
-                    "Computer Use is not allowed to use the app '\(installed.bundleIdentifier)' for safety reasons."
-                )
-            }
             return .object([
                 "bundleId": .string(installed.bundleIdentifier),
                 "displayName": .string(installed.displayName),
@@ -690,14 +682,6 @@ public final class CommandRouter {
             )
             guard case .installed(let installed) = installedOutcome else {
                 throw CUError("target_not_running", "The requested target app is not running")
-            }
-            guard AppTargetPolicy.decision(
-                bundleID: installed.bundleIdentifier
-            ) == .allow else {
-                throw CUError(
-                    "app_denied",
-                    "Computer Use is not allowed to use the app '\(installed.bundleIdentifier)' for safety reasons."
-                )
             }
             let identifier = installed.bundleURL.standardizedFileURL.path
             guard let launched = await AppTargetResolver.launch(
@@ -839,7 +823,9 @@ public final class CommandRouter {
                 )
             }
 
-            if let shot,
+            // Keep stream/frame validation in its native capture dimensions.
+            // Publish and map coordinates using the same final model image.
+            if let shot = shot.flatMap(Capture.boundedModelWindowShot),
                AXTree.currentProcessIdentity(pid: pid) == snapshotEvidence.processIdentity {
                 // An identical capture is the other half of the same problem:
                 // the pixels cannot say whether the action missed or the window
@@ -854,9 +840,12 @@ public final class CommandRouter {
                 ) {
                     Self.appendAXNotice(notice, to: &object)
                 }
+                // Lossless bytes above establish identical-frame evidence;
+                // presentation encoding does not rescale or change geometry.
+                let modelImage = Capture.modelWindowImage(shot)
                 var screenshot: [String: JSONValue] = [
-                    "base64": .string(shot.base64),
-                    "mimeType": .string(shot.mimeType),
+                    "base64": .string(modelImage.base64),
+                    "mimeType": .string(modelImage.mimeType),
                     "width": .int(shot.width),
                     "height": .int(shot.height),
                     "originX": .double(shot.originX),
@@ -1505,23 +1494,19 @@ public final class CommandRouter {
         let systemKeyCombos = try SystemKeyPolicy.parseGrant(
             payload["systemKeyCombos"]
         )
-        try SystemKeyPolicy.enforce(
-            sequence: key,
-            granted: systemKeyCombos
-        )
+        let chords = try KeyboardCommandSequence.prepare(key, systemKeyCombos: systemKeyCombos)
         let expected = try Self.expectedProcessTarget(payload)
         let target = try resolveTargetForMutation(payload)
         setResolvedTarget(target)
         try requireSnapshotProcess(target: target, expected: expected)
-        return try await withForegroundLease(
-            command: "press_key",
-            target: target
-        ) {
-            _ = try Injection.validateAuthorizedTarget(target)
-            try self.requireSnapshotProcess(target: target, expected: expected)
-            try await AXAction.pressKey(pid: target.pid, key)
-            return .bool(true)
+        try await KeyboardCommandSequence.run(chords: chords) { batch in
+            try await self.withForegroundLease(command: "press_key", target: target) {
+                _ = try Injection.validateAuthorizedTarget(target)
+                try self.requireSnapshotProcess(target: target, expected: expected)
+                try await AXAction.pressKey(pid: target.pid, chords: batch)
+            }
         }
+        return .bool(true)
     }
 
     /// `drag`: coordinate-only press→drag→release between screenshot-local points.

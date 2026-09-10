@@ -658,13 +658,20 @@ function dispatchDaemonCommand<T>(
   const isTurnScoped = !CONNECTION_SCOPED_COMMANDS.has(command)
   const turnId = activeTurnId
     ?? (isTurnScoped ? (activeTurnId = randomUUID()) : `connection-${state.generation}`)
+  // Native keyboard macros now complete each chord through its own input
+  // boundary. Keep the native deadline and client timer aligned, without
+  // extending screenshots, clicks, or single-key requests. This counts only
+  // separators for budgeting; native KeyMapping remains the validating parser.
+  const multipleChords = command === 'press_key' && typeof payload.key === 'string'
+    && payload.key.replace(/\s*\+\s*/g, '+').trim().split(/\s+/).length > 1
+  const timeoutMs = multipleChords ? Math.min(60_000, requestTimeoutMs * 3) : requestTimeoutMs
   const request = {
     id,
     requestId: id,
     cmd: command,
     payload,
     clientApiVersion: CU_HELPER_PROTOCOL_VERSION,
-    deadlineUnixMilliseconds: Date.now() + requestTimeoutMs,
+    deadlineUnixMilliseconds: Date.now() + timeoutMs,
     sessionId: getSessionId(),
     turnId,
   }
@@ -680,7 +687,7 @@ function dispatchDaemonCommand<T>(
       // Retire a daemon that missed its response deadline. Other requests that
       // were already in flight are also result-unknown, never replayable infra.
       resetState(`command ${command} timed out`, state.generation)
-    }, requestTimeoutMs)
+    }, timeoutMs)
     state.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer })
     try {
       state.socket.write(`${JSON.stringify(request)}\n`)

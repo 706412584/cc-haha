@@ -275,13 +275,25 @@ final class AXTreePublicationIntegrationTests: XCTestCase {
 
         if exerciseKeys {
             let (canvasHandle, _) = try publishedHandle(label: "Drag fixture", state: clickedState)
-            _ = try await router.handle(cmd: "click", payload: .object([
-                "pid": .int(Int(pid)), "index": .string(canvasHandle.rawValue),
-            ]))
-            _ = try await router.handle(cmd: "press_key", payload: .object([
-                "pid": .int(Int(pid)),
-                "key": .string("Control_L+a Super_R+b A question Delete BackSpace"),
-            ]))
+            var phase = "canvas click"
+            do {
+                _ = try await router.handle(cmd: "click", payload: .object([
+                    "pid": .int(Int(pid)), "index": .string(canvasHandle.rawValue),
+                ]))
+                phase = "keyboard macro"
+                _ = try await router.handle(cmd: "press_key", payload: .object([
+                    "pid": .int(Int(pid)),
+                    "key": .string("Control_L+a Super_R+b A question Delete BackSpace"),
+                ]))
+            } catch {
+                let windows = (CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? [])
+                    .filter { $0[kCGWindowOwnerPID as String] as? Int == Int(pid) }
+                    .map { ["id": $0[kCGWindowNumber as String] ?? "nil", "bounds": $0[kCGWindowBounds as String] ?? "nil", "onScreen": $0[kCGWindowIsOnscreen as String] ?? "nil", "layer": $0[kCGWindowLayer as String] ?? "nil"] }
+                let frame = AXTree.record(pid: pid, index: canvasHandle.index)?.frameGlobal
+                let receipt = (try? String(contentsOf: gestures, encoding: .utf8)) ?? "no receipt"
+                throw CUError((error as? CUError)?.code ?? "fixture_action_failed",
+                              "\(error.localizedDescription) Fixture phase=\(phase), pid=\(pid), terminated=\(process.isTerminated), canvas=\(String(describing: frame)), windows=\(windows), receipt=\(receipt)")
+            }
             try await waitUntil(description: "six received macro keys") {
                 guard let data = try? Data(contentsOf: gestures),
                       let receipt = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -442,6 +454,14 @@ final class AXTreePublicationIntegrationTests: XCTestCase {
             backing: .buffered,
             defer: false
         )
+        if regularActivation {
+            // This is a utility receiver, not a document in the user's active
+            // app set. A regular app's window can otherwise be reduced to a
+            // WindowServer preview while AX still reports its full-size frame.
+            // Keep it eligible to join the current set without changing any
+            // system preference, window level, or production input safeguard.
+            window.collectionBehavior = [.canJoinAllApplications]
+        }
         window.title = title
         if mismatchedWindowTitle {
             // Chrome exposes a decorated AX title while WindowServer uses the

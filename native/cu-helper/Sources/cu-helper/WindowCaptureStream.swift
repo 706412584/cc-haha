@@ -210,7 +210,8 @@ final class WindowCaptureStreamManager: WindowCaptureProviding {
                 originX: current.originX, originY: current.originY,
                 pointWidth: current.pointWidth, pointHeight: current.pointHeight,
                 windowID: current.key.windowID, source: .streamBackedScreenshot,
-                pixelsPerPoint: shot.pixelsPerPoint
+                pixelsPerPoint: shot.pixelsPerPoint,
+                mimeType: shot.mimeType
             )
         }
         return nil
@@ -840,7 +841,7 @@ extension Capture {
         guard frame.width == target.key.pixelWidth,
               frame.height == target.key.pixelHeight,
               let image = image(from: frame),
-              let encoded = appScreenshotBase64WithSize(image) else {
+              let encoded = pngBase64WithSize(image) else {
             return nil
         }
         return WindowShot(
