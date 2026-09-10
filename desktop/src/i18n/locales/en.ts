@@ -1060,7 +1060,7 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   'settings.mcp.empty': 'No MCP servers configured yet',
   'settings.mcp.emptyHint': 'Add a custom stdio, HTTP, or SSE MCP server to start extending tool access.',
   'settings.mcp.stats.total': 'Total servers',
-  'settings.mcp.stats.connected': 'Connected in current chat',
+  'settings.mcp.stats.connected': 'Connection checks for current project',
   'settings.mcp.stats.attention': 'Need attention',
   'settings.mcp.status.configured': 'Configured',
   'settings.mcp.status.configuredElsewhere': 'Not loaded in the current chat. Open a chat in this project to use it.',
@@ -1140,6 +1140,11 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   'settings.mcp.toast.deleteFailed': 'Failed to delete MCP server',
   'settings.mcp.toast.toggleFailed': 'Failed to update MCP server state',
   'settings.mcp.toast.reconnectFailed': 'Failed to reconnect MCP server',
+  'settings.mcp.toast.syncFailed': 'Chat synchronization failed: {error}',
+  'settings.mcp.toast.syncNotRunning': 'The current chat is not running; the setting will apply when it starts.',
+  'settings.mcp.toast.syncDifferentProject': 'The current chat uses a different project; its tools were not updated.',
+  'settings.mcp.toast.syncNoSession': 'No chat was selected; settings were saved.',
+  'settings.mcp.toast.syncUnconfirmed': 'The current chat update was not confirmed.',
 
   // Settings > Agents
   'settings.tab.agents': 'Agents',

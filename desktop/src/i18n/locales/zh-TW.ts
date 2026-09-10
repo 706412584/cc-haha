@@ -1061,7 +1061,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.mcp.empty': '還沒有配置 MCP 服務',
   'settings.mcp.emptyHint': '先新增一個自定義的 STDIO、HTTP 或 SSE MCP 服務。',
   'settings.mcp.stats.total': '服務總數',
-  'settings.mcp.stats.connected': '目前聊天已連線',
+  'settings.mcp.stats.connected': '目前專案連線檢查',
   'settings.mcp.stats.attention': '需要處理',
   'settings.mcp.status.configured': '已設定',
   'settings.mcp.status.configuredElsewhere': '目前聊天未載入；請在這個專案中開啟聊天後使用。',
@@ -1141,6 +1141,11 @@ export const zh: Record<TranslationKey, string> = {
   'settings.mcp.toast.deleteFailed': '刪除 MCP 服務失敗',
   'settings.mcp.toast.toggleFailed': '更新 MCP 服務狀態失敗',
   'settings.mcp.toast.reconnectFailed': '重連 MCP 服務失敗',
+  'settings.mcp.toast.syncFailed': '聊天同步失敗：{error}',
+  'settings.mcp.toast.syncNotRunning': '目前聊天未執行；設定將在聊天啟動時套用。',
+  'settings.mcp.toast.syncDifferentProject': '目前聊天屬於其他專案，其工具未更新。',
+  'settings.mcp.toast.syncNoSession': '未選擇聊天；設定已儲存。',
+  'settings.mcp.toast.syncUnconfirmed': '尚未確認目前聊天同步成功。',
 
   // Settings > Agents
   'settings.tab.agents': 'Agents',
