@@ -635,6 +635,40 @@ describe('local index database', () => {
     }
   })
 
+  it('reopens a frozen v5 cache after protocol rollback without losing existing data', async () => {
+    const databasePath = join(process.env.CLAUDE_CONFIG_DIR!, 'frozen-v5.sqlite')
+    await mkdir(dirname(databasePath), { recursive: true })
+    const seed = await openRawDatabase(databasePath)
+    seedFrozenV3(seed)
+    seed.exec('ALTER TABLE activity_sessions ADD COLUMN active_duration_ms INTEGER NOT NULL DEFAULT 0')
+    seed.exec('ALTER TABLE sessions ADD COLUMN session_api_format TEXT')
+    seed.exec('PRAGMA user_version = 5')
+    seed.exec("UPDATE sessions SET session_api_format = 'unknown'")
+    seed.exec('UPDATE source_files SET parser_version = 5')
+    seed.exec("INSERT INTO schema_meta (key, value) VALUES ('future-extension', 'keep-me')")
+    const originalSessions = queryAll<Record<string, unknown>>(seed, 'SELECT * FROM sessions')
+    const originalActivity = queryAll<Record<string, unknown>>(seed, 'SELECT * FROM activity_sessions')
+    seed.close(true)
+    const { openLocalIndexDatabase } = await loadDatabase()
+    const reopened = openLocalIndexDatabase({ path: databasePath })
+    try {
+      expect(reopened.read(operation => operation.get<{ user_version: number }>(
+        'PRAGMA user_version',
+      )?.user_version)).toBe(5)
+      expect(reopened.read(operation => operation.all('SELECT * FROM sessions'))).toEqual(originalSessions)
+      expect(reopened.read(operation => operation.all('SELECT * FROM activity_sessions'))).toEqual(originalActivity)
+      expect(reopened.read(operation => operation.get<{ value: string }>(
+        "SELECT value FROM schema_meta WHERE key = 'future-extension'",
+      )?.value)).toBe('keep-me')
+      reopened.write(operation => operation.run("UPDATE sessions SET title = 'Still editable'"))
+      expect(reopened.read(operation => operation.get<{ title: string; session_api_format: string }>(
+        'SELECT title, session_api_format FROM sessions',
+      ))).toEqual({ title: 'Still editable', session_api_format: 'unknown' })
+    } finally {
+      reopened.close()
+    }
+  })
+
   it('rolls back an interrupted v2 to v3 migration without changing v2 data', async () => {
     const databasePath = join(process.env.CLAUDE_CONFIG_DIR!, 'blocked-v3.sqlite')
     await mkdir(dirname(databasePath), { recursive: true })

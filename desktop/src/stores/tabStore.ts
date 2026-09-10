@@ -474,7 +474,6 @@ export const useTabStore = create<TabStore>((set, get) => ({
   restoreTabs: async () => {
     try {
       const restoreStartedWith = get()
-      const expectedSelections = useSessionRuntimeStore.getState().selections
       const restoreStillCurrent = () => {
         const current = get()
         return current.tabs === restoreStartedWith.tabs &&
@@ -523,10 +522,10 @@ export const useTabStore = create<TabStore>((set, get) => ({
       const recentSessions = reconcileSessionSnapshots(sessions, useSessionStore.getState().sessions)
       for (const session of recentSessions) sessionsById.set(session.id, session)
       if (historicalSessions.length > 0) {
-        const hydrated = useSessionStore.getState().hydrateHistoricalSessions(historicalSessions, expectedSelections)
+        const hydrated = useSessionStore.getState().hydrateHistoricalSessions(historicalSessions)
         for (const session of hydrated) sessionsById.set(session.id, session)
       }
-      useSessionRuntimeStore.getState().syncFromSessions(recentSessions, expectedSelections)
+      useSessionRuntimeStore.getState().syncFromSessions(recentSessions)
 
       const validTabs: Tab[] = data.openTabs
         .filter((t) => {

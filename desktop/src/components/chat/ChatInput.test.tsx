@@ -1093,16 +1093,6 @@ describe('ChatInput file mentions', () => {
   // moved. The button has no label to shed any more — it is one round icon at
   // every width — so what needs pinning is that it does *not* change with the
   // column, leaving the location as the only thing that degrades (next test).
-  it.each(['mixed', 'unknown'] as const)('blocks sending in a %s protocol session with new-session guidance', async (sessionApiFormat) => {
-    useSessionStore.setState((state) => ({ sessions: state.sessions.map((session) => ({ ...session, sessionApiFormat })) }))
-    render(<ChatInput compact />)
-    setComposerText('Continue please', 15)
-    expect(screen.getByRole('alert')).toHaveTextContent('Start a new session')
-    expect(screen.getByRole('button', { name: 'Run' })).toBeDisabled()
-    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' })
-    expect(mocks.wsSend).not.toHaveBeenCalledWith(sessionId, expect.objectContaining({type:'user_message'}))
-  })
-
   it('keeps the send button a fixed circle as the column narrows', async () => {
     const column = stubComposerColumnWidth(700)
 
@@ -1660,6 +1650,30 @@ describe('ChatInput file mentions', () => {
     })
     expect(document.querySelector('.composer-mention')).toHaveAttribute('data-mention-path', '/repo/backend')
   })
+
+  it.each(['unknown', 'mixed'] as const)(
+    'sends from an existing session despite retained %s protocol metadata', async (sessionApiFormat) => {
+      // A rollback must keep sessions usable even when old lock fields remain.
+      useSessionStore.setState({
+        sessions: useSessionStore.getState().sessions.map((session) => ({ ...session, sessionApiFormat })),
+      })
+      const legacyChat = { ...useChatStore.getState().getSession(sessionId), sessionApiFormat }
+      useChatStore.setState({ sessions: { [sessionId]: legacyChat } })
+      render(<ChatInput compact />)
+
+      setComposerText('Continue this session')
+      expect(getComposerElement()).toHaveAttribute('contenteditable', 'true')
+      expect(screen.getByRole('button', { name: 'Run' })).toBeEnabled()
+      fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+
+      await waitFor(() => {
+        expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
+          type: 'user_message', content: 'Continue this session', attachments: [],
+        })
+      })
+      expect(getComposerText()).toBe('')
+    },
+  )
 
   it('inserts a selected @ file as an inline mention pill and sends its absolute path', async () => {
     mocks.search.mockResolvedValueOnce({

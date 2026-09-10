@@ -511,35 +511,6 @@ describe('tabStore', () => {
     },
   )
 
-  it.each([false, true])('preserves a runtime chosen during tab restoration (historical: %s)', async (historical) => {
-    const session = historicalSummary('runtime-restore-race')
-    const nextSelection = { providerId: 'deepseek-provider', modelId: 'deepseek-v4.1' }
-    localStorage.setItem('cc-haha-open-tabs', JSON.stringify({
-      openTabs: [{ sessionId: session.id, title: session.title, type: 'session' }],
-      activeTabId: session.id,
-    }))
-    let resolveResponse!: () => void
-    if (historical) {
-      vi.mocked(sessionsApi.list).mockResolvedValueOnce({ sessions: [], total: 1 })
-      vi.mocked(sessionsApi.getSummary).mockReturnValueOnce(new Promise((resolve) => {
-        resolveResponse = () => resolve(session)
-      }))
-    } else {
-      vi.mocked(sessionsApi.list).mockReturnValueOnce(new Promise((resolve) => {
-        resolveResponse = () => resolve({ sessions: [session], total: 1 })
-      }))
-    }
-
-    const restoring = useTabStore.getState().restoreTabs()
-    if (historical) await vi.waitFor(() => expect(sessionsApi.getSummary).toHaveBeenCalledOnce())
-    useSessionRuntimeStore.getState().setSelection(session.id, nextSelection)
-    resolveResponse()
-    await restoring
-
-    expect(useSessionRuntimeStore.getState().selections[session.id]).toEqual(nextSelection)
-    expect(useTabStore.getState().activeTabId).toBe(session.id)
-  })
-
   it('hydrates restored tabs with authoritative transcript runtime metadata', async () => {
     useSessionRuntimeStore.getState().setSelection('session-1', {
       providerId: null,

@@ -15,7 +15,6 @@ import type {
   TokenUsage,
 } from './events.js'
 import { RUNTIME_CONFIG_APPLIED_EVENT } from './events.js'
-import { SessionProtocolError } from '../services/sessionProtocolHistory.js'
 import * as os from 'node:os'
 import {
   ConversationStartupError,
@@ -578,9 +577,6 @@ export const handleWebSocket = {
 
     const msg: ServerMessage = { type: 'connected', sessionId }
     sendMessage(ws, msg)
-    void sessionService.getSessionApiFormat(sessionId).then(sessionApiFormat => {
-      if (sessionApiFormat) sendMessage(ws, { type: 'session_protocol', sessionApiFormat })
-    }).catch(err => console.warn('[WS] Failed to restore session protocol:', err))
     const toolRequestIds = replayPendingPermissionRequests(ws, sessionId)
     const computerUseRequestIds = replayPendingComputerUsePermissionRequests(ws, sessionId)
     sendMessage(ws, {
@@ -646,14 +642,11 @@ export const handleWebSocket = {
               clearActiveUserTurn(sessionId, activeTurn)
               const titleState = sessionTitleState.get(sessionId)
               if (titleState) titleState.activeTurn = undefined
-              if (err instanceof SessionProtocolError) {
-                sendToSession(sessionId, { type: 'session_protocol', sessionApiFormat: err.currentFormat })
-              }
               sendMessage(ws, {
                 type: 'error',
-                message: err instanceof SessionProtocolError ? err.message : 'The request could not be started. Please retry.',
-                code: err instanceof SessionProtocolError ? err.code : 'USER_TURN_FAILED',
-                retryable: !(err instanceof SessionProtocolError),
+                message: 'The request could not be started. Please retry.',
+                code: 'USER_TURN_FAILED',
+                retryable: true,
               })
               sendMessage(ws, { type: 'status', state: 'idle' })
             }
@@ -855,15 +848,6 @@ async function handleUserMessage(
     await ensureCliSessionStarted(ws, sessionId, 'user_message')
   } catch (err) {
     if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) return
-    if (err instanceof SessionProtocolError) {
-      const sessionApiFormat = await sessionService.getSessionApiFormat(sessionId)
-      if (sessionApiFormat) sendMessage(ws, { type: 'session_protocol', sessionApiFormat })
-      sendMessage(ws, { type: 'error', message: err.message, code: err.code, retryable: false })
-      sendMessage(ws, { type: 'status', state: 'idle' })
-      failSessionChatActivity(sessionId)
-      clearActiveUserTurn(sessionId, activeTurn)
-      return
-    }
     const errMsg = err instanceof Error ? err.message : String(err)
     const code =
       err instanceof ConversationStartupError ? err.code : 'CLI_START_FAILED'
@@ -942,9 +926,6 @@ async function handleUserMessage(
       canSend: () =>
         activeUserTurns.get(sessionId) === activeTurn && !activeTurn.cancelled,
       messageUuid: activeTurn.expectedReplayUuid,
-      onProtocolLocked: sessionApiFormat => {
-        sendToSession(sessionId, { type: 'session_protocol', sessionApiFormat })
-      },
       onCommitted: () => {
         activeTurn.messageSent = true
       },
@@ -1485,24 +1466,6 @@ async function handleSetRuntimeConfig(
   // A user message arriving in that async admission window must wait for the
   // selected runtime instead of entering the previous provider's CLI process.
   await enqueueRuntimeTransition(sessionId, async () => {
-    try {
-      // Empty sessions retain the existing stale-provider fallback. Their
-      // actual resolved transport is checked and locked when sending.
-      if (await sessionService.getSessionApiFormat(sessionId)) {
-        await conversationService.validateSessionProtocol(sessionId, message.providerId ?? null)
-      }
-    } catch (err) {
-      const sessionApiFormat = await sessionService.getSessionApiFormat(sessionId)
-      if (sessionApiFormat) sendMessage(ws, { type: 'session_protocol', sessionApiFormat })
-      sendMessage(ws, {
-        type: 'error',
-        message: err instanceof Error ? err.message : String(err),
-        code: err instanceof SessionProtocolError ? err.code : 'RUNTIME_CONFIG_INVALID',
-        retryable: false,
-      })
-      broadcastAppliedRuntimeConfig(sessionId)
-      return
-    }
     let modelId = requestedModelId
     if (isGrokOfficialProviderId(message.providerId)) {
       modelId = (await getGrokReasoningEfforts(modelId)).modelId

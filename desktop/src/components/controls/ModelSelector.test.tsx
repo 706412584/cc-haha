@@ -16,9 +16,6 @@ vi.mock('../../lib/desktopRuntime', async (importOriginal) => {
 })
 
 import { ModelSelector } from './ModelSelector'
-import { useSessionStore } from '@/stores/sessionStore'
-import type { SessionListItem } from '@/types/session'
-import type { SessionProtocolState, SessionApiFormat } from '../../../../src/shared/sessionProtocol'
 import { useChatStore } from '../../stores/chatStore'
 import { useHahaOAuthStore } from '../../stores/hahaOAuthStore'
 import { useHahaOpenAIOAuthStore } from '../../stores/hahaOpenAIOAuthStore'
@@ -28,6 +25,7 @@ import { useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useTabStore, SETTINGS_TAB_ID } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import { OPENAI_OFFICIAL_PROVIDER_ID } from '../../constants/openaiOfficialProvider'
 import type { ModelInfo } from '../../types/settings'
 
@@ -49,8 +47,8 @@ afterEach(() => {
   useSettingsStore.setState(useSettingsStore.getInitialState(), true)
   useProviderStore.setState(useProviderStore.getInitialState(), true)
   useSessionRuntimeStore.setState(useSessionRuntimeStore.getInitialState(), true)
-  useChatStore.setState(useChatStore.getInitialState(), true)
   useSessionStore.setState(useSessionStore.getInitialState(), true)
+  useChatStore.setState(useChatStore.getInitialState(), true)
   useHahaOAuthStore.setState(useHahaOAuthStore.getInitialState(), true)
   useHahaOpenAIOAuthStore.setState(useHahaOpenAIOAuthStore.getInitialState(), true)
   useHahaGrokOAuthStore.setState(useHahaGrokOAuthStore.getInitialState(), true)
@@ -65,87 +63,41 @@ beforeEach(() => {
 })
 
 describe('ModelSelector', () => {
-  function prepareProtocolSession(protocol: SessionProtocolState | undefined, apiFormat: SessionApiFormat = 'anthropic') {
-    useSettingsStore.setState({ locale: 'en' })
-    useSessionStore.setState({ sessions: [{
-      id: 'protocol-session', title: 'Protocol session', messageCount: protocol ? 2 : 0,
-      sessionApiFormat: protocol, workDir: '/fixture/project',
-    } as SessionListItem] })
-    useProviderStore.setState({
-      activeId: 'provider-a', hasLoadedProviders: true, isLoading: false,
-      providers: [
-        { id: 'provider-a', name: 'Provider A', apiFormat, model: 'model-a' },
-        { id: 'provider-b', name: 'Provider B', apiFormat, model: 'model-b' },
-        { id: 'provider-c', name: 'Provider C', apiFormat: apiFormat === 'anthropic' ? 'openai_responses' : 'anthropic', model: 'model-c' },
-      ].map(({ model, ...provider }) => ({
-        ...provider, apiFormat: provider.apiFormat as SessionApiFormat,
-        presetId: 'custom', apiKey: 'fixture', baseUrl: 'http://127.0.0.1:9999',
-        models: { main: model, haiku: model, sonnet: model, opus: model },
-      })),
-    })
-    useSessionRuntimeStore.getState().setSelection('protocol-session', { providerId: 'provider-a', modelId: 'model-a' })
-  }
-
-  it.each(['anthropic', 'openai_chat', 'openai_responses'] as const)(
-    'allows other providers using %s and disables a different protocol', async (protocol) => {
-      prepareProtocolSession(protocol, protocol)
+  it.each(['unknown', 'mixed', 'anthropic'] as const)(
+    'allows cross-protocol selection despite retained %s session metadata', async (sessionApiFormat) => {
+      const sessionId = 'protocol-rollback-session'
+      // Older API responses and hydrated state can still contain the removed lock.
+      const legacySession = {
+        id: sessionId, title: 'Existing session', messageCount: 2,
+        createdAt: '2026-09-09T00:00:00.000Z', modifiedAt: '2026-09-09T00:00:00.000Z',
+        projectPath: '/fixture/project', workDir: '/fixture/project', workDirExists: true, sessionApiFormat,
+      }
+      const legacyChat = { ...useChatStore.getState().getSession(sessionId), sessionApiFormat }
+      useSessionStore.setState({ sessions: [legacySession] })
+      useChatStore.setState({ sessions: { [sessionId]: legacyChat } })
+      useSettingsStore.setState({ locale: 'en' })
+      useProviderStore.setState({
+        activeId: 'provider-a', hasLoadedProviders: true, isLoading: false,
+        providers: (['anthropic', 'openai_chat', 'openai_responses'] as const).map((apiFormat, index) => ({
+          id: `provider-${['a', 'b', 'c'][index]}`, name: `Provider ${index + 1}`, apiFormat,
+          presetId: 'custom', apiKey: 'fixture', baseUrl: 'http://127.0.0.1:9999',
+          models: { main: `model-${index + 1}`, haiku: '', sonnet: '', opus: '' },
+        })),
+      })
+      useSessionRuntimeStore.getState().setSelection(sessionId, { providerId: 'provider-a', modelId: 'model-1' })
       const runtimeChange = vi.fn()
-      render(<ModelSelector runtimeKey="protocol-session" onRuntimeSelectionChange={runtimeChange} />)
-      await clickByRole('model-a, Provider A')
-      expect(screen.getByRole('button', { name: /model-c/ })).toBeDisabled()
-      expect(screen.getByText('Different API protocol — start a new session')).toBeVisible()
-      expect(screen.getByRole('button', { name: /model-b/ })).toBeEnabled()
-      await clickByRole(/model-b/)
-      expect(runtimeChange).toHaveBeenCalledWith(expect.objectContaining({providerId:'provider-b',modelId:'model-b'}))
-      expect(useSessionStore.getState().sessions[0]?.sessionApiFormat).toBe(protocol)
+      render(<ModelSelector runtimeKey={sessionId} onRuntimeSelectionChange={runtimeChange} />)
+
+      await clickByRole('model-1, Provider 1')
+      expect(screen.getByRole('button', { name: /model-2/ })).toBeEnabled()
+      expect(screen.getByRole('button', { name: /model-3/ })).toBeEnabled()
+      await clickByRole(/model-2/)
+      expect(runtimeChange).toHaveBeenLastCalledWith(expect.objectContaining({ providerId: 'provider-b', modelId: 'model-2' }))
+      await clickByRole('model-2, Provider 2')
+      await clickByRole(/model-3/)
+      expect(runtimeChange).toHaveBeenLastCalledWith(expect.objectContaining({ providerId: 'provider-c', modelId: 'model-3' }))
     },
   )
-
-  it.each(['mixed', 'unknown'] as const)('explains %s legacy history and requires a new session', async (protocol) => {
-    prepareProtocolSession(protocol)
-    render(<ModelSelector runtimeKey="protocol-session" />)
-    await clickByRole('model-a, Provider A')
-    for (const model of ['model-a', 'model-b', 'model-c']) {
-      expect(screen.getAllByRole('button', { name: new RegExp(model) }).at(-1)).toBeDisabled()
-    }
-    expect(screen.getByRole('status')).toHaveTextContent('Start a new session')
-    expect(screen.getByRole('button', { name: 'New session' })).toBeEnabled()
-  })
-
-  it('leaves a new session unlocked when its picker is opened or changed', async () => {
-    prepareProtocolSession(undefined)
-    render(<ModelSelector runtimeKey="protocol-session" />)
-    await clickByRole('model-a, Provider A')
-    await clickByRole(/model-c/)
-    expect(useSessionStore.getState().sessions[0]?.sessionApiFormat).toBeUndefined()
-    expect(useChatStore.getState().sessions['protocol-session']?.sessionApiFormat).toBeUndefined()
-  })
-
-  it('updates an open picker when the server confirms a protocol lock', async () => {
-    prepareProtocolSession(undefined)
-    useChatStore.setState({ sessions: { 'protocol-session': useChatStore.getState().getSession('protocol-session') } })
-    render(<ModelSelector runtimeKey="protocol-session" />)
-    await clickByRole('model-a, Provider A')
-    expect(screen.getByRole('button', { name: /model-c/ })).toBeEnabled()
-    act(() => useChatStore.getState().handleServerMessage('protocol-session', {type:'session_protocol',sessionApiFormat:'anthropic'}))
-    expect(screen.getByRole('button', { name: /model-c/ })).toBeDisabled()
-    expect(screen.getByRole('status')).toHaveTextContent('Messages')
-  })
-
-  it('starts an unlocked session in the same directory without altering the old session', async () => {
-    prepareProtocolSession('mixed')
-    const createSession = vi.fn(async () => 'protocol-new')
-    const connectToSession = vi.fn()
-    useSessionStore.setState({ createSession })
-    useChatStore.setState({ connectToSession })
-    render(<ModelSelector runtimeKey="protocol-session" />)
-    await clickByRole('model-a, Provider A')
-    await clickByRole('New session')
-    expect(createSession).toHaveBeenCalledWith('/fixture/project')
-    expect(useTabStore.getState().activeTabId).toBe('protocol-new')
-    expect(connectToSession).toHaveBeenCalledWith('protocol-new')
-    expect(useSessionStore.getState().sessions[0]?.sessionApiFormat).toBe('mixed')
-  })
 
   it('keeps the current Claude Official catalog visible when the API returns legacy settings models', async () => {
     const legacyModels: ModelInfo[] = [

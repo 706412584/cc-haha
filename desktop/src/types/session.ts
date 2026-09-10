@@ -1,6 +1,5 @@
 // Source: src/server/services/sessionService.ts
 
-import type { SessionProtocolState } from '../../../src/shared/sessionProtocol'
 import type { ReasoningEffortLevel } from './settings'
 
 export type LocalIndexMode = 'off' | 'shadow' | 'on'
@@ -30,7 +29,6 @@ export type SessionListItem = {
   workDirExists: boolean
   workspaceState?: SessionWorkspaceState
   permissionMode?: string
-  sessionApiFormat?: SessionProtocolState
   runtimeProviderId?: string | null
   runtimeModelId?: string
   effortLevel?: ReasoningEffortLevel

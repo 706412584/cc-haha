@@ -1,4 +1,3 @@
-import type { SessionProtocolState } from '../../../shared/sessionProtocol.js'
 export type LocalIndexMode = 'off' | 'shadow' | 'on'
 export type LocalIndexState = 'off' | 'building' | 'ready' | 'degraded'
 
@@ -47,7 +46,6 @@ export type SessionListSummary = {
   runtimeProviderId?: string | null
   runtimeModelId?: string
   effortLevel?: string
-  sessionApiFormat?: SessionProtocolState
   repository?: PersistedRepositorySession
   worktreeSession?: PersistedWorktreeSession | null
 }

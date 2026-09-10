@@ -182,7 +182,8 @@ const SCHEMA_V4 = `
 ALTER TABLE activity_sessions ADD COLUMN active_duration_ms INTEGER NOT NULL DEFAULT 0;
 `
 
-// Additive cache migration. Parser v5 reprojects old rows from unchanged transcripts.
+// Retain the additive v5 schema so caches written before the protocol-lock rollback still open.
+// The nullable column is inert: session reads and writes no longer use it to restrict models.
 const SCHEMA_V5 = `
 ALTER TABLE sessions ADD COLUMN session_api_format TEXT;
 `

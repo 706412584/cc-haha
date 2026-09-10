@@ -2360,10 +2360,6 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   // ─── Model Selector ──────────────────────────────────────
   'model.selectModel': 'Select model',
   'model.configureProvider': 'Configure model provider',
-  'model.protocolLocked': 'This session uses {protocol}. To use a different API protocol, start a new session.',
-  'model.protocolMixed': 'This session contains history from multiple API protocols and cannot continue. Start a new session from the model menu.',
-  'model.protocolUnknown': 'The API protocol of this older session could not be determined. Start a new session from the model menu.',
-  'model.protocolRequiresNewSession': 'Different API protocol — start a new session',
   'model.configuration': 'Model Configuration',
   'model.searchPlaceholder': 'Search models',
   'model.clearSearch': 'Clear model search',

@@ -31,8 +31,6 @@ import {
   IMAGE_GENERATION_PROVIDER_KIND_ENV_KEY,
 } from '../../services/imageGeneration/config.js'
 import { sessionService } from './sessionService.js'
-import { assertSessionApiFormat } from './sessionProtocolHistory.js'
-import { resolveProviderApiFormat, type SessionApiFormat } from '../../shared/sessionProtocol.js'
 import { diagnosticsService } from './diagnosticsService.js'
 import {
   isMaterializedWorktreeLaunch,
@@ -165,7 +163,6 @@ type SendMessageOptions = {
   canSend?: () => boolean
   messageUuid?: string
   onCommitted?: () => void
-  onProtocolLocked?: (apiFormat: SessionApiFormat) => void
 }
 
 type HandleSdkPayloadOptions = {
@@ -201,8 +198,6 @@ type SessionProcess = {
   outputCallbacks: SessionOutputCallback[]
   workDir: string
   permissionMode: string
-  providerId: string | null
-  apiFormat: SessionApiFormat
   networkRoutingFingerprint: string
   networkDerivedFirstTokenTimeout: boolean
   sdkToken: string
@@ -279,21 +274,6 @@ export class ConversationService {
   private providerService = new ProviderService()
   private pendingPermissionModeChanges = new Map<string, Map<string, number>>()
 
-  async resolveRuntimeApiFormat(providerId: string | null = null): Promise<SessionApiFormat> {
-    const provider = providerId ? await this.providerService.getProvider(providerId) : undefined
-    const format = resolveProviderApiFormat(providerId, provider ?? undefined)
-    if (!format) {
-      throw new ConversationStartupError('The selected provider is unavailable or has an unsupported API protocol.', 'CLI_START_FAILED')
-    }
-    return format
-  }
-
-  async validateSessionProtocol(sessionId: string, providerId: string | null = null): Promise<SessionApiFormat> {
-    const format = await this.resolveRuntimeApiFormat(providerId)
-    assertSessionApiFormat(await sessionService.getSessionApiFormat(sessionId), format)
-    return format
-  }
-
   private trackPendingPermissionModeChange(sessionId: string, mode: string, delta: 1 | -1): void {
     const sessionChanges = this.pendingPermissionModeChanges.get(sessionId) ?? new Map<string, number>()
     const nextCount = (sessionChanges.get(mode) ?? 0) + delta
@@ -366,7 +346,6 @@ export class ConversationService {
     if (this.sessions.has(sessionId)) return
 
     const launchInfo = await sessionService.getSessionLaunchInfo(sessionId)
-    const apiFormat = await this.validateSessionProtocol(sessionId, options?.providerId ?? null)
     const shouldResume = !!launchInfo && launchInfo.transcriptMessageCount > 0
     const shouldReplacePlaceholder =
       !!launchInfo && launchInfo.transcriptMessageCount === 0
@@ -389,7 +368,7 @@ export class ConversationService {
       )
     }
 
-    if (shouldReplacePlaceholder && !launchInfo?.sessionApiFormat) {
+    if (shouldReplacePlaceholder) {
       await sessionService.clearSessionTranscript(sessionId, workDir)
     }
 
@@ -488,8 +467,6 @@ export class ConversationService {
     })
     const session: SessionProcess = {
       proc,
-      providerId: options?.providerId ?? null,
-      apiFormat,
       outputCallbacks: [],
       workDir: launchWorkDir,
       permissionMode: options?.permissionMode || 'default',
@@ -629,11 +606,8 @@ export class ConversationService {
     attachments?: AttachmentRef[],
     options?: SendMessageOptions,
   ): Promise<boolean> {
-    let session = this.sessions.get(sessionId)
-    if (!session) return false
-    const selectedFormat = await this.validateSessionProtocol(sessionId, session.providerId)
-    assertSessionApiFormat(session.apiFormat, selectedFormat)
     const userContent = await this.buildUserContent(content, sessionId, attachments)
+    let session = this.sessions.get(sessionId)
     if (session && !await this.refreshNetworkEnvironmentBeforeTurn(sessionId, session)) {
       return false
     }
@@ -646,15 +620,6 @@ export class ConversationService {
     // one of those awaits is pending, so check ownership at the last possible
     // point before writing the user message to the SDK socket.
     if (options?.canSend && !options.canSend()) return false
-    if (!session || this.sessions.get(sessionId) !== session) return false
-    // Saved provider configuration can change while its CLI is alive. Check
-    // both the selected route and the transport captured when it was started.
-    const currentFormat = await this.resolveRuntimeApiFormat(session.providerId)
-    assertSessionApiFormat(session.apiFormat, currentFormat)
-    await sessionService.lockSessionApiFormat(sessionId, currentFormat, session.workDir)
-    if (options?.canSend && !options.canSend()) return false
-    if (this.sessions.get(sessionId) !== session) return false
-    options?.onProtocolLocked?.(currentFormat)
     const sent = this.sendSdkMessage(sessionId, {
       type: 'user',
       ...(options?.messageUuid ? { uuid: options.messageUuid } : {}),

@@ -76,12 +76,6 @@ import {
   type ProjectHistoryRow,
 } from './projectSessionHistory.js'
 
-import { isSessionApiFormat, type SessionApiFormat, type SessionProtocolState } from '../../shared/sessionProtocol.js'
-import { createSessionProtocolAccumulator, inferSessionApiFormat, SessionProtocolError } from './sessionProtocolHistory.js'
-
-// Shared across service instances: two first sends cannot establish different locks.
-const sessionProtocolWrites = new Map<string, Promise<void>>()
-
 // ============================================================================
 // Types
 // ============================================================================
@@ -101,7 +95,6 @@ export type SessionListItem = {
   runtimeProviderId?: string | null
   runtimeModelId?: string
   effortLevel?: string
-  sessionApiFormat?: SessionProtocolState
 }
 
 export type SubagentTranscriptFragment = {
@@ -189,7 +182,6 @@ export type SessionLaunchInfo = {
   runtimeProviderId?: string | null
   runtimeModelId?: string
   effortLevel?: string
-  sessionApiFormat?: SessionProtocolState
 }
 
 type ProviderContextWindowHint = Pick<SessionLaunchInfo, 'runtimeProviderId' | 'runtimeModelId'>
@@ -2962,7 +2954,6 @@ export class SessionService {
     let runtimeModelId: string | undefined
     let effortLevel: string | undefined
     let customTitle: string | null = null
-    const sessionProtocol = createSessionProtocolAccumulator()
     let transcriptMessageCount = 0
     const metadata: TranscriptMetadataSnapshot = {}
 
@@ -2980,7 +2971,6 @@ export class SessionService {
     const contextState = createTranscriptContextAccumulator()
 
     await this.streamJsonlFile(found.filePath, (entry) => {
-      sessionProtocol.add(entry)
       if (typeof entry.message?.model === 'string') {
         metadata.model = entry.message.model
       }
@@ -3134,7 +3124,6 @@ export class SessionService {
 
     const workDir = latestWorkDir || latestCwd || this.desanitizePath(found.projectDir) || process.cwd()
     const launchInfo: SessionLaunchInfo = {
-      sessionApiFormat: sessionProtocol.get(),
       filePath: found.filePath,
       projectDir: found.projectDir,
       workDir,
@@ -3443,7 +3432,6 @@ export class SessionService {
       workDir,
       workDirExists,
       workspaceState,
-      sessionApiFormat: row.sessionApiFormat,
       permissionMode: row.permissionMode,
       ...(row.runtimeProviderId !== undefined
         ? { runtimeProviderId: row.runtimeProviderId }
@@ -3459,7 +3447,6 @@ export class SessionService {
   ): SessionListShadowComparison {
     const fieldHashes: SessionListShadowComparison['fieldHashes'] = []
     const fields: Array<keyof SessionListItem> = [
-      'sessionApiFormat',
       'id',
       'title',
       'createdAt',
@@ -3624,7 +3611,6 @@ export class SessionService {
           workDir,
           workDirExists,
           workspaceState,
-          sessionApiFormat: summary.sessionApiFormat,
           permissionMode: summary.permissionMode,
           ...(summary.runtimeProviderId !== undefined
             ? { runtimeProviderId: summary.runtimeProviderId }
@@ -3725,7 +3711,6 @@ export class SessionService {
       workDirExists,
       workspaceState,
       permissionMode,
-      sessionApiFormat: inferSessionApiFormat(entries),
       messages,
     }
   }
@@ -4164,62 +4149,6 @@ export class SessionService {
     return typeof entry?.cwd === 'string' && entry.cwd.trim() ? entry.cwd : null
   }
 
-  private async findProtocolSessionFile(sessionId: string): Promise<{ filePath: string; projectDir: string } | null> {
-    // SDK/WebSocket callers can use safe ad-hoc IDs before a UUID is assigned.
-    if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) throw ApiError.badRequest('Invalid session ID')
-    if (this.isValidSessionId(sessionId)) return this.findSessionFile(sessionId)
-    return (await this.findSessionFilesFromFiles(sessionId))[0] ?? null
-  }
-
-  async getSessionApiFormat(sessionId: string): Promise<SessionProtocolState | undefined> {
-    const found = await this.findProtocolSessionFile(sessionId)
-    if (!found) return undefined
-    const protocol = createSessionProtocolAccumulator()
-    await this.streamJsonlFile(found.filePath, entry => protocol.add(entry))
-    return protocol.get()
-  }
-
-  /** Establish the immutable protocol immediately before the first real send.
-   * Legacy histories are upgraded by appending metadata only after unambiguous inference. */
-  async lockSessionApiFormat(sessionId: string, apiFormat: SessionApiFormat, workDir?: string): Promise<void> {
-    if (!isSessionApiFormat(apiFormat)) throw ApiError.badRequest('Invalid API protocol')
-    const key = `${this.getConfigDir()}\0${sessionId}`
-    const previous = sessionProtocolWrites.get(key) ?? Promise.resolve()
-    const write = previous.catch(() => {}).then(async () => {
-      let found = await this.findProtocolSessionFile(sessionId)
-      if (!found && workDir) {
-        const absoluteWorkDir = await fs.realpath(path.resolve(normalizeDriveRootPathForPlatform(workDir)))
-        const projectDir = this.sanitizePath(absoluteWorkDir)
-        const directory = path.join(this.getProjectsDir(), projectDir)
-        await fs.mkdir(directory, { recursive: true })
-        found = { filePath: path.join(directory, `${sessionId}.jsonl`), projectDir }
-        await this.appendJsonlEntry(found.filePath, {
-          type: 'session-meta', isMeta: true, workDir: absoluteWorkDir,
-          timestamp: new Date().toISOString(),
-        })
-      }
-      if (!found) throw ApiError.notFound(`Session not found: ${sessionId}`)
-      const entries = await this.readJsonlFile(found.filePath)
-      const existing = inferSessionApiFormat(entries)
-      if (existing && existing !== apiFormat) throw new SessionProtocolError(existing, apiFormat)
-      if (entries.some(entry => entry.type === 'session-meta' &&
-        (entry as Record<string, unknown>).sessionApiFormat === apiFormat)) return
-      await this.appendJsonlEntry(found.filePath, {
-        type: 'session-meta',
-        isMeta: true,
-        sessionApiFormat: apiFormat,
-        timestamp: new Date().toISOString(),
-      })
-      this.invalidateSessionListCache()
-    })
-    sessionProtocolWrites.set(key, write)
-    try {
-      await write
-    } finally {
-      if (sessionProtocolWrites.get(key) === write) sessionProtocolWrites.delete(key)
-    }
-  }
-
   /**
    * Inspect how a session should be launched.
    * Placeholder desktop-created sessions have zero transcript messages.
@@ -4261,7 +4190,6 @@ export class SessionService {
     const transcriptMessageCount = this.countTranscriptMessages(entries)
 
     return {
-      sessionApiFormat: inferSessionApiFormat(entries),
       filePath: found.filePath,
       projectDir: found.projectDir,
       workDir,
@@ -4322,7 +4250,6 @@ export class SessionService {
         ? preservedPermissionMode
         : this.resolvePermissionModeFromEntries(entries)
       const now = new Date().toISOString()
-      const sessionApiFormat = inferSessionApiFormat(entries)
 
       const initialEntry = {
         type: 'file-history-snapshot',
@@ -4338,7 +4265,6 @@ export class SessionService {
       const metaEntry = {
         type: 'session-meta',
         isMeta: true,
-        ...(sessionApiFormat ? { sessionApiFormat } : {}),
         workDir,
         repository,
         ...(permissionMode ? { permissionMode } : {}),
@@ -4410,18 +4336,11 @@ export class SessionService {
       }
     }
 
-    // Moving the session metadata to a new workspace must not turn an existing
-    // conversation into an unlocked placeholder. Same-file updates retain the old record.
-    const sessionApiFormat = matches[0]?.filePath !== targetFilePath
-      ? inferSessionApiFormat(await this.readJsonlFile(matches[0]!.filePath))
-      : undefined
-
     await fs.mkdir(path.dirname(targetFilePath), { recursive: true })
 
     await this.appendJsonlEntry(targetFilePath, {
       type: 'session-meta',
       isMeta: true,
-      ...(sessionApiFormat ? { sessionApiFormat } : {}),
       workDir: normalizedWorkDir,
       repository,
       ...(metadata.permissionMode && VALID_SESSION_PERMISSION_MODES.has(metadata.permissionMode)

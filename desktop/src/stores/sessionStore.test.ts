@@ -244,53 +244,6 @@ describe('sessionStore', () => {
     })
   })
 
-  it('keeps a model chosen while an older session refresh is in flight', async () => {
-    const sessionId = 'session-runtime-switch'
-    const oldSelection = { providerId: 'openai-official', modelId: 'gpt-5.6' }
-    const nextSelection = { providerId: 'deepseek-provider', modelId: 'deepseek-v4.1' }
-    useSessionRuntimeStore.getState().setSelection(sessionId, oldSelection)
-    const response = {
-      sessions: [{
-        ...makeSession(sessionId, '2026-09-09T00:00:00.000Z'),
-        runtimeProviderId: oldSelection.providerId,
-        runtimeModelId: oldSelection.modelId,
-      }],
-      total: 1,
-    }
-    const refresh = createDeferred<typeof response>()
-    listMock.mockReturnValueOnce(refresh.promise)
-
-    const refreshing = useSessionStore.getState().fetchSessions()
-    useSessionRuntimeStore.getState().setSelection(sessionId, nextSelection)
-    refresh.resolve(response)
-    await refreshing
-
-    expect(useSessionRuntimeStore.getState().selections[sessionId]).toEqual(nextSelection)
-    expect(JSON.parse(localStorage.getItem('cc-haha-session-runtime')!)[sessionId])
-      .toEqual(nextSelection)
-  })
-
-  it('does not erase a confirmed protocol when an earlier unlocked refresh arrives', async () => {
-    const session = makeSession('locked-during-refresh', '2026-09-09T00:00:00.000Z')
-    useSessionStore.setState({ sessions: [session] })
-    const response = { sessions: [session], total: 1 }
-    const refresh = createDeferred<typeof response>()
-    listMock.mockReturnValueOnce(refresh.promise)
-    const refreshing = useSessionStore.getState().fetchSessions()
-    useSessionStore.getState().updateSessionApiFormat(session.id, 'anthropic')
-    refresh.resolve(response)
-    await refreshing
-    expect(useSessionStore.getState().sessions[0]?.sessionApiFormat).toBe('anthropic')
-  })
-
-  it('preserves the confirmed protocol when hydrating an older session snapshot', () => {
-    const session = { ...makeSession('locked-session', '2026-09-09T00:00:00.000Z'), sessionApiFormat: 'anthropic' as const }
-    useSessionStore.setState({ sessions: [session] })
-    useSessionStore.getState().updateSessionApiFormat(session.id, 'openai_responses')
-    useSessionStore.getState().hydrateHistoricalSessions([session])
-    expect(useSessionStore.getState().sessions[0]?.sessionApiFormat).toBe('openai_responses')
-  })
-
   it('updates a session message count without changing other metadata', () => {
     useSessionStore.setState({
       sessions: [makeSession('session-count-1', '2026-05-07T00:00:00.000Z', 'Working session')],

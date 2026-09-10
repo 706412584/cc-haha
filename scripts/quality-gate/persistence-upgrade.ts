@@ -9,18 +9,15 @@ type Check = {
 const rootDir = process.cwd()
 const checks: Check[] = [
   {
-    title: 'Server persistent JSON migrations',
-    command: ['bun', 'test', './src/server/__tests__/persistence-upgrade.test.ts'],
+    title: 'Local index schema compatibility after protocol rollback',
+    command: [
+      'bun', 'test', './src/server/services/localIndex/database.test.ts',
+      '--test-name-pattern', 'frozen v[45]',
+    ],
   },
   {
-    title: 'Session protocol history and local index migrations',
-    command: [
-      'bun', 'test',
-      './src/server/__tests__/session-protocol.test.ts',
-      './src/server/services/sessionProtocolHistory.test.ts',
-      './src/server/services/localIndex/database.test.ts',
-      './src/server/services/localIndex/sessionProjector.test.ts',
-    ],
+    title: 'Server persistent JSON migrations',
+    command: ['bun', 'test', './src/server/__tests__/persistence-upgrade.test.ts'],
   },
   {
     title: 'Desktop UI preference migrations',

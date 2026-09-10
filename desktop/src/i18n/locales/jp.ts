@@ -2362,10 +2362,6 @@ export const jp: Record<TranslationKey, string> = {
   // ─── Model Selector ──────────────────────────────────────
   'model.selectModel': 'モデルを選択',
   'model.configureProvider': 'モデルプロバイダーを設定',
-  'model.protocolLocked': 'このセッションは {protocol} を使用します。別の API プロトコルを使うには、新しいセッションを作成してください。',
-  'model.protocolMixed': '複数の API プロトコルの履歴が混在しているため、このセッションは続行できません。モデルメニューから新しいセッションを作成してください。',
-  'model.protocolUnknown': 'この古いセッションの API プロトコルを特定できません。モデルメニューから新しいセッションを作成してください。',
-  'model.protocolRequiresNewSession': 'API プロトコルが異なります。新しいセッションを作成してください',
   'model.configuration': 'モデル設定',
   'model.searchPlaceholder': 'モデルを検索',
   'model.clearSearch': 'モデル検索をクリア',

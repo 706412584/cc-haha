@@ -1,4 +1,3 @@
-import type { SessionProtocolState } from '../../../src/shared/sessionProtocol'
 import { create } from 'zustand'
 import {
   sessionsApi,
@@ -14,7 +13,6 @@ import { useSettingsStore } from './settingsStore'
 import { useTabStore } from './tabStore'
 import type { LocalIndexStatus, SessionListItem } from '../types/session'
 import type { PermissionMode } from '../types/settings'
-import type { RuntimeSelection } from '../types/runtime'
 import { isPlaceholderSessionTitle } from '../lib/sessionTitle'
 import { invalidateRecentProjectsCache } from '../lib/recentProjectsCache'
 
@@ -57,10 +55,7 @@ type SessionStore = {
   fetchSessions: (project?: string) => Promise<void>
   loadMoreProjectSessions: (projectRoot: string) => Promise<void>
   releaseProjectHistory: (projectRoot: string) => void
-  hydrateHistoricalSessions: (
-    sessions: SessionListItem[],
-    expectedSelections?: Record<string, RuntimeSelection>,
-  ) => SessionListItem[]
+  hydrateHistoricalSessions: (sessions: SessionListItem[]) => SessionListItem[]
   openHistoricalSession: (session: SessionListItem) => void
   createSession: (workDir?: string, options?: CreateSessionOptions) => Promise<string>
   branchSession: (
@@ -80,7 +75,6 @@ type SessionStore = {
   updateSessionTitle: (id: string, title: string) => void
   updateSessionMessageCount: (id: string, messageCount: number) => void
   updateSessionPermissionMode: (id: string, mode: PermissionMode) => void
-  updateSessionApiFormat: (id: string, sessionApiFormat: SessionProtocolState) => void
   setActiveSession: (id: string | null) => void
 }
 
@@ -111,14 +105,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   fetchSessions: async (project?: string) => {
     const requestId = ++fetchSessionsRequestId
-    const expectedSelections = useSessionRuntimeStore.getState().selections
     set({ isLoading: true, error: null, sessionListRequestId: requestId })
     try {
       const response = await sessionsApi.list(buildSessionListParams(project))
       if (requestId !== get().sessionListRequestId) return
       const raw = response.sessions
       const indexStatus = response.index ?? null
-      useSessionRuntimeStore.getState().syncFromSessions(raw, expectedSelections)
+      useSessionRuntimeStore.getState().syncFromSessions(raw)
       let syncedSessions: SessionListItem[] = []
       set((state) => {
         if (requestId !== state.sessionListRequestId) return state
@@ -273,13 +266,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     })
   },
 
-  hydrateHistoricalSessions: (snapshots, expectedSelections) => {
+  hydrateHistoricalSessions: (snapshots) => {
     if (snapshots.length === 0) return []
     const selected = reconcileSessionSnapshots(snapshots, get().sessions)
     const selectedIds = new Set(selected.map((session) => session.id))
     // Hydrate before activating the tab: connecting immediately applies its
     // runtime selection and the composer reads workspace/permission metadata.
-    useSessionRuntimeStore.getState().syncFromSessions(selected, expectedSelections)
+    useSessionRuntimeStore.getState().syncFromSessions(selected)
     set((state) => ({
       sessions: mergeSessionList([
         ...selected,
@@ -469,14 +462,6 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     }))
   },
 
-  updateSessionApiFormat: (id, sessionApiFormat) => {
-    set((state) => ({
-      sessions: state.sessions.map((session) =>
-        session.id === id ? { ...session, sessionApiFormat } : session,
-      ),
-    }))
-  },
-
   setActiveSession: (id) => set({ activeSessionId: id }),
 }))
 
@@ -581,7 +566,7 @@ function mergeSessionList(
 
   for (const item of incoming) {
     const current = currentById.get(item.id)
-    const candidate = preserveLocalMetadata(current, item)
+    const candidate = preserveLocalTitle(current, item)
     const existing = byId.get(candidate.id)
     if (!existing || sessionModifiedTime(candidate) > sessionModifiedTime(existing)) {
       byId.set(candidate.id, candidate)
@@ -613,16 +598,11 @@ function sessionModifiedTime(session: SessionListItem): number {
   return Number.isFinite(timestamp) ? timestamp : 0
 }
 
-function preserveLocalMetadata(
+function preserveLocalTitle(
   current: SessionListItem | undefined,
   incoming: SessionListItem,
 ): SessionListItem {
   if (!current) return incoming
-  // Protocol locks cannot be removed by a session-list snapshot taken before
-  // the first accepted turn. The live event is mirrored into this metadata.
-  if (current.sessionApiFormat && incoming.sessionApiFormat === undefined) {
-    incoming = { ...incoming, sessionApiFormat: current.sessionApiFormat }
-  }
   if (isPlaceholderSessionTitle(incoming.title) && !isPlaceholderSessionTitle(current.title)) {
     return { ...incoming, title: current.title }
   }

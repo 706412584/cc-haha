@@ -2361,10 +2361,6 @@ export const zh: Record<TranslationKey, string> = {
   // ─── Model Selector ──────────────────────────────────────
   'model.selectModel': '選擇模型',
   'model.configureProvider': '設定模型服務商',
-  'model.protocolLocked': '此對話使用 {protocol} 協定。如需使用其他 API 協定，請建立新對話。',
-  'model.protocolMixed': '此對話混用了多種 API 協定的歷史，無法繼續。請在模型選單中建立新對話。',
-  'model.protocolUnknown': '無法判定此舊對話的 API 協定。請在模型選單中建立新對話。',
-  'model.protocolRequiresNewSession': 'API 協定不同，請建立新對話',
   'model.configuration': '模型配置',
   'model.searchPlaceholder': '搜尋模型',
   'model.clearSearch': '清除模型搜尋',

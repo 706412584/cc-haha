@@ -2362,10 +2362,6 @@ export const kr: Record<TranslationKey, string> = {
   // ─── Model Selector ──────────────────────────────────────
   'model.selectModel': '모델 선택',
   'model.configureProvider': '모델 공급자 설정',
-  'model.protocolLocked': '이 세션은 {protocol} 프로토콜을 사용합니다. 다른 API 프로토콜을 사용하려면 새 세션을 시작하세요.',
-  'model.protocolMixed': '여러 API 프로토콜의 기록이 섞여 있어 이 세션을 계속할 수 없습니다. 모델 메뉴에서 새 세션을 시작하세요.',
-  'model.protocolUnknown': '이전 세션의 API 프로토콜을 확인할 수 없습니다. 모델 메뉴에서 새 세션을 시작하세요.',
-  'model.protocolRequiresNewSession': 'API 프로토콜이 다릅니다. 새 세션을 시작하세요',
   'model.configuration': '모델 구성',
   'model.searchPlaceholder': '모델 검색',
   'model.clearSearch': '모델 검색 지우기',
