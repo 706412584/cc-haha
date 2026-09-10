@@ -15,6 +15,18 @@ import {
   recordSidechainTranscript,
   getAgentTranscriptPath,
   resetProjectForTesting,
+  getCurrentSessionTitle,
+  saveAiGeneratedTitle,
+  saveTaskSummary,
+  saveCustomTitle,
+  saveTag,
+  saveAgentName,
+  saveAgentColor,
+  saveWorktreeState,
+  linkSessionToPR,
+  adoptResumedSessionFile,
+  recordContentReplacement,
+  removeTranscriptMessage,
 } from '../sessionStorage.js'
 import { resetSettingsCache, setSessionSettingsCache } from '../settings/settingsCache.js'
 
@@ -172,6 +184,104 @@ describe('session retention transitions', () => {
     const raw = await fs.readFile(getAgentTranscriptPath('retention-agent' as never), 'utf8')
     expect(raw).not.toContain('PRIVATE')
     expect(JSON.parse(raw.trim())).toMatchObject({ uuid: fresh.uuid, parentUuid: null })
+  })
+
+  async function updatePrivateMetadata() {
+    saveAiGeneratedTitle(sessionId, 'PRIVATE AI TITLE')
+    saveTaskSummary(sessionId, 'PRIVATE TASK SUMMARY')
+    await saveCustomTitle(sessionId, 'PRIVATE CUSTOM TITLE')
+    await saveTag(sessionId, 'PRIVATE TAG')
+    await saveAgentName(sessionId, 'PRIVATE AGENT')
+    await saveAgentColor(sessionId, 'PRIVATE COLOR')
+    await linkSessionToPR(sessionId, 1, 'https://example.invalid/PRIVATE', 'PRIVATE REPO')
+    saveWorktreeState(null)
+  }
+
+  it('removes an older failed message without losing later transcript content during a full rewrite', async () => {
+    const failed = user('FAILED STREAM MESSAGE')
+    const later = user('later retained content '.repeat(4000))
+    await recordTranscript([failed, later] as never[])
+    await flushSessionStorage()
+    const transcriptPath = getTranscriptPathForSession(sessionId)
+    // Preserve an unparseable line as well: tombstoning only removes the
+    // selected UUID, even when the target is outside the tail read window.
+    await fs.appendFile(transcriptPath, 'incomplete trailing entry\n')
+    await removeTranscriptMessage(failed.uuid)
+    const saved = await fs.readFile(transcriptPath, 'utf8')
+    expect(saved).not.toContain('FAILED STREAM MESSAGE')
+    const lines = saved.trim().split('\n')
+    expect(JSON.parse(lines[0]!)).toMatchObject({ uuid: later.uuid, message: later.message })
+    expect(lines[1]).toBe('incomplete trailing entry')
+    expect(lines).toHaveLength(2)
+  })
+
+  for (const replaceFile of [false, true]) {
+    it(`binds resumed content replacement to its existing file (replaced=${replaceFile})`, async () => {
+      const transcriptPath = getTranscriptPathForSession(sessionId)
+      await fs.mkdir(path.dirname(transcriptPath), { recursive: true })
+      await fs.writeFile(transcriptPath, '')
+      adoptResumedSessionFile()
+      const originalSetTimeout = globalThis.setTimeout
+      globalThis.setTimeout = ((callback: any, delay?: number, ...args: any[]) =>
+        originalSetTimeout(callback, delay === 100 ? 60_000 : delay, ...args)) as typeof setTimeout
+      try {
+        await recordContentReplacement([{ kind: 'tool-result', toolUseId: 'tool-private', replacement: 'PRIVATE REPLACEMENT' }])
+        if (replaceFile) {
+          await fs.rename(transcriptPath, transcriptPath + '.removed')
+          await fs.writeFile(transcriptPath, '')
+        }
+        await flushSessionStorage()
+        const saved = await fs.readFile(transcriptPath, 'utf8')
+        if (replaceFile) expect(saved).toBe('')
+        else expect(JSON.parse(saved)).toMatchObject({ type: 'content-replacement', replacements: [{ replacement: 'PRIVATE REPLACEMENT' }] })
+      } finally {
+        globalThis.setTimeout = originalSetTimeout
+      }
+    })
+  }
+
+  it('synchronous metadata helpers do not modify saved content while retention is zero', async () => {
+    await recordTranscript([user('public before private metadata')] as never[])
+    await flushSessionStorage()
+    const transcriptPath = getTranscriptPathForSession(sessionId)
+    const before = await fs.readFile(transcriptPath, 'utf8')
+    retention(0)
+    await updatePrivateMetadata()
+    expect(await fs.readFile(transcriptPath, 'utf8')).toBe(before)
+    expect(getCurrentSessionTitle(sessionId)).toBe('PRIVATE CUSTOM TITLE')
+  })
+
+  it('synchronous metadata helpers do not recreate a removed transcript with enabled cached settings', async () => {
+    await recordTranscript([user('public removed transcript')] as never[])
+    await flushSessionStorage()
+    const transcriptPath = getTranscriptPathForSession(sessionId)
+    await fs.unlink(transcriptPath)
+    await updatePrivateMetadata()
+    await expect(fs.readFile(transcriptPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('does not reappend private metadata caches when new public records materialize after deletion', async () => {
+    const old = user('old removed history')
+    await recordTranscript([old] as never[])
+    await flushSessionStorage()
+    const transcriptPath = getTranscriptPathForSession(sessionId)
+    retention(0)
+    await updatePrivateMetadata()
+    await fs.unlink(transcriptPath)
+    retention(365)
+    await recordTranscript([old, user('new public history')] as never[])
+    await flushSessionStorage()
+    reAppendSessionMetadata()
+    const saved = await fs.readFile(transcriptPath, 'utf8')
+    expect(saved).toContain('new public history')
+    expect(saved).not.toContain('PRIVATE')
+    await saveCustomTitle(sessionId, 'new public title')
+    await saveTag(sessionId, 'new public tag')
+    reAppendSessionMetadata()
+    const updated = await fs.readFile(transcriptPath, 'utf8')
+    expect(updated).not.toContain('PRIVATE')
+    expect(updated.match(/new public title/g)).toHaveLength(2)
+    expect(updated.match(/new public tag/g)).toHaveLength(2)
   })
 
   it('does not rebuild a removed session through cached last-prompt metadata while disabled', async () => {
