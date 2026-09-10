@@ -85,10 +85,16 @@ async function loadSharp(): Promise<MaybeDefault<SharpFunction & SharpCreator>> 
   // External imports in a compiled Bun executable otherwise resolve from the
   // caller's project. The desktop ships sharp beside the executable's ancestors
   // in app.asar.unpacked/node_modules, outside Electron's virtual ASAR filesystem.
-  if (isInBundledMode() || import.meta.url.includes('/$bunfs/') || import.meta.url.includes('/~BUN/')) {
+  if (isInBundledMode() || isCompiledImageProcessorUrl(import.meta.url)) {
     return createRequire(process.execPath)('sharp')
   }
   return await import('sharp') as unknown as MaybeDefault<SharpFunction & SharpCreator>
+}
+
+export function isCompiledImageProcessorUrl(moduleUrl: string): boolean {
+  // Windows Bun URLs encode ~BUN as %7EBUN, even without embedded assets.
+  const modulePath = decodeURIComponent(new URL(moduleUrl).pathname)
+  return modulePath.includes('/$bunfs/') || modulePath.includes('/~BUN/')
 }
 
 // Dynamic import shape varies by module interop mode — ESM yields { default: fn }, CJS yields fn directly.

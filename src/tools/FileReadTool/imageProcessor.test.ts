@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { isCompiledImageProcessorUrl } from './imageProcessor'
 
 const originalExecutable = process.execPath
 const originalEmbeddedFiles = Bun.embeddedFiles
@@ -14,6 +15,19 @@ afterEach(async () => {
 })
 
 describe('image processor module loading', () => {
+  test.each([
+    ['file:///B:/%7EBUN/root/claude-sidecar.exe', true],
+    ['file:///B:/%7eBUN/root/claude-sidecar.exe', true],
+    ['file:///B:/~BUN/root/claude-sidecar.exe', true],
+    ['file:///$bunfs/root/claude-sidecar', true],
+    ['file:///%24bunfs/root/claude-sidecar', true],
+    ['file:///D:/中文%20项目/src/tools/FileReadTool/imageProcessor.ts', false],
+    ['file:///home/user/project/src/tools/FileReadTool/imageProcessor.ts', false],
+    ['file:///D:/project/~BUN-tools/imageProcessor.ts', false],
+  ])('detects compiled image module URL %s as %s', (moduleUrl, expected) => {
+    expect(isCompiledImageProcessorUrl(moduleUrl)).toBe(expected)
+  })
+
   test('processes and creates images with the source-install sharp dependency', async () => {
     const sourceModule = './imageProcessor.js?source-test'
     const { getImageCreator, getImageProcessor } = await import(sourceModule)
