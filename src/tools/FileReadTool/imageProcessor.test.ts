@@ -65,11 +65,9 @@ async function runIsolated(script: string) {
 }
 
 describe('getImageProcessor', () => {
-  test('does not fall back to external sharp in bundled mode when native processor is unavailable', async () => {
+  test('falls back to sharp with a warning in bundled mode when native processor is unavailable', async () => {
     const result = await runIsolated(String.raw`
       import { mock } from 'bun:test'
-
-      let sharpImportAttempted = false
 
       mock.module('./src/utils/bundledMode.js', () => ({
         isInBundledMode: () => true,
@@ -80,39 +78,22 @@ describe('getImageProcessor', () => {
         throw new Error('native module missing')
       })
 
-      mock.module('sharp', () => {
-        sharpImportAttempted = true
-        return {
-          default: () => ({
-            metadata: async () => ({ width: 1, height: 1, format: 'png' }),
-            resize() { return this },
-            jpeg() { return this },
-            png() { return this },
-            webp() { return this },
-            toBuffer: async () => Buffer.from('sharp'),
-          }),
-        }
-      })
-
       const modulePath = './src/tools/FileReadTool/' + 'imageProcessor.js'
       const { getImageProcessor, resetImageProcessorForTests } = await import(modulePath)
       resetImageProcessorForTests()
 
-      try {
-        await getImageProcessor()
-        throw new Error('expected getImageProcessor to reject')
-      } catch (error) {
-        if (!String(error?.message ?? error).includes('Native image processor module not available in bundled mode')) {
-          throw error
-        }
-      }
-
-      if (sharpImportAttempted) {
-        throw new Error('sharp import was attempted')
+      // The native path fails, so the fallback must resolve to a usable sharp
+      // function (the source-install dependency under test) instead of throwing.
+      const processor = await getImageProcessor()
+      if (typeof processor !== 'function') {
+        throw new Error('expected fallback sharp function')
       }
     `)
 
     expect(result.exitCode).toBe(0)
-    expect(result.stderr).toBe('')
+    // The fallback must not be silent: the warning documents that the native
+    // path failed and the bundled sharp copy took over.
+    expect(result.stderr).toContain('Native image processor not available')
+    expect(result.stderr).toContain('falling back to sharp')
   })
 })

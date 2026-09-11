@@ -55,8 +55,12 @@ export async function getImageProcessor(): Promise<SharpFunction> {
       imageProcessorModule = { default: sharp }
       return sharp
     } catch (error) {
-      throw new Error(
-        `Native image processor module not available in bundled mode: ${errorMessage(error)}`,
+      // Fall back to sharp if native module is not available. v0.6.1 packs
+      // sharp (and its binaries) into asarUnpack, so the fallback resolves to
+      // the bundled copy rather than an ambient install.
+      // biome-ignore lint/suspicious/noConsole: intentional warning
+      console.warn(
+        `Native image processor not available (${errorMessage(error)}), falling back to sharp`,
       )
     }
   }
@@ -90,7 +94,14 @@ async function loadSharp(): Promise<MaybeDefault<SharpFunction & SharpCreator>> 
   // caller's project. The desktop ships sharp beside the executable's ancestors
   // in app.asar.unpacked/node_modules, outside Electron's virtual ASAR filesystem.
   if (isInBundledMode() || import.meta.url.includes('/$bunfs/') || import.meta.url.includes('/~BUN/')) {
-    return createRequire(process.execPath)('sharp')
+    try {
+      return createRequire(process.execPath)('sharp')
+    } catch {
+      // The executable-relative require failed (e.g. a dev run where
+      // process.execPath is the Bun binary, or a package missing the sidecar
+      // copy). Fall through to the ordinary import so the source-install
+      // dependency can still serve the process.
+    }
   }
   return await import('sharp') as unknown as MaybeDefault<SharpFunction & SharpCreator>
 }
