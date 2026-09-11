@@ -47,7 +47,8 @@ describe('image processor module loading', () => {
     expect(creator({ create: {
       width: 1, height: 1, channels: 3, background: { r: 0, g: 0, b: 0 },
     } })).toBe('packaged-sharp-fixture')
-
+  })
+})
 
 async function runIsolated(script: string) {
   const proc = Bun.spawn(['bun', '-e', script], {
