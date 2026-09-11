@@ -1572,7 +1572,14 @@ async function* queryModel(
   queryCheckpoint("query_message_normalization_start");
   let messagesForAPI = normalizeMessagesForAPI(messages, filteredTools);
   queryCheckpoint("query_message_normalization_end");
-  if (hasAnthropicCompatibleThirdPartyConfig()) {
+  if (
+    hasAnthropicCompatibleThirdPartyConfig() &&
+    !modelUsesBoundThinking(options.model)
+  ) {
+    // Third-party relays 400 on replayed encrypted thinking blocks. Models
+    // that use bound thinking (fable-5-1) are exempt: their thinking blocks
+    // carry a drop_block binding so providers implementing the protocol can
+    // safely replay them, and the API contract keeps signatures in history.
     messagesForAPI = stripSignatureBlocks(messagesForAPI);
   }
 
