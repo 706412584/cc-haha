@@ -12,7 +12,10 @@ const checks: Check[] = [
     title: 'Local index schema compatibility after protocol rollback',
     command: [
       'bun', 'test', './src/server/services/localIndex/database.test.ts',
-      '--test-name-pattern', 'frozen v[45]',
+      // v6: the merge moved upstream's v5 api-format migration to v6 (the
+      // fork lineage already owns v5 for thinking_enabled), so the frozen
+      // rollback test renamed accordingly.
+      '--test-name-pattern', 'frozen v[456]',
     ],
   },
   {
