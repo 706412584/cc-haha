@@ -2554,6 +2554,8 @@ export const zh: Record<TranslationKey, string> = {
   'contextIndicator.updatedNow': '剛剛更新',
   'contextIndicator.updatedMinutes': '{count} 分鐘前更新',
   'contextIndicator.estimate': '估算',
+  'contextIndicator.compactButton': '壓縮上下文',
+  'contextIndicator.compacting': '正在壓縮…',
   'chat.navigate': '導航',
   'chat.select': '選擇',
   'chat.dismiss': '關閉',

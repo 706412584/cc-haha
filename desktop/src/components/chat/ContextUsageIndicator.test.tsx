@@ -800,4 +800,66 @@ describe('ContextUsageIndicator presentation', () => {
     expect(await screen.findByTestId('context-usage-sheet')).toBeInTheDocument()
     expect(screen.queryByTestId('context-usage-popover')).not.toBeInTheDocument()
   })
+
+  it('sends a hidden /compact message from the details action and disables it while busy', async () => {
+    const sendMessage = vi.fn()
+    const { useChatStore: mockedStore } = await import('../../stores/chatStore')
+    mockedStore.setState({
+      sessions: {
+        ...mockedStore.getState().sessions,
+        'session-1': {
+          ...mockedStore.getState().getSession('session-1'),
+          chatState: 'idle',
+        },
+      },
+    } as never)
+    // Spy at the store level: the component calls useChatStore.getState().sendMessage
+    vi.spyOn(mockedStore.getState(), 'sendMessage').mockImplementation(sendMessage)
+
+    try {
+      const { rerender } = render(
+        <ContextUsageIndicator
+          sessionId="session-1"
+          chatState="idle"
+          messageCount={1}
+        />,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('21%')
+      })
+
+      fireEvent.click(screen.getByTestId('context-usage-indicator'))
+      await waitFor(() => {
+        expect(screen.queryByTestId('context-usage-popover')).toBeInTheDocument()
+      })
+      const button = await screen.findByTestId('context-compact-button')
+      expect(button).toBeEnabled()
+
+      fireEvent.click(button)
+      expect(sendMessage).toHaveBeenCalledTimes(1)
+      expect(sendMessage).toHaveBeenCalledWith('session-1', '/compact', [], {
+        hideDisplayContent: true,
+      })
+
+      // While a turn is in flight the action must be disabled.
+      rerender(
+        <ContextUsageIndicator
+          sessionId="session-1"
+          chatState="compacting"
+          messageCount={1}
+        />,
+      )
+      await waitFor(() => {
+        expect(screen.getByTestId('context-usage-indicator')).toBeEnabled()
+      })
+      fireEvent.click(screen.getByTestId('context-usage-indicator'))
+      await waitFor(() => {
+        expect(screen.getByTestId('context-compact-button')).toBeDisabled()
+      })
+      expect(screen.getByTestId('context-compact-button')).toHaveTextContent('Compacting…')
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
 })

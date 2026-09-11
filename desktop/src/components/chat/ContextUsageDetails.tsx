@@ -26,6 +26,13 @@ export type ContextUsageDetailsProps = {
     loading: string
     unavailableDetail: string
   }
+  /** Renders the manual "Compact context" action when provided. */
+  onCompact?: () => void
+  /** Disables the compact action (turn in flight, status unknown, etc.). */
+  compactDisabled?: boolean
+  compactInProgress?: boolean
+  compactButtonLabel?: string
+  compactingLabel?: string
 }
 
 function formatNumber(value: number) {
@@ -85,7 +92,38 @@ export function ContextUsageDetails({
   estimate = false,
   status,
   labels,
+  onCompact,
+  compactDisabled = false,
+  compactInProgress = false,
+  compactButtonLabel,
+  compactingLabel,
 }: ContextUsageDetailsProps) {
+  const compactAction = onCompact ? (
+    <button
+      type="button"
+      data-testid="context-compact-button"
+      disabled={compactDisabled || compactInProgress}
+      onClick={onCompact}
+      className="mt-4 inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3 text-[13px] font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      {compactInProgress ? (
+        <>
+          <span className="material-symbols-outlined animate-spin text-[15px]">
+            progress_activity
+          </span>
+          {compactingLabel}
+        </>
+      ) : (
+        <>
+          <span className="material-symbols-outlined text-[15px]">
+            compress
+          </span>
+          {compactButtonLabel}
+        </>
+      )}
+    </button>
+  ) : null
+
   if (variant === 'sheet') {
     return (
       <div data-testid="context-usage-details" data-variant="sheet">
@@ -135,6 +173,7 @@ export function ContextUsageDetails({
                 : labels.unavailableDetail}
           </div>
         )}
+        {compactAction}
       </div>
     )
   }
@@ -197,6 +236,7 @@ export function ContextUsageDetails({
           {status === 'loading' ? labels.loading : labels.unavailableDetail}
         </div>
       )}
+      {compactAction}
     </div>
   )
 }

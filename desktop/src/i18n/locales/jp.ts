@@ -2555,6 +2555,8 @@ export const jp: Record<TranslationKey, string> = {
   'contextIndicator.updatedNow': 'たった今更新',
   'contextIndicator.updatedMinutes': '{count} 分前に更新',
   'contextIndicator.estimate': '推定',
+  'contextIndicator.compactButton': 'コンテキストを圧縮',
+  'contextIndicator.compacting': '圧縮中…',
   'chat.navigate': '移動',
   'chat.select': '選択',
   'chat.dismiss': '閉じる',

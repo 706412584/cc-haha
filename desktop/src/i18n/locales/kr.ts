@@ -2555,6 +2555,8 @@ export const kr: Record<TranslationKey, string> = {
   'contextIndicator.updatedNow': '방금 업데이트됨',
   'contextIndicator.updatedMinutes': '{count}분 전 업데이트됨',
   'contextIndicator.estimate': '추정',
+  'contextIndicator.compactButton': '컨텍스트 압축',
+  'contextIndicator.compacting': '압축 중…',
   'chat.navigate': '이동',
   'chat.select': '선택',
   'chat.dismiss': '닫기',

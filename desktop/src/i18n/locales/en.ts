@@ -2586,6 +2586,8 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   'contextIndicator.updatedNow': 'Updated just now',
   'contextIndicator.updatedMinutes': 'Updated {count}m ago',
   'contextIndicator.estimate': 'Estimate',
+  'contextIndicator.compactButton': 'Compact context',
+  'contextIndicator.compacting': 'Compacting…',
   'chat.navigate': 'navigate',
   'chat.select': 'select',
   'chat.dismiss': 'dismiss',

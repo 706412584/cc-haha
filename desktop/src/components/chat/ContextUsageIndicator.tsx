@@ -7,6 +7,7 @@ import { useMobileViewport } from '../../hooks/useMobileViewport'
 import { useDismissable } from '../../hooks/useDismissable'
 import { isDesktopRuntime } from '../../lib/desktopRuntime'
 import { MobileBottomSheet } from '@/components/ui/MobileBottomSheet'
+import { useChatStore } from '@/stores/chatStore'
 import { ContextUsageDetails, type ContextUsageDetailsStatus } from './ContextUsageDetails'
 
 type Props = {
@@ -382,6 +383,19 @@ export function ContextUsageIndicator({
     unavailableDetail: t('contextIndicator.unavailableDetail'),
   }), [t])
 
+  // Manual compaction: send "/compact" through the same message chain the
+  // slash picker uses. Hidden from the transcript bubbles via hideDisplayContent
+  // so the panel action behaves like a command, not a chat message.
+  const handleCompact = useCallback(() => {
+    if (!sessionId || chatState !== 'idle') return
+    setDetailsOpen(false)
+    useChatStore.getState().sendMessage(sessionId, '/compact', [], {
+      hideDisplayContent: true,
+    })
+  }, [sessionId, chatState])
+  const compactDisabled = chatState !== 'idle' || detailsStatus !== 'ready'
+  const compactInProgress = chatState === 'compacting'
+
   const detailsBody = (
     <ContextUsageDetails
       variant={preferSheet ? 'sheet' : 'popover'}
@@ -395,6 +409,11 @@ export function ContextUsageIndicator({
       estimate={contextSource === 'estimate'}
       status={detailsStatus}
       labels={detailLabels}
+      onCompact={handleCompact}
+      compactDisabled={compactDisabled}
+      compactInProgress={compactInProgress}
+      compactButtonLabel={t('contextIndicator.compactButton')}
+      compactingLabel={t('contextIndicator.compacting')}
     />
   )
 
