@@ -1,6 +1,10 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, mock, test } from 'bun:test'
 
-import { buildPostCompactMessages, type CompactionResult } from './compact.js'
+import {
+  buildPostCompactMessages,
+  type CompactionResult,
+  getCompactTimeoutMs,
+} from './compact.js'
 import { getCurrentUsage } from '../../utils/tokens.js'
 import type { Message } from '../../types/message.js'
 
@@ -123,4 +127,114 @@ describe('buildPostCompactMessages stale-usage stripping (#743)', () => {
     expect(result).toHaveLength(2)
     expect(getCurrentUsage(result)).toBeNull()
   })
+})
+
+describe('getCompactTimeoutMs env override', () => {
+  const ORIGINAL = process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS
+
+  test('defaults to 5 minutes', () => {
+    delete process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS
+    expect(getCompactTimeoutMs()).toBe(5 * 60_000)
+  })
+
+  test('honors a positive override', () => {
+    process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS = '12345'
+    expect(getCompactTimeoutMs()).toBe(12_345)
+  })
+
+  test('0 disables the timeout', () => {
+    process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS = '0'
+    expect(getCompactTimeoutMs()).toBe(0)
+  })
+
+  test('ignores negative and non-numeric values', () => {
+    process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS = '-1'
+    expect(getCompactTimeoutMs()).toBe(5 * 60_000)
+    process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS = 'abc'
+    expect(getCompactTimeoutMs()).toBe(5 * 60_000)
+  })
+
+  if (ORIGINAL === undefined) delete process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS
+  else process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS = ORIGINAL
+})
+
+describe('compactConversation hard timeout', () => {
+  const ORIGINAL = process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS
+
+  function makeToolUseContext(parentAbort: AbortController): any {
+    return {
+      options: {
+        mainLoopModel: 'test-model',
+        tools: [],
+        agentDefinitions: { activeAgents: [], allAgents: [] },
+      },
+      abortController: parentAbort,
+      readFileState: new Map(),
+      messages: [],
+      setInProgressToolUseIDs: () => {},
+      setResponseLength: () => {},
+      getAppState: () => ({}) as any,
+      setAppState: () => {},
+    }
+  }
+
+  function makeMessages(): Message[] {
+    return [
+      {
+        type: 'user',
+        uuid: '00000000-0000-0000-0000-00000000a001',
+        timestamp: new Date().toISOString(),
+        message: { role: 'user', content: 'hello' },
+      } as unknown as Message,
+    ]
+  }
+
+  test('re-tags the surfaced error as compact timeout and leaves the parent signal intact', async () => {
+    process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS = '50'
+    const parentAbort = new AbortController()
+    // The summarize request hangs until the timeout aborts the child.
+    // queryModelWithStreaming is mocked because the streaming fallback path
+    // (streamCompactSummary) is what consumes compactAbort.signal.
+    const streamingMock = mock(async function* () {
+      await new Promise(resolve => setTimeout(resolve, 10_000))
+      yield { type: 'assistant' } as never
+    }) as unknown as typeof import('./compact.js')['compactConversation'] extends never
+      ? never
+      : any
+    mock.module('../api/claude.js', () => ({
+      queryModelWithStreaming: streamingMock,
+      getMaxOutputTokensForModel: () => 20_000,
+    }))
+
+    const { compactConversation, ERROR_MESSAGE_COMPACT_TIMEOUT } = await import(
+      './compact.js'
+    )
+
+    let surfacedError: unknown
+    try {
+      await compactConversation(
+        makeMessages(),
+        makeToolUseContext(parentAbort),
+        {
+          systemPrompt: [],
+          userContext: {},
+          systemContext: {},
+          toolUseContext: makeToolUseContext(parentAbort),
+          forkContextMessages: makeMessages(),
+        },
+        true,
+        undefined,
+        true, // isAutoCompact
+      )
+    } catch (error) {
+      surfacedError = error
+    }
+
+    expect(surfacedError).toBeInstanceOf(Error)
+    expect((surfacedError as Error).message).toBe(ERROR_MESSAGE_COMPACT_TIMEOUT)
+    expect(parentAbort.signal.aborted).toBe(false)
+
+    if (ORIGINAL === undefined) delete process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS
+    else process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS = ORIGINAL
+  }, 15_000)
 })

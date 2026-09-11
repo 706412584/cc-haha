@@ -83,6 +83,15 @@ const CONTEXT_OVERFLOW_PATTERNS: RegExp[] = [
   /exceeds? the context window/i,
   /context window exceeded/i,
   /supports only \d+\s*k?\s*(?:tokens?\s+of\s+)?context/i,
+  // GLM relay channel hard cap (Zhipu bigmodel wording): "Input token
+  // exceed the limit (request id: ...)". Deterministic overflow — same
+  // transcript replays the same error, so it must flow into reactive
+  // compact instead of surfacing as a raw 400 (#1162 family).
+  /input token exceed/i,
+  // Zhipu standard API 400001: "Prompt exceeds max length. Please check
+  // the request body...". Some multi-channel relays randomly route here;
+  // compacting clears it the same way.
+  /prompt exceeds max length/i,
 ]
 
 export function isContextOverflowErrorText(text: string): boolean {

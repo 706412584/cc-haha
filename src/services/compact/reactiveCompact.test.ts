@@ -102,6 +102,37 @@ describe('reactiveCompact prompt-too-long recovery', () => {
     expect(compactConversationMock).not.toHaveBeenCalled()
   })
 
+  test('does not compact inside a compact fork (recursion guard)', async () => {
+    // The compact fork runs a full query() loop; letting it trigger another
+    // reactive compact nests a fork per overflow error and deadlocks the
+    // session (each layer re-serializing the oversized context).
+    for (const querySource of ['compact', 'session_memory']) {
+      const result = await reactiveCompact.tryReactiveCompact({
+        hasAttempted: false,
+        querySource,
+        aborted: false,
+        messages: [fakeUserMessage('hello')],
+        cacheSafeParams: fakeCacheSafeParams(),
+      })
+
+      expect(result).toBeNull()
+      expect(compactConversationMock).not.toHaveBeenCalled()
+    }
+  })
+
+  test('compacts for main-loop sources', async () => {
+    const result = await reactiveCompact.tryReactiveCompact({
+      hasAttempted: false,
+      querySource: 'repl_main_thread',
+      aborted: false,
+      messages: [fakeUserMessage('hello')],
+      cacheSafeParams: fakeCacheSafeParams(),
+    })
+
+    expect(result).not.toBeNull()
+    expect(compactConversationMock).toHaveBeenCalledTimes(1)
+  })
+
   test('does not compact after abort', async () => {
     const result = await reactiveCompact.tryReactiveCompact({
       hasAttempted: false,

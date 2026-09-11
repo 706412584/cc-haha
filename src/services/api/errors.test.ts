@@ -74,6 +74,10 @@ describe('context overflow errors', () => {
       'context_length_exceeded',
       '401 {"error":{"type":"authentication_error","message":"k3-256k supports only 256K context."}}',
       'Request exceeds the context window of this model',
+      // GLM relay bigmodel channel hard cap (observed 2026-09-10)
+      'Input token exceed the limit (request id: 2026091012232219399237c955d568bTYJlzPo)',
+      // Zhipu standard API 400001 (multi-channel relay roulette)
+      'The request is invalid: Prompt exceeds max length. Please check the request body, required fields, and request format. (request id: 2026091013121410808462c955d568YOqobsug)',
     ]
 
     for (const message of overflowMessages) {
@@ -115,5 +119,33 @@ describe('context overflow errors', () => {
       type: 'text',
       text: PROMPT_TOO_LONG_ERROR_MESSAGE,
     })
+  })
+
+  test('maps GLM relay 400 overflow wordings to Prompt is too long so reactive compact can recover', () => {
+    const observedErrors = [
+      'Input token exceed the limit (request id: 2026091012232219399237c955d568bTYJlzPo)',
+      'The request is invalid: Prompt exceeds max length. Please check the request body, required fields, and request format. (request id: 2026091013121410808462c955d568YOqobsug)',
+    ]
+
+    for (const message of observedErrors) {
+      const error = new APIError(
+        400,
+        {
+          type: 'error',
+          error: { type: 'api_error', message },
+        },
+        message,
+        undefined,
+      )
+
+      const msg = getAssistantMessageFromError(error, 'glm-5.3-flash')
+
+      expect(msg.isApiErrorMessage).toBe(true)
+      expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.PROMPT_TOO_LONG)
+      expect(msg.message.content[0]).toMatchObject({
+        type: 'text',
+        text: PROMPT_TOO_LONG_ERROR_MESSAGE,
+      })
+    }
   })
 })

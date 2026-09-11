@@ -27,6 +27,7 @@ import { setLastSummarizedMessageId } from '../SessionMemory/sessionMemoryUtils.
 import {
   type CompactionResult,
   compactConversation,
+  ERROR_MESSAGE_COMPACT_TIMEOUT,
   ERROR_MESSAGE_USER_ABORT,
   type RecompactionInfo,
 } from './compact.js'
@@ -492,7 +493,14 @@ export async function autoCompactIfNeeded(
       consecutiveFailures: 0,
     }
   } catch (error) {
-    if (!hasExactErrorMessage(error, ERROR_MESSAGE_USER_ABORT)) {
+    // User abort is silent. A timeout is expected (bounded upstream, not a
+    // bug) so it skips the error log but still counts as a failure below —
+    // a compact that cannot finish inside the wall clock should trip the
+    // circuit breaker instead of re-hammering the API every turn.
+    const isAbort =
+      hasExactErrorMessage(error, ERROR_MESSAGE_USER_ABORT) ||
+      hasExactErrorMessage(error, ERROR_MESSAGE_COMPACT_TIMEOUT)
+    if (!isAbort) {
       logError(error)
     }
     // Increment consecutive failure count for circuit breaker.

@@ -6,6 +6,7 @@ import { getMessagesAfterCompactBoundary } from '../../utils/messages.js'
 import { isPromptTooLongMessage } from '../api/errors.js'
 import {
   compactConversation,
+  ERROR_MESSAGE_COMPACT_TIMEOUT,
   ERROR_MESSAGE_PROMPT_TOO_LONG,
   ERROR_MESSAGE_USER_ABORT,
   type CompactionResult,
@@ -38,16 +39,30 @@ export function isReactiveOnlyMode(): boolean {
 
 export async function tryReactiveCompact({
   hasAttempted,
+  querySource,
   aborted,
   messages,
   cacheSafeParams,
 }: {
   hasAttempted: boolean
-  querySource?: unknown
+  // Kept loose at the call boundary (query.ts passes its QuerySource) but the
+  // recursion guard below only compares against the two fork sources.
+  querySource?: string
   aborted: boolean
   messages: Message[]
   cacheSafeParams: CacheSafeParams
 }): Promise<CompactionResult | null> {
+  // Recursion guard, same as shouldAutoCompact (autoCompact.ts:231): the
+  // compact fork (runForkedAgent, querySource='compact') runs a full query()
+  // loop. If its oversized request also hits prompt-too-long, the fork's own
+  // reactive-compact would spawn another compact fork, ad infinitum — each
+  // layer re-serializing the whole oversized context (observed as a
+  // CPU-churning, transcript-silent deadlock). Inside the fork the error
+  // must surface instead so streamCompactSummary's PTL retry (head
+  // truncation, compact.ts) can shrink the input.
+  if (querySource === 'compact' || querySource === 'session_memory') {
+    return null
+  }
   if (hasAttempted || aborted) return null
 
   const messagesForCompact = getMessagesAfterCompactBoundary(messages)
@@ -66,9 +81,12 @@ export async function tryReactiveCompact({
       true,
     )
   } catch (error) {
+    // Expected outcomes stay silent: user abort, the bounded timeout, and
+    // the prompt-too-long handoff (which its own retry loop handles).
     if (
       !hasExactErrorMessage(error, ERROR_MESSAGE_PROMPT_TOO_LONG) &&
-      !hasExactErrorMessage(error, ERROR_MESSAGE_USER_ABORT)
+      !hasExactErrorMessage(error, ERROR_MESSAGE_USER_ABORT) &&
+      !hasExactErrorMessage(error, ERROR_MESSAGE_COMPACT_TIMEOUT)
     ) {
       logError(error)
     }

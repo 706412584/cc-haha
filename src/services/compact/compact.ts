@@ -68,6 +68,7 @@ import {
 } from '../../utils/messages.js'
 import { expandPath } from '../../utils/path.js'
 import { getPlan, getPlanFilePath } from '../../utils/plans.js'
+import { createChildAbortController } from '../../utils/abortController.js'
 import {
   isSessionActivityTrackingActive,
   sendSessionActivitySignal,
@@ -295,6 +296,21 @@ export const ERROR_MESSAGE_PROMPT_TOO_LONG =
 export const ERROR_MESSAGE_USER_ABORT = 'API Error: Request was aborted.'
 export const ERROR_MESSAGE_INCOMPLETE_RESPONSE =
   'Compaction interrupted · This may be due to network issues — please try again.'
+export const ERROR_MESSAGE_COMPACT_TIMEOUT =
+  'Compaction timed out · The upstream did not finish in time — please try again.'
+
+// Default 5 minutes. A 340K-token summarize request completes in well under a
+// minute on healthy upstreams (measured 14s); the withRetry backoff chain can
+// legitimately stretch a retry storm past this, which is exactly the stuck-
+// forever "Compacting conversation" deadlock this bound exists to break.
+// Override with CLAUDE_CODE_COMPACT_TIMEOUT_MS; 0 disables.
+const DEFAULT_COMPACT_TIMEOUT_MS = 5 * 60_000
+
+export function getCompactTimeoutMs(): number {
+  const raw = parseInt(process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS || '', 10)
+  if (Number.isFinite(raw) && raw >= 0) return raw
+  return DEFAULT_COMPACT_TIMEOUT_MS
+}
 
 export interface CompactionResult {
   boundaryMarker: SystemMessage
@@ -425,6 +441,16 @@ export async function compactConversation(
   isAutoCompact: boolean = false,
   recompactionInfo?: RecompactionInfo,
 ): Promise<CompactionResult> {
+  // Hard wall-clock bound for the whole compaction. The child aborts the
+  // in-flight summarize request (fork or streaming) without touching the
+  // parent controller, so user Esc/Stop semantics are unchanged. Without
+  // this, an unresponsive upstream (retry storm inside the fork, or an
+  // SSE body that never completes) leaves the UI stuck on "Compacting
+  // conversation" forever — observed as a transcript-silent 30+ minute
+  // hang with CPU still churning.
+  const timeoutMs = getCompactTimeoutMs()
+  const compactAbort = createChildAbortController(context.abortController)
+  const { compactTimeout, timedOut } = armCompactTimeout(compactAbort, timeoutMs)
   try {
     if (messages.length === 0) {
       throw new Error(ERROR_MESSAGE_NOT_ENOUGH_MESSAGES)
@@ -447,7 +473,7 @@ export async function compactConversation(
         trigger: isAutoCompact ? 'auto' : 'manual',
         customInstructions: customInstructions ?? null,
       },
-      context.abortController.signal,
+      compactAbort.signal,
     )
     customInstructions = mergeHookInstructions(
       customInstructions,
@@ -487,6 +513,7 @@ export async function compactConversation(
         context,
         preCompactTokenCount,
         cacheSafeParams: retryCacheSafeParams,
+        compactAbort,
       })
       summary = getAssistantMessageText(summaryResponse)
       if (!summary?.startsWith(PROMPT_TOO_LONG_ERROR_MESSAGE)) break
@@ -757,7 +784,7 @@ export async function compactConversation(
         trigger: isAutoCompact ? 'auto' : 'manual',
         compactSummary: summary,
       },
-      context.abortController.signal,
+      compactAbort.signal,
     )
 
     const combinedUserDisplayMessage = [
@@ -785,13 +812,46 @@ export async function compactConversation(
     if (!isAutoCompact) {
       addErrorNotificationIfNeeded(error, context)
     }
+    // The SDK and retry layers collapse any abort into a generic
+    // APIUserAbortError, losing the abort reason — the `timedOut` flag is
+    // the only reliable signal that the wall clock expired. Re-tag the
+    // surfaced error so callers (autoCompact circuit-breaker logging,
+    // manual /compact messaging) can distinguish timeout from user Esc.
+    if (
+      timedOut() &&
+      !hasExactErrorMessage(error, ERROR_MESSAGE_COMPACT_TIMEOUT)
+    ) {
+      throw new Error(ERROR_MESSAGE_COMPACT_TIMEOUT, { cause: error })
+    }
     throw error
   } finally {
+    if (compactTimeout !== undefined) clearTimeout(compactTimeout)
     context.setStreamMode?.('requesting')
     context.setResponseLength?.(() => 0)
     context.onCompactProgress?.({ type: 'compact_end' })
     context.setSDKStatus?.(null)
   }
+}
+
+/**
+ * Arm the compaction wall clock. Fires `compactAbort` on expiry and flips
+ * the returned `timedOut` flag so the catch site can re-tag the surfaced
+ * error (abort reasons are otherwise collapsed to APIUserAbortError
+ * downstream and the timeout becomes indistinguishable from user Esc).
+ */
+function armCompactTimeout(
+  compactAbort: AbortController,
+  timeoutMs: number,
+): { compactTimeout: ReturnType<typeof setTimeout> | undefined; timedOut: () => boolean } {
+  let timedOut = false
+  const compactTimeout =
+    timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true
+          compactAbort.abort(new Error(ERROR_MESSAGE_COMPACT_TIMEOUT))
+        }, timeoutMs)
+      : undefined
+  return { compactTimeout, timedOut: () => timedOut }
 }
 
 /**
@@ -809,6 +869,10 @@ export async function partialCompactConversation(
   userFeedback?: string,
   direction: PartialCompactDirection = 'from',
 ): Promise<CompactionResult> {
+  // Same wall-clock bound as compactConversation — see the rationale there.
+  const timeoutMs = getCompactTimeoutMs()
+  const compactAbort = createChildAbortController(context.abortController)
+  const { compactTimeout, timedOut } = armCompactTimeout(compactAbort, timeoutMs)
   try {
     const messagesToSummarize =
       direction === 'up_to'
@@ -852,7 +916,7 @@ export async function partialCompactConversation(
         trigger: 'manual',
         customInstructions: null,
       },
-      context.abortController.signal,
+      compactAbort.signal,
     )
 
     // Merge hook instructions with user feedback
@@ -899,6 +963,7 @@ export async function partialCompactConversation(
         context,
         preCompactTokenCount,
         cacheSafeParams: retryCacheSafeParams,
+        compactAbort,
       })
       summary = getAssistantMessageText(summaryResponse)
       if (!summary?.startsWith(PROMPT_TOO_LONG_ERROR_MESSAGE)) break
@@ -1103,7 +1168,7 @@ export async function partialCompactConversation(
         trigger: 'manual',
         compactSummary: summary,
       },
-      context.abortController.signal,
+      compactAbort.signal,
     )
 
     // 'from': prefix-preserving → boundary; 'up_to': suffix → last summary
@@ -1128,8 +1193,16 @@ export async function partialCompactConversation(
     }
   } catch (error) {
     addErrorNotificationIfNeeded(error, context)
+    // Same re-tagging as compactConversation — see that catch block.
+    if (
+      timedOut() &&
+      !hasExactErrorMessage(error, ERROR_MESSAGE_COMPACT_TIMEOUT)
+    ) {
+      throw new Error(ERROR_MESSAGE_COMPACT_TIMEOUT, { cause: error })
+    }
     throw error
   } finally {
+    if (compactTimeout !== undefined) clearTimeout(compactTimeout)
     context.setStreamMode?.('requesting')
     context.setResponseLength?.(() => 0)
     context.onCompactProgress?.({ type: 'compact_end' })
@@ -1172,6 +1245,7 @@ async function streamCompactSummary({
   context,
   preCompactTokenCount,
   cacheSafeParams,
+  compactAbort,
 }: {
   messages: Message[]
   summaryRequest: UserMessage
@@ -1179,6 +1253,7 @@ async function streamCompactSummary({
   context: ToolUseContext
   preCompactTokenCount: number
   cacheSafeParams: CacheSafeParams
+  compactAbort: AbortController
 }): Promise<AssistantMessage> {
   // When prompt cache sharing is enabled, use forked agent to reuse the
   // main conversation's cached prefix (system prompt, tools, context messages).
@@ -1225,10 +1300,19 @@ async function streamCompactSummary({
           forkLabel: 'compact',
           maxTurns: 1,
           skipCacheWrite: true,
-          // Pass the compact context's abortController so user Esc aborts the
-          // fork — same signal the streaming fallback uses at
-          // `signal: context.abortController.signal` below.
-          overrides: { abortController: context.abortController },
+          // The summarize fork replays the ENTIRE conversation as its input —
+          // recording it as a sidechain transcript duplicates that payload to
+          // disk on every compact attempt (64MB per 340K-token context;
+          // observed: 882 agent-acompact-*.jsonl / 53.79GB during a
+          // recursive-compact storm, enough to fill a drive). The summary
+          // result already lands in the main transcript via the compact
+          // boundary, so the fork transcript is pure waste.
+          skipTranscript: true,
+          // Pass the compact-scoped child abort controller so user Esc
+          // (parent) still aborts the fork, AND the compact timeout can
+          // abort it independently. Same signal the streaming fallback
+          // uses at `signal: compactAbort.signal` below.
+          overrides: { abortController: compactAbort },
         })
         const assistantMsg = getLastAssistantMessage(result.messages)
         const assistantText = assistantMsg
@@ -1336,7 +1420,7 @@ async function streamCompactSummary({
         ]),
         thinkingConfig: { type: 'disabled' as const },
         tools,
-        signal: context.abortController.signal,
+        signal: compactAbort.signal,
         options: {
           async getToolPermissionContext() {
             const appState = context.getAppState()
@@ -1398,7 +1482,7 @@ async function streamCompactSummary({
           preCompactTokenCount,
           hasStartedStreaming,
         })
-        await sleep(getRetryDelay(attempt), context.abortController.signal, {
+        await sleep(getRetryDelay(attempt), compactAbort.signal, {
           abortError: () => new APIUserAbortError(),
         })
         continue
