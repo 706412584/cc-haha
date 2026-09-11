@@ -54,6 +54,7 @@ import {
   extractConnectionErrorDetails,
   hasAPIErrorType,
 } from './errorUtils.js'
+import { isOpenAIPolicyError } from '../openaiAuth/policyError.js'
 
 const abortError = () => new APIUserAbortError()
 
@@ -261,6 +262,7 @@ export class RetriableStreamError extends Error {
  * technique the overloaded-error check has always used (see shouldRetry).
  */
 export function isRetryableStreamError(error: unknown): boolean {
+  if (isOpenAIPolicyError(error)) return false
   if (error instanceof APIError && error.status !== undefined) return false
   if (error instanceof APIConnectionError) {
     const details = extractConnectionErrorDetails(error)
@@ -318,6 +320,7 @@ const STREAM_TRANSPORT_DISCONNECT_CODES = new Set([
  * shouldRetryStreamAfterTransportDisconnect.
  */
 export function isRetryableStreamTransportError(error: unknown): boolean {
+  if (isOpenAIPolicyError(error)) return false
   const code = extractConnectionErrorDetails(error)?.code
   return code !== undefined && STREAM_TRANSPORT_DISCONNECT_CODES.has(code)
 }
@@ -501,6 +504,11 @@ export async function* withRetry<T>(
 
       return await operation(client, attempt, retryContext)
     } catch (error) {
+      // Policy rejection is final even when a gateway labels it 401/429/5xx.
+      // Stop before auth refresh, fast-mode changes or persistent/model fallback.
+      if (isOpenAIPolicyError(error)) {
+        throw new CannotRetryError(error, retryContext)
+      }
       lastError = error
       logForDebugging(
         `API error (attempt ${attempt}/${maxRetries + 1}): ${error instanceof APIError ? `${error.status} ${error.message}` : errorMessage(error)}`,
@@ -947,6 +955,7 @@ function handleGcpCredentialError(error: unknown): boolean {
 }
 
 function shouldRetry(error: APIError): boolean {
+  if (isOpenAIPolicyError(error)) return false
   // Never retry mock errors - they're from /mock-limits command for testing
   if (isMockRateLimitError(error)) {
     return false

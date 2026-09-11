@@ -133,7 +133,8 @@ import {
   wrapFetchWithStepUpDetection,
 } from './auth.js'
 import { markClaudeAiMcpConnected } from './claudeai.js'
-import { getAllMcpConfigs, isMcpServerDisabled } from './config.js'
+import { getAllMcpConfigs, isMcpServerDisabled, isMcpServerDisabledForExecution } from './config.js'
+import { getCwd, runWithCwdOverride } from '../../utils/cwd.js'
 import { getMcpServerHeaders } from './headersHelper.js'
 import { SdkControlClientTransport } from './SdkControlTransport.js'
 import type {
@@ -578,7 +579,12 @@ let onMcpConnectionClosed: ((name: string, client: Client) => void) | undefined
 
 // A delayed close belongs to its connection attempt, not whichever connection
 // currently has the same server name (including a changed configuration).
-const connectionAttempts = new Map<string, { key: string }>()
+type ConnectionAttempt = {
+  key: string
+  cancel?: () => Promise<void>
+  cleanup?: () => Promise<void>
+}
+const connectionAttempts = new Map<string, ConnectionAttempt>()
 
 export function setMcpConnectionClosedHandler(
   handler: ((name: string, client: Client) => void) | undefined,
@@ -590,10 +596,11 @@ export function notifyMcpConnectionClosed(name: string, client: Client): void {
   onMcpConnectionClosed?.(name, client)
 }
 
-function clearServerFetchCaches(name: string): void {
-  fetchToolsForClient.cache.delete(name)
-  fetchResourcesForClient.cache.delete(name)
-  fetchCommandsForClient.cache.delete(name)
+function clearServerFetchCaches(name: string, connectionKey: string): void {
+  const key = `${connectionKey}-connected`
+  fetchToolsForClient.cache.delete(key)
+  fetchResourcesForClient.cache.delete(key)
+  fetchCommandsForClient.cache.delete(key)
   if (feature('MCP_SKILLS')) {
     fetchMcpSkillsForClient!.cache.delete(name)
   }
@@ -609,7 +616,7 @@ export function getServerCacheKey(
   name: string,
   serverRef: ScopedMcpServerConfig,
 ): string {
-  return `${name}-${jsonStringify(serverRef)}`
+  return jsonStringify([getCwd(), name, serverRef])
 }
 
 /**
@@ -619,7 +626,16 @@ export function getServerCacheKey(
  * @param serverRef Scoped server configuration
  * @returns A wrapped client (either connected or failed)
  */
-export const connectToServer = memoize(
+const connectionProjects = new WeakMap<object, string>()
+
+export function getMcpClientCacheKey(client: MCPServerConnection): string {
+  const cwd = client.type === 'connected' ? connectionProjects.get(client.client) : undefined
+  return runWithCwdOverride(cwd ?? getCwd(), () =>
+    `${getServerCacheKey(client.name, client.config)}-${client.type}`,
+  )
+}
+
+const connectToServerMemoized = memoize(
   async (
     name: string,
     serverRef: ScopedMcpServerConfig,
@@ -633,8 +649,8 @@ export const connectToServer = memoize(
     },
   ): Promise<MCPServerConnection> => {
     const connectStartTime = Date.now()
-    const attempt = { key: getServerCacheKey(name, serverRef) }
-    connectionAttempts.set(name, attempt)
+    const attempt: ConnectionAttempt = { key: getServerCacheKey(name, serverRef) }
+    connectionAttempts.set(attempt.key, attempt)
     let inProcessServer:
       | { connect(t: Transport): Promise<void>; close(): Promise<void> }
       | undefined
@@ -1071,6 +1087,20 @@ export const connectToServer = memoize(
         }
       }
 
+      if (isMcpServerDisabledForExecution(name) || connectionAttempts.get(attempt.key) !== attempt) {
+        await transport.close().catch(() => {})
+        await inProcessServer?.close().catch(() => {})
+        return isMcpServerDisabledForExecution(name)
+          ? { name, type: 'disabled', config: serverRef }
+          : { name, type: 'failed', config: serverRef, error: 'MCP connection superseded' }
+      }
+      attempt.cancel = async () => {
+        if (transport instanceof StdioClientTransport && transport.pid) {
+          try { process.kill(transport.pid, 'SIGTERM') } catch { /* already exited */ }
+        }
+        await client.close().catch(() => {})
+        await inProcessServer?.close().catch(() => {})
+      }
       const connectPromise = client.connect(transport)
       const timeoutPromise = new Promise<never>((_, reject) => {
         const timeoutId = setTimeout(() => {
@@ -1179,6 +1209,15 @@ export const connectToServer = memoize(
         }
         throw error
       }
+
+      if (isMcpServerDisabledForExecution(name) || connectionAttempts.get(attempt.key) !== attempt) {
+        await client.close().catch(() => {})
+        await inProcessServer?.close().catch(() => {})
+        return isMcpServerDisabledForExecution(name)
+          ? { name, type: 'disabled', config: serverRef }
+          : { name, type: 'failed', config: serverRef, error: 'MCP connection superseded' }
+      }
+      connectionProjects.set(client, getCwd())
 
       const capabilities = client.getServerCapabilities()
       const serverVersion = client.getServerVersion()
@@ -1409,9 +1448,9 @@ export const connectToServer = memoize(
         )
 
         originalOnclose?.()
-        if (connectionAttempts.get(name) !== attempt) return
-        connectionAttempts.delete(name)
-        clearServerFetchCaches(name)
+        if (connectionAttempts.get(attempt.key) !== attempt) return
+        connectionAttempts.delete(attempt.key)
+        clearServerFetchCaches(name, attempt.key)
         connectToServer.cache.delete(attempt.key)
         logMCPDebug(name, `Cleared connection cache for reconnection`)
 
@@ -1597,6 +1636,7 @@ export const connectToServer = memoize(
         await cleanup()
       }
 
+      attempt.cleanup = wrappedCleanup
       const connectionDurationMs = Date.now() - connectStartTime
       logEvent('tengu_mcp_server_connection_succeeded', {
         connectionDurationMs,
@@ -1658,6 +1698,35 @@ export const connectToServer = memoize(
   getServerCacheKey,
 )
 
+// Keep the policy check outside memoization: cached connections and retained
+// tool closures must obey a disable even when session control delivery failed.
+export const connectToServer = Object.assign(
+  async (...args: Parameters<typeof connectToServerMemoized>): Promise<MCPServerConnection> => {
+    const [name, config] = args
+    if (isMcpServerDisabledForExecution(name)) return { name, config, type: 'disabled' }
+    const pending = connectToServerMemoized(...args)
+    let result = await pending
+    if (isMcpServerDisabledForExecution(name)) {
+      if (result.type === 'connected') await result.cleanup()
+      result = { name, config, type: 'disabled' }
+    }
+    if (result.type === 'disabled' && connectToServerMemoized.cache.get(getServerCacheKey(name, config)) === pending) {
+      connectToServerMemoized.cache.delete(getServerCacheKey(name, config))
+    }
+    return result
+  },
+  { cache: connectToServerMemoized.cache },
+)
+
+function assertMcpServerEnabled(name: string, client: object): void {
+  if (isMcpServerDisabledForExecution(name, connectionProjects.get(client))) {
+    throw new TelemetrySafeError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS(
+      `MCP server "${name}" is disabled`,
+      'MCP server disabled',
+    )
+  }
+}
+
 /**
  * Clears the memoize cache for a specific server
  * @param name Server name
@@ -1672,7 +1741,23 @@ export async function clearServerCache(
   // Detach before awaiting cleanup: a concurrent enable owns its own cache
   // entry, and clearing an empty cache must never start a new server.
   connectToServer.cache.delete(key)
-  if (connectionAttempts.get(name)?.key === key) clearServerFetchCaches(name)
+  const attempt = connectionAttempts.get(key)
+  if (attempt) {
+    connectionAttempts.delete(key)
+    clearServerFetchCaches(name, key)
+    if (attempt.cleanup) {
+      await attempt.cleanup()
+      return
+    }
+    // A disabled slow initializer must not delay control delivery. Close its
+    // transport now; any setup still awaiting environment/auth work sees the
+    // invalidated attempt before it can spawn or publish a connection.
+    await attempt.cancel?.()
+    void cached?.then(async client => {
+      if (client.type === 'connected') await client.cleanup()
+    }).catch(() => {})
+    return
+  }
 
   try {
     const wrappedClient = await cached
@@ -1698,12 +1783,17 @@ export async function clearServerCache(
 export async function ensureConnectedClient(
   client: ConnectedMCPServer,
 ): Promise<ConnectedMCPServer> {
+  assertMcpServerEnabled(client.name, client.client)
   // SDK MCP servers run in-process and are handled separately via setupSdkMcpClients
   if (client.config.type === 'sdk') {
     return client
   }
 
-  const connectedClient = await connectToServer(client.name, client.config)
+  const connectedClient = await runWithCwdOverride(
+    connectionProjects.get(client.client) ?? getCwd(),
+    () => connectToServer(client.name, client.config),
+  )
+  assertMcpServerEnabled(client.name, client.client)
   if (connectedClient.type !== 'connected') {
     throw new TelemetrySafeError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS(
       `MCP server "${client.name}" is not connected`,
@@ -2013,7 +2103,7 @@ export const fetchToolsForClient = memoizeWithLRU(
       return []
     }
   },
-  (client: MCPServerConnection) => client.name,
+  getMcpClientCacheKey,
   MCP_FETCH_CACHE_SIZE,
 )
 
@@ -2131,7 +2221,7 @@ export const fetchResourcesForClient = memoizeWithLRU(
       return []
     }
   },
-  (client: MCPServerConnection) => client.name,
+  getMcpClientCacheKey,
   MCP_FETCH_CACHE_SIZE,
 )
 
@@ -2207,7 +2297,7 @@ export const fetchCommandsForClient = memoizeWithLRU(
       return []
     }
   },
-  (client: MCPServerConnection) => client.name,
+  getMcpClientCacheKey,
   MCP_FETCH_CACHE_SIZE,
 )
 
@@ -3356,6 +3446,7 @@ async function callMCPTool({
   _meta?: Record<string, unknown>
   structuredContent?: Record<string, unknown>
 }> {
+  assertMcpServerEnabled(name, client)
   const toolStartTime = Date.now()
   let progressInterval: NodeJS.Timeout | undefined
 
@@ -3605,6 +3696,7 @@ export async function setupSdkMcpClients(
         // Connect the client
         await client.connect(transport)
 
+        connectionProjects.set(client, getCwd())
         // Get capabilities from the server
         const capabilities = client.getServerCapabilities()
 

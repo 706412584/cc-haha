@@ -14,8 +14,16 @@ process.env.ANTHROPIC_API_KEY = 'test-key'
 
 const mcpClient = { ...await import('../services/mcp/client.js') }
 const mcpConfig = { ...await import('../services/mcp/config.js') }
+const contextModule = { ...await import('../commands/context/context-noninteractive.js') }
+mock.module('../commands/context/context-noninteractive.js', () => ({
+  ...contextModule,
+  collectContextData: async ({ options }: { options: { tools: Tool[] } }) => ({ toolNames: options.tools.map(tool => tool.name) }),
+}))
 
 let isDisabled = false
+let sdkSetupEnabled = false
+let resolveSdkSetup: (() => void) | undefined
+const sdkCleanup = mock(async () => {})
 let hasConfig = true
 let resolveReconnect: ((result: ReturnType<typeof reconnectResult>) => void) | undefined
 const cleanup = mock(async () => {})
@@ -69,6 +77,13 @@ mock.module('../services/mcp/client.js', () => ({
       resolveReconnect = resolve
     }),
   clearServerCache,
+  setupSdkMcpClients: async () => {
+    await new Promise<void>(resolve => { resolveSdkSetup = resolve })
+    return {
+      clients: [{ ...connectedClient(), cleanup: sdkCleanup }],
+      tools: [{ name: 'unprefixed-sdk-tool', mcpInfo: { serverName: 'test-server', toolName: 'sdk' } } as Tool],
+    }
+  },
 }))
 
 mock.module('../services/mcp/config.js', () => ({
@@ -81,6 +96,7 @@ mock.module('../services/mcp/config.js', () => ({
         }
       : undefined,
   isMcpServerDisabled: () => isDisabled,
+  isMcpServerDisabledForExecution: () => isDisabled,
   setMcpServerEnabled: (_name: string, enabled: boolean) => {
     isDisabled = !enabled
   },
@@ -88,7 +104,7 @@ mock.module('../services/mcp/config.js', () => ({
 
 const { __runHeadlessStreamingForTests } = await import('./print.js')
 
-function startHeadless(input: Stream<string>, initialClient?: MCPServerConnection) {
+function startHeadless(input: Stream<string>, initialClient?: MCPServerConnection, initialTools: Tool[] = []) {
   const io = new StructuredIO(input)
   let state = getDefaultAppState()
   state = {
@@ -107,7 +123,7 @@ function startHeadless(input: Stream<string>, initialClient?: MCPServerConnectio
           config: { type: 'stdio', command: 'other' },
         },
       ],
-      tools: [{ name: 'mcp__test-server__old' } as Tool],
+      tools: [{ name: 'mcp__test-server__old', isReadOnly: () => true } as Tool],
       commands: [
         { name: 'mcp__test-server__old', description: '', argumentHint: '' },
       ],
@@ -118,10 +134,10 @@ function startHeadless(input: Stream<string>, initialClient?: MCPServerConnectio
     io,
     [],
     [],
-    [],
+    initialTools,
     [],
     (() => undefined) as unknown as CanUseToolFn,
-    {},
+    sdkSetupEnabled ? { 'test-server': { type: 'sdk', name: 'test-server' } } : {},
     () => state,
     update => {
       state = update(state)
@@ -129,7 +145,7 @@ function startHeadless(input: Stream<string>, initialClient?: MCPServerConnectio
     [],
     { outputFormat: 'stream-json' },
   )
-  return { io, output, getState: () => state }
+  return { io, output, getState: () => state, setState: (next: typeof state) => { state = next } }
 }
 
 async function nextControlResponse(output: AsyncIterable<unknown>) {
@@ -142,6 +158,9 @@ async function nextControlResponse(output: AsyncIterable<unknown>) {
 afterEach(() => {
   hasConfig = true
   isDisabled = false
+  sdkSetupEnabled = false
+  resolveSdkSetup = undefined
+  sdkCleanup.mockClear()
   resolveReconnect = undefined
   clearServerCache.mockClear()
   cleanup.mockClear()
@@ -150,6 +169,7 @@ afterEach(() => {
 afterAll(() => {
   mock.module('../services/mcp/client.js', () => mcpClient)
   mock.module('../services/mcp/config.js', () => mcpConfig)
+  mock.module('../commands/context/context-noninteractive.js', () => contextModule)
   if (originalAnthropicApiKey === undefined) {
     delete process.env.ANTHROPIC_API_KEY
   } else {
@@ -392,3 +412,107 @@ test.each(['mcp_reconnect', 'mcp_toggle'] as const)(
     }
   },
 )
+
+async function controlReader(output: AsyncIterable<unknown>) {
+  const iterator = output[Symbol.asyncIterator]()
+  return async () => {
+    while (true) {
+      const { value, done } = await iterator.next()
+      if (done) throw new Error('Missing control response')
+      if ((value as { type?: string }).type === 'control_response') return value
+    }
+  }
+}
+
+function enqueueControl(input: Stream<string>, requestId: string, request: Record<string, unknown>) {
+  input.enqueue(`${JSON.stringify({ type: 'control_request', request_id: requestId, request })}\n`)
+}
+
+test('removes startup and dynamic tools after disable and restores only fresh tools on enable', async () => {
+  const input = new Stream<string>()
+  const { output } = startHeadless(input, connectedClient(), [{ name: 'mcp__test-server__startup' } as Tool])
+  const next = await controlReader(output)
+  try {
+    enqueueControl(input, 'reconnect', { subtype: 'mcp_reconnect', serverName: 'test-server' })
+    await Bun.sleep(0)
+    resolveReconnect?.(reconnectResult(connectedClient(), true))
+    await next()
+    enqueueControl(input, 'disable', { subtype: 'mcp_toggle', serverName: 'test-server', enabled: false })
+    await next()
+    enqueueControl(input, 'disabled-pool', { subtype: 'get_context_usage', estimateOnly: true })
+    const disabled = await next() as { response: { response: { toolNames: string[] } } }
+    expect(disabled.response.response.toolNames.filter(name => name.startsWith('mcp__test-server__'))).toEqual([])
+    enqueueControl(input, 'enable', { subtype: 'mcp_toggle', serverName: 'test-server', enabled: true })
+    await Bun.sleep(0)
+    resolveReconnect?.(reconnectResult(connectedClient(), true))
+    await next()
+    enqueueControl(input, 'enabled-pool', { subtype: 'get_context_usage', estimateOnly: true })
+    const enabled = await next() as { response: { response: { toolNames: string[] } } }
+    expect(enabled.response.response.toolNames.filter(name => name.startsWith('mcp__test-server__'))).toEqual(['mcp__test-server__lookup'])
+  } finally { input.done() }
+})
+
+test('invalidates a pending connection when disabling without a connected client', async () => {
+  const input = new Stream<string>()
+  const { output } = startHeadless(input, { name: 'test-server', type: 'pending', config: connectedClient().config })
+  enqueueControl(input, 'disable-pending', { subtype: 'mcp_toggle', serverName: 'test-server', enabled: false })
+  await nextControlResponse(output)
+  expect(clearServerCache).toHaveBeenCalledTimes(1)
+  input.done()
+})
+
+test('does not overwrite a newer persisted disable with a delayed enable control', async () => {
+  isDisabled = true
+  const input = new Stream<string>()
+  const { output, getState } = startHeadless(input)
+  enqueueControl(input, 'stale-enable', { subtype: 'mcp_toggle', serverName: 'test-server', enabled: true, alreadyPersisted: true })
+  await Bun.sleep(0)
+  // Resolve the buggy reconnect so this assertion fails without timing out.
+  resolveReconnect?.(reconnectResult(connectedClient(), true))
+  await nextControlResponse(output)
+  expect(isDisabled).toBe(true)
+  expect(resolveReconnect).toBeUndefined()
+  expect(getState().mcp.clients[0]?.type).toBe('disabled')
+  input.done()
+})
+
+test('filters a late initialization result from tool assembly and status after persisted disable', async () => {
+  const input = new Stream<string>()
+  const { output, getState, setState } = startHeadless(input, connectedClient())
+  const next = await controlReader(output)
+  const lateState = getState()
+  enqueueControl(input, 'disable-before-init', { subtype: 'mcp_toggle', serverName: 'test-server', enabled: false })
+  await next()
+  setState(lateState)
+  enqueueControl(input, 'late-pool', { subtype: 'get_context_usage', estimateOnly: true })
+  const pool = await next() as { response: { response: { toolNames: string[] } } }
+  expect(pool.response.response.toolNames.filter(name => name.startsWith('mcp__test-server__'))).toEqual([])
+  enqueueControl(input, 'late-status', { subtype: 'mcp_status' })
+  expect(await next()).toMatchObject({ response: { response: { mcpServers: [
+    { name: 'test-server', status: 'disabled' }, { name: 'other-server' },
+  ] } } })
+  input.done()
+})
+
+test.each([false, true])('cleans SDK tools and transports when initialization finishes after disable: %s', async late => {
+  sdkSetupEnabled = true
+  const input = new Stream<string>()
+  const { output, getState } = startHeadless(input, connectedClient())
+  const next = await controlReader(output)
+  if (!late) {
+    resolveSdkSetup?.()
+    await Bun.sleep(0)
+  }
+  enqueueControl(input, 'disable-sdk', { subtype: 'mcp_toggle', serverName: 'test-server', enabled: false })
+  await next()
+  if (late) {
+    resolveSdkSetup?.()
+    await Bun.sleep(0)
+  }
+  expect(sdkCleanup).toHaveBeenCalledTimes(1)
+  expect(getState().mcp.tools.some(tool => tool.mcpInfo?.serverName === 'test-server')).toBe(false)
+  enqueueControl(input, 'sdk-pool', { subtype: 'get_context_usage', estimateOnly: true })
+  const pool = await next() as { response: { response: { toolNames: string[] } } }
+  expect(pool.response.response.toolNames).not.toContain('unprefixed-sdk-tool')
+  input.done()
+})

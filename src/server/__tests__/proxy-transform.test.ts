@@ -10,6 +10,7 @@ import { openaiResponsesToAnthropic } from '../proxy/transform/openaiResponsesTo
 import { stripLeadingBillingHeader } from '../proxy/transform/billingHeader.js'
 import { openaiUsageToAnthropic } from '../proxy/transform/usage.js'
 import { resolvePromptCacheKey } from '../proxy/promptCacheKey.js'
+import { buildComputerUseTools } from '../../vendor/computer-use-mcp/tools.js'
 import type { AnthropicRequest, OpenAIChatResponse, OpenAIResponsesResponse } from '../proxy/transform/types.js'
 
 const BILLING_HEADER = 'x-anthropic-billing-header: cc_version=2.1.220.693; cc_entrypoint=cli; cch=00000;'
@@ -1243,6 +1244,36 @@ describe('openaiChatToAnthropic', () => {
 // ─── anthropicToOpenaiResponses ─────────────────────────────────
 
 describe('anthropicToOpenaiResponses', () => {
+  test('keeps Computer Use optional fields optional on the Responses wire', () => {
+    const tools = buildComputerUseTools().map(tool => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.inputSchema,
+    }))
+    const original = structuredClone(tools)
+    const wire = JSON.parse(JSON.stringify(anthropicToOpenaiResponses({
+      model: 'gpt-6-astra',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'Read the Blender window' }],
+      tools,
+    })))
+
+    // Omitting strict lets Responses normalize every property to required.
+    // That made both non-nullable diff aliases mandatory while the executor
+    // correctly rejected their simultaneous presence (Blender regression).
+    for (const tool of wire.tools) {
+      expect(tool.strict).toBe(false)
+      expect(tool.parameters).toEqual(original.find(t => t.name === tool.name)!.input_schema)
+    }
+    const state = wire.tools.find((tool: { name: string }) => tool.name === 'get_app_state')
+    expect(state.parameters.required).toEqual(['app'])
+    expect(state.parameters.properties.disableDiff.type).toBe('boolean')
+    expect(state.parameters.properties.disable_diff.type).toBe('boolean')
+    const click = wire.tools.find((tool: { name: string }) => tool.name === 'click')
+    expect(click.parameters.required).toEqual(['app'])
+    expect(tools).toEqual(original)
+  })
+
   test('basic message', () => {
     const req: AnthropicRequest = {
       model: 'gpt-4o',
@@ -1305,6 +1336,7 @@ describe('anthropicToOpenaiResponses', () => {
       name: 'get_weather',
       description: 'Get weather',
       parameters: { type: 'object', properties: { city: { type: 'string' } } },
+      strict: false,
     })
   })
 

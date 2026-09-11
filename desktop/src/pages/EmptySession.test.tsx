@@ -685,7 +685,7 @@ describe('EmptySession', () => {
     })
   })
 
-  it('materializes the active provider runtime and visible default effort before the first draft message', async () => {
+  it.each([true, false])('materializes raw provider models with 1M=%s before the first draft message', async (enabled) => {
     useProviderStore.setState({
       providers: [{
         id: 'provider-minimax',
@@ -696,11 +696,12 @@ describe('EmptySession', () => {
         apiFormat: 'anthropic',
         runtimeKind: 'anthropic_compatible',
         models: {
-          main: 'MiniMax-M3[1m]',
-          haiku: 'MiniMax-M3[1m]',
-          sonnet: 'MiniMax-M3[1m]',
-          opus: 'MiniMax-M3[1m]',
+          main: 'MiniMax-M3',
+          haiku: 'MiniMax-M3',
+          sonnet: 'MiniMax-M3',
+          opus: 'MiniMax-M3',
         },
+        model1mSupport: { main: enabled, haiku: enabled, sonnet: enabled, opus: enabled },
         toolSearchEnabled: true,
       }],
       activeId: 'provider-minimax',
@@ -720,23 +721,29 @@ describe('EmptySession', () => {
 
     expect(useSessionRuntimeStore.getState().selections['draft-session']).toEqual({
       providerId: 'provider-minimax',
-      modelId: 'MiniMax-M3[1m]',
+      modelId: enabled ? 'MiniMax-M3[1m]' : 'MiniMax-M3',
       effortLevel: 'max',
     })
+    // The fork replays the runtime mode alignment ahead of every user turn,
+    // so set_coordinator_mode sits between prewarm and the user message.
+    const runtimeCallTypes = mocks.wsSend.mock.calls.map((call) => {
+      const payload = call[1] as Record<string, unknown>
+      return payload.type
+    })
+    expect(runtimeCallTypes[0]).toBe('set_runtime_config')
+    expect(runtimeCallTypes).toContain('prewarm_session')
+    expect(runtimeCallTypes[runtimeCallTypes.length - 1]).toBe('user_message')
     expect(mocks.wsSend.mock.calls[0]).toEqual([
       'draft-session',
       {
         type: 'set_runtime_config',
         requestId: expect.any(String),
         providerId: 'provider-minimax',
-        modelId: 'MiniMax-M3[1m]',
+        modelId: enabled ? 'MiniMax-M3[1m]' : 'MiniMax-M3',
         effortLevel: 'max',
       },
     ])
-    expect(mocks.wsSend.mock.calls[1]).toEqual(['draft-session', { type: 'prewarm_session' }])
-    const userMessageCallIndex = mocks.wsSend.mock.calls.findIndex(([, payload]) => payload.type === 'user_message')
-    expect(userMessageCallIndex).toBeGreaterThan(1)
-    expect(mocks.wsSend.mock.calls[userMessageCallIndex]).toEqual([
+    expect(mocks.wsSend.mock.calls[mocks.wsSend.mock.calls.length - 1]).toEqual([
       'draft-session',
       {
         type: 'user_message',

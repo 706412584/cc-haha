@@ -39,7 +39,7 @@ import {
 import { PROVIDER_PRESETS } from '../config/providerPresets.js'
 import { isOpenAIOfficialProviderId } from '../services/openaiOfficialProvider.js'
 import { isGrokOfficialProviderId } from '../services/grokOfficialProvider.js'
-import { getOpenAICodexModelCatalog } from '../../services/openaiAuth/modelCatalog.js'
+import { getDesktopOpenAICodexModelCatalog } from '../services/openaiModelCatalog.js'
 import {
   OPENAI_DEFAULT_MAIN_MODEL,
   getOpenAIModelCatalogEntry,
@@ -184,6 +184,7 @@ const sessionTitleState = new Map<string, {
   userMessageCount: number
   hasCustomTitle: boolean
   hasExistingTranscript: boolean
+  persistTitleSource: boolean
   firstUserMessage: string
   completedTurns: TitleConversationTurn[]
   activeTurn?: TitleConversationTurn & { count: number }
@@ -1040,6 +1041,7 @@ async function handleUserMessage(
   message: Extract<ClientMessage, { type: 'user_message' }>,
   activeTurn: ActiveUserTurnState,
 ) {
+  const persistTitleSource = sessionService.shouldPersistSession()
   const { sessionId } = ws.data
 
   const desktopSlashCommand = getDesktopSlashCommand(message.content)
@@ -1125,6 +1127,7 @@ async function handleUserMessage(
       userMessageCount: 0,
       hasCustomTitle,
       hasExistingTranscript: (launchInfo?.transcriptMessageCount ?? 0) > 0,
+      persistTitleSource,
       firstUserMessage: '',
       completedTurns: [],
       startedGenerationKeys: new Set<string>(),
@@ -1135,6 +1138,7 @@ async function handleUserMessage(
   const titleInput = getTitleInputForUserMessage(message.content, desktopSlashCommand)
   let titleTurnNumber: number | null = null
   if (titleInput) {
+    titleState.persistTitleSource &&= persistTitleSource
     titleState.userMessageCount++
     titleTurnNumber = titleState.userMessageCount
     titleState.activeTurn = {
@@ -2936,6 +2940,10 @@ function triggerTitleGeneration(
 ): void {
   const state = sessionTitleState.get(sessionId)
   if (!state || state.hasCustomTitle || state.hasExistingTranscript) return
+  // Titles summarize cumulative input. Once it includes a private turn, later
+  // refreshes must remain in memory even if retention is enabled again.
+  state.persistTitleSource &&= sessionService.shouldPersistSession()
+  const persist = state.persistTitleSource
 
   const count = phase === 'turn-complete'
     ? completedTurnCount ?? state.userMessageCount
@@ -2952,7 +2960,7 @@ function triggerTitleGeneration(
         const text = state.firstUserMessage
         const placeholder = deriveTitle(text)
         if (placeholder) {
-          const saved = await saveAiTitle(sessionId, placeholder)
+          const saved = await saveAiTitle(sessionId, placeholder, persist)
           if (!saved) {
             state.hasCustomTitle = true
             return
@@ -2990,7 +2998,7 @@ function triggerTitleGeneration(
       )
       if (generationSeq !== state.generationSeq) return
       if (aiTitle) {
-        const saved = await saveAiTitle(sessionId, aiTitle)
+        const saved = await saveAiTitle(sessionId, aiTitle, persist && state.persistTitleSource)
         if (!saved) {
           state.hasCustomTitle = true
           return
@@ -3075,8 +3083,10 @@ function bindTitleSessionOutput(
 }
 
 function appendAssistantTextForTitle(sessionId: string, cliMsg: any): void {
-  const activeTurn = sessionTitleState.get(sessionId)?.activeTurn
-  if (!activeTurn) return
+  const state = sessionTitleState.get(sessionId)
+  const activeTurn = state?.activeTurn
+  if (!state || !activeTurn) return
+  state.persistTitleSource &&= sessionService.shouldPersistSession()
 
   const streamText = extractAssistantStreamTextForTitle(cliMsg)
   if (streamText) {
@@ -4961,7 +4971,7 @@ type RuntimeSettings = {
 }
 
 async function getDefaultOpenAIReasoningEffort(modelId: string): Promise<string> {
-  const catalog = await getOpenAICodexModelCatalog()
+  const catalog = await getDesktopOpenAICodexModelCatalog()
   return getOpenAIModelCatalogEntry(modelId, catalog)?.defaultReasoningEffort ?? 'medium'
 }
 
@@ -5014,7 +5024,7 @@ async function resolveRuntimeEffort(
       return { valid: false }
     }
 
-    const catalog = await getOpenAICodexModelCatalog()
+    const catalog = await getDesktopOpenAICodexModelCatalog()
     const model = getOpenAIModelCatalogEntry(modelId, catalog)
     return !model || model.supportedReasoningEfforts.includes(effort)
       ? { valid: true, effort }

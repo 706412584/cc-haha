@@ -1,6 +1,7 @@
 import type { TranslationKey } from './en'
 
 export const zh: Record<TranslationKey, string> = {
+  'sidebar.projectHistoryFailed': '更早的会话加载失败。',
   // ─── Common ──────────────────────────────────────
   'common.cancel': '取消',
   'common.close': '关闭',
@@ -1126,7 +1127,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.mcp.empty': '还没有配置 MCP 服务',
   'settings.mcp.emptyHint': '先添加一个自定义的 STDIO、HTTP 或 SSE MCP 服务。',
   'settings.mcp.stats.total': '服务总数',
-  'settings.mcp.stats.connected': '当前聊天已连接',
+  'settings.mcp.stats.connected': '当前项目连接检查',
   'settings.mcp.stats.attention': '需要处理',
   'settings.mcp.status.configured': '已配置',
   'settings.mcp.status.configuredElsewhere': '当前聊天未加载；请在这个项目中打开聊天后使用。',
@@ -1272,6 +1273,11 @@ export const zh: Record<TranslationKey, string> = {
   'settings.mcp.marketplace.category.productivity': '协作',
   'settings.mcp.marketplace.category.ai': 'AI 工具',
   'settings.mcp.marketplace.category.utility': '通用工具',
+  'settings.mcp.toast.syncFailed': '聊天同步失败：{error}',
+  'settings.mcp.toast.syncNotRunning': '当前聊天未运行；设置将在聊天启动时应用。',
+  'settings.mcp.toast.syncDifferentProject': '当前聊天属于其他项目，其工具未更新。',
+  'settings.mcp.toast.syncNoSession': '未选择聊天；设置已保存。',
+  'settings.mcp.toast.syncUnconfirmed': '尚未确认当前聊天同步成功。',
 
   // Settings > Agents
   'settings.tab.agents': 'Agents',
@@ -1770,6 +1776,24 @@ export const zh: Record<TranslationKey, string> = {
   // Settings > General - Storage
   'settings.general.modeSwitchTitle': '切换数据存储位置？',
   'settings.general.modeSwitchConfirm': '保存并重启',
+  'settings.general.sessionRetentionTitle': '会话记录',
+  'settings.general.sessionRetentionDescription': '会话记录在本机保留多久。调小这个值会立即删除更早的记录，所以需要二次确认。',
+  'settings.general.sessionRetentionLabel': '会话记录保留时长',
+  'settings.general.sessionRetentionCurrent': '当前：{days} 天',
+  'settings.general.sessionRetentionCurrentOff': '当前：不保存记录',
+  'settings.general.sessionRetentionUnit': '天',
+  'settings.general.sessionRetentionHint': '默认 365 天。设为 0 将不再记录会话内容，并删除已有的全部记录。',
+  'settings.general.sessionRetentionRequired': '请输入天数。',
+  'settings.general.sessionRetentionRange': '请输入 0 到 {max} 之间的整数。',
+  'settings.general.sessionRetentionSave': '保存',
+  'settings.general.sessionRetentionSaved': '保留时长已更新，删除了 {count} 个过期会话文件。',
+  'settings.general.sessionRetentionSavedPartial': '保留时长已更新，删除了 {count} 个过期会话文件，另有 {errors} 个删除失败。',
+  'settings.general.sessionRetentionConfirmTitle': '确认修改会话记录保留时长？',
+  'settings.general.sessionRetentionConfirmDelete': '将永久删除 {days} 天前的会话记录，此操作不可恢复。',
+  'settings.general.sessionRetentionConfirmDisable': '设为 0 后将不再记录新的会话内容，并永久删除已有的全部记录，此操作不可恢复。',
+  'settings.general.sessionRetentionPreview': '按此设置，当前会删除 {count} 个文件。',
+  'settings.general.sessionRetentionPreviewUnavailable': '统计失败，仍可继续确认。',
+  'settings.general.sessionRetentionConfirmAction': '删除并保存',
   'settings.general.storageTitle': '数据存储位置',
   'settings.general.storageDescription': '低频高级设置。切换后，会话记录、Skills、MCP、插件、Provider 配置、任务和缓存都会从新的目录读取。',
   'settings.general.storageSystemTitle': '使用系统目录',

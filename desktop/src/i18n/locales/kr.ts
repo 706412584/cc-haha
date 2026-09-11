@@ -1,6 +1,7 @@
 import type { TranslationKey } from './en'
 
 export const kr: Record<TranslationKey, string> = {
+  'sidebar.projectHistoryFailed': '이전 세션을 불러오지 못했습니다.',
   // ─── Common ──────────────────────────────────────
   'common.cancel': '취소',
   'common.close': '닫기',
@@ -1125,7 +1126,7 @@ export const kr: Record<TranslationKey, string> = {
   'settings.mcp.empty': '아직 구성된 MCP 서버가 없습니다',
   'settings.mcp.emptyHint': '사용자 지정 stdio, HTTP 또는 SSE MCP 서버를 추가하여 도구 액세스 확장을 시작하세요.',
   'settings.mcp.stats.total': '총 서버',
-  'settings.mcp.stats.connected': '현재 채팅에 연결됨',
+  'settings.mcp.stats.connected': '현재 프로젝트 연결 확인',
   'settings.mcp.stats.attention': '주의 필요',
   'settings.mcp.status.configured': '구성됨',
   'settings.mcp.status.configuredElsewhere': '현재 채팅에는 로드되지 않았습니다. 이 프로젝트에서 채팅을 열어 사용하세요.',
@@ -1271,6 +1272,11 @@ export const kr: Record<TranslationKey, string> = {
   'settings.mcp.marketplace.category.productivity': '협업',
   'settings.mcp.marketplace.category.ai': 'AI 도구',
   'settings.mcp.marketplace.category.utility': '유틸리티',
+  'settings.mcp.toast.syncFailed': '채팅 동기화 실패: {error}',
+  'settings.mcp.toast.syncNotRunning': '현재 채팅이 실행 중이 아닙니다. 시작 시 설정이 적용됩니다.',
+  'settings.mcp.toast.syncDifferentProject': '현재 채팅은 다른 프로젝트를 사용하므로 도구가 업데이트되지 않았습니다.',
+  'settings.mcp.toast.syncNoSession': '선택한 채팅이 없습니다. 설정을 저장했습니다.',
+  'settings.mcp.toast.syncUnconfirmed': '현재 채팅 업데이트가 확인되지 않았습니다.',
 
   // Settings > Agents
   'settings.tab.agents': '에이전트',
@@ -1769,6 +1775,24 @@ export const kr: Record<TranslationKey, string> = {
   // Settings > General - Storage
   'settings.general.modeSwitchTitle': '데이터 저장 위치를 전환하시겠습니까?',
   'settings.general.modeSwitchConfirm': '저장하고 다시 시작',
+  'settings.general.sessionRetentionTitle': '세션 기록',
+  'settings.general.sessionRetentionDescription': '세션 기록을 이 기기에 보관하는 기간입니다. 값을 줄이면 오래된 기록이 즉시 삭제되므로 확인을 요청합니다.',
+  'settings.general.sessionRetentionLabel': '세션 기록 보관 기간',
+  'settings.general.sessionRetentionCurrent': '현재: {days}일',
+  'settings.general.sessionRetentionCurrentOff': '현재: 기록 저장 안 함',
+  'settings.general.sessionRetentionUnit': '일',
+  'settings.general.sessionRetentionHint': '기본값은 365일입니다. 0으로 설정하면 세션 내용을 기록하지 않고 기존 기록도 모두 삭제합니다.',
+  'settings.general.sessionRetentionRequired': '일수를 입력하세요.',
+  'settings.general.sessionRetentionRange': '0에서 {max} 사이의 정수를 입력하세요.',
+  'settings.general.sessionRetentionSave': '저장',
+  'settings.general.sessionRetentionSaved': '보관 기간을 업데이트하고 만료된 세션 파일 {count}개를 삭제했습니다.',
+  'settings.general.sessionRetentionSavedPartial': '보관 기간을 업데이트했습니다. 만료된 세션 파일 {count}개를 삭제했고 {errors}개는 삭제하지 못했습니다.',
+  'settings.general.sessionRetentionConfirmTitle': '세션 기록 보관 기간을 변경할까요?',
+  'settings.general.sessionRetentionConfirmDelete': '{days}일보다 오래된 세션 기록을 영구적으로 삭제합니다. 되돌릴 수 없습니다.',
+  'settings.general.sessionRetentionConfirmDisable': '0으로 설정하면 새 세션 내용을 기록하지 않고 기존 기록도 모두 영구적으로 삭제합니다. 되돌릴 수 없습니다.',
+  'settings.general.sessionRetentionPreview': '이 설정에서는 현재 파일 {count}개가 삭제됩니다.',
+  'settings.general.sessionRetentionPreviewUnavailable': '집계에 실패했습니다. 계속 진행할 수 있습니다.',
+  'settings.general.sessionRetentionConfirmAction': '삭제하고 저장',
   'settings.general.storageTitle': '데이터 저장 위치',
   'settings.general.storageDescription': '고급, 사용 빈도가 낮은 설정입니다. 전환 후에는 세션, 스킬, MCP, 플러그인, 공급자 설정, 작업, 캐시를 새 디렉터리에서 읽습니다.',
   'settings.general.storageSystemTitle': '시스템 디렉터리 사용',

@@ -29,6 +29,7 @@ Rules closer to the code take precedence. For the directory you are changing, re
 ## Implementation Rules
 
 - Keep changes tied to the requested behavior. Reuse existing utilities, stores, services, and test harnesses; add dependencies or abstractions only when the task needs them.
+- Computer Use has one app-authorization boundary on both macOS and Windows: enabling it in Settings and confirming its consent dialog authorizes all apps. Do not add per-app prompts, allowlists, denylists, category-based access tiers, or host/helper exceptions after that consent. Global disablement, OS permissions, and target/process validity checks still apply.
 - Executable JS/TS production changes under `src/`, `desktop/src/`, or `adapters/` require a same-area regression test unless a maintainer explicitly approves an exception. For bugs, reproduce the failure or add a test that fails for the intended reason; report when reproduction is unavailable. Test the behavior and affected boundaries. See [test design](docs/internals/contributing.md#回归测试设计) for state transitions, replay, and coverage caveats.
 - Keep TypeScript ESM style: 2-space indentation, no semicolons, `PascalCase` components, and `camelCase` functions/hooks/stores. Use structured parsers and existing boundaries for structured data.
 - Do not commit generated output such as `artifacts/`, coverage reports, `node_modules/`, build directories, or Rust `target/` trees.

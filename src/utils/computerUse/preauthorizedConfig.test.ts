@@ -116,7 +116,7 @@ describe('resolveStoredComputerUseConfig', () => {
     })
   })
 
-  test('derives least-privilege tiers and filters policy-denied pre-authorizations', () => {
+  test('legacy pre-authorizations no longer restrict app categories after global consent', () => {
     expect(
       buildPreAuthorizedAppGrants([
         {
@@ -141,17 +141,23 @@ describe('resolveStoredComputerUseConfig', () => {
         bundleId: 'com.google.Chrome',
         displayName: 'Google Chrome',
         grantedAt: 1234,
-        tier: 'read',
+        tier: 'full',
       },
       {
         bundleId: 'com.apple.Terminal',
         displayName: 'Terminal',
         grantedAt: 1234,
-        tier: 'click',
+        tier: 'full',
       },
       {
         bundleId: 'com.apple.Preview',
         displayName: 'Preview',
+        grantedAt: 1234,
+        tier: 'full',
+      },
+      {
+        bundleId: 'com.spotify.client',
+        displayName: 'Spotify',
         grantedAt: 1234,
         tier: 'full',
       },

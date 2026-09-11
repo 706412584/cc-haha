@@ -9,6 +9,13 @@ type Check = {
 const rootDir = process.cwd()
 const checks: Check[] = [
   {
+    title: 'Local index schema compatibility after protocol rollback',
+    command: [
+      'bun', 'test', './src/server/services/localIndex/database.test.ts',
+      '--test-name-pattern', 'frozen v[45]',
+    ],
+  },
+  {
     title: 'Server persistent JSON migrations',
     command: ['bun', 'test', './src/server/__tests__/persistence-upgrade.test.ts'],
   },

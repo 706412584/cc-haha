@@ -24,6 +24,7 @@ import type {
   SetValueResult,
 } from '../../vendor/computer-use-mcp/index.js'
 import { API_RESIZE_PARAMS, targetImageSize } from '../../vendor/computer-use-mcp/index.js'
+import { formatNativeAppList, type NativeAppInfo } from '../../vendor/computer-use-mcp/executor.js'
 import { sleep } from '../sleep.js'
 import {
   CLI_HOST_BUNDLE_ID,
@@ -102,9 +103,8 @@ async function writeClipboard(text: string): Promise<void> {
 //   - drag:   `from{x,y}`, `to{x,y}`, `button`
 //   - press_key: `key` ; type_text: `text`
 //
-// `list_apps` is the one shape that needs reconciliation: the daemon returns a
-// structured `AppRef[]` (`{bundleId, displayName}`), but the MCP tool face
-// (toolCalls.handleListApps) expects the rendered text block. We format it here.
+// Preserve structured list_apps rows for the JavaScript client. Older helpers
+// returned only running AppRef rows; normalize those during a host upgrade.
 // ----------------------------------------------------------------------------
 
 /** A daemon `list_apps` row — `Apps.AppRef` (Geometry.swift). */
@@ -132,19 +132,13 @@ function appTargetPayload(target: AppTarget): Record<string, unknown> {
   return { ...identity }
 }
 
-/**
- * Render the daemon's `AppRef[]` into the `list_apps` text block the tool face
- * surfaces verbatim. The native daemon does not track last-used / use-count, so
- * we emit the stable subset: "<Display Name> — <bundle.id>", most-recent-first
- * ordering being whatever the daemon returned (it sorts by display name).
- */
-function formatAppList(apps: readonly DaemonAppRef[]): string {
-  if (apps.length === 0) {
-    return 'No running applications are available to control.'
-  }
-  return apps
-    .map(a => `${a.displayName} — ${a.bundleId}`)
-    .join('\n')
+async function listNativeApps(): Promise<NativeAppInfo[]> {
+  const apps = await callHelper<Array<NativeAppInfo | DaemonAppRef>>('list_apps', {})
+  return apps.map(app => 'id' in app ? app : {
+    id: app.bundleId,
+    displayName: app.displayName,
+    isRunning: true,
+  })
 }
 
 /**
@@ -157,9 +151,10 @@ function formatAppList(apps: readonly DaemonAppRef[]): string {
 export function createCodexEngine(): CodexComputerEngine {
   return {
     async listApps(): Promise<string> {
-      const apps = await callHelper<DaemonAppRef[]>('list_apps', {})
-      return formatAppList(apps)
+      return formatNativeAppList(await listNativeApps())
     },
+
+    listAppsInfo: listNativeApps,
 
     async resolveTarget(target: AppTarget): Promise<ResolvedAppTarget> {
       // Sent as-is: the daemon owns the selector→process mapping, and it must

@@ -3769,6 +3769,107 @@ describe('Sessions API', () => {
     expect(body.index?.lastErrorCode === null || typeof body.index?.lastErrorCode === 'string').toBe(true)
   })
 
+  it('GET turn-checkpoints accepts a known memory session across workspace changes and persistence restore', async () => {
+    await fs.writeFile(path.join(tmpDir, 'settings.json'), JSON.stringify({ cleanupPeriodDays: 0 }))
+    resetSettingsCache()
+    const created = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir: tmpDir }),
+    })
+    expect(created.status).toBe(201)
+    const { sessionId } = await created.json() as { sessionId: string }
+    const { sessionService } = await import('../services/sessionService.js')
+    const selectedWorkDir = await fs.mkdtemp(path.join(tmpDir, 'selected-project-'))
+    // The runtime launch boundary records the user's selected working folder
+    // even though retention zero deliberately never materializes a JSONL.
+    await sessionService.appendSessionMetadata(sessionId, { workDir: selectedWorkDir })
+    expect(await sessionService.getSessionWorkDir(sessionId)).toBe(selectedWorkDir)
+
+    for (const days of [0, 365]) {
+      await fs.writeFile(path.join(tmpDir, 'settings.json'), JSON.stringify({ cleanupPeriodDays: days }))
+      resetSettingsCache()
+      const response = await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ checkpoints: [] })
+      expect(await sessionService.getSessionMessagesWithEvidence(sessionId)).toEqual({
+        messages: [], transcriptEvidenceComplete: false,
+      })
+      expect(await sessionService.findSessionFile(sessionId)).toBeNull()
+    }
+
+    // After new enabled content reaches disk, it takes precedence over the
+    // retained launch metadata and produces normal completed-turn checkpoints.
+    await writeSessionFile(sanitizePath(selectedWorkDir), sessionId, [
+      { type: 'session-meta', workDir: selectedWorkDir },
+      { type: 'user', uuid: 'public-user', parentUuid: null, timestamp: '2026-09-10T00:00:00.000Z', message: { role: 'user', content: 'public prompt' } },
+      { type: 'assistant', uuid: 'public-assistant', parentUuid: 'public-user', timestamp: '2026-09-10T00:00:01.000Z', message: { role: 'assistant', content: 'public reply' } },
+    ])
+    const restored = await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)
+    expect(restored.status).toBe(200)
+    const body = await restored.json() as { checkpoints: Array<{ target: { targetUserMessageId: string } }> }
+    expect(body.checkpoints).toHaveLength(1)
+    expect(body.checkpoints[0]?.target.targetUserMessageId).toBe('public-user')
+    expect((await sessionService.getSessionMessagesWithEvidence(sessionId)).transcriptEvidenceComplete).toBe(true)
+
+    await sessionService.deleteSession(sessionId)
+    expect((await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)).status).toBe(404)
+    expect((await fetch(`${baseUrl}/api/sessions/${crypto.randomUUID()}/turn-checkpoints`)).status).toBe(404)
+  })
+
+  for (const origin of ['created', 'resumed']) {
+    it(`GET turn-checkpoints keeps a positive ${origin} session known immediately after retention cleanup`, async () => {
+      const { sessionService } = await import('../services/sessionService.js')
+      await fs.writeFile(path.join(tmpDir, 'settings.json'), JSON.stringify({ cleanupPeriodDays: 365 }))
+      resetSettingsCache()
+      let sessionId: string
+      if (origin === 'created') {
+        const created = await fetch(`${baseUrl}/api/sessions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workDir: tmpDir }),
+        })
+        expect(created.status).toBe(201)
+        sessionId = (await created.json() as { sessionId: string }).sessionId
+      } else {
+        sessionId = crypto.randomUUID()
+        await writeSessionFile(sanitizePath(tmpDir), sessionId, [
+          { type: 'session-meta', workDir: tmpDir },
+          { type: 'user', uuid: 'restored-user', parentUuid: null, message: { role: 'user', content: 'saved before server restart' } },
+        ])
+        // Starting the runtime for an existing disk session updates metadata;
+        // this ID was never created by the current SessionService process.
+        await sessionService.appendSessionMetadata(sessionId, { workDir: tmpDir })
+      }
+      const found = await sessionService.findSessionFile(sessionId)
+      expect(found).not.toBeNull()
+      await fs.writeFile(path.join(tmpDir, 'settings.json'), JSON.stringify({ cleanupPeriodDays: 0 }))
+      resetSettingsCache()
+      await fs.unlink(found!.filePath)
+
+      // Clicking the still-open tab requests checkpoints before another prompt
+      // can refresh runtime metadata. No disk evidence must be created here.
+      for (const days of [0, 365]) {
+        await fs.writeFile(path.join(tmpDir, 'settings.json'), JSON.stringify({ cleanupPeriodDays: days }))
+        resetSettingsCache()
+        const response = await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({ checkpoints: [] })
+        expect(await sessionService.getSessionMessagesWithEvidence(sessionId)).toEqual({
+          messages: [], transcriptEvidenceComplete: false,
+        })
+        expect(await sessionService.findSessionFile(sessionId)).toBeNull()
+        expect((await fetch(`${baseUrl}/api/sessions/${crypto.randomUUID()}/turn-checkpoints`)).status).toBe(404)
+      }
+
+      // Explicit deletion ends this in-process lifetime even when cleanup has
+      // already removed its file; it must not become an immortal empty session.
+      await sessionService.deleteSession(sessionId)
+      expect((await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)).status).toBe(404)
+      await expect(sessionService.deleteSession(sessionId)).rejects.toMatchObject({ statusCode: 404 })
+    })
+  }
+
   it('POST /api/sessions should create a session', async () => {
     const workDir = await fs.mkdtemp(path.join(tmpDir, 'api-session-'))
     const res = await fetch(`${baseUrl}/api/sessions`, {

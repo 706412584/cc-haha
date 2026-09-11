@@ -17,8 +17,7 @@ describe('setupComputerUseMCP runtime capability', () => {
     })
 
     expect(Object.keys(result.mcpConfig)).toEqual(['computer-use'])
-    expect(result.allowedTools).toContain('mcp__computer-use__get_app_state')
-    expect(result.allowedTools).not.toContain('mcp__computer-use__screenshot')
+    expect(result.allowedTools).toEqual(['mcp__computer-use__js', 'mcp__computer-use__js_reset'])
   })
 
   test('keeps the Windows compatibility engine available without a macOS helper', () => {
@@ -32,6 +31,8 @@ describe('setupComputerUseMCP runtime capability', () => {
     expect(Object.keys(result.mcpConfig)).toEqual(['computer-use'])
     expect(result.allowedTools).toContain('mcp__computer-use__screenshot')
     expect(result.allowedTools).not.toContain('mcp__computer-use__get_app_state')
+    expect(result.allowedTools).not.toContain('mcp__computer-use__sequence')
+    expect(result.allowedTools).not.toContain('mcp__computer-use__js')
   })
 
   test('does not resolve a helper or advertise tools on unsupported platforms', () => {

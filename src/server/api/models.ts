@@ -14,6 +14,7 @@ import { attributionHeaderEnvForModel } from '../services/attributionHeaderPolic
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 import { hasOpenAIAuthLogin } from '../../utils/auth.js'
 import { getOpenAICodexModelCatalog } from '../../services/openaiAuth/modelCatalog.js'
+import { getDesktopOpenAICodexModelCatalog } from '../services/openaiModelCatalog.js'
 import {
   OPENAI_DEFAULT_MAIN_MODEL,
   type OpenAIModelCatalogEntry,
@@ -190,7 +191,7 @@ function buildOpenAIModelList(catalog: OpenAIModelCatalogEntry[]): ApiModelInfo[
 }
 
 async function getOpenAIModelList(): Promise<ApiModelInfo[]> {
-  return buildOpenAIModelList(await getOpenAICodexModelCatalog())
+  return buildOpenAIModelList(await getDesktopOpenAICodexModelCatalog())
 }
 
 function buildGrokModelList(catalog: GrokModelCatalogEntry[]): ApiModelInfo[] {
@@ -238,7 +239,7 @@ async function getOpenAIAuthModels(): Promise<ApiModelInfo[]> {
     return []
   }
 
-  return getOpenAIModelList()
+  return buildOpenAIModelList(await getOpenAICodexModelCatalog())
 }
 
 async function getStandaloneModelList(): Promise<ApiModelInfo[]> {
