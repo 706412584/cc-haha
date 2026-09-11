@@ -570,6 +570,35 @@ function isIncludedMcpTool(tool: Tool): boolean {
   )
 }
 
+// Session-side handler invoked after a connection closes (caches are already
+// cleared by then). useManageMCPConnections registers it to update AppState
+// and decide whether to reconnect; it is unregistered on unmount so that
+// shutdown closes never trigger reconnection.
+let onMcpConnectionClosed: ((name: string, client: Client) => void) | undefined
+
+// A delayed close belongs to its connection attempt, not whichever connection
+// currently has the same server name (including a changed configuration).
+const connectionAttempts = new Map<string, { key: string }>()
+
+export function setMcpConnectionClosedHandler(
+  handler: ((name: string, client: Client) => void) | undefined,
+): void {
+  onMcpConnectionClosed = handler
+}
+
+export function notifyMcpConnectionClosed(name: string, client: Client): void {
+  onMcpConnectionClosed?.(name, client)
+}
+
+function clearServerFetchCaches(name: string): void {
+  fetchToolsForClient.cache.delete(name)
+  fetchResourcesForClient.cache.delete(name)
+  fetchCommandsForClient.cache.delete(name)
+  if (feature('MCP_SKILLS')) {
+    fetchMcpSkillsForClient!.cache.delete(name)
+  }
+}
+
 /**
  * Generates the cache key for a server connection
  * @param name Server name
@@ -604,6 +633,8 @@ export const connectToServer = memoize(
     },
   ): Promise<MCPServerConnection> => {
     const connectStartTime = Date.now()
+    const attempt = { key: getServerCacheKey(name, serverRef) }
+    connectionAttempts.set(name, attempt)
     let inProcessServer:
       | { connect(t: Transport): Promise<void>; close(): Promise<void> }
       | undefined
@@ -1365,6 +1396,8 @@ export const connectToServer = memoize(
         }
       }
 
+      let closingIntentionally = false
+
       // Enhanced close handler with connection drop context
       client.onclose = () => {
         const uptime = Date.now() - connectionStartTime
@@ -1375,28 +1408,18 @@ export const connectToServer = memoize(
           `${transportType.toUpperCase()} connection closed after ${Math.floor(uptime / 1000)}s (${hasErrorOccurred ? 'with errors' : 'cleanly'})`,
         )
 
-        // Clear the memoization cache so next operation reconnects
-        const key = getServerCacheKey(name, serverRef)
-
-        // Also clear fetch caches (keyed by server name). Reconnection
-        // creates a new connection object; without clearing, the next
-        // fetch would return stale tools/resources from the old connection.
-        fetchToolsForClient.cache.delete(name)
-        fetchResourcesForClient.cache.delete(name)
-        fetchCommandsForClient.cache.delete(name)
-        if (feature('MCP_SKILLS')) {
-          fetchMcpSkillsForClient!.cache.delete(name)
-        }
-
-        connectToServer.cache.delete(key)
+        originalOnclose?.()
+        if (connectionAttempts.get(name) !== attempt) return
+        connectionAttempts.delete(name)
+        clearServerFetchCaches(name)
+        connectToServer.cache.delete(attempt.key)
         logMCPDebug(name, `Cleared connection cache for reconnection`)
 
-        if (originalOnclose) {
-          originalOnclose()
-        }
+        if (!closingIntentionally) notifyMcpConnectionClosed(name, client)
       }
 
       const cleanup = async () => {
+        closingIntentionally = true
         // In-process servers (e.g. Chrome MCP) don't have child processes or stderr
         if (inProcessServer) {
           try {
@@ -1645,25 +1668,17 @@ export async function clearServerCache(
   serverRef: ScopedMcpServerConfig,
 ): Promise<void> {
   const key = getServerCacheKey(name, serverRef)
+  const cached = connectToServer.cache.get(key)
+  // Detach before awaiting cleanup: a concurrent enable owns its own cache
+  // entry, and clearing an empty cache must never start a new server.
+  connectToServer.cache.delete(key)
+  if (connectionAttempts.get(name)?.key === key) clearServerFetchCaches(name)
 
   try {
-    const wrappedClient = await connectToServer(name, serverRef)
-
-    if (wrappedClient.type === 'connected') {
-      await wrappedClient.cleanup()
-    }
+    const wrappedClient = await cached
+    if (wrappedClient?.type === 'connected') await wrappedClient.cleanup()
   } catch {
     // Ignore errors - server might have failed to connect
-  }
-
-  // Clear from cache (both connection and fetch caches so reconnect
-  // fetches fresh tools/resources/commands instead of stale ones)
-  connectToServer.cache.delete(key)
-  fetchToolsForClient.cache.delete(name)
-  fetchResourcesForClient.cache.delete(name)
-  fetchCommandsForClient.cache.delete(name)
-  if (feature('MCP_SKILLS')) {
-    fetchMcpSkillsForClient!.cache.delete(name)
   }
 }
 
@@ -2761,6 +2776,37 @@ export type TransformedMCPResult = {
 }
 
 /**
+ * True when the given text block carries the same data as the structured
+ * content value — either byte-identical serialization or a JSON-equivalent
+ * parse (servers commonly pretty-print the JSON in TextContent).
+ */
+function jsonTextMatches(text: string, structuredContent: unknown): boolean {
+  const trimmed = text.trim()
+  if (trimmed === jsonStringify(structuredContent)) return true
+  try {
+    return jsonDeepEqual(JSON.parse(trimmed), structuredContent)
+  } catch {
+    return false
+  }
+}
+
+function jsonDeepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
+  if (Array.isArray(a) !== Array.isArray(b)) return false
+  if (Array.isArray(a)) {
+    const bArr = b as unknown[]
+    return a.length === bArr.length && a.every((item, i) => jsonDeepEqual(item, bArr[i]))
+  }
+  const aObj = a as Record<string, unknown>
+  const bObj = b as Record<string, unknown>
+  const aKeys = Object.keys(aObj).sort()
+  const bKeys = Object.keys(bObj).sort()
+  if (aKeys.length !== bKeys.length) return false
+  return aKeys.every((key, i) => key === bKeys[i] && jsonDeepEqual(aObj[key], bObj[key]))
+}
+
+/**
  * Generates a compact, jq-friendly type signature for a value.
  * e.g. "{title: string, items: [{id: number, name: string}]}"
  */
@@ -2795,6 +2841,44 @@ export async function transformMCPResult(
       }
     }
 
+    if ('content' in result && Array.isArray(result.content)) {
+      const transformedContent = (
+        await Promise.all(
+          result.content.map(item => transformResultContent(item, name)),
+        )
+      ).flat()
+      // The MCP spec encourages servers to also serialize structured content
+      // into a TextContent. When `content` already carries that serialized
+      // JSON, appending it again would duplicate the same data; when it does
+      // not (e.g. content is only a preview image), the structured data would
+      // otherwise be lost. Deduplicate, then merge when actually missing.
+      const structuredContent =
+        'structuredContent' in result ? result.structuredContent : undefined
+      const serialized =
+        structuredContent !== undefined ? jsonStringify(structuredContent) : undefined
+      // Servers often pretty-print the serialized JSON in TextContent while
+      // structuredContent carries the object, so compare JSON semantics rather
+      // than byte equality before deciding the data is already present.
+      const alreadySerialized =
+        serialized !== undefined &&
+        transformedContent.some(
+          block => block.type === 'text' && jsonTextMatches(block.text, structuredContent),
+        )
+      if (serialized !== undefined && !alreadySerialized) {
+        transformedContent.push({
+          type: 'text',
+          text: `Structured content:\n${serialized}`,
+        })
+      }
+      return {
+        content: transformedContent,
+        type: 'contentArray',
+        schema: structuredContent !== undefined
+          ? inferCompactSchema(structuredContent)
+          : inferCompactSchema(transformedContent),
+      }
+    }
+
     if (
       'structuredContent' in result &&
       result.structuredContent !== undefined
@@ -2803,19 +2887,6 @@ export async function transformMCPResult(
         content: jsonStringify(result.structuredContent),
         type: 'structuredContent',
         schema: inferCompactSchema(result.structuredContent),
-      }
-    }
-
-    if ('content' in result && Array.isArray(result.content)) {
-      const transformedContent = (
-        await Promise.all(
-          result.content.map(item => transformResultContent(item, name)),
-        )
-      ).flat()
-      return {
-        content: transformedContent,
-        type: 'contentArray',
-        schema: inferCompactSchema(transformedContent),
       }
     }
   }
@@ -2838,6 +2909,111 @@ function contentContainsImages(content: MCPToolResult): boolean {
     return false
   }
   return content.some(block => block.type === 'image')
+}
+
+/**
+ * Persist the text blocks of an image-containing large result to a file and
+ * return the non-text media blocks plus a file reference, keeping original
+ * block order. Text blocks stay in the context as summaries bounded by a
+ * hard budget: the caption following a media block is kept whole from a
+ * reserved share, all other text is truncated against the shared budget. This
+ * keeps image captions and ordering visible without letting many small blocks
+ * re-inflate the context; the full text lives in the file.
+ * Returns null when there is no text to persist or persistence fails (caller
+ * falls back to truncation).
+ */
+export async function persistTextFromImageContent(
+  content: MCPToolResult,
+  name: string,
+  tool: string,
+): Promise<MCPToolResult | null> {
+  if (!Array.isArray(content)) return null
+  const fullText: string[] = []
+  const kept: ContentBlockParam[] = []
+
+  // Text summaries share one hard budget. The short caption following a media
+  // block is kept whole and gets priority over ordinary text, so neither a
+  // long block nor a run of short log lines can starve the captions that
+  // explain the images; ordinary text is truncated against whatever the
+  // captions leave of the budget. Blank text blocks do not cancel caption
+  // priority.
+  const captionDemand = collectCaptionDemand(content)
+  const captionBudget = Math.min(MCP_TEXT_SUMMARY_BUDGET, captionDemand)
+  let remainingCaptionBudget = captionBudget
+  let remainingSummaryBudget = MCP_TEXT_SUMMARY_BUDGET - captionBudget
+  let awaitingCaption = false
+
+  for (const block of content) {
+    if (block.type === 'text') {
+      fullText.push(block.text)
+      if (block.text.trim().length === 0) continue
+      if (
+        awaitingCaption
+        && block.text.length <= MCP_TEXT_SUMMARY_LIMIT
+        && remainingCaptionBudget >= block.text.length
+      ) {
+        kept.push({ type: 'text', text: block.text })
+        remainingCaptionBudget -= block.text.length
+      } else if (remainingSummaryBudget > 0) {
+        const summary = block.text.slice(0, Math.min(remainingSummaryBudget, block.text.length))
+        kept.push({ type: 'text', text: summary })
+        remainingSummaryBudget -= summary.length
+      }
+      awaitingCaption = false
+    } else {
+      // Keep every non-text media block (images, documents, resources, …).
+      kept.push(block)
+      awaitingCaption = true
+    }
+  }
+  const textContent = fullText.join('\n')
+  if (textContent.trim().length === 0) return null
+
+  // persistToolResult treats an existing file ('wx') as a replay of the same
+  // invocation, so the id must be unique per call — parallel invocations of
+  // the same server/tool would otherwise share a timestamp-based file and
+  // read each other's content. A UUID provides the invocation identity.
+  const persistId = `mcp-${normalizeNameForMCP(name)}-${normalizeNameForMCP(tool)}-${crypto.randomUUID()}`
+  const persistResult = await persistToolResult(textContent, persistId)
+  if (isPersistError(persistResult)) return null
+
+  kept.push({
+    type: 'text',
+    text: getBinaryBlobSavedMessage(
+      persistResult.filepath,
+      'text/plain',
+      persistResult.originalSize,
+      `[MCP output from ${name}] `,
+    ),
+  })
+  return kept
+}
+
+const MCP_TEXT_SUMMARY_LIMIT = 200
+const MCP_TEXT_SUMMARY_BUDGET = 2000
+
+/**
+ * Total length of the captions in the result: the first non-blank short text
+ * block after each media block. Captions get priority over ordinary text in
+ * the summary budget.
+ */
+function collectCaptionDemand(content: ContentBlockParam[]): number {
+  let demand = 0
+  let awaitingCaption = false
+  for (const block of content) {
+    if (block.type === 'text') {
+      if (block.text.trim().length > 0) {
+        if (awaitingCaption && block.text.length <= MCP_TEXT_SUMMARY_LIMIT) {
+          demand += block.text.length
+        }
+        awaitingCaption = false
+      }
+      // Blank blocks do not cancel caption priority.
+    } else {
+      awaitingCaption = true
+    }
+  }
+  return demand
 }
 
 export async function processMCPResult(
@@ -2877,8 +3053,20 @@ export async function processMCPResult(
   }
 
   // If content contains images, fall back to truncation - persisting images as JSON
-  // defeats the image compression logic and makes them non-viewable
+  // defeats the image compression logic and makes them non-viewable.
+  // Large text in the same array (e.g. appended structuredContent) would be
+  // truncated along with the whole result; persist that text instead so the
+  // data survives while the images stay visible in the context.
   if (contentContainsImages(content)) {
+    const persistedText = await persistTextFromImageContent(content, name, tool)
+    if (persistedText) {
+      logEvent('tengu_mcp_large_result_handled', {
+        outcome: 'persisted',
+        reason: 'text_persisted_images_kept',
+        sizeEstimateTokens,
+      } as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS)
+      return persistedText
+    }
     logEvent('tengu_mcp_large_result_handled', {
       outcome: 'truncated',
       reason: 'contains_images',

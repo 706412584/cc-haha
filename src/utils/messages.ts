@@ -2444,7 +2444,9 @@ export function normalizeMessagesForAPI(
   const smooshed = checkStatsigFeatureGate_CACHED_MAY_BE_STALE(
     'tengu_chair_sermon',
   )
-    ? smooshSystemReminderSiblings(mergeAdjacentUserMessages(withNonEmpty))
+    ? smooshSystemReminderSiblings(
+        mergeAdjacentUserMessages(withNonEmpty),
+      )
     : withNonEmpty
 
   // Unconditional — catches transcripts persisted before smooshIntoToolResult

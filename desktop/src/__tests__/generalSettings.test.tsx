@@ -2201,6 +2201,62 @@ describe('Settings > Providers tab', () => {
       'cc-haha translates the protocol locally without an additional third-party conversion service',
     )).toBeInTheDocument()  })
 
+  it('uses the proxy in settings JSON and connection tests when nested tool media is unsupported', async () => {
+    providerStoreState.testConfig = vi.fn().mockResolvedValue({
+      connectivity: { success: true, latencyMs: 1 },
+      proxy: { success: true, latencyMs: 1 },
+    })
+    providerStoreState.presets = [{
+      id: 'custom',
+      name: 'Custom',
+      baseUrl: 'https://api.example.com/anthropic',
+      apiFormat: 'anthropic',
+      defaultModels: {
+        main: 'model-main',
+        haiku: '',
+        sonnet: '',
+        opus: '',
+      },
+      needsApiKey: true,
+      websiteUrl: '',
+    }]
+
+    render(<Settings />)
+    fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
+
+    const dialog = screen.getByRole('dialog')
+    const mediaSupport = within(dialog).getByLabelText('Preserve nested tool result media')
+    expect(mediaSupport).toBeChecked()
+    fireEvent.click(mediaSupport)
+
+    const settingsTextarea = await waitFor(() => {
+      const textarea = dialog.querySelector('textarea') as HTMLTextAreaElement
+      const settings = JSON.parse(textarea.value) as {
+        env?: {
+          ANTHROPIC_API_KEY?: string
+          ANTHROPIC_AUTH_TOKEN?: string
+          ANTHROPIC_BASE_URL?: string
+        }
+      }
+      expect(settings.env?.ANTHROPIC_BASE_URL).toMatch(/\/proxy$/)
+      expect(settings.env?.ANTHROPIC_API_KEY).toBe('proxy-managed')
+      expect(settings.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+      return textarea
+    })
+    expect(settingsTextarea.value).not.toContain('"ANTHROPIC_BASE_URL": "https://api.example.com/anthropic"')
+
+    fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: /Test Connection/i }))
+
+    await waitFor(() => {
+      expect(providerStoreState.testConfig).toHaveBeenCalledWith(expect.objectContaining({
+        baseUrl: 'https://api.example.com/anthropic',
+        apiFormat: 'anthropic',
+        supportsNestedToolResultMedia: false,
+      }))
+    })
+  })
+
   it('localizes the main model placeholder in the provider form', () => {
     useSettingsStore.setState({ locale: 'zh' })
     providerStoreState.presets = [

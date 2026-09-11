@@ -17,7 +17,8 @@ describe('setupComputerUseMCP runtime capability', () => {
     })
 
     expect(Object.keys(result.mcpConfig)).toEqual(['computer-use'])
-    expect(result.allowedTools.length).toBeGreaterThan(0)
+    expect(result.allowedTools).toContain('mcp__computer-use__get_app_state')
+    expect(result.allowedTools).not.toContain('mcp__computer-use__screenshot')
   })
 
   test('keeps the Windows compatibility engine available without a macOS helper', () => {
@@ -29,6 +30,16 @@ describe('setupComputerUseMCP runtime capability', () => {
     })
 
     expect(Object.keys(result.mcpConfig)).toEqual(['computer-use'])
-    expect(result.allowedTools.length).toBeGreaterThan(0)
+    expect(result.allowedTools).toContain('mcp__computer-use__screenshot')
+    expect(result.allowedTools).not.toContain('mcp__computer-use__get_app_state')
+  })
+
+  test('does not resolve a helper or advertise tools on unsupported platforms', () => {
+    expect(setupComputerUseMCP({
+      platform: 'linux',
+      resolveMacosNativeBinary: () => {
+        throw new Error('must not resolve a macOS helper on Linux')
+      },
+    })).toEqual({ mcpConfig: {}, allowedTools: [] })
   })
 })

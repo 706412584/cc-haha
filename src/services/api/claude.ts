@@ -137,6 +137,7 @@ import {
 } from "src/bootstrap/state.js";
 import {
   AFK_MODE_BETA_HEADER,
+  THINKING_BINDING_CONTROLS_BETA_HEADER,
   CONTEXT_1M_BETA_HEADER,
   CONTEXT_MANAGEMENT_BETA_HEADER,
   EFFORT_BETA_HEADER,
@@ -194,6 +195,7 @@ import {
 import { endQueryProfile, queryCheckpoint } from "src/utils/queryProfiler.js";
 import {
   modelSupportsAdaptiveThinking,
+  modelUsesBoundThinking,
   modelSupportsThinking,
   resolveModelThinkingEnabled,
   shouldSendExplicitDisabledThinking,
@@ -1932,7 +1934,8 @@ async function* queryModel(
     // setting that can greatly affect model quality and bashing.
     if (hasThinking && modelCanThink) {
       if (
-        !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING) &&
+        (modelUsesBoundThinking(options.model) ||
+          !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING)) &&
         modelSupportsAdaptiveThinking(options.model)
       ) {
         // For models that support adaptive thinking, always use adaptive
@@ -1960,6 +1963,19 @@ async function* queryModel(
       thinking = {
         type: 'disabled',
       } as unknown as BetaMessageStreamParams['thinking']
+    }
+
+    if (thinking?.type === 'adaptive' && modelUsesBoundThinking(options.model)) {
+      // Directory, tool and compacted-history updates can invalidate old thinking.
+      // Let the API retain valid blocks and drop only those bound to an old prefix.
+      // This header is required for compatibility even when optional betas are disabled.
+      thinking = {
+        ...thinking,
+        block_binding: { prefix_mismatch_behavior: 'drop_block' },
+      } as typeof thinking
+      if (!betasParams.includes(THINKING_BINDING_CONTROLS_BETA_HEADER)) {
+        betasParams.push(THINKING_BINDING_CONTROLS_BETA_HEADER)
+      }
     }
 
     // Get API context management strategies if enabled

@@ -703,9 +703,44 @@ describe('Models API', () => {
 
     expect(res.status).toBe(200)
     const body = await res.json()
-    expect(body.models).toBeArray()
-    expect(body.models.length).toBe(4)
-    expect(body.models[0].id).toContain('claude')
+    expect(body.models).toEqual([
+      {
+        id: 'claude-fable-5-1',
+        name: 'Fable 5.1',
+        description: 'Highest capability for long-running tasks',
+        context: '1m',
+        defaultReasoningEffort: 'high',
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      {
+        id: 'claude-fable-5',
+        name: 'Fable 5',
+        description: 'Highest capability for long-running tasks',
+        context: '1m',
+      },
+      {
+        id: 'claude-opus-4-8',
+        name: 'Opus 4.8',
+        description: 'Best for complex agentic coding and enterprise work',
+        context: '1m',
+        defaultReasoningEffort: 'high',
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      {
+        id: 'claude-sonnet-5',
+        name: 'Sonnet 5',
+        description: 'Best combination of speed and intelligence',
+        context: '1m',
+        defaultReasoningEffort: 'high',
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      {
+        id: 'claude-haiku-4-5',
+        name: 'Haiku 4.5',
+        description: 'Fastest with near-frontier intelligence',
+        context: '200k',
+      },
+    ])
   })
 
   it('GET /api/models should expose the active provider model effort catalog', async () => {
@@ -935,6 +970,7 @@ describe('Models API', () => {
     )
     const listBody = await listResponse.json()
     expect(listBody.models.map((model: { id: string }) => model.id)).toEqual([
+      'claude-fable-5-1',
       'claude-fable-5',
       'claude-opus-4-8',
       'claude-sonnet-5',

@@ -604,12 +604,12 @@ function getProviderAuthValue(apiKey: string, preset: ProviderPreset): string {
 }
 
 function buildSettingsJsonAuthEnv(
-  apiFormat: ApiFormat,
+  needsProxy: boolean,
   authStrategy: ProviderAuthStrategy,
   apiKey: string,
   preset: ProviderPreset,
 ): Record<string, string> {
-  if (apiFormat !== 'anthropic') {
+  if (needsProxy) {
     return { ANTHROPIC_API_KEY: 'proxy-managed' }
   }
 
@@ -936,6 +936,13 @@ function updateSettingsJsonModels(
   }
 }
 
+function providerNeedsProxy(
+  apiFormat: ApiFormat,
+  supportsNestedToolResultMedia: boolean,
+): boolean {
+  return apiFormat !== 'anthropic' || !supportsNestedToolResultMedia
+}
+
 function updateSettingsJsonProviderConnection(
   raw: string,
   apiFormat: ApiFormat,
@@ -946,6 +953,7 @@ function updateSettingsJsonProviderConnection(
   proxyBaseUrl: string,
   toolSearchEnabled = false,
   disableExperimentalBetas = false,
+  supportsNestedToolResultMedia = true,
 ): string {
   try {
     const parsed = JSON.parse(raw || '{}') as { env?: Record<string, unknown> }
@@ -957,8 +965,13 @@ function updateSettingsJsonProviderConnection(
     delete env.ANTHROPIC_AUTH_TOKEN
     applyToolSearchEnv(env, apiFormat, toolSearchEnabled)
     applyDisableExperimentalBetasEnv(env, disableExperimentalBetas)
-    env.ANTHROPIC_BASE_URL = apiFormat !== 'anthropic' ? proxyBaseUrl : baseUrl
-    Object.assign(env, buildSettingsJsonAuthEnv(apiFormat, authStrategy, apiKey, preset))
+    env.ANTHROPIC_BASE_URL = providerNeedsProxy(apiFormat, supportsNestedToolResultMedia) ? proxyBaseUrl : baseUrl
+    Object.assign(env, buildSettingsJsonAuthEnv(
+      providerNeedsProxy(apiFormat, supportsNestedToolResultMedia),
+      authStrategy,
+      apiKey,
+      preset,
+    ))
     parsed.env = env
     return JSON.stringify(parsed, null, 2)
   } catch {
@@ -1044,6 +1057,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   const [toolSearchEnabled, setToolSearchEnabled] = useState(provider?.toolSearchEnabled ?? false)
   const [toolSearchConfirmOpen, setToolSearchConfirmOpen] = useState(false)
   const [disableExperimentalBetas, setDisableExperimentalBetas] = useState(provider?.disableExperimentalBetas ?? false)
+  const [supportsNestedToolResultMedia, setSupportsNestedToolResultMedia] = useState(provider?.supportsNestedToolResultMedia ?? true)
   const [imageGeneration, setImageGeneration] = useState<ImageGenerationFormValue>({
     enabled: Boolean(provider?.imageGeneration),
     model: provider?.imageGeneration?.model ?? '',
@@ -1076,6 +1090,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     autoCompactWindow,
     toolSearchEnabled,
     disableExperimentalBetas,
+    supportsNestedToolResultMedia,
   }
   const providerSettingsRef = useRef(currentProviderSettings)
   providerSettingsRef.current = currentProviderSettings
@@ -1104,8 +1119,9 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           autoCompactWindow,
           toolSearchEnabled,
           disableExperimentalBetas,
+          supportsNestedToolResultMedia,
         } = providerSettingsRef.current
-        const needsProxy = apiFormat !== 'anthropic'
+        const needsProxy = providerNeedsProxy(apiFormat, supportsNestedToolResultMedia)
         const autoCompactWindowEnv = autoCompactWindow.trim()
         const modelContextWindows = buildModelContextWindows(models, modelContextInputs)
         const normalizedModels = normalizeModelMapping(models)
@@ -1120,7 +1136,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
             ? { [MODEL_CONTEXT_WINDOWS_ENV_KEY]: JSON.stringify(modelContextWindows) }
             : {}),
           ANTHROPIC_BASE_URL: needsProxy ? providerProxyBaseUrl : baseUrl,
-          ...buildSettingsJsonAuthEnv(apiFormat, authStrategy, apiKey, selectedPreset),
+          ...buildSettingsJsonAuthEnv(needsProxy, authStrategy, apiKey, selectedPreset),
           ANTHROPIC_MODEL: runtimeModels.main,
           ...(runtimeModels.fable ? { ANTHROPIC_DEFAULT_FABLE_MODEL: runtimeModels.fable } : {}),
           ANTHROPIC_DEFAULT_HAIKU_MODEL: runtimeModels.haiku,
@@ -1181,6 +1197,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     setToolSearchEnabled(false)
     setToolSearchConfirmOpen(false)
     setDisableExperimentalBetas(false)
+    setSupportsNestedToolResultMedia(true)
     setShowContextSettings(false)
     setTestResult(null)
   }
@@ -1271,6 +1288,10 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   ] satisfies Array<{ value: ProviderAuthStrategy; label: string; description: string; icon: ReactNode }>
   const selectedAuthStrategyLabel = authStrategyItems.find((item) => item.value === authStrategy)?.label ?? t('settings.providers.authStrategyAuthToken')
   const toolSearchUnsupported = apiFormat !== 'anthropic'
+  const nestedToolResultMediaUnsupported = apiFormat !== 'anthropic'
+  const nestedToolResultMediaDescription = nestedToolResultMediaUnsupported
+    ? t('settings.providers.nestedToolResultMediaUnsupported')
+    : t('settings.providers.nestedToolResultMediaDesc')
   const toolSearchDescription = toolSearchUnsupported
     ? t('settings.providers.toolSearchUnsupported')
     : t('settings.providers.toolSearchDesc')
@@ -1294,20 +1315,37 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   }
   const handleBaseUrlChange = (value: string) => {
     setBaseUrl(value)
-    setSettingsJson((current) => updateSettingsJsonProviderConnection(current, apiFormat, authStrategy, apiKey, selectedPreset, value, providerProxyBaseUrl, toolSearchEnabled, disableExperimentalBetas))
+    setSettingsJson((current) => updateSettingsJsonProviderConnection(current, apiFormat, authStrategy, apiKey, selectedPreset, value, providerProxyBaseUrl, toolSearchEnabled, disableExperimentalBetas, supportsNestedToolResultMedia))
   }
   const handleApiKeyChange = (value: string) => {
     setApiKey(value)
-    setSettingsJson((current) => updateSettingsJsonProviderConnection(current, apiFormat, authStrategy, value, selectedPreset, baseUrl, providerProxyBaseUrl, toolSearchEnabled, disableExperimentalBetas))
+    setSettingsJson((current) => updateSettingsJsonProviderConnection(current, apiFormat, authStrategy, value, selectedPreset, baseUrl, providerProxyBaseUrl, toolSearchEnabled, disableExperimentalBetas, supportsNestedToolResultMedia))
   }
   const handleApiFormatChange = (value: ApiFormat) => {
     setApiFormat(value)
-    setSettingsJson((current) => updateSettingsJsonProviderConnection(current, value, authStrategy, apiKey, selectedPreset, baseUrl, providerProxyBaseUrl, toolSearchEnabled, disableExperimentalBetas))
+    setSettingsJson((current) => updateSettingsJsonProviderConnection(current, value, authStrategy, apiKey, selectedPreset, baseUrl, providerProxyBaseUrl, toolSearchEnabled, disableExperimentalBetas, supportsNestedToolResultMedia))
   }
   const handleAuthStrategyChange = (value: ProviderAuthStrategy) => {
     setAuthStrategy(value)
-    setSettingsJson((current) => updateSettingsJsonProviderConnection(current, apiFormat, value, apiKey, selectedPreset, baseUrl, providerProxyBaseUrl, toolSearchEnabled, disableExperimentalBetas))
+    setSettingsJson((current) => updateSettingsJsonProviderConnection(current, apiFormat, value, apiKey, selectedPreset, baseUrl, providerProxyBaseUrl, toolSearchEnabled, disableExperimentalBetas, supportsNestedToolResultMedia))
   }
+  const handleNestedToolResultMediaToggle = (enabled: boolean) => {
+    if (nestedToolResultMediaUnsupported) return
+    setSupportsNestedToolResultMedia(enabled)
+    setSettingsJson((current) => updateSettingsJsonProviderConnection(
+      current,
+      apiFormat,
+      authStrategy,
+      apiKey,
+      selectedPreset,
+      baseUrl,
+      providerProxyBaseUrl,
+      toolSearchEnabled,
+      disableExperimentalBetas,
+      enabled,
+    ))
+  }
+
   const handleToolSearchToggle = (enabled: boolean) => {
     if (toolSearchUnsupported) return
     if (enabled) {
@@ -1326,6 +1364,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     setDisableExperimentalBetas(disabled)
     setSettingsJson((current) => updateSettingsJsonDisableExperimentalBetas(current, disabled))
   }
+
   const handleModelChange = (slot: ModelSlot, value: string) => {
     const hasMarker = hasModel1mMarker(value)
     const nextModels = { ...models, [slot]: stripModel1mMarker(value) }
@@ -1490,6 +1529,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           ...(Object.keys(parsedModelContextWindows).length > 0 && { modelContextWindows: parsedModelContextWindows }),
           toolSearchEnabled,
           ...(disableExperimentalBetas && { disableExperimentalBetas }),
+          supportsNestedToolResultMedia,
           ...(storedImageGeneration !== undefined && { imageGeneration: storedImageGeneration }),
           notes: notes.trim() || undefined,
         })
@@ -1507,6 +1547,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
             : null,
           toolSearchEnabled,
           disableExperimentalBetas,
+          supportsNestedToolResultMedia,
           imageGeneration: storedImageGeneration ?? null,
           notes: notes.trim() || undefined,
         }
@@ -1547,7 +1588,8 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
       const savedConfigUnchanged = mode === 'edit' && provider && !apiKey.trim() &&
         baseUrl.trim() === provider.baseUrl.trim() &&
         apiFormat === provider.apiFormat &&
-        authStrategy === provider.authStrategy
+        authStrategy === provider.authStrategy &&
+        supportsNestedToolResultMedia === (provider.supportsNestedToolResultMedia ?? true)
       if (savedConfigUnchanged && provider) {
         result = await useProviderStore.getState().testProvider(provider.id, {
           modelId: models.main.trim(),
@@ -1560,6 +1602,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           modelId: models.main.trim(),
           authStrategy,
           apiFormat,
+          supportsNestedToolResultMedia,
         })
       }
       setTestResult(result)
@@ -1742,6 +1785,26 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
             </div>
             <div className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
               {t('settings.providers.disableExperimentalBetasDesc')}
+            </div>
+          </div>
+        </label>
+
+        <label className="relative flex cursor-pointer items-start gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-3 transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)]">
+          <input
+            type="checkbox"
+            aria-label={t('settings.providers.supportsNestedToolResultMedia')}
+            checked={supportsNestedToolResultMedia}
+            disabled={nestedToolResultMediaUnsupported}
+            onChange={(e) => handleNestedToolResultMediaToggle(e.target.checked)}
+            className={SETTINGS_CHECKBOX_INPUT_CLASS}
+          />
+          <SettingsCheckboxMark checked={supportsNestedToolResultMedia} disabled={nestedToolResultMediaUnsupported} />
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-[var(--color-text-primary)]">
+              {t('settings.providers.supportsNestedToolResultMedia')}
+            </div>
+            <div className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
+              {nestedToolResultMediaDescription}
             </div>
           </div>
         </label>

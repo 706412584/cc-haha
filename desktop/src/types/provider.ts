@@ -49,6 +49,7 @@ export type SavedProvider = {
   modelContextWindows?: ModelContextWindows
   toolSearchEnabled?: boolean
   disableExperimentalBetas?: boolean
+  supportsNestedToolResultMedia?: boolean
   imageGeneration?: ImageGenerationConfig
   notes?: string
   /**
@@ -80,6 +81,7 @@ export type CreateProviderInput = {
   modelContextWindows?: ModelContextWindows
   toolSearchEnabled?: boolean
   disableExperimentalBetas?: boolean
+  supportsNestedToolResultMedia?: boolean
   imageGeneration?: ImageGenerationConfig
   notes?: string
 }
@@ -97,6 +99,7 @@ export type UpdateProviderInput = {
   modelContextWindows?: ModelContextWindows | null
   toolSearchEnabled?: boolean
   disableExperimentalBetas?: boolean
+  supportsNestedToolResultMedia?: boolean
   imageGeneration?: ImageGenerationConfig | null
   notes?: string
 }
@@ -107,6 +110,7 @@ export type TestProviderConfigInput = {
   modelId: string
   authStrategy?: ProviderAuthStrategy
   apiFormat?: ApiFormat
+  supportsNestedToolResultMedia?: boolean
 }
 
 /** Input for the server-side `/api/providers/fetch-models` proxy. */
@@ -133,7 +137,7 @@ export type ProviderTestStepResult = {
 export type ProviderTestResult = {
   /** Step 1: Basic connectivity */
   connectivity: ProviderTestStepResult
-  /** Step 2: Proxy pipeline (only for openai_* formats) */
+  /** Step 2: Proxy pipeline when the provider requires local request handling */
   proxy?: ProviderTestStepResult
 }
 

@@ -127,6 +127,7 @@ export type OpenAIChatStreamChunk = {
 export type OpenAIResponsesInputContentPart =
   | { type: 'input_text'; text: string }
   | { type: 'input_image'; image_url: string }
+  | { type: 'input_file'; file_url?: string; file_data?: string; filename?: string }
 
 export type OpenAIResponsesInputItem =
   | { type: 'message'; role: 'user' | 'assistant' | 'system'; content: string | OpenAIResponsesInputContentPart[] }
@@ -180,10 +181,41 @@ export type OpenAIResponsesResponse = {
 
 // ─── Anthropic Types (subset used by transforms) ───────────
 
+export type AnthropicImageSource =
+  | { type: 'base64'; media_type: string; data: string }
+  | { type: 'url'; url: string }
+  | { type: 'file'; file_id: string }
+
+/**
+ * A text block inside a custom-content document (`source.type: 'content'`).
+ * Mirrors the Anthropic `TextBlockParam` fields the wire protocol allows
+ * (cache_control, citations) so degradation keeps them instead of dropping
+ * them silently.
+ */
+export type AnthropicDocumentContentTextBlock = {
+  type: 'text'
+  text: string
+  cache_control?: unknown
+  citations?: unknown
+}
+
+export type AnthropicDocumentSource =
+  | { type: 'base64'; media_type: string; data: string }
+  | { type: 'url'; url: string }
+  | { type: 'text'; media_type: string; data: string }
+  | { type: 'file'; file_id: string }
+  | {
+      type: 'content'
+      content: string | Array<AnthropicDocumentContentTextBlock | { type: 'image'; source: AnthropicImageSource; cache_control?: unknown }>
+    }
+
 export type AnthropicContentBlock =
   | { type: 'text'; text: string; cache_control?: unknown }
-  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string }; cache_control?: unknown }
+  | { type: 'image'; source: AnthropicImageSource; cache_control?: unknown }
+  | { type: 'document'; source: AnthropicDocumentSource; title?: string; context?: string; citations?: unknown; cache_control?: unknown }
+  | { type: 'search_result'; source: string; title: string; content: Array<{ type: 'text'; text: string }>; citations?: unknown; cache_control?: unknown }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown>; cache_control?: unknown }
+  | { type: 'server_tool_use'; id: string; name: string; input: unknown; cache_control?: unknown }
   | { type: 'tool_result'; tool_use_id: string; content: string | AnthropicContentBlock[]; is_error?: boolean; cache_control?: unknown }
   | { type: 'thinking'; thinking: string; signature?: string }
   | { type: 'redacted_thinking'; data: string }
