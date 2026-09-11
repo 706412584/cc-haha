@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { AsyncResource } from 'node:async_hooks'
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ToolUseContext } from '../Tool.js'
@@ -378,6 +378,51 @@ describe('Task tool execution ordering', () => {
     }
   })
 
+  it('self-heals a NUL-corrupted revision file instead of failing every mutation', async () => {
+    const configDir = await mkdtemp(join(tmpdir(), 'task-revision-corrupt-'))
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = configDir
+    const taskListId = 'revision-corruption'
+    const revisionPath = join(configDir, 'tasks', taskListId, '.revision')
+
+    try {
+      const first = await createTaskWithCommit(taskListId, {
+        subject: 'Survives corruption',
+        description: 'Written before the disk corruption',
+        status: 'pending',
+        blocks: [],
+        blockedBy: [],
+      })
+      expect(first.revision).toBe(1)
+
+      // Simulate a crash/power-loss torn write: the revision file (and one
+      // task file) ends up as NUL bytes on disk, as observed in the wild.
+      await writeFile(revisionPath, Buffer.from('\0\0', 'binary'))
+      const corruptedTaskPath = join(configDir, 'tasks', taskListId, '1.json')
+      await writeFile(corruptedTaskPath, Buffer.alloc(64).fill(0))
+
+      // The list must stay readable: the corrupted task is skipped and the
+      // revision read heals to 0 instead of throwing.
+      const snapshot = await readTaskListSnapshot(taskListId)
+      expect(snapshot.tasks).toEqual([])
+
+      // Mutations must work again and restore a monotonic revision sequence.
+      const healed = await createTaskWithCommit(taskListId, {
+        subject: 'Healed list',
+        description: 'Created after the corruption healed',
+        status: 'pending',
+        blocks: [],
+        blockedBy: [],
+      })
+      expect(healed.revision).toBe(1)
+      expect(await readFile(revisionPath, 'utf-8')).toBe('1')
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      await rm(configDir, { recursive: true, force: true })
+    }
+  })
+
   it('fails closed on malformed lifecycle state and preserves forward fields', async () => {
     const configDir = await mkdtemp(join(tmpdir(), 'task-lifecycle-state-'))
     const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
@@ -421,9 +466,10 @@ describe('Task tool execution ordering', () => {
 
       await resetTaskList('empty-revision')
       await writeFile(join(getTasksDir('empty-revision'), '.revision'), '   ')
-      await expect(readTaskListSnapshot('empty-revision')).rejects.toThrow(
-        'Invalid empty task-list revision',
-      )
+      // A blank/whitespace revision is treated as corrupt and healed to 0
+      // rather than rejected: failing closed here would permanently disable
+      // every task mutation for the list (observed with NUL-torn files).
+      expect((await readTaskListSnapshot('empty-revision')).revision).toBe(0)
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
       else process.env.CLAUDE_CONFIG_DIR = previousConfigDir

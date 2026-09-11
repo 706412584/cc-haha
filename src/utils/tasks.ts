@@ -158,12 +158,17 @@ function getTaskListRevisionPath(taskListId: string): string {
 async function readTaskListRevisionLocked(taskListId: string): Promise<number> {
   try {
     const content = (await readFile(getTaskListRevisionPath(taskListId), 'utf-8')).trim()
-    if (!content) {
-      throw new Error(`Invalid empty task-list revision for ${taskListId}`)
-    }
     const revision = Number(content)
-    if (Number.isSafeInteger(revision) && revision >= 0) return revision
-    throw new Error(`Invalid task-list revision for ${taskListId}: ${content}`)
+    if (content && Number.isSafeInteger(revision) && revision >= 0) return revision
+    // A torn write (crash/power loss) can leave the revision file as NUL
+    // bytes or other garbage. Throwing here would permanently disable every
+    // task mutation for the list, so heal instead: reset to 0 and rewrite the
+    // file so subsequent bumps stay monotonic from the recovered value.
+    logForDebugging(
+      `[Tasks] Corrupt task-list revision for ${taskListId} (${JSON.stringify(content)}); resetting to 0`,
+    )
+    await writeFile(getTaskListRevisionPath(taskListId), '0')
+    return 0
   } catch (error) {
     if (getErrnoCode(error) === 'ENOENT') return 0
     throw error
