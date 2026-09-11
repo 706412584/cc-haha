@@ -184,6 +184,8 @@ export async function handleSessionsApi(
     if (subResource === 'provider-transition') {
       if (req.method !== 'POST') return methodNotAllowed(req.method)
       return await createProviderTransitionSession(req, sessionId)
+    }
+
     if (subResource === 'summary') {
       if (req.method !== 'GET') {
         return Response.json(
