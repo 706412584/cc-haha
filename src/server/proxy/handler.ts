@@ -24,6 +24,7 @@ import { openaiChatToAnthropic } from './transform/openaiChatToAnthropic.js'
 import { openaiResponsesToAnthropic } from './transform/openaiResponsesToAnthropic.js'
 import { openaiChatStreamToAnthropic } from './streaming/openaiChatStreamToAnthropic.js'
 import { openaiResponsesStreamToAnthropic } from './streaming/openaiResponsesStreamToAnthropic.js'
+import { isOverLengthToolName, ToolNameWireMap } from './transform/toolNameWire.js'
 import type { AnthropicRequest } from './transform/types.js'
 import { getProxyFetchOptions } from '../../utils/proxy.js'
 import {
@@ -656,6 +657,10 @@ async function handleOpenaiChat(
   networkSettings: NetworkSettings,
   traceContext: ProxyTraceContext | null,
 ): Promise<Response> {
+  // Over-length MCP tool names violate the `^[a-zA-Z0-9_-]{1,64}$` limit most
+  // OpenAI-compatible endpoints enforce. Only pay the mapping cost when the
+  // request actually carries one.
+  const toolNames = body.tools?.some((t) => isOverLengthToolName(t.name)) ? new ToolNameWireMap() : undefined
   const transformed = anthropicToOpenaiChat(body, {
     // Third-party Anthropic-compatible endpoints may hide reasoning behind
     // the OpenAI `thinking` toggle and `reasoning_content` — always pass them
@@ -663,6 +668,7 @@ async function handleOpenaiChat(
     roundTripReasoningContent: true,
     passThinkingToggle: true,
     imageContentMode: shouldUseTextOnlyOpenAIChatContent(baseUrl, body.model) ? 'text_only' : 'vision',
+    toolNames,
   })
   const url = buildOpenaiEndpoint(baseUrl, 'chat/completions')
   const upstreamRequestHeaders = {
@@ -767,7 +773,7 @@ async function handleOpenaiChat(
       )
     }
     const upstreamBody = withStreamIdleTimeout(upstream.body, networkSettings.aiRequestTimeoutMs)
-    const anthropicStream = openaiChatStreamToAnthropic(upstreamBody, body.model)
+    const anthropicStream = openaiChatStreamToAnthropic(upstreamBody, body.model, toolNames)
     const tracedStream = traceContext
       ? captureTraceStream(anthropicStream, async (bodySnapshot, error) => {
           await recordProxyTrace({
@@ -801,7 +807,7 @@ async function handleOpenaiChat(
   const policyError = getOpenAIPolicyError(responseBody)
   const anthropicResponse = policyError
     ? { type: 'error', error: { type: 'permission_error', ...policyError } }
-    : openaiChatToAnthropic(responseBody, body.model)
+    : openaiChatToAnthropic(responseBody, body.model, toolNames)
   if (traceContext) {
     recordProxyTraceInBackground({
       callId: traceCallId,
@@ -853,7 +859,10 @@ async function handleOpenaiResponses(
   traceContext: ProxyTraceContext | null,
   promptCacheKey?: string,
 ): Promise<Response> {
-  const transformed = anthropicToOpenaiResponses(body, { cacheKey: promptCacheKey })
+  // Same over-length tool-name guard as the Chat Completions path — the
+  // Responses API enforces the same 64-char function-name limit.
+  const toolNames = body.tools?.some((t) => isOverLengthToolName(t.name)) ? new ToolNameWireMap() : undefined
+  const transformed = anthropicToOpenaiResponses(body, { cacheKey: promptCacheKey, toolNames })
   const url = buildOpenaiEndpoint(baseUrl, 'responses')
   const upstreamRequestHeaders = {
     'Content-Type': 'application/json',
@@ -957,7 +966,7 @@ async function handleOpenaiResponses(
       )
     }
     const upstreamBody = withStreamIdleTimeout(upstream.body, networkSettings.aiRequestTimeoutMs)
-    const anthropicStream = openaiResponsesStreamToAnthropic(upstreamBody, body.model)
+    const anthropicStream = openaiResponsesStreamToAnthropic(upstreamBody, body.model, { toolNames })
     const tracedStream = traceContext
       ? captureTraceStream(anthropicStream, async (bodySnapshot, error) => {
           await recordProxyTrace({
@@ -991,7 +1000,7 @@ async function handleOpenaiResponses(
   const policyError = getOpenAIPolicyError(responseBody)
   const anthropicResponse = policyError
     ? { type: 'error', error: { type: 'permission_error', ...policyError } }
-    : openaiResponsesToAnthropic(responseBody, body.model)
+    : openaiResponsesToAnthropic(responseBody, body.model, { toolNames })
   if (traceContext) {
     recordProxyTraceInBackground({
       callId: traceCallId,

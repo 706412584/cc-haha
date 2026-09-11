@@ -22,6 +22,7 @@ import { anthropicToOpenaiResponses } from '../../server/proxy/transform/anthrop
 import { openaiResponsesToAnthropic } from '../../server/proxy/transform/openaiResponsesToAnthropic.js'
 import { openaiResponsesStreamToAnthropic } from '../../server/proxy/streaming/openaiResponsesStreamToAnthropic.js'
 import { openaiResponsesStreamToAnthropicResponse } from '../../server/proxy/streaming/openaiResponsesStreamToAnthropicResponse.js'
+import { isOverLengthToolName, ToolNameWireMap } from '../../server/proxy/transform/toolNameWire.js'
 import type { AnthropicRequest } from '../../server/proxy/transform/types.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { OPENAI_CODEX_STREAM_MARKER_HEADER } from './streamPolicy.js'
@@ -53,12 +54,17 @@ export function buildOpenAICodexFetch(
     const sessionId = readSessionId(input, init)
     const identity = resolveOpenAIRequestIdentity(sessionId, agentId)
     const cacheKey = resolvePromptCacheKey(originalBody, sessionId)
+    // Codex enforces the same 64-char function-name limit as other
+    // OpenAI-compatible upstreams; rename over-length MCP tools both ways.
+    const toolNames = originalBody.tools?.some((t) => isOverLengthToolName(t.name))
+      ? new ToolNameWireMap()
+      : undefined
     const transformedBody = anthropicToOpenaiResponses(
       {
         ...originalBody,
         model: mappedModel,
       },
-      { preserveOpenAIReasoning: true, cacheKey },
+      { preserveOpenAIReasoning: true, cacheKey, toolNames },
     )
     // Keep a valid native request-scoped value ahead of the transformed value,
     // the session env, and the model default. The generic transformer preserves
@@ -191,6 +197,7 @@ export function buildOpenAICodexFetch(
             onTerminal: () => upstreamAbort?.markTerminal(),
             onCancel: reason => upstreamAbort?.abort(reason),
             onSettled: () => upstreamAbort?.dispose(),
+            toolNames,
           },
         ),
         {
@@ -212,7 +219,7 @@ export function buildOpenAICodexFetch(
       const responseBody = await openaiResponsesStreamToAnthropicResponse(
         upstream.body,
         mappedModel,
-        { openAICodexOAuth: true },
+        { openAICodexOAuth: true, toolNames },
       )
       return Response.json(responseBody)
     }
@@ -222,7 +229,7 @@ export function buildOpenAICodexFetch(
       openaiResponsesToAnthropic(
         responseBody,
         mappedModel,
-        { preserveOpenAIReasoning: true },
+        { preserveOpenAIReasoning: true, toolNames },
       ),
     )
   }

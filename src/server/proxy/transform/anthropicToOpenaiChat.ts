@@ -16,6 +16,7 @@ import type {
 } from './types.js'
 import { stripLeadingBillingHeader } from './billingHeader.js'
 import { normalizeOpenAIReasoningEffort } from './effort.js'
+import type { ToolNameWireMap } from './toolNameWire.js'
 
 type OpenAIChatImageContentMode = 'vision' | 'text_only'
 
@@ -29,6 +30,7 @@ type OpenAIChatTransformOptions = {
   passThinkingToggle?: boolean
   passSamplingParams?: boolean
   imageContentMode?: OpenAIChatImageContentMode
+  toolNames?: ToolNameWireMap
 }
 
 // Synthetic degradation text carries its own separators: the parts are
@@ -100,7 +102,7 @@ export function anthropicToOpenaiChat(
       .map((t): OpenAITool => ({
         type: 'function',
         function: {
-          name: t.name,
+          name: options.toolNames ? options.toolNames.toWire(t.name) : t.name,
           description: t.description,
           parameters: t.input_schema,
         },
@@ -109,7 +111,7 @@ export function anthropicToOpenaiChat(
 
   // tool_choice
   if (body.tool_choice !== undefined) {
-    result.tool_choice = convertToolChoice(body.tool_choice)
+    result.tool_choice = convertToolChoice(body.tool_choice, options.toolNames)
   }
 
   // thinking → reasoning_effort
@@ -573,7 +575,7 @@ function searchResultToText(block: Extract<AnthropicContentBlock, { type: 'searc
 function convertAssistantMessage(
   blocks: AnthropicContentBlock[],
   output: OpenAIChatMessage[],
-  options: { roundTripReasoningContent?: boolean },
+  options: { roundTripReasoningContent?: boolean; toolNames?: ToolNameWireMap },
 ): void {
   let textContent = ''
   let reasoningContent = ''
@@ -589,7 +591,7 @@ function convertAssistantMessage(
         id: block.id,
         type: 'function',
         function: {
-          name: block.name,
+          name: options.toolNames ? options.toolNames.toWire(block.name) : block.name,
           arguments: typeof block.input === 'string' ? block.input : JSON.stringify(block.input),
         },
       })
@@ -611,7 +613,7 @@ function convertAssistantMessage(
   output.push(msg)
 }
 
-function convertToolChoice(choice: unknown): unknown {
+function convertToolChoice(choice: unknown, toolNames?: ToolNameWireMap): unknown {
   if (typeof choice === 'string') return choice
   if (typeof choice === 'object' && choice !== null) {
     const c = choice as Record<string, unknown>
@@ -619,7 +621,8 @@ function convertToolChoice(choice: unknown): unknown {
     if (c.type === 'any') return 'required'
     if (c.type === 'none') return 'none'
     if (c.type === 'tool' && typeof c.name === 'string') {
-      return { type: 'function', function: { name: c.name } }
+      const name = toolNames ? toolNames.toWire(c.name) : c.name
+      return { type: 'function', function: { name } }
     }
   }
   return 'auto'

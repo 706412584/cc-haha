@@ -1,5 +1,6 @@
 import { getOpenAIPolicyError } from '../../../services/openaiAuth/policyError.js'
 import { openaiResponsesToAnthropic } from '../transform/openaiResponsesToAnthropic.js'
+import type { ToolNameWireMap } from '../transform/toolNameWire.js'
 import type {
   AnthropicResponse,
   OpenAIResponsesResponse,
@@ -7,6 +8,8 @@ import type {
 
 export type OpenAIResponsesCollectOptions = {
   openAICodexOAuth?: boolean
+  /** Map over-length wire tool names back to their originals. */
+  toolNames?: ToolNameWireMap
 }
 
 type StreamFallbackState = {
@@ -124,7 +127,7 @@ export async function openaiResponsesStreamToAnthropicResponse(
   return openaiResponsesToAnthropic(
     completedResponse ?? buildFallbackResponse(fallback),
     model,
-    { preserveOpenAIReasoning: options.openAICodexOAuth },
+    { preserveOpenAIReasoning: options.openAICodexOAuth, toolNames: options.toolNames },
   )
 }
 

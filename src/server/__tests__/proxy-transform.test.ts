@@ -7,6 +7,8 @@ import { anthropicToOpenaiChat } from '../proxy/transform/anthropicToOpenaiChat.
 import { anthropicToOpenaiResponses } from '../proxy/transform/anthropicToOpenaiResponses.js'
 import { openaiChatToAnthropic } from '../proxy/transform/openaiChatToAnthropic.js'
 import { openaiResponsesToAnthropic } from '../proxy/transform/openaiResponsesToAnthropic.js'
+import { ToolNameWireMap } from '../proxy/transform/toolNameWire.js'
+import { openaiChatStreamToAnthropic } from '../proxy/streaming/openaiChatStreamToAnthropic.js'
 import { stripLeadingBillingHeader } from '../proxy/transform/billingHeader.js'
 import { openaiUsageToAnthropic } from '../proxy/transform/usage.js'
 import { resolvePromptCacheKey } from '../proxy/promptCacheKey.js'
@@ -2088,6 +2090,159 @@ describe('openaiResponsesToAnthropic', () => {
     }
     const result = openaiResponsesToAnthropic(res, 'gpt-4o')
     expect(result.content).toEqual([{ type: 'text', text: '' }])
+  })
+})
+
+// ─── ToolNameWireMap (over-length tool names) ───────────────────
+
+describe('ToolNameWireMap over-length tool names', () => {
+  const LONG_MCP_TOOL = 'mcp__plugin_spark2-gamedev_sce-editor-mcp__spark2_runtime_call_tool'
+
+  test('wire name stays within the 64-char OpenAI function-name limit', () => {
+    const toolNames = new ToolNameWireMap()
+    const wire = toolNames.toWire(LONG_MCP_TOOL)
+    expect(wire.length).toBeLessThanOrEqual(64)
+    expect(wire.startsWith('truncated__')).toBe(true)
+    expect(wire).toMatch(/^[a-zA-Z0-9_-]+$/)
+  })
+
+  test('short names pass through untouched and map back to themselves', () => {
+    const toolNames = new ToolNameWireMap()
+    expect(toolNames.toWire('get_weather')).toBe('get_weather')
+    expect(toolNames.fromWire('get_weather')).toBe('get_weather')
+  })
+
+  test('renames consistently and restores the original on the response side', () => {
+    const toolNames = new ToolNameWireMap()
+    const wire = toolNames.toWire(LONG_MCP_TOOL)
+    expect(toolNames.toWire(LONG_MCP_TOOL)).toBe(wire)
+    expect(toolNames.fromWire(wire)).toBe(LONG_MCP_TOOL)
+  })
+
+  test('unmapped wire names pass through fromWire unchanged', () => {
+    const toolNames = new ToolNameWireMap()
+    expect(toolNames.fromWire('never_registered')).toBe('never_registered')
+  })
+
+  test('anthropicToOpenaiChat renames tools, assistant tool_use history, and tool_choice together', () => {
+    const toolNames = new ToolNameWireMap()
+    const req: AnthropicRequest = {
+      model: 'deepseek-v4-pro',
+      max_tokens: 100,
+      messages: [
+        { role: 'user', content: 'Run the editor tool' },
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'tc_1', name: LONG_MCP_TOOL, input: { op: 'save' } }],
+        },
+        {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'tc_1', content: 'saved' }],
+        },
+      ],
+      tools: [{ name: LONG_MCP_TOOL, description: 'Editor runtime', input_schema: { type: 'object' } }],
+      tool_choice: { type: 'tool', name: LONG_MCP_TOOL },
+    }
+    const result = anthropicToOpenaiChat(req, { toolNames })
+    const wire = toolNames.toWire(LONG_MCP_TOOL)
+    expect(result.tools![0].function.name).toBe(wire)
+    expect(result.messages[1].tool_calls![0].function.name).toBe(wire)
+    expect(result.tool_choice).toEqual({ type: 'function', function: { name: wire } })
+    // tool_call ids and tool messages are name-independent — untouched.
+    expect(result.messages[1].tool_calls![0].id).toBe('tc_1')
+    expect(result.messages[2].tool_call_id).toBe('tc_1')
+  })
+
+  test('openaiChatToAnthropic maps the wire name back to the original', () => {
+    const toolNames = new ToolNameWireMap()
+    const wire = toolNames.toWire(LONG_MCP_TOOL)
+    const res: OpenAIChatResponse = {
+      id: 'chatcmpl-wire',
+      object: 'chat.completion',
+      created: 1234567890,
+      model: 'deepseek-v4-pro',
+      choices: [{
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call_1',
+            type: 'function',
+            function: { name: wire, arguments: '{}' },
+          }],
+        },
+        finish_reason: 'tool_calls',
+      }],
+    }
+    const result = openaiChatToAnthropic(res, 'deepseek-v4-pro', toolNames)
+    const toolUse = result.content.find(b => b.type === 'tool_use') as { type: 'tool_use'; name: string }
+    expect(toolUse.name).toBe(LONG_MCP_TOOL)
+  })
+
+  test('anthropicToOpenaiResponses + openaiResponsesToAnthropic round-trip the rename', () => {
+    const toolNames = new ToolNameWireMap()
+    const req: AnthropicRequest = {
+      model: 'gpt-6-astra',
+      max_tokens: 100,
+      messages: [
+        { role: 'user', content: 'Run the editor tool' },
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'tc_1', name: LONG_MCP_TOOL, input: { op: 'save' } }],
+        },
+      ],
+      tools: [{ name: LONG_MCP_TOOL, description: 'Editor runtime', input_schema: { type: 'object' } }],
+    }
+    const wireReq = anthropicToOpenaiResponses(req, { toolNames })
+    const wire = toolNames.toWire(LONG_MCP_TOOL)
+    expect(wireReq.tools![0].name).toBe(wire)
+    const functionCall = wireReq.input.find(
+      item => item.type === 'function_call',
+    ) as { type: 'function_call'; name: string }
+    expect(functionCall.name).toBe(wire)
+
+    const res: OpenAIResponsesResponse = {
+      id: 'resp-wire',
+      object: 'response',
+      created_at: 1234567890,
+      model: 'gpt-6-astra',
+      status: 'completed',
+      output: [{
+        type: 'function_call',
+        id: 'fc_1',
+        call_id: 'call_1',
+        name: wire,
+        arguments: '{}',
+      }],
+    }
+    const result = openaiResponsesToAnthropic(res, 'gpt-6-astra', { toolNames })
+    const toolUse = result.content.find(b => b.type === 'tool_use') as { type: 'tool_use'; name: string }
+    expect(toolUse.name).toBe(LONG_MCP_TOOL)
+  })
+
+  test('chat streaming maps the wire tool name back in content_block_start', async () => {
+    const toolNames = new ToolNameWireMap()
+    const wire = toolNames.toWire(LONG_MCP_TOOL)
+    const sse = [
+      'data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant"}}]}',
+      `data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"${wire}","arguments":"{}"}}]}}]}`,
+      `data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+      'data: [DONE]',
+    ].join('\n\n')
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(sse))
+        controller.close()
+      },
+    })
+    const anthropic = openaiChatStreamToAnthropic(stream, 'deepseek-v4-pro', toolNames)
+    const text = await new Response(anthropic).text()
+    const start = text
+      .split('\n')
+      .find(line => line.startsWith('data: ') && line.includes('"content_block_start"'))
+    expect(start).toBeDefined()
+    expect(JSON.parse(start!.slice(6)).content_block.name).toBe(LONG_MCP_TOOL)
   })
 })
 

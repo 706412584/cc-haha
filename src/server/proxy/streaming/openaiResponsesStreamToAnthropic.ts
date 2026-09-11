@@ -8,6 +8,7 @@ import { getOpenAIPolicyError } from '../../../services/openaiAuth/policyError.j
 import { encodeOpenAIReasoningEnvelope } from '../transform/openaiReasoning.js'
 import { stringifyOpenAIToolArguments } from '../transform/toolArguments.js'
 import { openaiUsageToAnthropic } from '../transform/usage.js'
+import type { ToolNameWireMap } from '../transform/toolNameWire.js'
 import type {
   OpenAICompatibleUsage,
   OpenAIResponsesReasoningItem,
@@ -24,6 +25,8 @@ export type OpenAIResponsesStreamOptions = {
   onTerminal?: (event: string) => void
   onCancel?: (reason: unknown) => void
   onSettled?: () => void
+  /** Map over-length wire tool names back to their originals. */
+  toolNames?: ToolNameWireMap
 }
 
 type StreamState = {
@@ -261,7 +264,7 @@ function processEvent(
           content_block: {
             type: 'tool_use',
             id: callId,
-            name,
+            name: options.toolNames ? options.toolNames.fromWire(name) : name,
             input: {},
           },
         })))

@@ -15,6 +15,7 @@ import type {
 import { stripLeadingBillingHeader } from './billingHeader.js'
 import { normalizeOpenAIReasoningEffort } from './effort.js'
 import { decodeOpenAIReasoningEnvelope } from './openaiReasoning.js'
+import type { ToolNameWireMap } from './toolNameWire.js'
 
 export type OpenAIResponsesTransformOptions = {
   /** Stable cache routing key, forwarded as `prompt_cache_key`. */
@@ -22,6 +23,8 @@ export type OpenAIResponsesTransformOptions = {
   passSamplingParams?: boolean
   /** Restore only cc-haha namespaced OpenAI reasoning envelopes. */
   preserveOpenAIReasoning?: boolean
+  /** Rename over-length tool names for the wire; response side maps back. */
+  toolNames?: ToolNameWireMap
 }
 
 /**
@@ -78,7 +81,7 @@ export function anthropicToOpenaiResponses(
       .filter((t) => t.name !== 'BatchTool')
       .map((t) => ({
         type: 'function',
-        name: t.name,
+        name: options.toolNames ? options.toolNames.toWire(t.name) : t.name,
         description: t.description,
         parameters: t.input_schema,
         // Responses otherwise normalizes optional properties to required.
@@ -96,7 +99,7 @@ export function anthropicToOpenaiResponses(
   // tool_choice with no tools at all) is an orphan that strict Responses
   // upstreams reject.
   if (body.tool_choice !== undefined) {
-    const toolChoice = convertToolChoice(body.tool_choice)
+    const toolChoice = convertToolChoice(body.tool_choice, options.toolNames)
     if (isSelectableToolChoice(toolChoice, result.tools)) {
       result.tool_choice = toolChoice
     }
@@ -272,7 +275,7 @@ function convertMessageToInputItems(
       output.push({
         type: 'function_call',
         call_id: block.id,
-        name: block.name,
+        name: options.toolNames ? options.toolNames.toWire(block.name) : block.name,
         arguments: typeof block.input === 'string' ? block.input : JSON.stringify(block.input),
       })
     } else if (block.type === 'tool_result') {
@@ -315,7 +318,7 @@ function convertMessageToInputItems(
   flushContentParts()
 }
 
-function convertToolChoice(choice: unknown): unknown {
+function convertToolChoice(choice: unknown, toolNames?: ToolNameWireMap): unknown {
   if (typeof choice === 'string') return choice
   if (typeof choice === 'object' && choice !== null) {
     const c = choice as Record<string, unknown>
@@ -326,7 +329,8 @@ function convertToolChoice(choice: unknown): unknown {
       // Responses names the function inline: {type:'function', name}. The
       // nested {function:{name}} form belongs to Chat Completions and is
       // rejected here (see anthropicToOpenaiChat for that shape).
-      return { type: 'function', name: c.name }
+      const name = toolNames ? toolNames.toWire(c.name) : c.name
+      return { type: 'function', name }
     }
   }
   return 'auto'

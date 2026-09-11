@@ -13,9 +13,12 @@ import type {
 import { parseOpenAIToolArguments } from './toolArguments.js'
 import { openaiUsageToAnthropic } from './usage.js'
 import { encodeOpenAIReasoningEnvelope } from './openaiReasoning.js'
+import type { ToolNameWireMap } from './toolNameWire.js'
 
 export type OpenAIResponsesToAnthropicOptions = {
   preserveOpenAIReasoning?: boolean
+  /** Rename over-length tool names for the wire; response side maps back. */
+  toolNames?: ToolNameWireMap
 }
 
 /**
@@ -71,7 +74,7 @@ function convertOutputItem(
       content.push({
         type: 'tool_use',
         id: item.call_id,
-        name: item.name,
+        name: options.toolNames ? options.toolNames.fromWire(item.name) : item.name,
         input: parseOpenAIToolArguments(item.arguments),
       })
       break
