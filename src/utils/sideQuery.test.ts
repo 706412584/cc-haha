@@ -5,7 +5,6 @@ import { join } from 'node:path'
 import { createSandboxedTestEnvironment } from '../../scripts/pr/test-environment.js'
 import { getIsInteractive, setIsInteractive } from '../bootstrap/state.js'
 import { enableConfigs } from './config.js'
-import { get3PModelCapabilityOverride } from './model/modelSupportOverrides.js'
 import { generatePermissionExplanation } from './permissions/permissionExplainer.js'
 import { sideQuery } from './sideQuery.js'
 
@@ -60,14 +59,17 @@ async function withCapturedRequests<T>(
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     }, originalEnv))
     setIsInteractive(false)
-    get3PModelCapabilityOverride.cache.clear()
+    // Fork's get3PModelCapabilityOverride is intentionally not memoized
+    // (ea87d67c: provider switches rewrite these env vars in-process, so a
+    // cache keyed on the model id would keep the previous provider's answer).
+    // Upstream's memoized variant needs cache.clear() between environments;
+    // the fork reads env directly and needs no reset.
     enableConfigs()
     return { result: await run(), requests, headers }
   } finally {
     for (const key of Object.keys(process.env)) delete process.env[key]
     Object.assign(process.env, originalEnv)
     setIsInteractive(interactive)
-    get3PModelCapabilityOverride.cache.clear()
     server.stop(true)
     await rm(sandbox, { recursive: true, force: true })
   }

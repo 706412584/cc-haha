@@ -868,23 +868,6 @@ export class SessionService {
       options.oversizedWarnMinIntervalMs >= 0
         ? Math.floor(options.oversizedWarnMinIntervalMs)
         : 5 * 60 * 1000
-  }
-
-  /** R2: true if we should emit console.warn for this oversized path now. */
-  private shouldWarnOversized(filePath: string): boolean {
-    if (this.oversizedWarnMinIntervalMs <= 0) return true
-    const now = this.now()
-    const last = this.oversizedWarnLastAt.get(filePath)
-    if (last !== undefined && now - last < this.oversizedWarnMinIntervalMs) {
-      return false
-    }
-    this.oversizedWarnLastAt.set(filePath, now)
-    // Bound map growth: drop oldest-ish entries when large.
-    if (this.oversizedWarnLastAt.size > 200) {
-      const oldest = this.oversizedWarnLastAt.keys().next().value
-      if (oldest !== undefined) this.oversizedWarnLastAt.delete(oldest)
-    }
-    return true
     this.projectHistory = new ProjectSessionHistory({
       now: this.now,
       scope: () => this.getConfigDir(),
@@ -904,6 +887,23 @@ export class SessionService {
         }
       },
     })
+  }
+
+  /** R2: true if we should emit console.warn for this oversized path now. */
+  private shouldWarnOversized(filePath: string): boolean {
+    if (this.oversizedWarnMinIntervalMs <= 0) return true
+    const now = this.now()
+    const last = this.oversizedWarnLastAt.get(filePath)
+    if (last !== undefined && now - last < this.oversizedWarnMinIntervalMs) {
+      return false
+    }
+    this.oversizedWarnLastAt.set(filePath, now)
+    // Bound map growth: drop oldest-ish entries when large.
+    if (this.oversizedWarnLastAt.size > 200) {
+      const oldest = this.oversizedWarnLastAt.keys().next().value
+      if (oldest !== undefined) this.oversizedWarnLastAt.delete(oldest)
+    }
+    return true
   }
 
   private normalizeCacheCapacity(value: number | undefined, fallback: number): number {
