@@ -11,6 +11,7 @@ import {
   clearTraceCaptureStateForTests,
   createTraceCallId,
   createTraceBodySnapshot,
+  drainTraceCaptureForTests,
   getTraceCaptureDiagnosticsForTests,
   readResponseTraceSnapshot,
   setTraceAppendBeforeWriteHookForTests,
@@ -51,6 +52,12 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  // Drain queued trace appends before clearing state: fire-and-forget
+  // recordEvent calls (e.g. dumpPrompts) can still be queued when a test's
+  // assertions finish. clearTraceCaptureStateForTests drops the queue, so a
+  // late append then races the temp-dir removal below and surfaces an
+  // unhandled ENOENT that fails the whole file on CI.
+  await drainTraceCaptureForTests()
   await clearTraceCaptureStateForTests()
   if (originalConfigDir === undefined) {
     delete process.env.CLAUDE_CONFIG_DIR
