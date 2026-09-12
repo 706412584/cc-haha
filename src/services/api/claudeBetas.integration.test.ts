@@ -82,10 +82,19 @@ async function runRelay(options: {
       CALLER_DIR: sandbox,
       ANTHROPIC_API_KEY: 'loopback-test-key',
       ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.port}`,
-      ...(options.provider ? buildProviderManagedEnv({
-        ...options.provider,
-        baseUrl: `http://127.0.0.1:${server.port}`,
-      }) : {
+      ...(options.provider ? {
+        ...buildProviderManagedEnv({
+          ...options.provider,
+          baseUrl: `http://127.0.0.1:${server.port}`,
+        }),
+        // buildProviderManagedEnv applies the custom preset's auth_token
+        // strategy, which overwrites ANTHROPIC_API_KEY with ''. On CI runners
+        // (CI=true), the CLI's auth bootstrap then rejects the empty key
+        // before the first request — the desktop sidecar never sets CI, so
+        // mirror that environment by restoring a non-empty key after the
+        // managed env spread.
+        ANTHROPIC_API_KEY: 'loopback-test-key',
+      } : {
         ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-5[1m]',
         ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort',
         CLAUDE_CODE_MODEL_CONTEXT_WINDOWS: '{"claude-opus-5":1000000}',
