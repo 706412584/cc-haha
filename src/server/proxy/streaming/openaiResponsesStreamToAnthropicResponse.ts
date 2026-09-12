@@ -1,4 +1,6 @@
+import { getOpenAIPolicyError } from '../../../services/openaiAuth/policyError.js'
 import { openaiResponsesToAnthropic } from '../transform/openaiResponsesToAnthropic.js'
+import type { ToolNameWireMap } from '../transform/toolNameWire.js'
 import type {
   AnthropicResponse,
   OpenAIResponsesResponse,
@@ -6,6 +8,8 @@ import type {
 
 export type OpenAIResponsesCollectOptions = {
   openAICodexOAuth?: boolean
+  /** Map over-length wire tool names back to their originals. */
+  toolNames?: ToolNameWireMap
 }
 
 type StreamFallbackState = {
@@ -92,7 +96,7 @@ export async function openaiResponsesStreamToAnthropicResponse(
           completedResponse = response
         }
       } else if (
-        options.openAICodexOAuth &&
+        (options.openAICodexOAuth || getOpenAIPolicyError(data)) &&
         (
           currentEvent === 'response.failed' ||
           currentEvent === 'response.incomplete' ||
@@ -100,7 +104,10 @@ export async function openaiResponsesStreamToAnthropicResponse(
           currentEvent === 'error'
         )
       ) {
-        terminalError = new Error(readTerminalError(currentEvent, data))
+        const policyError = getOpenAIPolicyError(data)
+        terminalError = policyError
+          ? Object.assign(new Error(policyError.message), { code: policyError.code, type: 'permission_error', status: 403 })
+          : new Error(readTerminalError(currentEvent, data))
       } else {
         updateFallbackState(currentEvent, data, fallback)
       }
@@ -120,7 +127,7 @@ export async function openaiResponsesStreamToAnthropicResponse(
   return openaiResponsesToAnthropic(
     completedResponse ?? buildFallbackResponse(fallback),
     model,
-    { preserveOpenAIReasoning: options.openAICodexOAuth },
+    { preserveOpenAIReasoning: options.openAICodexOAuth, toolNames: options.toolNames },
   )
 }
 

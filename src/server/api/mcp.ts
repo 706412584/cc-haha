@@ -7,6 +7,7 @@ import {
   clearServerCache,
   connectToServer,
   fetchToolsForClient,
+  getServerCacheKey,
   listRawToolsForServer,
   reconnectMcpServerImpl,
   type RawMcpToolInfo,
@@ -17,6 +18,7 @@ import {
   getAllMcpConfigs,
   getMcpConfigByName,
   isMcpServerDisabled,
+  isMcpServerDisabledForExecution,
   projectDirDeclaresMcpServers,
   registerCwdProjectIfDeclaresMcpServers,
   removeMcpConfig,
@@ -48,43 +50,6 @@ import { getCwd, runWithCwdOverride } from '../../utils/cwd.js'
 import { normalizePathForConfigKey } from '../../utils/path.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 import { conversationService } from '../services/conversationService.js'
-
-/**
- * In-memory cache for MCP server status results. Avoids re-probing servers
- * every time the settings page is opened (probes are expensive for stdio
- * servers that use npx/uvx — first-run downloads can take 30-60s).
- *
- * Cache entries are stored with a timestamp and expire after STATUS_CACHE_TTL_MS.
- * Cleared on explicit reconnect or toggle so UI stays fresh after user actions.
- */
-const STATUS_CACHE_TTL_MS = 5 * 60 * 1000 // 5 minutes
-type StatusCacheEntry = {
-  status: Pick<McpServerDto, 'status' | 'statusDetail' | 'statusLabel'>
-  timestamp: number
-}
-const statusCache = new Map<string, StatusCacheEntry>()
-
-function getCachedStatus(name: string): Pick<McpServerDto, 'status' | 'statusDetail' | 'statusLabel'> | null {
-  const entry = statusCache.get(name)
-  if (!entry) return null
-  if (Date.now() - entry.timestamp > STATUS_CACHE_TTL_MS) {
-    statusCache.delete(name)
-    return null
-  }
-  return entry.status
-}
-
-function setCachedStatus(name: string, status: Pick<McpServerDto, 'status' | 'statusDetail' | 'statusLabel'>): void {
-  statusCache.set(name, { status, timestamp: Date.now() })
-}
-
-export function clearStatusCache(name?: string): void {
-  if (name) {
-    statusCache.delete(name)
-  } else {
-    statusCache.clear()
-  }
-}
 
 type McpEditableConfigDto =
   | {
@@ -135,7 +100,7 @@ type McpMutationBody = {
 
 type McpSessionSyncDto = {
   applied: boolean
-  reason?: 'not_running' | 'different_project' | 'failed'
+  reason?: 'not_running' | 'different_project' | 'failed' | 'no_session'
   error?: string
 }
 
@@ -172,10 +137,16 @@ async function syncMcpToggleToSession(
   sessionId: string | undefined,
   server: McpServerIdentity,
   enabled: boolean,
-): Promise<McpSessionSyncDto | undefined> {
-  if (!sessionId) return undefined
+): Promise<McpSessionSyncDto> {
+  if (!sessionId) return { applied: false, reason: 'no_session' }
   if (!conversationService.hasSession(sessionId)) {
     return { applied: false, reason: 'not_running' }
+  }
+
+  const sessionCwd = conversationService.getSessionWorkDir(sessionId)
+  if (!sessionCwd || normalizePathForConfigKey(getProjectPathForConfig(sessionCwd)) !==
+    normalizePathForConfigKey(getProjectPathForConfig(getCwd()))) {
+    return { applied: false, reason: 'different_project' }
   }
 
   if (server.scope === 'local' || server.scope === 'project' || server.scope === 'user') {
@@ -195,7 +166,7 @@ async function syncMcpToggleToSession(
   try {
     await conversationService.requestControl(
       sessionId,
-      { subtype: 'mcp_toggle', serverName: server.name, enabled },
+      { subtype: 'mcp_toggle', serverName: server.name, enabled, alreadyPersisted: true },
       120_000,
     )
     return { applied: true }
@@ -382,13 +353,16 @@ async function inspectServerStatus(
 
   const hostPreflightStatus = await getHostPreflightStatus(config, enabled)
   if (hostPreflightStatus) {
-    setCachedStatus(name, hostPreflightStatus)
     return hostPreflightStatus
   }
 
+  const cacheKey = getServerCacheKey(name, config)
+  let cachedProbe: ReturnType<typeof connectToServer> | undefined
   try {
-    const client = await connectToServer(name, config)
-    await clearServerCache(name, config).catch(() => {})
+    const connecting = connectToServer(name, config)
+    cachedProbe = connectToServer.cache?.get(cacheKey)
+    const client = await connecting
+    if (client.type === 'connected') await client.cleanup().catch(() => {})
 
     const status: McpServerDto['status'] =
       client.type === 'connected'
@@ -397,22 +371,23 @@ async function inspectServerStatus(
           ? 'needs-auth'
           : 'failed'
 
-    const result = {
+    return {
       status,
       statusLabel: getStatusLabel(status),
       statusDetail: 'error' in client ? client.error : undefined,
     }
-    setCachedStatus(name, result)
-    return result
   } catch (error) {
-    await clearServerCache(name, config).catch(() => {})
-    const result = {
-      status: 'failed' as const,
+    return {
+      status: 'failed',
       statusLabel: getStatusLabel('failed'),
       statusDetail: error instanceof Error ? error.message : String(error),
     }
-    setCachedStatus(name, result)
-    return result
+  } finally {
+    // Failed probes must be retried, but a slow old probe may have been replaced
+    // by a reconnect. Check its cached promise immediately before detaching it.
+    if (cachedProbe && connectToServer.cache?.get(cacheKey) === cachedProbe) {
+      await clearServerCache(name, config).catch(() => {})
+    }
   }
 }
 
@@ -421,7 +396,8 @@ function buildServerDto(
   config: ScopedMcpServerConfig,
   status: Pick<McpServerDto, 'status' | 'statusDetail' | 'statusLabel'>,
 ): McpServerDto {
-  const enabled = !isMcpServerDisabled(name)
+  const enabled = !isMcpServerDisabledForExecution(name)
+  if (!enabled) status = getInitialStatus(false)
   const transport = config.type ?? 'stdio'
   const canEdit = EDITABLE_SCOPES.has(config.scope) && (transport === 'stdio' || transport === 'http' || transport === 'sse')
 
@@ -429,7 +405,7 @@ function buildServerDto(
     name,
     scope: config.scope,
     transport,
-    enabled: !isMcpServerDisabled(name),
+    enabled,
     status: status.status,
     statusLabel: status.statusLabel,
     statusDetail: status.statusDetail,
@@ -448,9 +424,7 @@ function serializeServerSnapshot(
   name: string,
   config: ScopedMcpServerConfig,
 ): McpServerDto {
-  const enabled = !isMcpServerDisabled(name)
-  const cached = enabled ? getCachedStatus(name) : null
-  return buildServerDto(name, config, cached ?? getInitialStatus(enabled))
+  return buildServerDto(name, config, getInitialStatus(!isMcpServerDisabled(name)))
 }
 
 async function serializeServerWithLiveStatus(
@@ -588,17 +562,6 @@ function listProjectPathsWithConfiguredMcp(): Response {
   return Response.json({ projectPaths })
 }
 
-function getConfigFilePaths(): Response {
-  const userConfig = getGlobalClaudeFile()
-  const projectConfig = join(getCwd(), '.mcp.json')
-  return Response.json({
-    files: [
-      { scope: 'user', path: userConfig, label: 'User (~/.claude.json)' },
-      { scope: 'project', path: projectConfig, label: 'Project (.mcp.json)' },
-    ],
-  })
-}
-
 async function getServerStatus(name: string): Promise<Response> {
   const existing = await resolveServerForRuntimeAction(name)
   if (!existing) {
@@ -607,6 +570,17 @@ async function getServerStatus(name: string): Promise<Response> {
 
   return Response.json({
     server: await serializeServerWithLiveStatus(name, existing),
+  })
+}
+
+function getConfigFilePaths(): Response {
+  const userConfig = getGlobalClaudeFile()
+  const projectConfig = join(getCwd(), '.mcp.json')
+  return Response.json({
+    files: [
+      { scope: 'user', path: userConfig, label: 'User (~/.claude.json)' },
+      { scope: 'project', path: projectConfig, label: 'Project (.mcp.json)' },
+    ],
   })
 }
 
@@ -848,46 +822,56 @@ async function deleteServer(name: string, url: URL): Promise<Response> {
   return Response.json({ ok: true })
 }
 
+// Serialize enable probes so a stale probe's cleanup cannot close the next
+// enable's connection. Persisting a disable never waits behind a slow probe.
+const enableProbeQueues = new Map<string, Promise<Response>>()
+
+async function syncMcpToggleToSessions(
+  sessionId: string | undefined,
+  server: McpServerIdentity,
+  enabled: boolean,
+): Promise<McpSessionSyncDto> {
+  const sessionIds = [...new Set([
+    ...(sessionId ? [sessionId] : []),
+    ...conversationService.getActiveSessions(),
+  ])]
+  const results = await Promise.all(sessionIds.map(id => syncMcpToggleToSession(id, server, enabled)))
+  const failure = results.find(result => result.reason === 'failed')
+  return failure ?? (sessionId ? results[sessionIds.indexOf(sessionId)]! : { applied: false, reason: 'no_session' })
+}
+
 async function toggleServer(name: string, sessionId?: string): Promise<Response> {
   const existing = await resolveServerForRuntimeAction(name)
   if (!existing) {
     throw ApiError.notFound(`MCP server not found: ${name}`)
   }
 
-  clearStatusCache(name)
   const serverIdentity = getServerIdentity(name, existing)
-  const enabled = isMcpServerDisabled(name)
+  const enabled = isMcpServerDisabledForExecution(name)
   setMcpServerEnabled(name, enabled)
-  const sessionSync = await syncMcpToggleToSession(sessionId, serverIdentity, enabled)
+  if (!enabled) await clearServerCache(name, existing).catch(() => {})
+  const sessionSync = await syncMcpToggleToSessions(sessionId, serverIdentity, enabled)
 
   if (!enabled) {
-    await clearServerCache(name, existing).catch(() => {})
     const updated = serializeServerSnapshot(name, existing)
-    return Response.json({ server: updated, ...(sessionSync ? { sessionSync } : {}) })
+    return Response.json({ server: updated, sessionSync })
   }
 
-  const hostPreflightStatus = await getHostPreflightStatus(existing, true)
-  if (hostPreflightStatus) {
+  const key = JSON.stringify([getProjectPathForConfig(getCwd()), name])
+  const previous = enableProbeQueues.get(key)
+  const next = (previous ?? Promise.resolve()).catch(() => {}).then(async () => {
+    if (isMcpServerDisabledForExecution(name)) {
+      return Response.json({ server: serializeServerSnapshot(name, existing), sessionSync })
+    }
     await clearServerCache(name, existing).catch(() => {})
-    return Response.json({
-      server: buildServerDto(name, existing, hostPreflightStatus),
-    })
-  }
-
-  const result = await reconnectMcpServerImpl(name, existing)
-  await clearServerCache(name, existing).catch(() => {})
-
-  const updated = await serializeServerWithLiveStatus(name, existing)
-  const statusDetail =
-    result.client.type === 'failed' && 'error' in result.client ? result.client.error : undefined
-
-  return Response.json({
-    server: {
-      ...updated,
-      ...(statusDetail ? { statusDetail } : {}),
-    },
-    ...(sessionSync ? { sessionSync } : {}),
+    const updated = await serializeServerWithLiveStatus(name, existing)
+    return Response.json({ server: updated, sessionSync })
   })
+  enableProbeQueues.set(key, next)
+  void next.finally(() => {
+    if (enableProbeQueues.get(key) === next) enableProbeQueues.delete(key)
+  }).catch(() => {})
+  return next
 }
 
 async function reconnectServer(name: string): Promise<Response> {
@@ -896,7 +880,6 @@ async function reconnectServer(name: string): Promise<Response> {
     throw ApiError.notFound(`MCP server not found: ${name}`)
   }
 
-  clearStatusCache(name)
   const hostPreflightStatus = await getHostPreflightStatus(existing, !isMcpServerDisabled(name))
   if (hostPreflightStatus) {
     await clearServerCache(name, existing).catch(() => {})

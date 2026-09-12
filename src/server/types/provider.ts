@@ -66,6 +66,7 @@ export const ModelContextWindowsSchema = z.record(
 )
 export const ToolSearchEnabledSchema = z.boolean()
 export const DisableExperimentalBetasSchema = z.boolean()
+export const SupportsNestedToolResultMediaSchema = z.boolean()
 
 export const ImageGenerationConfigSchema = z.object({
   model: z.string().trim().min(1),
@@ -88,6 +89,7 @@ export const SavedProviderSchema = z.object({
   modelContextWindows: ModelContextWindowsSchema.optional(),
   toolSearchEnabled: ToolSearchEnabledSchema.optional(),
   disableExperimentalBetas: DisableExperimentalBetasSchema.optional(),
+  supportsNestedToolResultMedia: SupportsNestedToolResultMediaSchema.optional(),
   imageGeneration: ImageGenerationConfigSchema.optional(),
   notes: z.string().optional(),
   /**
@@ -150,6 +152,7 @@ export const CreateProviderSchema = z.object({
   modelContextWindows: ModelContextWindowsSchema.optional(),
   toolSearchEnabled: ToolSearchEnabledSchema.optional(),
   disableExperimentalBetas: DisableExperimentalBetasSchema.optional(),
+  supportsNestedToolResultMedia: SupportsNestedToolResultMediaSchema.optional(),
   imageGeneration: ImageGenerationConfigSchema.optional(),
   notes: z.string().optional(),
 })
@@ -167,6 +170,7 @@ export const UpdateProviderSchema = z.object({
   modelContextWindows: ModelContextWindowsSchema.nullable().optional(),
   toolSearchEnabled: ToolSearchEnabledSchema.optional(),
   disableExperimentalBetas: DisableExperimentalBetasSchema.optional(),
+  supportsNestedToolResultMedia: SupportsNestedToolResultMediaSchema.optional(),
   imageGeneration: ImageGenerationConfigSchema.nullable().optional(),
   notes: z.string().optional(),
 })
@@ -177,6 +181,7 @@ export const TestProviderSchema = z.object({
   modelId: z.string().min(1),
   authStrategy: ProviderAuthStrategySchema.optional(),
   apiFormat: ApiFormatSchema.default('anthropic'),
+  supportsNestedToolResultMedia: SupportsNestedToolResultMediaSchema.optional(),
 })
 
 /**
@@ -223,6 +228,6 @@ export interface ProviderTestStepResult {
 export interface ProviderTestResult {
   /** Step 1: Basic connectivity — API reachable, key valid, model exists */
   connectivity: ProviderTestStepResult
-  /** Step 2: Proxy pipeline — full Anthropic→OpenAI→Anthropic round-trip (only for openai_* formats) */
+  /** Step 2: Proxy pipeline when the provider requires local request handling */
   proxy?: ProviderTestStepResult
 }

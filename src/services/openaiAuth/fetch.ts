@@ -1,5 +1,9 @@
 import type { ClientOptions } from '@anthropic-ai/sdk'
 import { randomUUID } from 'crypto'
+import type { OpenAICodexTurnState } from './turnState.js'
+import { resolveOpenAIRequestIdentity } from './requestIdentity.js'
+import { encodeOpenAIRequestBody } from './requestCompression.js'
+import { getOpenAIPolicyError } from './policyError.js'
 import {
   OPENAI_CODEX_API_ENDPOINT,
   OPENAI_CODEX_ORIGINATOR,
@@ -13,10 +17,12 @@ import {
   resolveOpenAIReasoningEffortWithPriority,
 } from './models.js'
 import { getOpenAIOAuthTokens } from './storage.js'
+import { resolvePromptCacheKey } from '../../server/proxy/promptCacheKey.js'
 import { anthropicToOpenaiResponses } from '../../server/proxy/transform/anthropicToOpenaiResponses.js'
 import { openaiResponsesToAnthropic } from '../../server/proxy/transform/openaiResponsesToAnthropic.js'
 import { openaiResponsesStreamToAnthropic } from '../../server/proxy/streaming/openaiResponsesStreamToAnthropic.js'
 import { openaiResponsesStreamToAnthropicResponse } from '../../server/proxy/streaming/openaiResponsesStreamToAnthropicResponse.js'
+import { isOverLengthToolName, ToolNameWireMap } from '../../server/proxy/transform/toolNameWire.js'
 import type { AnthropicRequest } from '../../server/proxy/transform/types.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { OPENAI_CODEX_STREAM_MARKER_HEADER } from './streamPolicy.js'
@@ -31,6 +37,8 @@ export function shouldUseOpenAICodexAuth(): boolean {
 export function buildOpenAICodexFetch(
   fetchOverride: ClientOptions['fetch'],
   source: string | undefined,
+  turnState?: OpenAICodexTurnState,
+  agentId?: string,
 ): ClientOptions['fetch'] {
   const inner = fetchOverride ?? globalThis.fetch
 
@@ -43,12 +51,20 @@ export function buildOpenAICodexFetch(
 
     const originalBody = await readAnthropicBody(input, init)
     const mappedModel = resolveOpenAICodexModel(originalBody.model)
+    const sessionId = readSessionId(input, init)
+    const identity = resolveOpenAIRequestIdentity(sessionId, agentId)
+    const cacheKey = resolvePromptCacheKey(originalBody, sessionId)
+    // Codex enforces the same 64-char function-name limit as other
+    // OpenAI-compatible upstreams; rename over-length MCP tools both ways.
+    const toolNames = originalBody.tools?.some((t) => isOverLengthToolName(t.name))
+      ? new ToolNameWireMap()
+      : undefined
     const transformedBody = anthropicToOpenaiResponses(
       {
         ...originalBody,
         model: mappedModel,
       },
-      { preserveOpenAIReasoning: true },
+      { preserveOpenAIReasoning: true, cacheKey, toolNames },
     )
     // Keep a valid native request-scoped value ahead of the transformed value,
     // the session env, and the model default. The generic transformer preserves
@@ -90,6 +106,12 @@ export function buildOpenAICodexFetch(
     headers.set('Authorization', `Bearer ${tokens.accessToken}`)
     headers.set('originator', OPENAI_CODEX_ORIGINATOR)
     headers.set('User-Agent', OPENAI_CODEX_TOKEN_USER_AGENT)
+    if (identity) {
+      headers.set('session-id', identity.sessionId)
+      headers.set('thread-id', identity.threadId)
+    }
+    const routingState = turnState?.get()
+    if (routingState) headers.set('x-codex-turn-state', routingState)
     if (tokens.accountId) {
       headers.set('ChatGPT-Account-Id', tokens.accountId)
     }
@@ -98,6 +120,7 @@ export function buildOpenAICodexFetch(
       `[API REQUEST] ${url.pathname} remapped_to=OpenAI/Codex model=${mappedModel} source=${source ?? 'unknown'} request_id=${randomUUID()}`,
     )
 
+    const wireBody = await encodeOpenAIRequestBody(JSON.stringify(upstreamBody), headers, init?.signal)
     const upstreamAbort = transformedBody.stream
       ? createTerminalAwareAbortBridge(init?.signal)
       : null
@@ -107,7 +130,7 @@ export function buildOpenAICodexFetch(
         ...init,
         method: 'POST',
         headers,
-        body: JSON.stringify(upstreamBody),
+        body: wireBody,
         signal: upstreamAbort?.signal ?? init?.signal,
       })
     } catch (error) {
@@ -119,6 +142,21 @@ export function buildOpenAICodexFetch(
       const errorText = await upstream.text().catch(() => '').finally(() => {
         upstreamAbort?.dispose()
       })
+      const policyError = getOpenAIPolicyError({ message: errorText })
+      if (policyError) {
+        return Response.json({
+          type: 'error',
+          error: { type: 'permission_error', ...policyError },
+        }, {
+          status: 403,
+          headers: {
+            'x-should-retry': 'false',
+            ...(upstream.headers.get('x-request-id')
+              ? { 'x-request-id': upstream.headers.get('x-request-id')! }
+              : {}),
+          },
+        })
+      }
       return Response.json(
         {
           type: 'error',
@@ -130,6 +168,10 @@ export function buildOpenAICodexFetch(
         { status: upstream.status },
       )
     }
+
+    // The server's first successful response pins this agentic turn. Do not
+    // rotate the value on continuations or persist it into another user turn.
+    if (!init?.signal?.aborted) turnState?.capture(upstream.headers.get('x-codex-turn-state'))
 
     if (transformedBody.stream) {
       if (!upstream.body) {
@@ -155,6 +197,7 @@ export function buildOpenAICodexFetch(
             onTerminal: () => upstreamAbort?.markTerminal(),
             onCancel: reason => upstreamAbort?.abort(reason),
             onSettled: () => upstreamAbort?.dispose(),
+            toolNames,
           },
         ),
         {
@@ -176,7 +219,7 @@ export function buildOpenAICodexFetch(
       const responseBody = await openaiResponsesStreamToAnthropicResponse(
         upstream.body,
         mappedModel,
-        { openAICodexOAuth: true },
+        { openAICodexOAuth: true, toolNames },
       )
       return Response.json(responseBody)
     }
@@ -186,7 +229,7 @@ export function buildOpenAICodexFetch(
       openaiResponsesToAnthropic(
         responseBody,
         mappedModel,
-        { preserveOpenAIReasoning: true },
+        { preserveOpenAIReasoning: true, toolNames },
       ),
     )
   }
@@ -242,6 +285,12 @@ function isEventStreamResponse(response: Response): boolean {
   return (response.headers.get('Content-Type') ?? '')
     .toLowerCase()
     .includes('text/event-stream')
+}
+
+function readSessionId(input: RequestInfo | URL, init?: RequestInit): string | null {
+  const header = 'x-claude-code-session-id'
+  const fromInit = init?.headers ? new Headers(init.headers).get(header) : null
+  return fromInit || (input instanceof Request ? input.headers.get(header) : null)
 }
 
 async function readAnthropicBody(

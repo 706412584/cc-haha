@@ -1,10 +1,14 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { memo, useState, useEffect, useMemo, useRef } from 'react'
 import { Brain } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 
-export function ThinkingBlock({
+// The whole chat tree re-renders on every streamed delta, so this block has to
+// bail out on identical props the way its siblings (AssistantMessage,
+// ToolCallBlock, ...) do. The settings it reads are subscribed to internally,
+// which is unaffected by the shallow prop comparison.
+export const ThinkingBlock = memo(function ThinkingBlock({
   content,
   isActive = false,
 }: {
@@ -36,10 +40,29 @@ export function ThinkingBlock({
     }
   }, [isActive])
 
+  // Pinning the view to the newest reasoning reads `scrollHeight`, which forces
+  // a synchronous layout, and `displayContent` changes on every streamed delta.
+  // Deferring both the read and the write into a frame collapses a burst of
+  // deltas into one scroll per frame; the cleanup drops a frame that a newer
+  // delta has already made obsolete.
+  //
+  // The settle transition needs its own frame: ending the stream re-runs this
+  // effect, whose cleanup cancels the pending frame, and a bare `!isActive`
+  // guard would leave nothing to replace it — so the last delta would never be
+  // scrolled to and the block would sit a line short of the bottom. Scrolling
+  // is still confined to the live block plus that one settle, so opening a
+  // finished block later does not jump to its end.
+  const wasActiveRef = useRef(isActive)
   useEffect(() => {
-    if (expanded && isActive && contentRef.current) {
-      contentRef.current.scrollTop = contentRef.current.scrollHeight
-    }
+    const wasActive = wasActiveRef.current
+    wasActiveRef.current = isActive
+    if (!expanded || !contentRef.current) return
+    if (!isActive && !wasActive) return
+    const element = contentRef.current
+    const frame = requestAnimationFrame(() => {
+      element.scrollTop = element.scrollHeight
+    })
+    return () => cancelAnimationFrame(frame)
   }, [displayContent, expanded, isActive])
 
   const label = (
@@ -86,19 +109,41 @@ export function ThinkingBlock({
           data-thinking-content="expanded"
           className="relative mb-2 mt-1 max-h-[300px] overflow-y-auto rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3 py-2.5 text-[11px] text-[var(--color-text-secondary)]"
         >
-          <MarkdownRenderer
-            content={displayContent}
-            variant="compact"
-            cache={!isActive}
-            streaming={isActive}
-            className="thinking-markdown text-[var(--color-text-secondary)]"
-          />
-          {isActive && <span className="thinking-cursor" />}
+          {/* While the block streams, `cache={false}` sends every delta through
+              a full `marked.parse` + sanitize + innerHTML swap of the entire
+              accumulated text — the dominant main-thread cost of a fast model's
+              thinking. Plain pre-wrapped text costs nothing and matches the
+              settled block on plain prose: same font size, same leading-5, so a
+              run of sentences does not move when the stream ends.
+
+              Markdown constructs do give up something for the duration: a
+              heading is literal `##`, a fence is literal backticks, and blank
+              lines between paragraphs are one empty line here (~20px) rather
+              than the compact `prose-p:my-1` gap (~8px). So a thinking block
+              that is still open when the stream ends reflows a little. Making
+              the streaming branch parse paragraphs too would put per-delta work
+              back on the path this changed to remove, for a shift that happens
+              once per block — and with `thinkingAutoCollapse` on (the default)
+              the block closes at that moment anyway and there is nothing to
+              reflow. */}
+          {isActive ? (
+            <div className="thinking-stream text-xs leading-5 text-[var(--color-text-secondary)]">
+              {displayContent}
+              <span className="thinking-cursor" />
+            </div>
+          ) : (
+            <MarkdownRenderer
+              content={displayContent}
+              variant="compact"
+              cache
+              className="thinking-markdown text-[var(--color-text-secondary)]"
+            />
+          )}
         </div>
       )}
     </div>
   )
-}
+})
 
 const THINKING_PREVIEW_MAX_CHARS = 160
 /** A short line ending in a colon is a heading for what comes after it. */
@@ -174,6 +219,13 @@ const thinkingStyles = `
 .thinking-dots::after {
   content: '';
   animation: thinking-dots 1.4s steps(1, end) infinite;
+}
+/* Plain-text streaming body: keep the source's newlines and wrap long lines.
+   Size/leading come from the caller's text-xs / leading-5, matching compact
+   Markdown prose. Markdown-specific spacing settles once when streaming ends. */
+.thinking-stream {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .thinking-markdown > :first-child,
 .thinking-markdown > :first-child > :first-child {

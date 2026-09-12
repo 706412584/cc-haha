@@ -1665,6 +1665,30 @@ describe('ChatInput file mentions', () => {
     expect(document.querySelector('.composer-mention')).toHaveAttribute('data-mention-path', '/repo/backend')
   })
 
+  it.each(['unknown', 'mixed'] as const)(
+    'sends from an existing session despite retained %s protocol metadata', async (sessionApiFormat) => {
+      // A rollback must keep sessions usable even when old lock fields remain.
+      useSessionStore.setState({
+        sessions: useSessionStore.getState().sessions.map((session) => ({ ...session, sessionApiFormat })),
+      })
+      const legacyChat = { ...useChatStore.getState().getSession(sessionId), sessionApiFormat }
+      useChatStore.setState({ sessions: { [sessionId]: legacyChat } })
+      render(<ChatInput compact />)
+
+      setComposerText('Continue this session')
+      expect(getComposerElement()).toHaveAttribute('contenteditable', 'true')
+      expect(screen.getByRole('button', { name: 'Run' })).toBeEnabled()
+      fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+
+      await waitFor(() => {
+        expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
+          type: 'user_message', content: 'Continue this session', attachments: [],
+        })
+      })
+      expect(getComposerText()).toBe('')
+    },
+  )
+
   it('inserts a selected @ file as an inline mention pill and sends its absolute path', async () => {
     mocks.search.mockResolvedValueOnce({
       currentPath: '/repo/backend/src',

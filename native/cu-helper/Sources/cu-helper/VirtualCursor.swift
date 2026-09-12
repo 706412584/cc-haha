@@ -180,10 +180,12 @@ public final class VirtualCursor {
         await runGlide(to: target, duration: duration)
     }
 
-    /// Action movement starts the owner-managed spring immediately but waits
-    /// only the foreground policy delay. Background/unrequested actions snap and
-    /// return without delay. The real OS cursor is never moved.
-    public func moveForAction(to p: CGPoint, targetPid: pid_t) async {
+    /// Start the owner-managed spring immediately. Coordinate gestures skip the
+    /// visual readability wait; indexed actions retain the visible policy delay.
+    /// Hidden/unrequested actions snap. The real OS cursor is never moved.
+    public func moveForAction(
+        to p: CGPoint, targetPid: pid_t, waitForVisualFeedback: Bool = true
+    ) async {
         let target = sanitized(p)
         if headless {
             motionState.snap(to: target)
@@ -203,6 +205,7 @@ public final class VirtualCursor {
         let decision = currentVisualDecision()
         await CursorActionTiming.perform(
             decision: decision,
+            waitForVisualFeedback: waitForVisualFeedback,
             startGlide: { [self] in
                 if !startGlide(to: target) {
                     snap(to: target)

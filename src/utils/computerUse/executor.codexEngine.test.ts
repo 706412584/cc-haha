@@ -313,6 +313,24 @@ describe('CLI executor Codex engine — daemon payload alignment', () => {
     const text = await exec.engine!.listApps()
     expect(text).toBe('No running applications are available to control.')
   })
+
+  itEngine('preserves native inventory metadata without guessing running state', async () => {
+    const exec = await loadExecutor()
+    nextResult = [
+      { id: 'dev.test.Editor', displayName: 'Editor', isRunning: false, lastUsedDate: '2026-09-09T01:00:00Z', useCount: 4 },
+      { id: 'dev.test.Unknown' },
+    ]
+    expect(await exec.engine!.listAppsInfo!()).toEqual(nextResult)
+    expect(calls).toEqual([{ command: 'list_apps', payload: {} }])
+  })
+
+  itEngine('accepts the previous helper inventory while upgrading the host', async () => {
+    const exec = await loadExecutor()
+    nextResult = [{ bundleId: 'com.apple.finder', displayName: 'Finder' }]
+    expect(await exec.engine!.listAppsInfo!()).toEqual([
+      { id: 'com.apple.finder', displayName: 'Finder', isRunning: true },
+    ])
+  })
 })
 
 describe('Windows virtual cursor motion', () => {

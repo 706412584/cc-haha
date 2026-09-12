@@ -1,4 +1,5 @@
-﻿import type {
+﻿import { OpenAICodexTurnState } from '../openaiAuth/turnState.js';
+import type {
   BetaContentBlock,
   BetaContentBlockParam,
   BetaImageBlockParam,
@@ -137,6 +138,7 @@ import {
 } from "src/bootstrap/state.js";
 import {
   AFK_MODE_BETA_HEADER,
+  THINKING_BINDING_CONTROLS_BETA_HEADER,
   CONTEXT_1M_BETA_HEADER,
   CONTEXT_MANAGEMENT_BETA_HEADER,
   EFFORT_BETA_HEADER,
@@ -194,6 +196,7 @@ import {
 import { endQueryProfile, queryCheckpoint } from "src/utils/queryProfiler.js";
 import {
   modelSupportsAdaptiveThinking,
+  modelUsesBoundThinking,
   modelSupportsThinking,
   resolveModelThinkingEnabled,
   shouldSendExplicitDisabledThinking,
@@ -231,6 +234,7 @@ import {
   EmptyStreamError,
   shouldTriggerNonStreamingFallbackForEmptyStream,
 } from "./streamFallback.js";
+import { isOpenAIPolicyError } from "../openaiAuth/policyError.js"
 import { StreamAssistantCommitBuffer } from "./streamAssistantCommitBuffer.js";
 import {
   commitOutputLimitResponse,
@@ -760,6 +764,7 @@ export function assistantMessageToMessageParam(
 }
 
 export type Options = {
+  openAITurnState?: OpenAICodexTurnState;
   getToolPermissionContext: () => Promise<ToolPermissionContext>;
   model: string;
   toolChoice?: BetaToolChoiceTool | BetaToolChoiceAuto | undefined;
@@ -808,6 +813,8 @@ export async function queryModelWithoutStreaming({
   signal: AbortSignal;
   options: Options;
 }): Promise<AssistantMessage> {
+  using ownedOpenAITurnState = options.openAITurnState ? undefined : new OpenAICodexTurnState(signal);
+  options = { ...options, openAITurnState: options.openAITurnState ?? ownedOpenAITurnState };
   // Store the assistant message but continue consuming the generator to ensure
   // logAPISuccessAndDuration gets called (which happens after all yields)
   let assistantMessage: AssistantMessage | undefined;
@@ -871,6 +878,8 @@ export async function* queryModelWithStreaming({
   StreamEvent | AssistantMessage | SystemAPIErrorMessage | SystemStreamingFallbackMessage,
   void
 > {
+  using ownedOpenAITurnState = options.openAITurnState ? undefined : new OpenAICodexTurnState(signal);
+  options = { ...options, openAITurnState: options.openAITurnState ?? ownedOpenAITurnState };
   return yield* withStreamingVCR(messages, async function* () {
     yield* withStreamRetry(
       () =>
@@ -930,6 +939,8 @@ export async function* executeNonStreamingRequest(
     model: string;
     fetchOverride?: Options["fetchOverride"];
     source: string;
+    openAITurnState?: OpenAICodexTurnState;
+    agentId?: AgentId;
   },
   retryOptions: {
     model: string;
@@ -957,6 +968,8 @@ export async function* executeNonStreamingRequest(
         model: clientOptions.model,
         fetchOverride: clientOptions.fetchOverride,
         source: clientOptions.source,
+        openAITurnState: clientOptions.openAITurnState,
+        agentId: clientOptions.agentId,
       }),
     async (anthropic, attempt, context) => {
       const start = Date.now();
@@ -1570,7 +1583,14 @@ async function* queryModel(
   queryCheckpoint("query_message_normalization_start");
   let messagesForAPI = normalizeMessagesForAPI(messages, filteredTools);
   queryCheckpoint("query_message_normalization_end");
-  if (hasAnthropicCompatibleThirdPartyConfig()) {
+  if (
+    hasAnthropicCompatibleThirdPartyConfig() &&
+    !modelUsesBoundThinking(options.model)
+  ) {
+    // Third-party relays 400 on replayed encrypted thinking blocks. Models
+    // that use bound thinking (fable-5-1) are exempt: their thinking blocks
+    // carry a drop_block binding so providers implementing the protocol can
+    // safely replay them, and the API contract keeps signatures in history.
     messagesForAPI = stripSignatureBlocks(messagesForAPI);
   }
 
@@ -1932,7 +1952,8 @@ async function* queryModel(
     // setting that can greatly affect model quality and bashing.
     if (hasThinking && modelCanThink) {
       if (
-        !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING) &&
+        (modelUsesBoundThinking(options.model) ||
+          !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING)) &&
         modelSupportsAdaptiveThinking(options.model)
       ) {
         // For models that support adaptive thinking, always use adaptive
@@ -1960,6 +1981,19 @@ async function* queryModel(
       thinking = {
         type: 'disabled',
       } as unknown as BetaMessageStreamParams['thinking']
+    }
+
+    if (thinking?.type === 'adaptive' && modelUsesBoundThinking(options.model)) {
+      // Directory, tool and compacted-history updates can invalidate old thinking.
+      // Let the API retain valid blocks and drop only those bound to an old prefix.
+      // This header is required for compatibility even when optional betas are disabled.
+      thinking = {
+        ...thinking,
+        block_binding: { prefix_mismatch_behavior: 'drop_block' },
+      } as typeof thinking
+      if (!betasParams.includes(THINKING_BINDING_CONTROLS_BETA_HEADER)) {
+        betasParams.push(THINKING_BINDING_CONTROLS_BETA_HEADER)
+      }
     }
 
     // Get API context management strategies if enabled
@@ -2120,6 +2154,8 @@ async function* queryModel(
           model: options.model,
           fetchOverride: options.fetchOverride,
           source: options.querySource,
+          openAITurnState: options.openAITurnState,
+          agentId: options.agentId,
         }),
       async (anthropic, attempt, context) => {
         attemptNumber = attempt;
@@ -2939,6 +2975,9 @@ async function* queryModel(
         streamMaxDurationTimer = null;
       }
 
+      // A safety rejection is terminal, including for non-streaming fallback.
+      if (isOpenAIPolicyError(streamingError)) throw streamingError
+
       // Instrumentation: if the watchdog had already fired and the for-await
       // threw (rather than exiting cleanly), record that the loop DID exit and
       // how long after the watchdog. Distinguishes true hangs from error exits.
@@ -3203,7 +3242,7 @@ async function* queryModel(
           : "other") as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       });
       const result = yield* executeNonStreamingRequest(
-        { model: options.model, source: options.querySource },
+        { model: options.model, source: options.querySource, openAITurnState: options.openAITurnState, agentId: options.agentId },
         {
           model: options.model,
           fallbackModel: options.fallbackModel,
@@ -3274,6 +3313,7 @@ async function* queryModel(
     // with raw streams, 404s are thrown during creation (caught here).
     const is404StreamCreationError =
       !didFallBackToNonStreaming &&
+      !isOpenAIPolicyError(errorFromRetry) &&
       errorFromRetry instanceof CannotRetryError &&
       errorFromRetry.originalError instanceof APIError &&
       errorFromRetry.originalError.status === 404;
@@ -3312,7 +3352,7 @@ async function* queryModel(
       try {
         // Fall back to non-streaming mode
         const result = yield* executeNonStreamingRequest(
-          { model: options.model, source: options.querySource },
+          { model: options.model, source: options.querySource, openAITurnState: options.openAITurnState, agentId: options.agentId },
           {
             model: options.model,
             fallbackModel: options.fallbackModel,

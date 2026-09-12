@@ -1,6 +1,6 @@
 import type { Database } from 'bun:sqlite'
 
-export const LOCAL_INDEX_SCHEMA_VERSION = 5
+export const LOCAL_INDEX_SCHEMA_VERSION = 6
 export const LOCAL_INDEX_SCHEMA_UNSUPPORTED =
   'LOCAL_INDEX_SCHEMA_UNSUPPORTED' as const
 
@@ -187,12 +187,20 @@ const SCHEMA_V5 = `
 ALTER TABLE activity_sessions ADD COLUMN active_duration_ms INTEGER NOT NULL DEFAULT 0;
 `
 
+// Additive: fork lineage reached v5 with thinking_enabled (this migration's
+// session_api_format is v5 on upstream v0.6.1), so the api-format column lands
+// in v6 here to keep already-migrated local installs monotonic.
+const SCHEMA_V6 = `
+ALTER TABLE sessions ADD COLUMN session_api_format TEXT;
+`
+
 const MIGRATIONS = [
   { version: 1, sql: SCHEMA_V1 },
   { version: 2, sql: SCHEMA_V2 },
   { version: 3, sql: SCHEMA_V3 },
   { version: 4, sql: SCHEMA_V4 },
   { version: 5, sql: SCHEMA_V5 },
+  { version: 6, sql: SCHEMA_V6 },
 ] as const
 
 export class UnsupportedLocalIndexSchemaError extends Error {

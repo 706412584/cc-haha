@@ -27,6 +27,7 @@ struct WindowCaptureStreamTarget: Equatable, Sendable {
     let originY: Double
     let pointWidth: Double
     let pointHeight: Double
+    var pixelsPerPoint: Double? = nil
 }
 
 /// An immutable copy of the newest complete BGRA frame. The ScreenCaptureKit
@@ -79,7 +80,7 @@ protocol WindowCaptureProviding: AnyObject {
         pid: pid_t,
         processIdentity: AXTreeProcessIdentity,
         preferredWindowID: CGWindowID?,
-        scale: Double,
+        scale: Double?,
         newerThanUptime: TimeInterval?
     ) async -> WindowShot?
 
@@ -117,7 +118,7 @@ final class WindowCaptureStreamManager: WindowCaptureProviding {
     private let factory: any WindowCaptureStreamSourceFactory
     private let frameWaitAttempts: Int
     private let frameWaitNanoseconds: UInt64
-    private let takeSnapshot: (WindowCaptureStreamTarget, Double) async -> WindowShot?
+    private let takeSnapshot: (WindowCaptureStreamTarget, Double?) async -> WindowShot?
     private var generation: UInt64 = 0
     private var starting: Entry?
     private var active: Entry?
@@ -130,7 +131,7 @@ final class WindowCaptureStreamManager: WindowCaptureProviding {
         factory: any WindowCaptureStreamSourceFactory,
         frameWaitAttempts: Int = 12,
         frameWaitNanoseconds: UInt64 = 50_000_000,
-        takeSnapshot: @escaping (WindowCaptureStreamTarget, Double) async -> WindowShot? = { target, scale in
+        takeSnapshot: @escaping (WindowCaptureStreamTarget, Double?) async -> WindowShot? = { target, scale in
             await Capture.windowShot(
                 pid: target.key.pid,
                 preferredWindowID: target.key.windowID,
@@ -149,7 +150,7 @@ final class WindowCaptureStreamManager: WindowCaptureProviding {
         pid: pid_t,
         processIdentity: AXTreeProcessIdentity,
         preferredWindowID: CGWindowID?,
-        scale: Double,
+        scale: Double?,
         newerThanUptime: TimeInterval?
     ) async -> WindowShot? {
         guard Capture.hasScreenRecordingPermission(),
@@ -208,7 +209,9 @@ final class WindowCaptureStreamManager: WindowCaptureProviding {
                 base64: shot.base64, width: shot.width, height: shot.height,
                 originX: current.originX, originY: current.originY,
                 pointWidth: current.pointWidth, pointHeight: current.pointHeight,
-                windowID: current.key.windowID, source: .streamBackedScreenshot
+                windowID: current.key.windowID, source: .streamBackedScreenshot,
+                pixelsPerPoint: shot.pixelsPerPoint,
+                mimeType: shot.mimeType
             )
         }
         return nil
@@ -220,7 +223,7 @@ final class WindowCaptureStreamManager: WindowCaptureProviding {
     /// pixel frame before its on-demand screenshot may be treated as live.
     func captureSnapshot(
         for target: WindowCaptureStreamTarget,
-        scale: Double,
+        scale: Double?,
         newerThanUptime: TimeInterval? = nil
     ) async -> WindowShot? {
         // The stream is a long-lived render/freshness consumer, not the model
@@ -797,7 +800,7 @@ extension Capture {
         pid: pid_t,
         processIdentity: AXTreeProcessIdentity,
         preferredWindowID: CGWindowID?,
-        scale: Double
+        scale: Double?
     ) -> WindowCaptureStreamTarget? {
         guard processIdentity.isProven,
               let candidate = bestWindow(
@@ -809,8 +812,10 @@ extension Capture {
         let frame = candidate.frame
         guard frame.width > 1, frame.height > 1 else { return nil }
 
-        let outputScale = scale > 0 ? scale : 0.5
         let backingScale = backingScaleFactor(forWindowFrame: frame)
+        let outputScale = scale.flatMap { $0 > 0 ? $0 : nil } ?? NativeScreenshotPolicy.scale(
+            pointSize: frame.size, backingScale: backingScale
+        )
         let width = max(1, Int(ceil(frame.width * backingScale * outputScale)))
         let height = max(1, Int(ceil(frame.height * backingScale * outputScale)))
         return WindowCaptureStreamTarget(
@@ -824,7 +829,8 @@ extension Capture {
             originX: Double(frame.origin.x),
             originY: Double(frame.origin.y),
             pointWidth: Double(frame.width),
-            pointHeight: Double(frame.height)
+            pointHeight: Double(frame.height),
+            pixelsPerPoint: backingScale * outputScale
         )
     }
 
@@ -847,7 +853,8 @@ extension Capture {
             pointWidth: target.pointWidth,
             pointHeight: target.pointHeight,
             windowID: target.key.windowID,
-            source: .stream
+            source: .stream,
+            pixelsPerPoint: target.pixelsPerPoint
         )
     }
 

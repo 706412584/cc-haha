@@ -1,6 +1,7 @@
 import type { TranslationKey } from './en'
 
 export const jp: Record<TranslationKey, string> = {
+  'sidebar.projectHistoryFailed': '以前のセッションを読み込めませんでした。',
   // ─── Common ──────────────────────────────────────
   'common.cancel': 'キャンセル',
   'common.close': '閉じる',
@@ -874,6 +875,9 @@ export const jp: Record<TranslationKey, string> = {
   'settings.providers.toolSearchConfirmEnable': '有効にする',
   'settings.providers.disableExperimentalBetas': '実験的な Beta ヘッダーを無効化',
   'settings.providers.disableExperimentalBetasDesc': 'このプロバイダーに CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 を設定し、サードパーティゲートウェイが拒否する可能性のある beta API 形式を避けます。GPT および o シリーズのモデルには Session で選択した推論強度が引き続き転送されます。その他の Anthropic 互換モデルへの直接接続では、ゲートウェイの既定値に戻る場合があります。',
+  'settings.providers.supportsNestedToolResultMedia': 'ツール結果のメディアを保持',
+  'settings.providers.nestedToolResultMediaDesc': 'Anthropic 互換エンドポイントがネストされたメディアに対応している場合、画像とファイルを tool result 内に保持します。ネストされたメディアを表示できないサードパーティエンドポイントでは、このオプションをオフにすると画像とファイルが独立したコンテンツブロックに引き上げられます。',
+  'settings.providers.nestedToolResultMediaUnsupported': 'ツール結果のネストされたメディアを設定できるのは Anthropic Messages プロバイダーのみです。',
   'settings.providers.imageGenerationEnabled': '画像生成を有効にする',
   'settings.providers.imageGenerationEnabledDesc': 'OpenAI 互換 Images API を通じてチャットから画像を生成します。認証情報は Skill ではなくプロバイダー設定に保存されます。',
   'settings.providers.imageGenerationModel': '画像モデル',
@@ -1122,7 +1126,7 @@ export const jp: Record<TranslationKey, string> = {
   'settings.mcp.empty': 'MCP サーバーはまだ設定されていません',
   'settings.mcp.emptyHint': 'カスタムの stdio、HTTP、または SSE の MCP サーバーを追加して、ツールアクセスの拡張を始めましょう。',
   'settings.mcp.stats.total': 'サーバー総数',
-  'settings.mcp.stats.connected': '現在のチャットで接続中',
+  'settings.mcp.stats.connected': '現在のプロジェクトの接続確認',
   'settings.mcp.stats.attention': '要対応',
   'settings.mcp.status.configured': '設定済み',
   'settings.mcp.status.configuredElsewhere': '現在のチャットでは読み込まれていません。このプロジェクトでチャットを開いて使用してください。',
@@ -1268,6 +1272,11 @@ export const jp: Record<TranslationKey, string> = {
   'settings.mcp.marketplace.category.productivity': 'プロダクティビティ',
   'settings.mcp.marketplace.category.ai': 'AI ツール',
   'settings.mcp.marketplace.category.utility': 'ユーティリティ',
+  'settings.mcp.toast.syncFailed': 'チャットの同期に失敗しました：{error}',
+  'settings.mcp.toast.syncNotRunning': '現在のチャットは実行中ではありません。開始時に設定が適用されます。',
+  'settings.mcp.toast.syncDifferentProject': '現在のチャットは別のプロジェクトを使用しているため、ツールは更新されませんでした。',
+  'settings.mcp.toast.syncNoSession': 'チャットが選択されていません。設定を保存しました。',
+  'settings.mcp.toast.syncUnconfirmed': '現在のチャットの更新を確認できませんでした。',
 
   // Settings > Agents
   'settings.tab.agents': 'エージェント',
@@ -1766,6 +1775,24 @@ export const jp: Record<TranslationKey, string> = {
   // Settings > General - Storage
   'settings.general.modeSwitchTitle': 'データ保存場所を切り替えますか？',
   'settings.general.modeSwitchConfirm': '保存して再起動',
+  'settings.general.sessionRetentionTitle': 'セッション履歴',
+  'settings.general.sessionRetentionDescription': 'セッション記録をこの端末に保持する期間です。値を小さくすると古い記録がすぐに削除されるため、確認を求めます。',
+  'settings.general.sessionRetentionLabel': 'セッション履歴の保持期間',
+  'settings.general.sessionRetentionCurrent': '現在：{days} 日',
+  'settings.general.sessionRetentionCurrentOff': '現在：記録を保存しない',
+  'settings.general.sessionRetentionUnit': '日',
+  'settings.general.sessionRetentionHint': '既定は 365 日です。0 にするとセッション内容を記録しなくなり、既存の記録もすべて削除します。',
+  'settings.general.sessionRetentionRequired': '日数を入力してください。',
+  'settings.general.sessionRetentionRange': '0 から {max} までの整数を入力してください。',
+  'settings.general.sessionRetentionSave': '保存',
+  'settings.general.sessionRetentionSaved': '保持期間を更新し、期限切れのセッションファイルを {count} 件削除しました。',
+  'settings.general.sessionRetentionSavedPartial': '保持期間を更新しました。期限切れのセッションファイルを {count} 件削除し、{errors} 件は削除できませんでした。',
+  'settings.general.sessionRetentionConfirmTitle': 'セッション履歴の保持期間を変更しますか？',
+  'settings.general.sessionRetentionConfirmDelete': '{days} 日より古いセッション記録を完全に削除します。元に戻せません。',
+  'settings.general.sessionRetentionConfirmDisable': '0 にすると新しいセッション内容を記録しなくなり、既存の記録もすべて完全に削除します。元に戻せません。',
+  'settings.general.sessionRetentionPreview': 'この設定では現在 {count} 件のファイルが削除されます。',
+  'settings.general.sessionRetentionPreviewUnavailable': '集計に失敗しました。そのまま続行できます。',
+  'settings.general.sessionRetentionConfirmAction': '削除して保存',
   'settings.general.storageTitle': 'データ保存場所',
   'settings.general.storageDescription': '高度で使用頻度の低い設定です。切り替え後は、セッション、スキル、MCP、プラグイン、プロバイダー設定、タスク、キャッシュが新しいディレクトリから読み込まれます。',
   'settings.general.storageSystemTitle': 'システムディレクトリを使用',

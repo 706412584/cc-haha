@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { MarketplaceCatalog, MarketplaceRemoteSource, McpServerRecord, McpToolsResult, McpToolToggleResult, McpUpsertPayload } from '../types/mcp'
+import type { MarketplaceCatalog, MarketplaceRemoteSource, McpServerRecord, McpToggleResult, McpToolToggleResult, McpToolsResult, McpUpsertPayload } from '../types/mcp'
 
 export const mcpApi = {
   list: (cwd?: string) => {
@@ -98,7 +98,7 @@ export const mcpApi = {
   },
 
   toggle: (name: string, cwd?: string, sessionId?: string) => {
-    return api.post<{ server: McpServerRecord }>(
+    return api.post<McpToggleResult>(
       `/api/mcp/${encodeURIComponent(name)}/toggle`,
       {
         ...(cwd ? { cwd } : {}),

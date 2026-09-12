@@ -10,10 +10,13 @@ import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as os from 'os'
 import { ApiError } from '../middleware/errorHandler.js'
+import { buildOpenaiEndpoint } from '../proxy/openaiEndpoint.js'
+import { normalizeAnthropicBaseUrl } from '../../services/api/anthropicBaseUrl.js'
 import { readRecoverableJsonFile } from './recoverableJsonFile.js'
 import { ManagedSettingsService } from './managedSettingsService.js'
 import { anthropicToOpenaiChat } from '../proxy/transform/anthropicToOpenaiChat.js'
 import { anthropicToOpenaiResponses } from '../proxy/transform/anthropicToOpenaiResponses.js'
+import { hoistToolResultMediaForCompatibility } from '../proxy/transform/anthropicMediaHoist.js'
 import { openaiChatToAnthropic } from '../proxy/transform/openaiChatToAnthropic.js'
 import { openaiResponsesToAnthropic } from '../proxy/transform/openaiResponsesToAnthropic.js'
 import type { AnthropicRequest } from '../proxy/transform/types.js'
@@ -41,6 +44,8 @@ import {
   normalizeImageGeneration,
   normalizeModelMapping,
   normalizeProvidersIndex,
+  providerNeedsProxy,
+  resolveProviderApiKey,
 } from './providerRuntimeEnv.js'
 import {
   getNetworkProxyFetchOptions,
@@ -126,6 +131,7 @@ function buildSavedProvider(input: CreateProviderInput): SavedProvider {
     ...(input.modelContextWindows !== undefined && { modelContextWindows: input.modelContextWindows }),
     toolSearchEnabled: input.toolSearchEnabled ?? false,
     ...(input.disableExperimentalBetas === true && { disableExperimentalBetas: true }),
+    ...(input.supportsNestedToolResultMedia !== undefined && { supportsNestedToolResultMedia: input.supportsNestedToolResultMedia }),
     ...(imageGeneration !== undefined && { imageGeneration }),
     ...(input.notes !== undefined && { notes: input.notes }),
   }
@@ -299,6 +305,7 @@ export class ProviderService {
       ...(typeof input.autoCompactWindow === 'number' && { autoCompactWindow: input.autoCompactWindow }),
       ...(input.modelContextWindows !== undefined && input.modelContextWindows !== null && { modelContextWindows: input.modelContextWindows }),
       ...(input.toolSearchEnabled !== undefined && { toolSearchEnabled: input.toolSearchEnabled }),
+      ...(input.supportsNestedToolResultMedia !== undefined && { supportsNestedToolResultMedia: input.supportsNestedToolResultMedia }),
       ...(input.disableExperimentalBetas === true && { disableExperimentalBetas: true }),
       ...(imageGeneration !== undefined && imageGeneration !== null && { imageGeneration }),
       ...(input.notes !== undefined && { notes: input.notes }),
@@ -587,7 +594,10 @@ export class ProviderService {
       const provider = index.providers.find(p => p.id === index.activeId)
       if (provider) {
         const presetDefaultEnv = getPresetDefaultEnv(provider.presetId)
-        const needsProxy = provider.apiFormat != null && provider.apiFormat !== 'anthropic'
+        const needsProxy = providerNeedsProxy(
+          provider.apiFormat ?? 'anthropic',
+          provider.supportsNestedToolResultMedia,
+        )
         const authEnv = buildProviderAuthEnv(provider, presetDefaultEnv, needsProxy)
         if (Object.values(authEnv).some(value => value.length > 0)) {
           return { hasAuth: true, source: 'cc-haha-provider', activeProvider: provider.name }
@@ -633,19 +643,26 @@ export class ProviderService {
     baseUrl: string
     apiKey: string
     apiFormat: ApiFormat
+    supportsNestedToolResultMedia: boolean
+    authStrategy: ProviderAuthStrategy
   } | null> {
-    if (providerId) {
-      if (isOpenAIOfficialProviderId(providerId) || isGrokOfficialProviderId(providerId)) {
-        return null
-      }
-      const provider = await this.getProvider(providerId)
+    const toProxyConfig = (provider: SavedProvider) => {
+      const presetDefaultEnv = getPresetDefaultEnv(provider.presetId)
       return {
         id: provider.id,
         name: provider.name,
         baseUrl: provider.baseUrl,
-        apiKey: provider.apiKey,
+        apiKey: resolveProviderApiKey(provider, presetDefaultEnv),
         apiFormat: provider.apiFormat ?? 'anthropic',
+        supportsNestedToolResultMedia: provider.supportsNestedToolResultMedia ?? true,
+        authStrategy: provider.authStrategy ?? getPresetAuthStrategy(provider.presetId),
       }
+    }
+    if (providerId) {
+      if (isOpenAIOfficialProviderId(providerId) || isGrokOfficialProviderId(providerId)) {
+        return null
+      }
+      return toProxyConfig(await this.getProvider(providerId))
     }
 
     const index = await this.readIndex()
@@ -654,20 +671,15 @@ export class ProviderService {
       return null
     }
     const provider = await this.getProvider(index.activeId).catch(() => null)
-    if (!provider) return null
-    return {
-      id: provider.id,
-      name: provider.name,
-      baseUrl: provider.baseUrl,
-      apiKey: provider.apiKey,
-      apiFormat: provider.apiFormat ?? 'anthropic',
-    }
+    return provider ? toProxyConfig(provider) : null
   }
 
   async getActiveProviderForProxy(): Promise<{
     baseUrl: string
     apiKey: string
     apiFormat: ApiFormat
+    supportsNestedToolResultMedia: boolean
+    authStrategy: ProviderAuthStrategy
   } | null> {
     return this.getProviderForProxy()
   }
@@ -684,9 +696,7 @@ export class ProviderService {
     const apiFormat = provider.apiFormat ?? 'anthropic'
     const authStrategy = provider.authStrategy ?? getPresetAuthStrategy(provider.presetId)
     const presetDefaultEnv = getPresetDefaultEnv(provider.presetId)
-    const apiKey = provider.apiKey
-      || presetDefaultEnv.ANTHROPIC_AUTH_TOKEN
-      || presetDefaultEnv.ANTHROPIC_API_KEY
+    const apiKey = resolveProviderApiKey(provider, presetDefaultEnv)
       || (authStrategy === 'dual_dummy' ? 'dummy' : '')
 
     if (!baseUrl || !apiKey) {
@@ -698,6 +708,7 @@ export class ProviderService {
       modelId,
       authStrategy,
       apiFormat,
+      supportsNestedToolResultMedia: provider.supportsNestedToolResultMedia,
     })
   }
 
@@ -717,14 +728,20 @@ export class ProviderService {
       return { connectivity: step1 }
     }
 
-    // For native Anthropic format, no proxy pipeline to test
-    if (format === 'anthropic') {
+    if (!providerNeedsProxy(format, input.supportsNestedToolResultMedia)) {
       return { connectivity: step1 }
     }
 
     // ── Step 2: Full proxy pipeline ──────────────────────────
     // Anthropic request → transform → upstream → transform back → validate
-    const step2 = await this.testProxyPipeline(base, input.apiKey, modelId, format, networkSettings)
+    const step2 = await this.testProxyPipeline(
+      base,
+      input.apiKey,
+      modelId,
+      format,
+      authStrategy,
+      networkSettings,
+    )
 
     return { connectivity: step1, proxy: step2 }
   }
@@ -858,7 +875,8 @@ export class ProviderService {
     base: string,
     apiKey: string,
     modelId: string,
-    format: 'openai_chat' | 'openai_responses',
+    format: ApiFormat,
+    authStrategy: ProviderAuthStrategy,
     networkSettings: NetworkSettings,
   ): Promise<ProviderTestStepResult> {
     const start = Date.now()
@@ -870,22 +888,32 @@ export class ProviderService {
         messages: [{ role: 'user', content: 'Say "ok" and nothing else.' }],
       }
 
-      // Transform to OpenAI format
       let upstreamUrl: string
       let transformedBody: unknown
+      let headers: Record<string, string>
       if (format === 'openai_chat') {
         transformedBody = anthropicToOpenaiChat(anthropicReq)
-        upstreamUrl = `${base}/v1/chat/completions`
-      } else {
+        upstreamUrl = buildOpenaiEndpoint(base, 'chat/completions')
+        headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }
+      } else if (format === 'openai_responses') {
         transformedBody = anthropicToOpenaiResponses(anthropicReq)
-        upstreamUrl = `${base}/v1/responses`
+        upstreamUrl = buildOpenaiEndpoint(base, 'responses')
+        headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }
+      } else {
+        transformedBody = hoistToolResultMediaForCompatibility(anthropicReq)
+        upstreamUrl = `${normalizeAnthropicBaseUrl(base)}/v1/messages`
+        headers = {
+          'Content-Type': 'application/json',
+          'anthropic-version': '2023-06-01',
+          ...buildAnthropicAuthHeaders(apiKey, authStrategy),
+        }
       }
       const proxyOptions = getNetworkProxyFetchOptions(networkSettings, upstreamUrl)
 
       // Call upstream with transformed request
       const response = await fetch(upstreamUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        headers,
         body: JSON.stringify(transformedBody),
         signal: AbortSignal.timeout(networkSettings.aiRequestTimeoutMs),
         ...proxyOptions,
@@ -902,7 +930,9 @@ export class ProviderService {
       const responseBody = await response.json()
       const anthropicRes = format === 'openai_chat'
         ? openaiChatToAnthropic(responseBody, modelId)
-        : openaiResponsesToAnthropic(responseBody, modelId)
+        : format === 'openai_responses'
+          ? openaiResponsesToAnthropic(responseBody, modelId)
+          : responseBody
 
       const latencyMs = Date.now() - start
 
@@ -936,21 +966,21 @@ function buildDirectTestRequest(
 
   if (format === 'openai_chat') {
     return {
-      url: `${base}/v1/chat/completions`,
+      url: buildOpenaiEndpoint(base, 'chat/completions'),
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: { model: modelId, max_tokens: 16, stream: false, messages: [{ role: 'user', content: prompt }] },
     }
   }
   if (format === 'openai_responses') {
     return {
-      url: `${base}/v1/responses`,
+      url: buildOpenaiEndpoint(base, 'responses'),
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: { model: modelId, max_output_tokens: 16, input: [{ type: 'message', role: 'user', content: prompt }] },
     }
   }
   // anthropic
   return {
-    url: `${base}/v1/messages`,
+    url: `${normalizeAnthropicBaseUrl(base)}/v1/messages`,
     headers: {
       'Content-Type': 'application/json',
       'anthropic-version': '2023-06-01',

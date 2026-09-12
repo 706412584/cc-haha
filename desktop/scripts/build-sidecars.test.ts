@@ -416,6 +416,9 @@ describe('build-sidecars Windows x64 target mapping', () => {
     expect(desktopPackage.scripts?.['test:compiled-sidecar-smoke']).toContain(
       'CC_HAHA_RUN_COMPILED_SIDECAR_SMOKE=1',
     )
+    expect(desktopPackage.scripts?.['test:compiled-sidecar-smoke']).toContain(
+      'scripts/image-processor-packaging.test.ts',
+    )
     expect(rootPackage.scripts?.['check:native']).toContain(
       'test:compiled-sidecar-smoke',
     )

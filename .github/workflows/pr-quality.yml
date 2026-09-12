@@ -130,6 +130,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Install root dependencies
         run: bun install --frozen-lockfile
       - name: Install desktop dependencies
@@ -235,7 +237,7 @@ jobs:
           sudo apt-get install -y \
             build-essential curl wget file \
             libxdo-dev libssl-dev patchelf \
-            libfuse2
+            libfuse2 ripgrep
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
@@ -324,6 +326,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Install root dependencies
         run: bun install --frozen-lockfile
       - name: Install desktop dependencies

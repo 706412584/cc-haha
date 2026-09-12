@@ -1,19 +1,11 @@
+import { COMPUTER_USE_BATCHING_GUIDANCE } from '../../vendor/computer-use-mcp/instructions.js'
 import { isComputerUseSkillEnabled } from '../../utils/computerUse/skillGate.js'
 import { buildPlatformComputerUseTools } from '../../vendor/computer-use-mcp/mcpServer.js'
 import { registerBundledSkill } from '../bundledSkills.js'
 
 const MAC_COMPUTER_USE_TOOLS = [
-  'list_apps',
-  'get_app_state',
-  'click',
-  'set_value',
-  'select_text',
-  'perform_secondary_action',
-  'scroll',
-  'drag',
-  'press_key',
-  'type_text',
-  'paste',
+  'js',
+  'js_reset',
 ].map(name => `mcp__computer-use__${name}`)
 
 export function getComputerUseToolAllowlist(
@@ -44,37 +36,49 @@ const COMPUTER_USE_PROMPT = `# Operating Mac apps
 You are driving real applications on the user's Mac through the accessibility
 engine. Work in this loop:
 
-1. \`get_app_state({ app })\` — returns the app's accessibility tree AND a
-   screenshot of its window. It launches the app in the background if it is not
-   running, so there is no separate "open" step.
-2. Act.
-3. \`get_app_state\` again before deciding anything else. Element handles are only
-   valid inside the snapshot that produced them; re-read to get fresh ones.
+1. Use \`js\` to bind an app with \`cua.getApp("App Name")\` and read its initial
+   AX state. Request \`app.getScreenshot()\` when visual information is needed.
+2. Perform known actions in that persistent JS session, then observe at the next
+   decision point.
+3. Inspect state and screenshots before choosing further actions.
 
-Do not sleep between an action and the next \`get_app_state\`. The engine already
-waits for the UI to settle — about a second, longer while the app shows a
-progress indicator.
+${COMPUTER_USE_BATCHING_GUIDANCE}
+
+Do not add a fixed sleep before an observation. The observation path waits
+for UI changes when needed. Read its result before deciding whether more context
+is necessary.
+
+## Blender keyboard input
+
+For Blender, ordinary \`app.typeText\` can leave text unchanged. Use
+\`await app.pressKey("s x 1 period 3 5 Return")\` for a known numeric transform,
+or \`await app.pressKey("a d d space c u b e")\` in a known search field.
+These send actual key presses. Use short macros and observe through the JS App
+after opening an unfamiliar dialog; never replay the whole batch after failure.
+Use \`space\` for a literal space, \`period\` for a decimal point, and
+\`minus\` for a negative sign.
 
 ## Naming the app
 
-Pass the app name straight to \`get_app_state\` — display name, bundle identifier,
-or full path all work. Do NOT call \`list_apps\` first just to look up an
+Pass the app name straight to \`cua.getApp\` — display name, bundle identifier,
+or full path all work. Do NOT call \`cua.listApps()\` first just to look up an
 identifier. If a call fails with a display name, immediately retry the same call
 with the bundle identifier before investigating anything else. Reach for
-\`list_apps\` only when you genuinely cannot name the app.
+\`cua.listApps()\` only when you genuinely cannot name the app.
 
 ## Choosing how to act
 
-Prefer \`element_index\` while the tree still describes the control you want: it
-targets the element directly and survives the window moving.
+Prefer \`app.click("gN:id")\` while the tree
+describes the control you want: it targets the element directly and survives
+the window moving.
 
-Switch to \`x\`/\`y\` read off the screenshot when either is true:
+Switch to \`[x,y]\` read off the screenshot when either is true:
 
 - **the tree is a dead end.** Many Chromium/Electron apps expose only their
-  window frame and menu bar. \`get_app_state\` says so explicitly when it detects
+  window frame and menu bar. AX state says so explicitly when it detects
   this. That is not a slow-loading tree — it will never fill in. Five tools
-  still work there: \`click\` with x/y, \`drag\` with x/y, \`press_key\`, and
-  \`type_text\`/\`paste\`. Everything else needs a handle it cannot get. The menu bar stays
+  still work there: \`app.click([x,y])\`, \`app.drag(from,to)\`, \`app.pressKey(key)\`, and
+  \`app.typeText(text)\`/\`app.paste(text)\`. Element methods need an observed handle. The menu bar stays
   fully addressable, so a menu path is often the shortest route.
 - **element actions run but the UI does not change.**
 
@@ -83,14 +87,15 @@ them as-is; do not convert them.
 
 ## Knowing whether it worked
 
-Mutating tools return a fixed receipt. The receipt means the action was
-**dispatched**, never that it had the intended effect. Only the next
-\`get_app_state\` tells you what actually happened. Judge the screenshot as well
-as AX text: Chromium/CEF content can visibly change while the AX diff stays empty.
+Awaiting a JS action or receiving a standalone receipt means the action was
+**dispatched**, never that it had the intended effect. Observe through the JS
+App to learn what actually happened.
+Judge the screenshot as well as AX text: Chromium/CEF content
+can visibly change while the AX diff stays empty.
 
 If two consecutive screenshots leave the relevant UI unchanged, the approach is wrong.
 Change something real: switch from handle to coordinates, target a different
-element, re-read the full tree with \`disableDiff: true\`, or take a different
+element, re-read the full tree with \`app.getAXState({disableDiffing:true})\`, or take a different
 route through the UI such as the menu bar. Repeating the same call a third time
 never helps.
 
@@ -102,19 +107,19 @@ session.
 
 ## Tool notes
 
-- \`get_app_state\` returns a diff against the previous read by default. Pass
-  \`disableDiff: true\` when you need the whole tree — after acting from a
+- \`app.getAXState()\` returns a diff against the previous read by default. Pass
+  \`{disableDiffing:true}\` when you need the whole tree — after acting from a
   screenshot alone, or whenever the diff has left you unsure of the state.
-- \`perform_secondary_action\` only accepts an action actually listed for that
+- \`app.performSecondaryAction(element,action)\` only accepts an action actually listed for that
   element in the tree. Do not guess action names.
-- \`press_key\` and \`type_text\` are delivered to the named app, so they cannot
+- \`app.pressKey\` and \`app.typeText\` are delivered to the named app, so they cannot
   trigger global system shortcuts.
-- If \`type_text\` does not visibly change a Chromium/CEF field, use
-  \`paste({ app, text, format: "text" })\`. It restores the user's prior clipboard.
-  If it times out after dispatch, call \`get_app_state\` before retrying: the app
+- If \`app.typeText\` does not visibly change a Chromium/CEF field, use
+  \`app.paste(text,{format:"text"})\`. It restores the user's prior clipboard.
+  If it times out after dispatch, rebind and call \`app.getAXStateAndScreenshot()\` before retrying: the app
   may have consumed the paste late.
-- \`press_key\` uses xdotool key names: "a", "Return", "Tab", "Up", "super+c".
-- \`select_text\` works inside editable elements; use \`prefix\`/\`suffix\` to
+- \`app.pressKey\` uses xdotool key names: "a", "Return", "Tab", "Up", "super+c".
+- \`app.selectText\` works inside editable elements; use \`prefix\`/\`suffix\` to
   disambiguate repeated matches.
 
 ## Trust

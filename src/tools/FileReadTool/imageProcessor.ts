@@ -1,4 +1,5 @@
 import type { Buffer } from 'buffer'
+import { createRequire } from 'node:module'
 import { isInBundledMode } from '../../utils/bundledMode.js'
 import { errorMessage } from '../../utils/errors.js'
 
@@ -54,17 +55,19 @@ export async function getImageProcessor(): Promise<SharpFunction> {
       imageProcessorModule = { default: sharp }
       return sharp
     } catch (error) {
-      throw new Error(
-        `Native image processor module not available in bundled mode: ${errorMessage(error)}`,
+      // Fall back to sharp if native module is not available. v0.6.1 packs
+      // sharp (and its binaries) into asarUnpack, so the fallback resolves to
+      // the bundled copy rather than an ambient install.
+      // biome-ignore lint/suspicious/noConsole: intentional warning
+      console.warn(
+        `Native image processor not available (${errorMessage(error)}), falling back to sharp`,
       )
     }
   }
 
   // Use sharp for non-bundled builds.
   // Single structural cast: our SharpFunction is a subset of sharp's actual type surface.
-  const imported = (await import(
-    'sharp'
-  )) as unknown as MaybeDefault<SharpFunction>
+  const imported = await loadSharp()
   const sharp = unwrapDefault(imported)
   imageProcessorModule = { default: sharp }
   return sharp
@@ -80,12 +83,33 @@ export async function getImageCreator(): Promise<SharpCreator> {
     return imageCreatorModule.default
   }
 
-  const imported = (await import(
-    'sharp'
-  )) as unknown as MaybeDefault<SharpCreator>
+  const imported = await loadSharp()
   const sharp = unwrapDefault(imported)
   imageCreatorModule = { default: sharp }
   return sharp
+}
+
+async function loadSharp(): Promise<MaybeDefault<SharpFunction & SharpCreator>> {
+  // External imports in a compiled Bun executable otherwise resolve from the
+  // caller's project. The desktop ships sharp beside the executable's ancestors
+  // in app.asar.unpacked/node_modules, outside Electron's virtual ASAR filesystem.
+  if (isInBundledMode() || isCompiledImageProcessorUrl(import.meta.url)) {
+    try {
+      return createRequire(process.execPath)('sharp')
+    } catch {
+      // The executable-relative require failed (e.g. a dev run where
+      // process.execPath is the Bun binary, or a package missing the sidecar
+      // copy). Fall through to the ordinary import so the source-install
+      // dependency can still serve the process.
+    }
+  }
+  return await import('sharp') as unknown as MaybeDefault<SharpFunction & SharpCreator>
+}
+
+export function isCompiledImageProcessorUrl(moduleUrl: string): boolean {
+  // Windows Bun URLs encode ~BUN as %7EBUN, even without embedded assets.
+  const modulePath = decodeURIComponent(new URL(moduleUrl).pathname)
+  return modulePath.includes('/$bunfs/') || modulePath.includes('/~BUN/')
 }
 
 // Dynamic import shape varies by module interop mode — ESM yields { default: fn }, CJS yields fn directly.

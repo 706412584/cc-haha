@@ -276,6 +276,7 @@ describe('Settings > General tab', () => {
         aiRequestTimeoutMs: 120_000,
         proxy: { mode: 'direct', url: '' },
       },
+      cleanupPeriodDays: null,
       h5Access: {
         enabled: false,
         token: null,
@@ -352,6 +353,9 @@ describe('Settings > General tab', () => {
       }),
       setNetwork: vi.fn().mockImplementation(async (network) => {
         useSettingsStore.setState({ network })
+      }),
+      setCleanupPeriodDays: vi.fn().mockImplementation(async (days: number) => {
+        useSettingsStore.setState({ cleanupPeriodDays: days })
       }),
       appMode: {
         mode: 'default',
@@ -729,6 +733,280 @@ describe('Settings > General tab', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Decrease by 30 seconds' }))
     expect(timeoutInput).toHaveValue(60)
     expect(saveButton).not.toBeDisabled()
+  })
+
+  it('previews session cleanup and only deletes after confirmation', async () => {
+    const cleanupSessions = vi
+      .spyOn(settingsApi, 'cleanupSessions')
+      .mockImplementation(async (days, dryRun = false) => ({
+        ok: true,
+        days,
+        dryRun,
+        files: 7,
+        errors: 0,
+      }))
+
+    try {
+      render(<Settings />)
+      fireEvent.click(screen.getByText('General'))
+
+      const input = screen.getByLabelText('Keep session history for')
+      expect(input).toHaveValue(365)
+
+      const section = screen.getByRole('heading', { name: 'Session History' })
+        .parentElement as HTMLElement
+      const saveButton = within(section).getByRole('button', { name: 'Save' })
+      expect(saveButton).toBeDisabled()
+
+      fireEvent.change(input, { target: { value: '90' } })
+      expect(saveButton).not.toBeDisabled()
+
+      await act(async () => {
+        fireEvent.click(saveButton)
+      })
+
+      expect(cleanupSessions).toHaveBeenCalledWith(90, true)
+      expect(useSettingsStore.getState().setCleanupPeriodDays).not.toHaveBeenCalled()
+
+      const dialog = screen.getByRole('dialog', { name: 'Change session history retention?' })
+      expect(within(dialog).getByText('7 files currently match this cutoff.')).toBeInTheDocument()
+      expect(
+        within(dialog).getByText(/Sessions older than 90 days will be permanently deleted/),
+      ).toBeInTheDocument()
+
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Delete and save' }))
+      })
+
+      expect(useSettingsStore.getState().setCleanupPeriodDays).toHaveBeenCalledWith(90)
+      expect(cleanupSessions).toHaveBeenLastCalledWith(90)
+      expect(useSettingsStore.getState().cleanupPeriodDays).toBe(90)
+      expect(
+        screen.queryByRole('dialog', { name: 'Change session history retention?' }),
+      ).not.toBeInTheDocument()
+      expect(
+        useUIStore.getState().toasts[useUIStore.getState().toasts.length - 1],
+      ).toMatchObject({
+        type: 'success',
+        message: 'Retention updated. 7 old session files removed.',
+      })
+    } finally {
+      cleanupSessions.mockRestore()
+    }
+  })
+
+  it('cancelling the retention confirmation keeps the stored value', async () => {
+    const cleanupSessions = vi.spyOn(settingsApi, 'cleanupSessions').mockResolvedValue({
+      ok: true,
+      days: 0,
+      dryRun: true,
+      files: 3,
+      errors: 0,
+    })
+
+    try {
+      render(<Settings />)
+      fireEvent.click(screen.getByText('General'))
+
+      const input = screen.getByLabelText('Keep session history for')
+      fireEvent.change(input, { target: { value: '0' } })
+
+      const section = screen.getByRole('heading', { name: 'Session History' })
+        .parentElement as HTMLElement
+      await act(async () => {
+        fireEvent.click(within(section).getByRole('button', { name: 'Save' }))
+      })
+
+      const dialog = screen.getByRole('dialog', { name: 'Change session history retention?' })
+      expect(
+        within(dialog).getByText(/stops recording new session content and permanently deletes/),
+      ).toBeInTheDocument()
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+
+      expect(useSettingsStore.getState().setCleanupPeriodDays).not.toHaveBeenCalled()
+      expect(cleanupSessions).toHaveBeenCalledTimes(1)
+      expect(input).toHaveValue(0)
+    } finally {
+      cleanupSessions.mockRestore()
+    }
+  })
+
+  it('surfaces a failed cleanup inside the dialog so the user can retry', async () => {
+    const cleanupSessions = vi
+      .spyOn(settingsApi, 'cleanupSessions')
+      .mockResolvedValueOnce({ ok: true, days: 90, dryRun: true, files: 4, errors: 0 })
+      .mockRejectedValueOnce(new Error('disk offline'))
+
+    try {
+      render(<Settings />)
+      fireEvent.click(screen.getByText('General'))
+      fireEvent.change(screen.getByLabelText('Keep session history for'), {
+        target: { value: '90' },
+      })
+
+      const section = screen.getByRole('heading', { name: 'Session History' })
+        .parentElement as HTMLElement
+      await act(async () => {
+        fireEvent.click(within(section).getByRole('button', { name: 'Save' }))
+      })
+
+      const dialog = screen.getByRole('dialog', { name: 'Change session history retention?' })
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Delete and save' }))
+      })
+
+      // The error must be visible inside the modal (the card behind it is
+      // covered) and the dialog must stay open so confirming again retries.
+      expect(within(dialog).getByText('disk offline')).toBeInTheDocument()
+      expect(
+        screen.getByRole('dialog', { name: 'Change session history retention?' }),
+      ).toBeInTheDocument()
+    } finally {
+      cleanupSessions.mockRestore()
+    }
+  })
+
+  it('opens the confirmation only after the impact count is known', async () => {
+    let resolvePreview!: (value: Awaited<ReturnType<typeof settingsApi.cleanupSessions>>) => void
+    const previewPromise = new Promise<Awaited<ReturnType<typeof settingsApi.cleanupSessions>>>(
+      (resolve) => {
+        resolvePreview = resolve
+      },
+    )
+    const cleanupSessions = vi.spyOn(settingsApi, 'cleanupSessions').mockReturnValue(previewPromise)
+
+    try {
+      render(<Settings />)
+      fireEvent.click(screen.getByText('General'))
+      fireEvent.change(screen.getByLabelText('Keep session history for'), {
+        target: { value: '90' },
+      })
+
+      const section = screen.getByRole('heading', { name: 'Session History' })
+        .parentElement as HTMLElement
+      const saveButton = within(section).getByRole('button', { name: 'Save' })
+      fireEvent.click(saveButton)
+
+      // While the dry-run is in flight there is nothing to confirm yet.
+      expect(saveButton).toBeDisabled()
+      expect(
+        screen.queryByRole('dialog', { name: 'Change session history retention?' }),
+      ).not.toBeInTheDocument()
+
+      await act(async () => {
+        resolvePreview({ ok: true, days: 90, dryRun: true, files: 5, errors: 0 })
+      })
+
+      const dialog = screen.getByRole('dialog', { name: 'Change session history retention?' })
+      expect(within(dialog).getByText('5 files currently match this cutoff.')).toBeInTheDocument()
+      expect(useSettingsStore.getState().setCleanupPeriodDays).not.toHaveBeenCalled()
+    } finally {
+      cleanupSessions.mockRestore()
+    }
+  })
+
+  it('reports files it could not remove instead of a clean success', async () => {
+    const cleanupSessions = vi
+      .spyOn(settingsApi, 'cleanupSessions')
+      .mockImplementation(async (days, dryRun = false) => ({
+        ok: true,
+        days,
+        dryRun,
+        files: 6,
+        errors: dryRun ? 0 : 2,
+      }))
+
+    try {
+      render(<Settings />)
+      fireEvent.click(screen.getByText('General'))
+      fireEvent.change(screen.getByLabelText('Keep session history for'), {
+        target: { value: '90' },
+      })
+
+      const section = screen.getByRole('heading', { name: 'Session History' })
+        .parentElement as HTMLElement
+      await act(async () => {
+        fireEvent.click(within(section).getByRole('button', { name: 'Save' }))
+      })
+
+      const dialog = screen.getByRole('dialog', { name: 'Change session history retention?' })
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Delete and save' }))
+      })
+
+      expect(
+        useUIStore.getState().toasts[useUIStore.getState().toasts.length - 1],
+      ).toMatchObject({
+        type: 'success',
+        message: 'Retention updated. 6 old session files removed, 2 could not be removed.',
+      })
+    } finally {
+      cleanupSessions.mockRestore()
+    }
+  })
+
+  it('confirms the value the dialog was opened with even if the store moves underneath', async () => {
+    // A failed save rolls the store back and the effect then resets the input
+    // behind the modal. The dialog must stay pinned to what the user saw, or
+    // the retry would silently apply the rolled-back value instead.
+    const cleanupSessions = vi
+      .spyOn(settingsApi, 'cleanupSessions')
+      .mockImplementation(async (days, dryRun = false) => ({
+        ok: true,
+        days,
+        dryRun,
+        files: 3,
+        errors: 0,
+      }))
+
+    try {
+      render(<Settings />)
+      fireEvent.click(screen.getByText('General'))
+      fireEvent.change(screen.getByLabelText('Keep session history for'), {
+        target: { value: '90' },
+      })
+
+      const section = screen.getByRole('heading', { name: 'Session History' })
+        .parentElement as HTMLElement
+      await act(async () => {
+        fireEvent.click(within(section).getByRole('button', { name: 'Save' }))
+      })
+
+      const dialog = screen.getByRole('dialog', { name: 'Change session history retention?' })
+      expect(
+        within(dialog).getByText(/Sessions older than 90 days will be permanently deleted/),
+      ).toBeInTheDocument()
+
+      await act(async () => {
+        useSettingsStore.setState({ cleanupPeriodDays: 365 })
+      })
+      // Precondition for the regression: the input behind the modal moved.
+      expect(screen.getByLabelText('Keep session history for')).toHaveValue(365)
+
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Delete and save' }))
+      })
+
+      expect(useSettingsStore.getState().setCleanupPeriodDays).toHaveBeenLastCalledWith(90)
+      expect(cleanupSessions).toHaveBeenLastCalledWith(90)
+    } finally {
+      cleanupSessions.mockRestore()
+    }
+  })
+
+  it('hides the retention controls on a touch-H5 phone browser', () => {
+    document.documentElement.setAttribute('data-touch-h5', 'true')
+    try {
+      render(<Settings />)
+      fireEvent.click(screen.getByText('General'))
+
+      expect(
+        screen.queryByRole('heading', { name: 'Session History' }),
+      ).not.toBeInTheDocument()
+    } finally {
+      document.documentElement.removeAttribute('data-touch-h5')
+    }
   })
 
   it('keeps data storage at the bottom of General settings', () => {
@@ -1876,8 +2154,9 @@ describe('Settings > General tab', () => {
     fireEvent.change(screen.getByLabelText('Tavily API key'), {
       target: { value: 'tvly-test-key' },
     })
-    const saveButtons = screen.getAllByRole('button', { name: 'Save' })
-    fireEvent.click(saveButtons[saveButtons.length - 1]!)
+    const webSearchSection = screen.getByRole('heading', { name: 'WebSearch' })
+      .parentElement as HTMLElement
+    fireEvent.click(within(webSearchSection).getByRole('button', { name: 'Save' }))
 
     expect(useSettingsStore.getState().setWebSearch).toHaveBeenCalledWith({
       mode: 'tavily',
@@ -2200,6 +2479,62 @@ describe('Settings > Providers tab', () => {
     expect(within(dialog).getByText(
       'cc-haha translates the protocol locally without an additional third-party conversion service',
     )).toBeInTheDocument()  })
+
+  it('uses the proxy in settings JSON and connection tests when nested tool media is unsupported', async () => {
+    providerStoreState.testConfig = vi.fn().mockResolvedValue({
+      connectivity: { success: true, latencyMs: 1 },
+      proxy: { success: true, latencyMs: 1 },
+    })
+    providerStoreState.presets = [{
+      id: 'custom',
+      name: 'Custom',
+      baseUrl: 'https://api.example.com/anthropic',
+      apiFormat: 'anthropic',
+      defaultModels: {
+        main: 'model-main',
+        haiku: '',
+        sonnet: '',
+        opus: '',
+      },
+      needsApiKey: true,
+      websiteUrl: '',
+    }]
+
+    render(<Settings />)
+    fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
+
+    const dialog = screen.getByRole('dialog')
+    const mediaSupport = within(dialog).getByLabelText('Preserve nested tool result media')
+    expect(mediaSupport).toBeChecked()
+    fireEvent.click(mediaSupport)
+
+    const settingsTextarea = await waitFor(() => {
+      const textarea = dialog.querySelector('textarea') as HTMLTextAreaElement
+      const settings = JSON.parse(textarea.value) as {
+        env?: {
+          ANTHROPIC_API_KEY?: string
+          ANTHROPIC_AUTH_TOKEN?: string
+          ANTHROPIC_BASE_URL?: string
+        }
+      }
+      expect(settings.env?.ANTHROPIC_BASE_URL).toMatch(/\/proxy$/)
+      expect(settings.env?.ANTHROPIC_API_KEY).toBe('proxy-managed')
+      expect(settings.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+      return textarea
+    })
+    expect(settingsTextarea.value).not.toContain('"ANTHROPIC_BASE_URL": "https://api.example.com/anthropic"')
+
+    fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: /Test Connection/i }))
+
+    await waitFor(() => {
+      expect(providerStoreState.testConfig).toHaveBeenCalledWith(expect.objectContaining({
+        baseUrl: 'https://api.example.com/anthropic',
+        apiFormat: 'anthropic',
+        supportsNestedToolResultMedia: false,
+      }))
+    })
+  })
 
   it('localizes the main model placeholder in the provider form', () => {
     useSettingsStore.setState({ locale: 'zh' })

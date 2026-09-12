@@ -2816,7 +2816,7 @@ describe('MessageList nested tool calls', () => {
     expect(group.toolCalls.map((toolCall) => toolCall.toolUseId)).toEqual(['read-1', 'bash-1'])
   })
 
-  it('keeps a completed tool group visibly live while post-tool thinking streams', () => {
+  it('keeps a completed tool group visibly live while post-tool thinking streams', async () => {
     render(<MessageList sessionId={ACTIVE_TAB} />)
 
     const store = useChatStore.getState()
@@ -2845,8 +2845,12 @@ describe('MessageList nested tool calls', () => {
       })
     })
 
+    // Thinking is coalesced on the same 50ms cadence as content_delta, so the
+    // streaming row appears on the next tick rather than synchronously.
     const group = screen.getByTestId('activity-group')
-    expect(group.getAttribute('data-running')).toBe('true')
+    await waitFor(() => {
+      expect(group.getAttribute('data-running')).toBe('true')
+    })
     // The tool finished but the run has not: feedback has to stay somewhere the
     // reader can see (#d3ba73af3, which restored it after an earlier collapse
     // dropped it). It now sits on the step that is actually still going — the
@@ -8105,6 +8109,13 @@ describe('MessageList nested tool calls', () => {
       'This will rewind the conversation to before this turn. Files on disk will not be changed.',
     )).toBeTruthy()
     expect(within(dialog).queryByRole('button', { name: 'Undo current turn' })).toBeNull()
+    // History renders before its checkpoint cards reload. Hold that request so
+    // the assertion cannot accidentally pass on a stale card from the old turn.
+    let resolveCheckpointReload!: (response: Awaited<ReturnType<typeof sessionsApi.getTurnCheckpoints>>) => void
+    const checkpointReload = new Promise<Awaited<ReturnType<typeof sessionsApi.getTurnCheckpoints>>>((resolve) => {
+      resolveCheckpointReload = resolve
+    })
+    vi.mocked(sessionsApi.getTurnCheckpoints).mockReturnValue(checkpointReload)
     fireEvent.click(within(dialog).getByRole('button', { name: 'Roll back conversation only' }))
 
     await waitFor(() => {
@@ -8120,7 +8131,28 @@ describe('MessageList nested tool calls', () => {
       expect(messages.some((message) => message.type === 'user_text' && message.content === 'continue')).toBe(false)
       expect(messages.some((message) => message.type === 'error')).toBe(false)
     })
-    expect(screen.getByText('kept.ts')).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'src/kept.ts' }).getAttribute('data-file-path')).toBe('src/kept.ts')
+    expect(screen.queryByText('kept.ts')).toBeNull()
+    await act(async () => {
+      resolveCheckpointReload({
+        checkpoints: [
+          {
+            target: {
+              targetUserMessageId: 'transcript-user-first',
+              userMessageIndex: 0,
+              userMessageCount: 1,
+            },
+            code: {
+              available: true,
+              filesChanged: ['src/kept.ts'],
+              insertions: 2,
+              deletions: 0,
+            },
+          },
+        ],
+      })
+    })
+    expect(await screen.findByText('kept.ts')).toBeTruthy()
     expect(useChatStore.getState().sessions[ACTIVE_TAB]?.composerPrefill).toMatchObject({
       text: 'continue',
     })

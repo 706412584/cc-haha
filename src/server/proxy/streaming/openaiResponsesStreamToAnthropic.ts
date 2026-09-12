@@ -4,9 +4,11 @@
  * Original work by Jason Young, MIT License
  */
 
+import { getOpenAIPolicyError } from '../../../services/openaiAuth/policyError.js'
 import { encodeOpenAIReasoningEnvelope } from '../transform/openaiReasoning.js'
 import { stringifyOpenAIToolArguments } from '../transform/toolArguments.js'
 import { openaiUsageToAnthropic } from '../transform/usage.js'
+import type { ToolNameWireMap } from '../transform/toolNameWire.js'
 import type {
   OpenAICompatibleUsage,
   OpenAIResponsesReasoningItem,
@@ -23,6 +25,8 @@ export type OpenAIResponsesStreamOptions = {
   onTerminal?: (event: string) => void
   onCancel?: (reason: unknown) => void
   onSettled?: () => void
+  /** Map over-length wire tool names back to their originals. */
+  toolNames?: ToolNameWireMap
 }
 
 type StreamState = {
@@ -260,7 +264,7 @@ function processEvent(
           content_block: {
             type: 'tool_use',
             id: callId,
-            name,
+            name: options.toolNames ? options.toolNames.fromWire(name) : name,
             input: {},
           },
         })))
@@ -412,7 +416,7 @@ function processEvent(
     }
 
     case 'response.incomplete':
-      if (!options.openAICodexOAuth) break
+      if (!options.openAICodexOAuth && !getOpenAIPolicyError(data)) break
       state.terminalSeen = true
       if (readIncompleteReason(asRecord(data.response)) === 'max_output_tokens') {
         const response = asRecord(data.response)
@@ -434,7 +438,7 @@ function processEvent(
     case 'response.failed':
     case 'response.cancelled':
     case 'error': {
-      if (!options.openAICodexOAuth) break
+      if (!options.openAICodexOAuth && !getOpenAIPolicyError(data)) break
       state.terminalSeen = true
       const streamError = readStreamError(event, data)
       controller.enqueue(encoder.encode(formatSse('error', {
@@ -539,7 +543,9 @@ function closeAllReasoningBlocks(
 function readStreamError(
   event: string,
   data: Record<string, unknown>,
-): { type: 'api_error' | 'overloaded_error'; message: string } {
+): { type: 'api_error' | 'overloaded_error' | 'permission_error'; message: string; code?: string } {
+  const policyError = getOpenAIPolicyError(data)
+  if (policyError) return { type: 'permission_error', ...policyError }
   const response = asRecord(data.response)
   const error = asRecord(response?.error) ?? asRecord(data.error) ?? data
   const code = typeof error?.code === 'string' ? error.code : ''

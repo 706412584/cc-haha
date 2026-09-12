@@ -11,11 +11,16 @@ import type {
 } from './types.js'
 import { parseOpenAIToolArguments } from './toolArguments.js'
 import { openaiUsageToAnthropic } from './usage.js'
+import type { ToolNameWireMap } from './toolNameWire.js'
 
 /**
  * Convert OpenAI Chat Completions response to Anthropic Messages response.
  */
-export function openaiChatToAnthropic(response: OpenAIChatResponse, model: string): AnthropicResponse {
+export function openaiChatToAnthropic(
+  response: OpenAIChatResponse,
+  model: string,
+  toolNames?: ToolNameWireMap,
+): AnthropicResponse {
   const choice = response.choices?.[0]
   if (!choice) {
     return createEmptyResponse(response, model)
@@ -54,7 +59,7 @@ export function openaiChatToAnthropic(response: OpenAIChatResponse, model: strin
       content.push({
         type: 'tool_use',
         id: tc.id,
-        name: tc.function.name,
+        name: toolNames ? toolNames.fromWire(tc.function.name) : tc.function.name,
         input: parseOpenAIToolArguments(tc.function.arguments),
       })
     }

@@ -25,6 +25,15 @@ import {
   validateLspEntry,
 } from './launcherRouting'
 
+// The compiled Computer Use runtime relaunches this executable directly. Its
+// isolated worker has no app-root and must not load preload, CLI configuration,
+// providers, or any desktop mode before serving the JSON-only kernel protocol.
+if (process.argv[2] === '--computer-use-repl-worker') {
+  const { runComputerUseReplWorker } = await import('../../src/utils/computerUse/replWorker')
+  await runComputerUseReplWorker()
+  process.exit(0)
+}
+
 type AdapterConfigShape = Awaited<
   ReturnType<typeof import('../../adapters/common/config.ts')['loadConfig']>
 >

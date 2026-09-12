@@ -2,6 +2,7 @@ import { resolvePromptCacheKey } from '../../server/proxy/promptCacheKey.js'
 import { anthropicToOpenaiResponses } from '../../server/proxy/transform/anthropicToOpenaiResponses.js'
 import { openaiResponsesStreamToAnthropic } from '../../server/proxy/streaming/openaiResponsesStreamToAnthropic.js'
 import { openaiResponsesStreamToAnthropicResponse } from '../../server/proxy/streaming/openaiResponsesStreamToAnthropicResponse.js'
+import { isOverLengthToolName, ToolNameWireMap } from '../../server/proxy/transform/toolNameWire.js'
 import type { AnthropicRequest } from '../../server/proxy/transform/types.js'
 import { ensureFreshGrokTokens, forceRefreshGrokTokens } from './refresh.js'
 import { resolveGrokModel, resolveGrokReasoningEffort } from './models.js'
@@ -46,9 +47,14 @@ export function buildGrokFetch(
     // the whole prefix. xAI reads it from the body; the CLI proxy also keys its
     // conversation state off a header, so both carry the same identity.
     const cacheKey = resolvePromptCacheKey(originalBody, readSessionId(input, init))
+    // Grok's Responses endpoint enforces the same 64-char function-name limit
+    // as other OpenAI-compatible upstreams; rename over-length MCP tools.
+    const toolNames = originalBody.tools?.some((t) => isOverLengthToolName(t.name))
+      ? new ToolNameWireMap()
+      : undefined
     const transformedBody = anthropicToOpenaiResponses(
       { ...originalBody, model: requestedModel },
-      cacheKey ? { cacheKey } : {},
+      { ...(cacheKey ? { cacheKey } : {}), toolNames },
     )
     transformedBody.model = requestedModel
     transformedBody.stream = true
@@ -120,7 +126,7 @@ export function buildGrokFetch(
 
     if (originalBody.stream) {
       return new Response(
-        openaiResponsesStreamToAnthropic(upstream.body, requestedModel),
+        openaiResponsesStreamToAnthropic(upstream.body, requestedModel, { toolNames }),
         {
           status: 200,
           headers: {
@@ -136,6 +142,7 @@ export function buildGrokFetch(
       await openaiResponsesStreamToAnthropicResponse(
         upstream.body,
         requestedModel,
+        { toolNames },
       ),
     )
   }

@@ -20,9 +20,11 @@
  *   - delta.reasoning          (GLM-5, Cerebras, Groq — mapped to reasoning_content)
  */
 
+import { getOpenAIPolicyError } from '../../../services/openaiAuth/policyError.js'
 import type { OpenAIChatStreamChunk } from '../transform/types.js'
 import { stringifyOpenAIToolArguments } from '../transform/toolArguments.js'
 import { openaiUsageToAnthropic } from '../transform/usage.js'
+import type { ToolNameWireMap } from '../transform/toolNameWire.js'
 
 // ─── Types ─────────────────────────────────────────────────
 
@@ -94,6 +96,7 @@ function createState(model: string): StreamState {
 export function openaiChatStreamToAnthropic(
   upstream: ReadableStream<Uint8Array>,
   model: string,
+  toolNames?: ToolNameWireMap,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
   const decoder = new TextDecoder()
@@ -104,6 +107,7 @@ export function openaiChatStreamToAnthropic(
     async start(controller) {
       const reader = upstream.getReader()
       let errored = false
+      let policyRejected = false
 
       try {
         while (true) {
@@ -134,7 +138,16 @@ export function openaiChatStreamToAnthropic(
               continue
             }
 
-            processChunk(chunk, state)
+            const policyError = getOpenAIPolicyError(chunk)
+            if (policyError) {
+              policyRejected = true
+              enqueue(state, 'error', { type: 'error', error: { type: 'permission_error', ...policyError } })
+              flushQueue(state, controller, encoder)
+              await reader.cancel().catch(() => {})
+              return
+            }
+
+            processChunk(chunk, state, toolNames)
             flushQueue(state, controller, encoder)
           }
         }
@@ -143,7 +156,7 @@ export function openaiChatStreamToAnthropic(
         controller.error(err)
       } finally {
         if (!errored) {
-          finalizeStream(state)
+          if (!policyRejected) finalizeStream(state)
           flushQueue(state, controller, encoder)
           controller.close()
         }
@@ -327,7 +340,7 @@ function detectBlockTransition(
 
 // ─── Main chunk processing ─────────────────────────────────
 
-function processChunk(chunk: OpenAIChatStreamChunk, state: StreamState): void {
+function processChunk(chunk: OpenAIChatStreamChunk, state: StreamState, toolNames?: ToolNameWireMap): void {
   const choice = chunk.choices?.[0]
 
   // Handle chunks with empty/missing choices (some providers send these)
@@ -366,7 +379,7 @@ function processChunk(chunk: OpenAIChatStreamChunk, state: StreamState): void {
         handleText(delta, state)
         break
       case 'tool_use':
-        handleToolCalls(delta, state)
+        handleToolCalls(delta, state, toolNames)
         break
     }
   }
@@ -411,7 +424,7 @@ function handleText(delta: DeltaEx, state: StreamState): void {
   })
 }
 
-function handleToolCalls(delta: DeltaEx, state: StreamState): void {
+function handleToolCalls(delta: DeltaEx, state: StreamState, toolNames?: ToolNameWireMap): void {
   if (!delta.tool_calls) return
 
   for (const tc of delta.tool_calls) {
@@ -441,7 +454,12 @@ function handleToolCalls(delta: DeltaEx, state: StreamState): void {
       enqueue(state, 'content_block_start', {
         type: 'content_block_start',
         index: block.anthropicIndex,
-        content_block: { type: 'tool_use', id: block.id, name: block.name, input: {} },
+        content_block: {
+          type: 'tool_use',
+          id: block.id,
+          name: toolNames ? toolNames.fromWire(block.name) : block.name,
+          input: {},
+        },
       })
 
       // Flush buffered arguments

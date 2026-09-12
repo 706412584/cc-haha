@@ -4,7 +4,7 @@
 
 > 验证方法：在 pre-merge 基线（合并 commit 的第一父，`git worktree add <tmp> <first-parent> --detach`）上重跑同一批测试。若基线同样红 → 预存。
 
-最后核对日期：2026-08-25（合并上游 v0.5.5 → v0.5.64，PR #153）。
+最后核对日期：2026-09-12（合并上游 v0.6.1）。
 
 ---
 
@@ -58,9 +58,31 @@ fork 之前把后台 agent 的完成通知从「完成即直塞命令队列」�
   `uses caller-supplied models in the reusable field appearance`
 - `src/pages/EmptySession.test.tsx`（1 个）:
   `materializes the resolved Claude OAuth model before the first draft message`
+
+  > 注（2026-09-12）：同文件的 `materializes raw provider models with 1M=true/false before the first draft message`
+  > 两个用例已按 fork 行为适配（`set_runtime_config` 带 `requestId`；`set_coordinator_mode` 重放插在
+  > prewarm 与 user_message 之间），不再红。
 - `src/components/activity/SessionActivityPanel.test.tsx`（2 个，基线同样红）:
   `labels a cached workflow agent explicitly instead of calling it merely completed` / `renders a workflow as phase headers with their agents, each opening the subagent page`
 - `src/components/layout/Sidebar.test.tsx`（多个，基线同样红）— project display-name / repo 上下文相关的一组。
+
+### `claudeBetas.integration.test.ts`（Windows 本地专用，CI 正常）
+
+7 个用例在 **Windows 本地**全部报 `EBUSY: resource busy or locked, rm 'C:\Users\...\cc-haha-context-beta-*'`
+（`runRelay` 的 `finally` 里 `rm(sandbox)` 与刚被 `child.kill()` 的 CLI 子进程抢文件句柄）。CI 是 Linux/macOS，
+无此句柄竞争，7/7 通过 —— 上面 `check:server` 的红即由此而来，不是断言失败。
+
+本地验证真实行为时，可临时给该 `rm` 加退避重试；加完 7 pass / 0 fail。**不要把这个补丁提交**：
+CI 上不需要，且会把「清理失败」从可见的红变成静默重试。
+
+## desktop（vitest）——Windows 环境限制（非 quarantine 覆盖）
+
+下列两个文件与其**全部 import 的源文件**均与 pre-merge 基线（`b28d2fa3`）逐字节相同，desktop 的 vitest 配置也未改动，故与上游合并无关，属 Windows 本地环境限制：
+
+- `scripts/build-macos-arm64.test.ts > installs every package needed by the compiled sidecar in a clean worktree`
+  — 测试用 `spawnSync('/bin/bash', ...)` 跑 macOS 构建脚本；Windows 无 `/bin/bash`，`spawnSync` 返回 `status: null`（ENOENT）。CI(Linux/macOS) 上应通过。
+- `electron/services/serverRuntime.test.ts > waits for real server shutdown cleanup before the first restart attempt`
+  — fixture 子进程依赖 `SIGTERM` handler 延时清理 `active-turn` 文件；Windows 上 `child.kill()` 直接终止进程，handler 不执行，`active-turn` 残留。
 
 ## quarantine 已登记项
 

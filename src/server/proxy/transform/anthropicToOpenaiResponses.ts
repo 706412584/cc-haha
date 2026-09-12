@@ -15,6 +15,7 @@ import type {
 import { stripLeadingBillingHeader } from './billingHeader.js'
 import { normalizeOpenAIReasoningEffort } from './effort.js'
 import { decodeOpenAIReasoningEnvelope } from './openaiReasoning.js'
+import type { ToolNameWireMap } from './toolNameWire.js'
 
 export type OpenAIResponsesTransformOptions = {
   /** Stable cache routing key, forwarded as `prompt_cache_key`. */
@@ -22,6 +23,8 @@ export type OpenAIResponsesTransformOptions = {
   passSamplingParams?: boolean
   /** Restore only cc-haha namespaced OpenAI reasoning envelopes. */
   preserveOpenAIReasoning?: boolean
+  /** Rename over-length tool names for the wire; response side maps back. */
+  toolNames?: ToolNameWireMap
 }
 
 /**
@@ -78,9 +81,13 @@ export function anthropicToOpenaiResponses(
       .filter((t) => t.name !== 'BatchTool')
       .map((t) => ({
         type: 'function',
-        name: t.name,
+        name: options.toolNames ? options.toolNames.toWire(t.name) : t.name,
         description: t.description,
         parameters: t.input_schema,
+        // Responses otherwise normalizes optional properties to required.
+        // Preserve Anthropic/MCP omission semantics, including alternative
+        // selectors and compatibility aliases that cannot coexist.
+        strict: false,
       }))
     if (tools.length > 0) {
       result.tools = tools
@@ -92,7 +99,7 @@ export function anthropicToOpenaiResponses(
   // tool_choice with no tools at all) is an orphan that strict Responses
   // upstreams reject.
   if (body.tool_choice !== undefined) {
-    const toolChoice = convertToolChoice(body.tool_choice)
+    const toolChoice = convertToolChoice(body.tool_choice, options.toolNames)
     if (isSelectableToolChoice(toolChoice, result.tools)) {
       result.tool_choice = toolChoice
     }
@@ -119,17 +126,108 @@ export function anthropicToOpenaiResponses(
   return result
 }
 
+/**
+ * Model-visible document metadata (title/context) as synthetic prefix text.
+ * Both fields are visible to the model in the Anthropic protocol, so
+ * degradation keeps them instead of dropping them silently. Returns an empty
+ * string when neither is set, otherwise a newline-terminated prefix so the
+ * document body follows on its own line.
+ */
+function documentProvenanceText(document: { title?: string; context?: string }): string {
+  const lines = [
+    ...(document.title ? [`[Document: ${document.title}]`] : []),
+    ...(document.context ? [`[Document context: ${document.context}]`] : []),
+  ]
+  return lines.length > 0 ? `${lines.join('\n')}\n` : ''
+}
+
 function convertContentBlock(
-  block: Extract<AnthropicContentBlock, { type: 'text' | 'image' }>,
-): OpenAIResponsesInputContentPart {
+  block: Extract<AnthropicContentBlock, { type: 'text' | 'image' | 'document' | 'search_result' }>,
+): OpenAIResponsesInputContentPart[] {
   if (block.type === 'text') {
-    return { type: 'input_text', text: block.text }
+    return [{ type: 'input_text', text: block.text }]
   }
 
-  return {
-    type: 'input_image',
-    image_url: `data:${block.source.media_type};base64,${block.source.data}`,
+  if (block.type === 'search_result') {
+    // Search results carry their content as text; keep it visible instead of
+    // dropping the block. `source` is a URL string per the official schema.
+    const contentText = Array.isArray(block.content)
+      ? block.content.filter((part): part is { type: 'text'; text: string } => part.type === 'text').map(part => part.text)
+      : []
+    const text = [
+      block.title,
+      ...contentText,
+      block.source,
+    ].filter((part): part is string => typeof part === 'string' && part.length > 0)
+      .join(' — ')
+    return [{ type: 'input_text', text }]
   }
+
+  if (block.type === 'document') {
+    const source = block.source
+    if (source.type === 'text') {
+      // Anthropic text documents carry plain text in `data` — not base64.
+      // Title/context are model-visible metadata, kept as a synthetic prefix.
+      return [{ type: 'input_text', text: `${documentProvenanceText(block)}${source.data}` }]
+    }
+    if (source.type === 'content') {
+      // Custom-content documents carry inline text and image blocks
+      // (citations/RAG). Keep both visible. Title/context are synthesized
+      // metadata, so they may carry their own separator (unlike the
+      // document's text blocks, which are never rewritten).
+      const parts: OpenAIResponsesInputContentPart[] = []
+      const provenance = documentProvenanceText(block)
+      if (provenance) parts.push({ type: 'input_text', text: provenance })
+      if (typeof source.content === 'string') {
+        parts.push({ type: 'input_text', text: source.content })
+      } else {
+        for (const part of source.content) {
+          if (part.type === 'text') {
+            parts.push({ type: 'input_text', text: part.text })
+          } else {
+            parts.push(...convertContentBlock(part))
+          }
+        }
+      }
+      return parts
+    }
+    if (source.type === 'url') {
+      // The input_file carries the title as filename, so the synthetic
+      // provenance prefix keeps the model-visible title/context text.
+      const provenance = documentProvenanceText(block)
+      return [
+        ...(provenance ? [{ type: 'input_text' as const, text: provenance }] : []),
+        { type: 'input_file', file_url: source.url, ...(block.title ? { filename: block.title } : {}) },
+      ]
+    }
+    if (source.type === 'file') {
+      // Files API references cannot be forwarded to a third-party endpoint.
+      // The omission notice already carries the title, so only context needs
+      // a synthetic prefix.
+      const contextPrefix = block.context ? `[Document context: ${block.context}]\n` : ''
+      return [{ type: 'input_text', text: `${contextPrefix}[Document: ${block.title ?? 'file'} omitted — file-based source]` }]
+    }
+    const base64Provenance = documentProvenanceText(block)
+    return [
+      ...(base64Provenance ? [{ type: 'input_text' as const, text: base64Provenance }] : []),
+      {
+        type: 'input_file',
+        file_data: `data:${source.media_type};base64,${source.data}`,
+        ...(block.title ? { filename: block.title } : {}),
+      },
+    ]
+  }
+
+  const source = block.source
+  if (source.type === 'file') {
+    return [{ type: 'input_text', text: '[Image omitted: file-based image source is not supported by this endpoint.]' }]
+  }
+  return [{
+    type: 'input_image',
+    image_url: source.type === 'url'
+      ? source.url
+      : `data:${source.media_type};base64,${source.data}`,
+  }]
 }
 
 function convertMessageToInputItems(
@@ -168,8 +266,8 @@ function convertMessageToInputItems(
   }
 
   for (const block of content) {
-    if (block.type === 'text' || block.type === 'image') {
-      contentParts.push(convertContentBlock(block))
+    if (block.type === 'text' || block.type === 'image' || block.type === 'document' || block.type === 'search_result') {
+      contentParts.push(...convertContentBlock(block))
     } else if (block.type === 'tool_use') {
       // Flush any accumulated content first
       flushContentParts()
@@ -177,22 +275,31 @@ function convertMessageToInputItems(
       output.push({
         type: 'function_call',
         call_id: block.id,
-        name: block.name,
+        name: options.toolNames ? options.toolNames.toWire(block.name) : block.name,
         arguments: typeof block.input === 'string' ? block.input : JSON.stringify(block.input),
       })
     } else if (block.type === 'tool_result') {
       // Flush any accumulated content first
       flushContentParts()
       // Lift to function_call_output item
+      const sourceBlocks = Array.isArray(block.content) ? block.content : []
       const resultContent = typeof block.content === 'string'
         ? block.content
-        : Array.isArray(block.content)
-          ? block.content.filter((part): part is Extract<AnthropicContentBlock, { type: 'text' | 'image' }> => (
-              part.type === 'text' || part.type === 'image'
-            )).map(convertContentBlock)
-          : ''
-      const resultOutput = Array.isArray(resultContent) && resultContent.every((part) => part.type === 'input_text')
-        ? resultContent.map((part) => part.text).join('\n')
+        : sourceBlocks
+            .filter((part): part is Extract<AnthropicContentBlock, { type: 'text' | 'image' | 'document' | 'search_result' }> => (
+              part.type === 'text' || part.type === 'image' || part.type === 'document' || part.type === 'search_result'
+            ))
+            .flatMap(convertContentBlock)
+      // Adjacent *text* blocks carry no separator in the Anthropic wire shape,
+      // so joining with '\n' would inject separators the tool output never
+      // had. Concatenate without a separator to keep the text unchanged, and
+      // only when every source block was text — anything degraded from another
+      // block type keeps its array shape so block boundaries stay visible.
+      const onlyTextBlocks = sourceBlocks.every(part => part.type === 'text')
+      const resultOutput = onlyTextBlocks
+        && Array.isArray(resultContent)
+        && resultContent.every((part): part is Extract<OpenAIResponsesInputContentPart, { type: 'input_text' }> => part.type === 'input_text')
+        ? resultContent.map((part) => part.text).join('')
         : resultContent
       output.push({
         type: 'function_call_output',
@@ -211,7 +318,7 @@ function convertMessageToInputItems(
   flushContentParts()
 }
 
-function convertToolChoice(choice: unknown): unknown {
+function convertToolChoice(choice: unknown, toolNames?: ToolNameWireMap): unknown {
   if (typeof choice === 'string') return choice
   if (typeof choice === 'object' && choice !== null) {
     const c = choice as Record<string, unknown>
@@ -222,7 +329,8 @@ function convertToolChoice(choice: unknown): unknown {
       // Responses names the function inline: {type:'function', name}. The
       // nested {function:{name}} form belongs to Chat Completions and is
       // rejected here (see anthropicToOpenaiChat for that shape).
-      return { type: 'function', name: c.name }
+      const name = toolNames ? toolNames.toWire(c.name) : c.name
+      return { type: 'function', name }
     }
   }
   return 'auto'

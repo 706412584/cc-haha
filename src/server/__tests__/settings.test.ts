@@ -14,6 +14,7 @@ import { handleModelsApi } from '../api/models.js'
 import { handleStatusApi, resetUsage, addUsage } from '../api/status.js'
 import { ProviderService } from '../services/providerService.js'
 import { hahaOAuthService } from '../services/hahaOAuthService.js'
+import { hahaOpenAIOAuthService } from '../services/hahaOpenAIOAuthService.js'
 import {
   clearOpenAICodexModelCatalogCache,
 } from '../../services/openaiAuth/modelCatalog.js'
@@ -690,6 +691,184 @@ describe('Settings API', () => {
 })
 
 // =============================================================================
+// Session cleanup API
+// =============================================================================
+
+describe('POST /api/settings/session-cleanup', () => {
+  beforeEach(setup)
+  afterEach(teardown)
+
+  const MS_PER_DAY = 24 * 60 * 60 * 1000
+
+  async function seedTranscript(name: string, ageDays: number): Promise<string> {
+    const projectDir = path.join(tmpDir, 'projects', 'test-project')
+    await fs.mkdir(projectDir, { recursive: true })
+    const filePath = path.join(projectDir, name)
+    await fs.writeFile(filePath, '{"type":"summary"}\n')
+    const mtime = new Date(Date.now() - ageDays * MS_PER_DAY)
+    await fs.utimes(filePath, mtime, mtime)
+    return filePath
+  }
+
+  it('dryRun counts matching transcripts without deleting them', async () => {
+    const oldFile = await seedTranscript('old.jsonl', 400)
+    const newFile = await seedTranscript('new.jsonl', 1)
+
+    const { req, url, segments } = makeRequest('POST', '/api/settings/session-cleanup', {
+      days: 365,
+      dryRun: true,
+    })
+    const res = await handleSettingsApi(req, url, segments)
+
+    expect(res.status).toBe(200)
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      days: 365,
+      dryRun: true,
+      files: 1,
+    })
+    await expect(fs.stat(oldFile)).resolves.toBeDefined()
+    await expect(fs.stat(newFile)).resolves.toBeDefined()
+  })
+
+  it('deletes transcripts older than the cutoff and keeps newer ones', async () => {
+    const oldFile = await seedTranscript('old.jsonl', 400)
+    const newFile = await seedTranscript('new.jsonl', 1)
+
+    const { req, url, segments } = makeRequest('POST', '/api/settings/session-cleanup', {
+      days: 365,
+    })
+    const res = await handleSettingsApi(req, url, segments)
+
+    expect(res.status).toBe(200)
+    await expect(res.json()).resolves.toMatchObject({ ok: true, dryRun: false, files: 1 })
+    await expect(fs.stat(oldFile)).rejects.toThrow()
+    await expect(fs.stat(newFile)).resolves.toBeDefined()
+  })
+
+  it('treats 0 as "delete every transcript"', async () => {
+    const recentFile = await seedTranscript('recent.jsonl', 1)
+
+    const { req, url, segments } = makeRequest('POST', '/api/settings/session-cleanup', {
+      days: 0,
+    })
+    const res = await handleSettingsApi(req, url, segments)
+
+    expect(res.status).toBe(200)
+    await expect(res.json()).resolves.toMatchObject({ days: 0, files: 1 })
+    await expect(fs.stat(recentFile)).rejects.toThrow()
+  })
+
+  it('uses the requested days rather than the stored retention setting', async () => {
+    // Stored value is 30 days: a 40-day-old transcript would be deleted if the
+    // endpoint read the setting back instead of using the request. 365 keeps it.
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({ cleanupPeriodDays: 30 }),
+      'utf-8',
+    )
+    const file = await seedTranscript('forty-days.jsonl', 40)
+
+    const { req, url, segments } = makeRequest('POST', '/api/settings/session-cleanup', {
+      days: 365,
+    })
+    const res = await handleSettingsApi(req, url, segments)
+
+    expect(res.status).toBe(200)
+    await expect(res.json()).resolves.toMatchObject({ days: 365, files: 0 })
+    await expect(fs.stat(file)).resolves.toBeDefined()
+  })
+
+  it('removes expired subagent transcripts alongside the parent session', async () => {
+    const sessionDir = path.join(tmpDir, 'projects', 'test-project', 'session-a')
+    const nestedDir = path.join(sessionDir, 'subagents', 'workflows', 'wf-1')
+    await fs.mkdir(nestedDir, { recursive: true })
+    const oldAgent = path.join(nestedDir, 'agent-1.jsonl')
+    await fs.writeFile(oldAgent, '{}\n')
+    const oldMtime = new Date(Date.now() - 400 * MS_PER_DAY)
+    await fs.utimes(oldAgent, oldMtime, oldMtime)
+    const freshAgent = path.join(sessionDir, 'subagents', 'agent-2.jsonl')
+    await fs.writeFile(freshAgent, '{}\n')
+
+    const { req, url, segments } = makeRequest('POST', '/api/settings/session-cleanup', {
+      days: 365,
+    })
+    const res = await handleSettingsApi(req, url, segments)
+
+    expect(res.status).toBe(200)
+    await expect(res.json()).resolves.toMatchObject({ files: 1 })
+    await expect(fs.stat(oldAgent)).rejects.toThrow()
+    await expect(fs.stat(freshAgent)).resolves.toBeDefined()
+  })
+
+  it('dryRun counts nested subagent transcripts without deleting them', async () => {
+    const nestedDir = path.join(
+      tmpDir,
+      'projects',
+      'test-project',
+      'session-b',
+      'subagents',
+      'workflows',
+      'wf-2',
+    )
+    await fs.mkdir(nestedDir, { recursive: true })
+    const oldAgent = path.join(nestedDir, 'agent-1.jsonl')
+    await fs.writeFile(oldAgent, '{}\n')
+    const oldMtime = new Date(Date.now() - 400 * MS_PER_DAY)
+    await fs.utimes(oldAgent, oldMtime, oldMtime)
+
+    const { req, url, segments } = makeRequest('POST', '/api/settings/session-cleanup', {
+      days: 365,
+      dryRun: true,
+    })
+    const res = await handleSettingsApi(req, url, segments)
+
+    expect(res.status).toBe(200)
+    await expect(res.json()).resolves.toMatchObject({ files: 1, dryRun: true })
+    await expect(fs.stat(oldAgent)).resolves.toBeDefined()
+    // dryRun must not prune the now-empty directories either.
+    await expect(fs.stat(nestedDir)).resolves.toBeDefined()
+  })
+
+  it('keeps non-transcript cleanup on 30 days even when transcripts are kept for 3650', async () => {
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({ cleanupPeriodDays: 3650 }),
+      'utf-8',
+    )
+    const plansDir = path.join(tmpDir, 'plans')
+    await fs.mkdir(plansDir, { recursive: true })
+    const oldPlan = path.join(plansDir, 'old-plan.md')
+    await fs.writeFile(oldPlan, '# plan\n', 'utf-8')
+    const oldMtime = new Date(Date.now() - 60 * MS_PER_DAY)
+    await fs.utimes(oldPlan, oldMtime, oldMtime)
+
+    const { cleanupOldPlanFiles } = await import('../../utils/cleanup.js')
+    const result = await cleanupOldPlanFiles()
+
+    // Plans must not inherit the transcript retention window.
+    expect(result.messages).toBe(1)
+    await expect(fs.stat(oldPlan)).rejects.toThrow()
+  })
+
+  it('rejects invalid day values', async () => {
+    for (const days of [-1, 1.5, 3651, '30', null]) {
+      const { req, url, segments } = makeRequest('POST', '/api/settings/session-cleanup', {
+        days,
+      })
+      const res = await handleSettingsApi(req, url, segments)
+      expect(res.status).toBe(400)
+    }
+  })
+
+  it('rejects non-POST methods', async () => {
+    const { req, url, segments } = makeRequest('GET', '/api/settings/session-cleanup')
+    const res = await handleSettingsApi(req, url, segments)
+    expect(res.status).toBe(405)
+  })
+})
+
+// =============================================================================
 // Models API
 // =============================================================================
 
@@ -703,9 +882,44 @@ describe('Models API', () => {
 
     expect(res.status).toBe(200)
     const body = await res.json()
-    expect(body.models).toBeArray()
-    expect(body.models.length).toBe(4)
-    expect(body.models[0].id).toContain('claude')
+    expect(body.models).toEqual([
+      {
+        id: 'claude-fable-5-1',
+        name: 'Fable 5.1',
+        description: 'Highest capability for long-running tasks',
+        context: '1m',
+        defaultReasoningEffort: 'high',
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      {
+        id: 'claude-fable-5',
+        name: 'Fable 5',
+        description: 'Highest capability for long-running tasks',
+        context: '1m',
+      },
+      {
+        id: 'claude-opus-4-8',
+        name: 'Opus 4.8',
+        description: 'Best for complex agentic coding and enterprise work',
+        context: '1m',
+        defaultReasoningEffort: 'high',
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      {
+        id: 'claude-sonnet-5',
+        name: 'Sonnet 5',
+        description: 'Best combination of speed and intelligence',
+        context: '1m',
+        defaultReasoningEffort: 'high',
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      {
+        id: 'claude-haiku-4-5',
+        name: 'Haiku 4.5',
+        description: 'Fastest with near-frontier intelligence',
+        context: '200k',
+      },
+    ])
   })
 
   it('GET /api/models should expose the active provider model effort catalog', async () => {
@@ -935,6 +1149,7 @@ describe('Models API', () => {
     )
     const listBody = await listResponse.json()
     expect(listBody.models.map((model: { id: string }) => model.id)).toEqual([
+      'claude-fable-5-1',
       'claude-fable-5',
       'claude-opus-4-8',
       'claude-sonnet-5',
@@ -1109,12 +1324,62 @@ describe('Models API', () => {
       'gpt-5.4',
       'gpt-5.5',
       'gpt-5.4-mini',
+      'gpt-6-astra',
     ])
     expect(body.models[0]).toMatchObject({
       id: 'gpt-5.6-sol',
       defaultReasoningEffort: 'low',
       supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     })
+  })
+
+  it('GET /api/models discovers models using the desktop ChatGPT account', async () => {
+    const providerSvc = new ProviderService()
+    await providerSvc.activateProvider('openai-official')
+    await hahaOpenAIOAuthService.saveTokens({
+      accessToken: 'desktop-catalog-token',
+      refreshToken: null,
+      expiresAt: null,
+      accountId: 'desktop-account',
+      email: 'desktop@example.test',
+    })
+    const originalFetch = globalThis.fetch
+    const requests: Headers[] = []
+    clearOpenAICodexModelCatalogCache()
+    globalThis.fetch = (async (_input, init) => {
+      requests.push(new Headers(init?.headers))
+      return Response.json({ models: [{
+        slug: 'gpt-desktop-account-only',
+        display_name: 'Desktop account model',
+        visibility: 'list',
+        default_reasoning_level: 'high',
+        supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }],
+        context_window: 300_000,
+      }] })
+    }) as typeof fetch
+    try {
+      const { req, url, segments } = makeRequest('GET', '/api/models')
+      expect((await handleModelsApi(req, url, segments)).status).toBe(200)
+      // Let the immediate background catalog response settle before reading it.
+      await new Promise(resolve => setTimeout(resolve, 0))
+      const res = await handleModelsApi(req, url, segments)
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body.models).toEqual([{
+        id: 'gpt-desktop-account-only',
+        name: 'Desktop account model',
+        description: '',
+        context: '285000',
+        defaultReasoningEffort: 'high',
+        supportedReasoningEfforts: ['low', 'high'],
+      }])
+      expect(requests).toHaveLength(1)
+      expect(requests[0]?.get('Authorization')).toBe('Bearer desktop-catalog-token')
+      expect(requests[0]?.get('ChatGPT-Account-Id')).toBe('desktop-account')
+    } finally {
+      globalThis.fetch = originalFetch
+      clearOpenAICodexModelCatalogCache()
+    }
   })
 
   it('PUT /api/models/current should persist GPT model to managed settings when ChatGPT Official is active', async () => {

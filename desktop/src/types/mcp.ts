@@ -126,3 +126,14 @@ export type MarketplaceCatalog = {
   entries: MarketplaceEntry[]
   remoteSources: MarketplaceRemoteSource[]
 }
+
+export type McpSessionSync = {
+  applied: boolean
+  reason?: 'not_running' | 'different_project' | 'failed' | 'no_session'
+  error?: string
+}
+
+export type McpToggleResult = {
+  server: McpServerRecord
+  sessionSync?: McpSessionSync
+}
