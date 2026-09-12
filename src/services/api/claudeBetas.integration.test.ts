@@ -190,9 +190,13 @@ for (const { enabled, disableBetas } of [
       requireContextBeta: false,
       env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
     })
-    expect(result.exitCode, JSON.stringify(result)).toBe(0)
-    expect(result.stdout).toContain('relay-ok')
-    expect(result.requests).toHaveLength(1)
+    // CI (Linux) intermittently reports the CLI exiting 0 with empty stdout in
+    // these provider cases. Attach the full result (including stderr) to every
+    // assertion message so a red run pinpoints which stage diverges.
+    const note = JSON.stringify(result)
+    expect(result.exitCode, note).toBe(0)
+    expect(result.stdout, note).toContain('relay-ok')
+    expect(result.requests, note).toHaveLength(1)
     const request = result.requests[0]!
     expect(request.model).toBe(model)
     expect(request.beta.split(',').includes(contextBeta)).toBe(enabled && !disableBetas)
