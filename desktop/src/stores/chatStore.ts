@@ -1005,6 +1005,30 @@ export function __resetHistoryLoadStateForTesting(): void {
   historyLoadAbortRetries.clear()
 }
 
+/** @internal — apply buffered `thinking` events now instead of waiting out the
+ *  throttle window. Tests that predated the buffer assert on the transcript
+ *  synchronously after a delta; this is the same call the timer makes, so they
+ *  keep exercising the real merge path. */
+export function __flushPendingThinkingDeltaForTesting(sessionId: string): void {
+  flushPendingThinkingDelta(sessionId)
+}
+
+/** @internal — drop throttled streaming buffers between tests. They live at
+ *  module scope (per session, shared by every store instance) and a test that
+ *  sends deltas without advancing timers would otherwise leave a live timer
+ *  that flushes into whatever session the next test installs. */
+export function __resetPendingStreamBuffersForTesting(): void {
+  for (const timer of flushTimerBySession.values()) clearTimeout(timer)
+  flushTimerBySession.clear()
+  pendingDeltaBySession.clear()
+  for (const timer of toolInputFlushTimerBySession.values()) clearTimeout(timer)
+  toolInputFlushTimerBySession.clear()
+  pendingToolInputDeltaBySession.clear()
+  for (const timer of thinkingFlushTimerBySession.values()) clearTimeout(timer)
+  thinkingFlushTimerBySession.clear()
+  pendingThinkingDeltaBySession.clear()
+}
+
 function makeContextExhaustedMessage(): UIMessage {
   return {
     id: nextId(),
@@ -1192,6 +1216,153 @@ function clearPendingToolInputDelta(sessionId: string): void {
     toolInputFlushTimerBySession.delete(sessionId)
   }
   pendingToolInputDeltaBySession.delete(sessionId)
+}
+
+// Streaming throttle for `thinking`, same 50ms cadence as content_delta above.
+// A fast reasoning model emits hundreds of thinking_delta fragments per second
+// and every one of them used to synchronously copy the whole message array,
+// re-scan it for a merge target and re-concat the block (joinThinkingContent is
+// `previous + next`, i.e. O(n²) over the block length) — that was the dominant
+// main-thread cost of a long thinking phase.
+//
+// `complete` has to survive the buffering. A fragment is raw-concatenated,
+// while a whole block the server re-sends (handler.ts forwards a finished
+// block with `complete: true`) joins with a blank line AND is subject to the
+// replay dedupe that drops a block identical to one already in the transcript.
+// Collapsing both kinds into a single string would glue whole blocks together
+// and defeat that dedupe, so the buffer keeps the two kinds apart — and, more
+// importantly, it keeps every event separate rather than pre-joining a run of
+// fragments. The dedupe compares one incoming event against the transcript, so
+// joining two events before that check changes which ones are recognized as
+// replays (the wake-replay tests pin exactly that: a fragment run that spans
+// the turn tail and the next turn's head stops matching the head it replays).
+type PendingThinkingSegment = {
+  text: string
+  /** `complete: true` on the wire: a whole re-sent block, not a raw fragment. */
+  wholeBlock: boolean
+}
+const pendingThinkingDeltaBySession = new Map<string, PendingThinkingSegment[]>()
+const thinkingFlushTimerBySession = new Map<string, ReturnType<typeof setTimeout>>()
+
+function appendPendingThinkingDelta(sessionId: string, text: string, wholeBlock: boolean): void {
+  const segments = pendingThinkingDeltaBySession.get(sessionId)
+  if (segments) {
+    segments.push({ text, wholeBlock })
+    return
+  }
+  pendingThinkingDeltaBySession.set(sessionId, [{ text, wholeBlock }])
+}
+
+/** Discard buffered thinking without writing it (attempt reset, turn cleanup). */
+function clearPendingThinkingDelta(sessionId: string): void {
+  const flushTimer = thinkingFlushTimerBySession.get(sessionId)
+  if (flushTimer) {
+    clearTimeout(flushTimer)
+    thinkingFlushTimerBySession.delete(sessionId)
+  }
+  pendingThinkingDeltaBySession.delete(sessionId)
+}
+
+/**
+ * Apply every buffered `thinking` event for one session in a single store
+ * update. Each event goes through the same steps the synchronous handler used
+ * — flush pending assistant text first, skip blank blocks, drop blocks that
+ * replay an existing one verbatim, then merge into the tail thinking block or
+ * start a new one — so the resulting transcript is byte-for-byte what the
+ * per-event path produced. Only the number of notifications changes.
+ *
+ * Returns true when at least one event actually reached the transcript, which
+ * is what the old synchronous path gated `ensureElapsedTimer()` on: empty and
+ * replayed blocks must not start the turn timer (that is what made opening an
+ * already-finished session look like it started answering again).
+ */
+function flushPendingThinkingDelta(sessionId: string): boolean {
+  const flushTimer = thinkingFlushTimerBySession.get(sessionId)
+  if (flushTimer) {
+    clearTimeout(flushTimer)
+    thinkingFlushTimerBySession.delete(sessionId)
+  }
+  const segments = pendingThinkingDeltaBySession.get(sessionId)
+  if (!segments || segments.length === 0) return false
+  pendingThinkingDeltaBySession.delete(sessionId)
+
+  let applied = false
+  useChatStore.setState((state) => {
+    const session = state.sessions[sessionId]
+    if (!session) return state
+
+    // A thinking event first flushes buffered assistant text into its own
+    // message; keeping that here preserves the text-bubble-before-reasoning
+    // order the synchronous path produced.
+    const bufferedText = consumePendingDelta(sessionId)
+    const pendingText = `${session.streamingText}${bufferedText}`
+    let messages = pendingText.trim()
+      ? appendAssistantTextMessage(session.messages, pendingText, Date.now())
+      : session.messages
+
+    let activeThinkingId = session.activeThinkingId
+    let appendedChars = 0
+    for (const segment of segments) {
+      // 服务端两个 thinking 发射点都做了非空过滤，但 `&& delta.thinking` 是真值
+      // 判断，纯空白仍能漏过来，落到下面就是一个点开什么都没有的空壳气泡。
+      if (!segment.text.trim()) continue
+      // 真正的重放源已在服务端按 uuid 挡掉（conversationService.isReplayedSdkMessage）。
+      // 这里再兜一道：thinking 没有 transcriptMessageId 之类的身份，任何漏网的
+      // 重放都只能靠"整块内容与已有 thinking 逐字相同"来认。流式 delta 是碎片，
+      // 不会命中；命中的必然是被整块重发的同一段思考。
+      if (messages.some((message) => message.type === 'thinking' && message.content === segment.text)) {
+        continue
+      }
+      const lastIndex = findStreamMergeTargetIndex(messages)
+      const last = lastIndex >= 0 ? messages[lastIndex] : undefined
+      if (last && last.type === 'thinking') {
+        const updated = [...messages]
+        updated[lastIndex] = {
+          ...last,
+          content: joinThinkingContent(last.content, segment.text, segment.wholeBlock),
+        }
+        messages = updated
+        activeThinkingId = last.id
+      } else {
+        const id = nextId()
+        messages = [...messages, { id, type: 'thinking', content: segment.text, timestamp: Date.now() }]
+        activeThinkingId = id
+      }
+      appendedChars += segment.text.length
+      applied = true
+    }
+
+    // 全是空块/重放块、又没有待冲刷的正文：一个字节都没变，别为了清 streamingText
+    // 白白触发一次整会话重渲染。
+    if (
+      !applied &&
+      messages === session.messages &&
+      session.streamingText === '' &&
+      !bufferedText
+    ) {
+      return state
+    }
+
+    return {
+      sessions: updateSessionIn(state.sessions, sessionId, () => ({
+        messages,
+        // 真实的 thinking 增量证明上一次请求已经成功恢复。推理模型重试恢复后
+        // 先输出思考块（没有 content_start 前导），如果只靠 content_start 的
+        // text/tool_use 分支清 apiRetry，横幅会在整个思考阶段一直显示"正在重试"。
+        ...(applied
+          ? {
+              chatState: 'thinking' as const,
+              activeThinkingId,
+              apiRetry: null,
+              streamingFallback: null,
+            }
+          : {}),
+        streamingText: '',
+        streamingResponseChars: session.streamingResponseChars + appendedChars,
+      })),
+    }
+  })
+  return applied
 }
 
 /**
@@ -2965,6 +3136,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // handshake failure does not advance the history lifecycle here: its
         // normal cold REST remains useful even while the socket is unavailable.
         clearPendingDelta(sessionId)
+        clearPendingThinkingDelta(sessionId)
         clearPendingToolInputDelta(sessionId)
         clearPendingTaskToolUseIds(sessionId)
         clearPendingToolParentUseIds(sessionId)
@@ -3084,6 +3256,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const text = consumePendingDelta(sessionId)
       set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, (sess) => ({ streamingText: sess.streamingText + text })) }))
     }
+    // 与上面的正文缓冲同样先冲刷再删会话：缓冲必须排空，绝不能留给下一次连接
+    // （同一个 sessionId 重新连上时会看到一个上一回合的思考碎片）。
+    flushPendingThinkingDelta(sessionId)
     clearPendingToolInputDelta(sessionId)
     clearPendingTaskToolUseIds(sessionId)
     clearPendingToolParentUseIds(sessionId)
@@ -3153,6 +3328,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       updateOptimisticSessionTitle(sessionId, userFacingContent || content.trim())
     }
 
+    // 新回合开始，上一回合的思考碎片先落盘（在下面 set 之前，顺序见 flush 内的注释）。
+    flushPendingThinkingDelta(sessionId)
     set((s) => {
       const session = s.sessions[sessionId] ?? createDefaultSessionState()
       const bufferedDelta = consumePendingDelta(sessionId)
@@ -3506,6 +3683,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // chatStore.test.ts "flushes throttled deltas only for the stopped
     // session".
     const stoppedDelta = consumePendingDelta(sessionId)
+    // Same for buffered thinking: Stop must not strand a partial reasoning block
+    // in the buffer where the idle transition below would drop it.
+    flushPendingThinkingDelta(sessionId)
     clearPendingToolInputDelta(sessionId)
     clearPendingTaskToolUseIds(sessionId)
     clearPendingToolParentUseIds(sessionId)
@@ -4546,6 +4726,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
 
     const now = Date.now()
+    // 队列消息把当前回合切成两段，缓冲的思考必须先落进第一段，不能跟着新回合走。
+    flushPendingThinkingDelta(sessionId)
     set((state) => ({
       sessions: updateSessionIn(state.sessions, sessionId, (currentSession) => {
         const pendingText = `${currentSession.streamingText}${consumePendingDelta(sessionId)}`
@@ -4576,6 +4758,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     clearPendingToolParentUseIds(sessionId)
     clearPendingFileEdits(sessionId)
     clearPendingToolInputDelta(sessionId)
+    clearPendingThinkingDelta(sessionId)
     resetCompactionThrash(sessionId)
     pendingOwnedTaskEvents.delete(sessionId)
     pendingAgentRunEvents.delete(sessionId)
@@ -4626,6 +4809,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (!session?.elapsedTimer) return
       clearInterval(session.elapsedTimer)
       update(() => ({ elapsedTimer: null }))
+    }
+
+    // 缓冲的 thinking 在下一条消息之前必须落盘。旧路径是收到即写入，所以后面任何
+    // 事件（正文/工具/status/message_complete/快照…）看到的 messages 里都已经有
+    // 那段思考了；统一在这里冲刷才保得住同一套顺序，而不是在每个 case 里各补一次。
+    //
+    // 三个例外：thinking 自己正是要被合并的对象；session_state 的 running 快照与
+    // stream_retry 明确要丢弃本次尝试的产物（见各自分支里的 clear），提前冲刷会把
+    // 本该丢掉的碎片写进 transcript。
+    if (
+      msg.type !== 'thinking' &&
+      msg.type !== 'session_state' &&
+      msg.type !== 'streaming_fallback'
+    ) {
+      flushPendingThinkingDelta(sessionId)
     }
 
     switch (msg.type) {
@@ -4764,6 +4962,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           // stream_retry attempt) to stale text/tool JSON. Persisted completed
           // messages are merged back below while the turn remains running.
           consumePendingDelta(sessionId)
+          clearPendingThinkingDelta(sessionId)
           clearPendingToolInputDelta(sessionId)
           clearPendingTaskToolUseIds(sessionId)
           clearPendingToolParentUseIds(sessionId)
@@ -4807,6 +5006,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           // by a new turn) remains authoritative across this retry as well.
           if (!historyBootstrapDisabled) void get().loadHistory(sessionId)
           break
+        }
+
+        // 终态快照（idle/error）到达前最后 50ms 内收到的思考碎片属于这一轮，必须先
+        // 冲刷再判定。旧同步路径收到即写入，所以它到达这里时 chatState 已经是
+        // 'thinking'、messages 里也已经有了那段思考；缓冲之后两者都还没发生，不冲刷
+        // 就会走错分支——而且 50ms 后那次 flush 会在本分支把状态置回 idle **之后**
+        // 触发，把一轮已经结束的回答重新点亮成"正在思考"。
+        //
+        // running 快照不在此列：它要丢弃本次尝试的产物，那条路径自己会 clear。
+        if (flushPendingThinkingDelta(sessionId)) {
+          session = get().sessions[sessionId] ?? session
         }
 
         if (session.chatState === 'idle') {
@@ -5001,6 +5211,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (!session) break
         if (session.suppressNextTaskNotificationResponse && msg.blockType === 'text') {
           consumePendingDelta(sessionId)
+          clearPendingThinkingDelta(sessionId)
           update(() => ({
             streamingText: '',
             activeThinkingId: null,
@@ -5098,6 +5309,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           // Discard only this attempt's in-flight partials, then show a visible
           // retry banner (apiRetry). Must NOT go idle — user Stop is separate.
           consumePendingDelta(sessionId)
+          // 失败尝试的思考碎片随尝试一起丢弃，下一段重试从干净状态开始。
+          clearPendingThinkingDelta(sessionId)
           clearPendingToolInputDelta(sessionId)
           clearPendingTaskToolUseIds(sessionId)
           clearPendingToolParentUseIds(sessionId)
@@ -5151,6 +5364,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
         // 进入非流式降级阶段：旧的重试横幅（针对失败的流式请求）已过时，
         // 清掉换成降级提示；后续非流式重试到来的 api_retry 会重新接管显示。
+        //
+        // 缓冲里的思考碎片先冲刷落盘。旧同步路径下它早就写进 messages 了，本分支
+        // 只把 activeThinkingId 置空、并不删内容；不在这里冲刷的话，那个 50ms 定时器
+        // 会在本分支之后才触发，把刚置空的 activeThinkingId 重新挂回那个思考块，
+        // 于是降级等待期间界面上又出现一个"正在思考"的活动块。
+        flushPendingThinkingDelta(sessionId)
         update((session) => ({
           streamingFallback: {
             cause: msg.cause,
@@ -5169,6 +5388,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case 'content_delta':
         if (get().sessions[sessionId]?.suppressNextTaskNotificationResponse) {
           consumePendingDelta(sessionId)
+          clearPendingThinkingDelta(sessionId)
           break
         }
         let receivedLiveDelta = false
@@ -5233,6 +5453,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case 'thinking': {
         if (get().sessions[sessionId]?.suppressNextTaskNotificationResponse) {
           consumePendingDelta(sessionId)
+          // 被抑制回合的思考碎片也必须一起丢掉，否则它会拖到下一个回合才冲刷出来。
+          clearPendingThinkingDelta(sessionId)
           update(() => ({
             streamingText: '',
             activeThinkingId: null,
@@ -5240,61 +5462,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }))
           break
         }
-        // 重放/空块都不该冒出一个新的「已思考」气泡，也不该把会话拖回 thinking 态
-        // 或者启动计时器 —— 那正是"打开一个早就结束的会话，它自己开始输出"的观感。
-        let skippedThinkingBlock = false
-        update((s) => {
-          const pendingText = `${s.streamingText}${consumePendingDelta(sessionId)}`
-          const base = pendingText.trim()
-            ? appendAssistantTextMessage(s.messages, pendingText, Date.now())
-            : s.messages
-          // 服务端两个 thinking 发射点都做了非空过滤，但 `&& delta.thinking` 是真值
-          // 判断，纯空白仍能漏过来，落到下面就是一个点开什么都没有的空壳气泡。
-          if (!msg.text.trim()) {
-            skippedThinkingBlock = true
-            return { messages: base, streamingText: '' }
-          }
-          // 真正的重放源已在服务端按 uuid 挡掉（conversationService.isReplayedSdkMessage）。
-          // 这里再兜一道：thinking 没有 transcriptMessageId 之类的身份，任何漏网的
-          // 重放都只能靠"整块内容与已有 thinking 逐字相同"来认。流式 delta 是碎片，
-          // 不会命中；命中的必然是被整块重发的同一段思考。
-          if (base.some((message) => message.type === 'thinking' && message.content === msg.text)) {
-            skippedThinkingBlock = true
-            return { messages: base, streamingText: '' }
-          }
-          const lastIndex = findStreamMergeTargetIndex(base)
-          const last = lastIndex >= 0 ? base[lastIndex] : undefined
-          // 真实的 thinking 增量证明上一次请求已经成功恢复。推理模型重试恢复后
-          // 先输出思考块（没有 content_start 前导），如果只靠 content_start 的
-          // text/tool_use 分支清 apiRetry，横幅会在整个思考阶段一直显示"正在重试"。
-          if (last && last.type === 'thinking') {
-            const updated = [...base]
-            updated[lastIndex] = {
-              ...last,
-              content: joinThinkingContent(last.content, msg.text, msg.complete === true),
-            }
-            return {
-              messages: updated,
-              chatState: 'thinking',
-              activeThinkingId: last.id,
-              apiRetry: null,
-              streamingFallback: null,
-              streamingText: '',
-              streamingResponseChars: s.streamingResponseChars + msg.text.length,
-            }
-          }
-          const id = nextId()
-          return {
-            messages: [...base, { id, type: 'thinking', content: msg.text, timestamp: Date.now() }],
-            chatState: 'thinking',
-            activeThinkingId: id,
-            apiRetry: null,
-            streamingFallback: null,
-            streamingText: '',
-            streamingResponseChars: s.streamingResponseChars + msg.text.length,
-          }
-        })
-        if (!skippedThinkingBlock) ensureElapsedTimer()
+        if (!get().sessions[sessionId]) break
+        appendPendingThinkingDelta(sessionId, msg.text, msg.complete === true)
+        if (!thinkingFlushTimerBySession.has(sessionId)) {
+          const timer = setTimeout(() => {
+            // 只有真的落到 transcript 上的块才启动计时器：重放/空块正是"打开一个早就
+            // 结束的会话，它自己开始输出"的观感来源，那条判定在 flush 里。
+            if (flushPendingThinkingDelta(sessionId)) ensureElapsedTimer()
+          }, 50)
+          thinkingFlushTimerBySession.set(sessionId, timer)
+        }
         break
       }
 
@@ -5582,6 +5759,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         if (session.suppressNextTaskNotificationResponse) {
           consumePendingDelta(sessionId)
+          clearPendingThinkingDelta(sessionId)
           clearPendingToolInputDelta(sessionId)
           if (session.elapsedTimer) clearInterval(session.elapsedTimer)
           const hasRunningBackgroundAgents = hasRunningBackgroundTasks(session.backgroundAgentTasks)
@@ -5934,6 +6112,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             historyError: null,
           }))
           clearPendingDelta(sessionId)
+          clearPendingThinkingDelta(sessionId)
           clearPendingTaskToolUseIds(sessionId)
           clearPendingToolParentUseIds(sessionId)
           clearPendingFileEdits(sessionId)

@@ -2816,7 +2816,7 @@ describe('MessageList nested tool calls', () => {
     expect(group.toolCalls.map((toolCall) => toolCall.toolUseId)).toEqual(['read-1', 'bash-1'])
   })
 
-  it('keeps a completed tool group visibly live while post-tool thinking streams', () => {
+  it('keeps a completed tool group visibly live while post-tool thinking streams', async () => {
     render(<MessageList sessionId={ACTIVE_TAB} />)
 
     const store = useChatStore.getState()
@@ -2845,8 +2845,12 @@ describe('MessageList nested tool calls', () => {
       })
     })
 
+    // Thinking is coalesced on the same 50ms cadence as content_delta, so the
+    // streaming row appears on the next tick rather than synchronously.
     const group = screen.getByTestId('activity-group')
-    expect(group.getAttribute('data-running')).toBe('true')
+    await waitFor(() => {
+      expect(group.getAttribute('data-running')).toBe('true')
+    })
     // The tool finished but the run has not: feedback has to stay somewhere the
     // reader can see (#d3ba73af3, which restored it after an earlier collapse
     // dropped it). It now sits on the step that is actually still going — the

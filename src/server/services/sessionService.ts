@@ -130,7 +130,7 @@ export type SessionListShadowComparison = {
 /** R1: read-path observability only — no behavior change. */
 export type JsonlParseMetric = {
   cacheHit: boolean
-  mode: 'tail' | 'full'
+  mode: 'tail' | 'full' | 'append'
   fileBytes: number
   readBytes: number
   entryCount: number
@@ -139,6 +139,11 @@ export type JsonlParseMetric = {
   cachedAfterRead: boolean
   /** Basename only (usually sessionId.jsonl) — never a full user path. */
   fileName: string
+  /**
+   * Reads of the same file folded into this event by the diagnostics throttle.
+   * Present only when at least one read was suppressed.
+   */
+  suppressedReads?: number
 }
 
 export type SessionServiceLocalIndexOptions = {
@@ -148,6 +153,14 @@ export type SessionServiceLocalIndexOptions = {
   recordShadowComparison?: (comparison: SessionListShadowComparison) => void
   /** Optional override for tests; default writes a diagnostics event. */
   recordJsonlParseMetric?: (metric: JsonlParseMetric) => void
+  /**
+   * Minimum gap between diagnostics writes for the same transcript. Reads are
+   * polled every few seconds per active session, so without a floor the log
+   * line for each poll becomes its own load. 0 disables the throttle.
+   */
+  jsonlMetricMinIntervalMs?: number
+  /** A read slower than this is always reported, throttle or not. */
+  jsonlMetricSlowMs?: number
   targetedEntryReader?: typeof readSessionEntriesByLocator
   sessionListCacheMaxEntries?: number
   sessionListSummaryCacheMaxEntries?: number
@@ -774,6 +787,31 @@ export class SessionService {
     size: number
     entries: RawEntry[]
     parseComplete: boolean
+    /**
+     * Byte offset of the last complete line folded into `entries`.
+     *
+     * An active transcript gains one line per event, so (mtime, size) changes
+     * on every append and the whole file was re-read + re-parsed each poll —
+     * 10 GB/day of redundant `JSON.parse` on a single 27 MB session, which is
+     * the main-thread cost behind the "UI stutters while a fast model streams"
+     * report. Recording the offset lets an append resume from the tail.
+     *
+     * `entries` is only valid up to this offset: a file rewritten in place can
+     * keep growing while its prefix changes, so the resume path additionally
+     * verifies trailing records at the cached offset (see `readAppendedJsonl`).
+     */
+    offset: number
+    /**
+     * How many leading records of `entries` lie within `offset`.
+     *
+     * A transcript whose final record has no terminating newline is still
+     * parsed (a full read wants its content), but that record sits *past* the
+     * offset — the writer may still be appending to it. Resuming from the
+     * offset therefore has to start from this count, not from `entries.length`,
+     * or the unterminated record gets read a second time once it is complete
+     * and appears twice in the transcript.
+     */
+    resumableEntries: number
   }>()
   private readonly readJsonlInFlight = new Map<
     string,
@@ -814,6 +852,29 @@ export class SessionService {
   /** R2: rate-limit oversized console.warn per path so logs don't look like a storm. */
   private readonly oversizedWarnLastAt = new Map<string, number>()
   private readonly oversizedWarnMinIntervalMs: number
+  /**
+   * Per-file throttle for the diagnostics write, plus the count suppressed
+   * since the last emitted event.
+   *
+   * The read path is polled every few seconds per active session, and writing
+   * a line for every hit and miss made the diagnostics log its own load: a
+   * single busy session produced ~1.7k lines in a day, which both costs an
+   * append per poll and buries the reads worth looking at. Notable events
+   * (oversized-tail reads, slow reads) still always get through.
+   */
+  private readonly jsonlMetricLastAt = new Map<string, number>()
+  private readonly jsonlMetricSuppressed = new Map<string, number>()
+  private readonly jsonlMetricMinIntervalMs: number
+  private readonly jsonlMetricSlowMs: number
+  /**
+   * How much of the cached prefix an append resume re-reads to confirm the file
+   * was not rewritten in place, and how many trailing records it anchors on.
+   *
+   * Reading the whole prefix would cost as much as the full read it replaces
+   * (31 MB here), so the check is deliberately an anchor on the prefix's end.
+   */
+  private readonly appendVerifyWindowBytes = 64 * 1024
+  private readonly appendVerifyEntries = 3
   private readonly projectHistory: ProjectSessionHistory
 
   constructor(
@@ -846,13 +907,15 @@ export class SessionService {
     this.recordJsonlParseMetric =
       options.recordJsonlParseMetric ??
       ((metric) => {
+        const throttled = this.throttleJsonlMetric(metric)
+        if (!throttled) return
         void diagnosticsService.recordEvent({
           type: 'session_jsonl_parse',
-          severity: metric.mode === 'tail' ? 'warn' : 'info',
-          summary: metric.cacheHit
-            ? `JSONL cache hit ${metric.fileName} (${metric.fileBytes} bytes)`
-            : `JSONL ${metric.mode} parse ${metric.fileName} read=${metric.readBytes}B in ${metric.durationMs}ms`,
-          details: metric,
+          severity: throttled.mode === 'tail' ? 'warn' : 'info',
+          summary: throttled.cacheHit
+            ? `JSONL cache hit ${throttled.fileName} (${throttled.fileBytes} bytes)`
+            : `JSONL ${throttled.mode} parse ${throttled.fileName} read=${throttled.readBytes}B in ${throttled.durationMs}ms`,
+          details: throttled,
         })
       })
     this.targetedEntryReader = options.targetedEntryReader ?? readSessionEntriesByLocator
@@ -868,6 +931,18 @@ export class SessionService {
       options.oversizedWarnMinIntervalMs >= 0
         ? Math.floor(options.oversizedWarnMinIntervalMs)
         : 5 * 60 * 1000
+    this.jsonlMetricMinIntervalMs =
+      typeof options.jsonlMetricMinIntervalMs === 'number' &&
+      Number.isFinite(options.jsonlMetricMinIntervalMs) &&
+      options.jsonlMetricMinIntervalMs >= 0
+        ? Math.floor(options.jsonlMetricMinIntervalMs)
+        : 30_000
+    this.jsonlMetricSlowMs =
+      typeof options.jsonlMetricSlowMs === 'number' &&
+      Number.isFinite(options.jsonlMetricSlowMs) &&
+      options.jsonlMetricSlowMs >= 0
+        ? options.jsonlMetricSlowMs
+        : 250
     this.projectHistory = new ProjectSessionHistory({
       now: this.now,
       scope: () => this.getConfigDir(),
@@ -954,13 +1029,22 @@ export class SessionService {
     size: number,
     entries: RawEntry[],
     parseComplete: boolean = true,
+    offset: number = size,
+    resumableEntries: number = entries.length,
   ): void {
     const previous = this.readJsonlCache.get(filePath)
     if (previous) {
       this.readCacheTotalBytes -= previous.size
       this.readJsonlCache.delete(filePath)
     }
-    this.readJsonlCache.set(filePath, { mtimeMs, size, entries, parseComplete })
+    this.readJsonlCache.set(filePath, {
+      mtimeMs,
+      size,
+      entries,
+      parseComplete,
+      offset,
+      resumableEntries: Math.max(0, Math.min(resumableEntries, entries.length)),
+    })
     this.readCacheTotalBytes += size
     while (this.readCacheTotalBytes > this.readCacheMaxTotalBytes) {
       const oldest = this.readJsonlCache.keys().next().value
@@ -1278,7 +1362,14 @@ export class SessionService {
       }
     }
 
-    const readPromise = this.readAndParseJsonl(filePath, stat)
+    const readPromise = (async () => {
+      const cached = this.readJsonlCache.get(filePath)
+      if (cached) {
+        const appended = await this.readAppendedJsonl(filePath, stat, cached)
+        if (appended) return appended
+      }
+      return this.readAndParseJsonl(filePath, stat)
+    })()
     this.readJsonlInFlight.set(filePath, readPromise)
     try {
       const result = await readPromise
@@ -1292,6 +1383,173 @@ export class SessionService {
     }
   }
 
+  /**
+   * Serve a growing transcript by parsing only the bytes appended since the
+   * cached read.
+   *
+   * An active session appends a line per event, so (mtime, size) never matches
+   * the previous read and every poll re-parsed the whole file — a 31 MB
+   * transcript re-read every few seconds while a model streams, which is the
+   * largest single cost behind the "UI stutters" report. Resuming from the last
+   * complete-line offset turns that into a read of just the new tail.
+   *
+   * Returns null whenever the append-only assumption cannot be confirmed, so
+   * the caller falls back to a full read. Size alone cannot confirm it: a file
+   * rewritten in place (session rewind truncates and rewrites) can end up
+   * *larger* than the cached size with a completely different prefix, so the
+   * bytes at the end of the cached prefix are re-verified against disk before
+   * anything is reused.
+   */
+  private async readAppendedJsonl(
+    filePath: string,
+    stat: { mtimeMs: number; size: number },
+    cached: {
+      mtimeMs: number
+      size: number
+      entries: RawEntry[]
+      parseComplete: boolean
+      offset: number
+      resumableEntries: number
+    },
+  ): Promise<{ entries: RawEntry[]; exists: boolean; parseComplete: boolean } | null> {
+    // Shrink or a backwards clock: not an append.
+    if (stat.size < cached.offset || stat.mtimeMs < cached.mtimeMs) return null
+    // Nothing cached to resume from, or nothing new — the exact-match path
+    // above already handled an unchanged file.
+    if (cached.offset <= 0 || stat.size <= cached.offset) return null
+    // Stay out of the oversized regime the tail path owns; a transcript that
+    // crosses the ceiling must keep degrading to a tail window rather than
+    // accumulating in the cache.
+    if (stat.size > this.maxFullJsonlReadBytes) return null
+
+    const started = performance.now()
+    const fileName = path.basename(filePath)
+    const windowStart = Math.max(0, cached.offset - this.appendVerifyWindowBytes)
+    const tail = await this.readJsonlRange(filePath, windowStart, cached.offset)
+    if (tail === null || !this.jsonlTailMatch(tail, cached.entries, cached.resumableEntries)) {
+      return null
+    }
+
+    // Only the records inside the offset are reused. Anything past it came from
+    // a line that had not been terminated yet and is about to be read again.
+    const entries = cached.entries.slice(0, cached.resumableEntries)
+    let parseComplete = cached.parseComplete
+    let malformed = false
+    const appended = await this.streamJsonlFileFrom(
+      filePath,
+      cached.offset,
+      (entry) => entries.push(entry),
+      true,
+      () => {
+        malformed = true
+      },
+    )
+    if (malformed) parseComplete = false
+
+    // `consumed` stops at the last complete line, so a record still being
+    // written is kept in `entries` (matching a full read) but excluded from the
+    // resumable prefix — the next append re-parses it whole rather than
+    // splicing its halves together.
+    this.storeReadCache(
+      filePath,
+      stat.mtimeMs,
+      stat.size,
+      entries,
+      parseComplete,
+      appended.consumed,
+      cached.resumableEntries + appended.completeEntries,
+    )
+    this.emitJsonlParseMetric({
+      cacheHit: false,
+      mode: 'append',
+      fileBytes: stat.size,
+      readBytes: stat.size - cached.offset,
+      entryCount: entries.length,
+      durationMs: performance.now() - started,
+      cachedAfterRead: true,
+      fileName,
+    })
+    return { entries: entries.slice(), exists: true, parseComplete }
+  }
+
+  /** Read `[start, end)`, or null if the file cannot supply it. */
+  private async readJsonlRange(
+    filePath: string,
+    start: number,
+    end: number,
+  ): Promise<Buffer | null> {
+    const length = end - start
+    if (length <= 0) return null
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined
+    try {
+      handle = await fs.open(filePath, 'r')
+      const buffer = Buffer.alloc(length)
+      const { bytesRead } = await handle.read(buffer, 0, length, start)
+      return bytesRead === length ? buffer : null
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw err
+    } finally {
+      await handle?.close().catch(() => {})
+    }
+  }
+
+  /**
+   * Does the end of the cached prefix still match the bytes on disk?
+   *
+   * `tail` is the window ending exactly at the cached offset. The last few
+   * *complete* records must sit inside it in order, and the window must end
+   * right after one of them — that is, at the offset the cache believes the
+   * file ended. Records are located by searching for their serialization rather
+   * than by re-serializing to a fixed width, so the check stays exact for
+   * transcripts that were pretty-printed or had their keys reordered.
+   *
+   * Anchoring on records rather than on raw bytes is what makes this robust to
+   * the trailing partial: a record still being written is in `entries` but past
+   * the offset, and the bytes just before the offset are a complete line either
+   * way. For the same reason the window must end in a newline — anything else
+   * means the cached offset is not a record boundary on disk.
+   *
+   * Only the records inside the cached offset are checked — `resumableEntries`,
+   * not `entries.length`. A record still being written sits past the offset and
+   * its bytes on disk may already have grown beyond what the cache parsed, so
+   * requiring it to match would fail the check on exactly the transcripts the
+   * resume path exists for.
+   *
+   * This anchors the prefix's *end*, it does not compare the whole prefix. A
+   * rewrite that edits an earlier record *without changing the file's total
+   * byte length* leaves the final records byte-identical at the same offsets
+   * and is not caught — the stale record survives until the file is read whole
+   * again. Every writer in this codebase is strictly append-only
+   * (`appendFile` / `createWriteStream(flags:'a')`), and the one in-place
+   * rewrite that exists (session rewind from a checkpoint) truncates first, so
+   * the size guard rejects it. The residual case needs an external process
+   * editing the transcript in place, which is out of scope for a read cache;
+   * comparing the whole prefix would cost as much as the full read this path
+   * exists to avoid. A window too small to hold the verified records fails the
+   * check, which degrades to a full read rather than to a wrong one.
+   */
+  private jsonlTailMatch(tail: Buffer, entries: RawEntry[], resumableEntries: number): boolean {
+    if (tail.length === 0 || tail[tail.length - 1] !== 0x0a) return false
+    const last = Math.min(resumableEntries, entries.length)
+    if (last <= 0) return false
+    const first = Math.max(0, last - this.appendVerifyEntries)
+
+    let cursor = 0
+    for (let i = first; i < last; i += 1) {
+      const line = Buffer.from(JSON.stringify(entries[i]), 'utf8')
+      const start = tail.indexOf(line, cursor)
+      if (start === -1) return false
+      const newline = start + line.length
+      if (tail[newline] !== 0x0a) return false
+      // The window ends at the cached offset, so the record whose newline is
+      // the final byte is the one the offset was measured after.
+      if (newline === tail.length - 1) return true
+      cursor = newline + 1
+    }
+    return false
+  }
+
   private emitJsonlParseMetric(metric: JsonlParseMetric): void {
     try {
       this.recordJsonlParseMetric({
@@ -1301,6 +1559,43 @@ export class SessionService {
     } catch {
       // Observability must never break transcript reads.
     }
+  }
+
+  /**
+   * Apply the per-file throttle to a metric about to be written to the
+   * diagnostics log, returning null when this read should not be reported.
+   *
+   * The read path is polled every few seconds per active session, and a line
+   * per poll made the log its own load — one busy session produced ~1.7k lines
+   * in a day. Reads that are slow, or that degraded to a tail window, always
+   * get through; suppressed reads are counted and folded into the next event so
+   * the volume stays visible rather than silently vanishing.
+   *
+   * Applied at the diagnostics sink rather than at `emitJsonlParseMetric`, so
+   * an injected recorder still observes every read.
+   */
+  private throttleJsonlMetric(metric: JsonlParseMetric): JsonlParseMetric | null {
+    const suppressed = this.jsonlMetricSuppressed.get(metric.fileName) ?? 0
+    const notable = metric.mode === 'tail' || metric.durationMs >= this.jsonlMetricSlowMs
+    if (!notable && this.jsonlMetricMinIntervalMs > 0) {
+      const now = this.now()
+      const last = this.jsonlMetricLastAt.get(metric.fileName)
+      if (last !== undefined && now - last < this.jsonlMetricMinIntervalMs) {
+        this.jsonlMetricSuppressed.set(metric.fileName, suppressed + 1)
+        return null
+      }
+    }
+    this.jsonlMetricLastAt.set(metric.fileName, this.now())
+    this.jsonlMetricSuppressed.set(metric.fileName, 0)
+    // Bound map growth the same way the oversized-warn throttle does.
+    if (this.jsonlMetricLastAt.size > 200) {
+      const oldest = this.jsonlMetricLastAt.keys().next().value
+      if (oldest !== undefined) {
+        this.jsonlMetricLastAt.delete(oldest)
+        this.jsonlMetricSuppressed.delete(oldest)
+      }
+    }
+    return suppressed > 0 ? { ...metric, suppressedReads: suppressed } : metric
   }
 
   private async readAndParseJsonl(
@@ -1343,7 +1638,7 @@ export class SessionService {
       throw err
     }
 
-    const { entries, parseComplete } = this.parseJsonlContent(content)
+    const { entries, parseComplete, consumed, resumableEntries } = this.parseJsonlContent(content)
     // Any file that reaches here was fully read (the >maxFullJsonlReadBytes
     // tail path returned earlier and is the only non-cacheable case), so it is
     // always cacheable. The readCacheMaxTotalBytes budget + LRU eviction in
@@ -1351,7 +1646,19 @@ export class SessionService {
     // the largest, most-frequently-polled active transcripts from the cache,
     // forcing a full re-parse on every sidebar refresh / workbench poll.
     const cachedAfterRead = true
-    this.storeReadCache(filePath, stat.mtimeMs, stat.size, entries, parseComplete)
+    // `consumed`, not `stat.size`: the read happens after the stat, so an
+    // actively-appended transcript usually has entries past `stat.size`. The
+    // append resume anchors on this offset, so it has to describe the bytes
+    // that were actually parsed.
+    this.storeReadCache(
+      filePath,
+      stat.mtimeMs,
+      stat.size,
+      entries,
+      parseComplete,
+      consumed,
+      resumableEntries,
+    )
     this.emitJsonlParseMetric({
       cacheHit: false,
       mode: 'full',
@@ -1368,19 +1675,38 @@ export class SessionService {
   private parseJsonlContent(content: string): {
     entries: RawEntry[]
     parseComplete: boolean
+    /** Byte offset just past the last complete line. */
+    consumed: number
+    /** How many leading `entries` lie within `consumed`. */
+    resumableEntries: number
   } {
+    const parts = content.split('\n')
+    // Without a terminating newline the final part is a record still being
+    // written: parsed, but not part of the resumable prefix.
+    const completeLines = content.endsWith('\n') ? parts.length : parts.length - 1
     const entries: RawEntry[] = []
     let parseComplete = true
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      try {
-        entries.push(JSON.parse(trimmed) as RawEntry)
-      } catch {
-        parseComplete = false
+    let resumableEntries = 0
+    for (let i = 0; i < parts.length; i += 1) {
+      const trimmed = parts[i]!.trim()
+      if (trimmed) {
+        try {
+          entries.push(JSON.parse(trimmed) as RawEntry)
+        } catch {
+          parseComplete = false
+        }
       }
+      if (i < completeLines) resumableEntries = entries.length
     }
-    return { entries, parseComplete }
+    // A record with no terminating newline is still parsed (callers want the
+    // partial line's content), but it is not part of the resumable prefix: the
+    // writer may still be appending to it. Byte length, not string length —
+    // transcripts are usually CJK.
+    const lastNewline = content.lastIndexOf('\n')
+    const consumed = lastNewline < 0
+      ? 0
+      : Buffer.byteLength(content, 'utf8') - Buffer.byteLength(content.slice(lastNewline + 1), 'utf8')
+    return { entries, parseComplete, consumed, resumableEntries }
   }
 
   private async readJsonlFile(filePath: string): Promise<RawEntry[]> {
@@ -1537,18 +1863,19 @@ export class SessionService {
    * refreshes.
    *
    * With `includeTrailingPartial`, a final line lacking a newline is still
-   * parsed — but it is excluded from `consumed` and flagged via
-   * `consumedTrailingPartial`, because a resuming caller must re-read it once
-   * it is complete and so must not fold it into a cached aggregate.
+   * parsed — but it is excluded from both `consumed` and `completeEntries`,
+   * because a resuming caller must re-read it once it is complete and so must
+   * not fold it into a cached aggregate.
    */
   private async streamJsonlFileFrom(
     filePath: string,
     startOffset: number,
     onEntry: (entry: RawEntry) => void,
     includeTrailingPartial = false,
-  ): Promise<{ consumed: number; consumedTrailingPartial: boolean }> {
+    onMalformedLine?: () => void,
+  ): Promise<{ consumed: number; completeEntries: number }> {
     let consumed = startOffset
-    let consumedTrailingPartial = false
+    let completeEntries = 0
     const stream = createReadStream(filePath, { start: startOffset })
     // Buffer-based splitting: a multi-byte character can straddle a chunk
     // boundary, so decoding each chunk to a string independently would corrupt
@@ -1556,13 +1883,17 @@ export class SessionService {
     let pending: Buffer[] = []
     let pendingLength = 0
 
-    const handleLine = (line: Buffer): void => {
+    const handleLine = (line: Buffer, completeLine: boolean): void => {
       const trimmed = line.toString('utf8').trim()
       if (!trimmed) return
       try {
         onEntry(JSON.parse(trimmed) as RawEntry)
+        if (completeLine) completeEntries += 1
       } catch {
-        // skip malformed lines
+        // A malformed *complete* line is a real gap in the transcript. A
+        // trailing partial is not: it is a record still being written, and the
+        // full-read path does not treat it as malformed either.
+        if (completeLine) onMalformedLine?.()
       }
     }
 
@@ -1582,7 +1913,7 @@ export class SessionService {
             line = segment
           }
           consumed += line.length + 1
-          handleLine(line)
+          handleLine(line, true)
           buffer = buffer.subarray(newlineIndex + 1)
           newlineIndex = buffer.indexOf(0x0a)
         }
@@ -1599,8 +1930,7 @@ export class SessionService {
         const line = pending.length === 1
           ? pending[0]!
           : Buffer.concat(pending, pendingLength)
-        consumedTrailingPartial = true
-        handleLine(line)
+        handleLine(line, false)
       }
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -1610,7 +1940,7 @@ export class SessionService {
       stream.destroy()
     }
 
-    return { consumed, consumedTrailingPartial }
+    return { consumed, completeEntries }
   }
 
   /**

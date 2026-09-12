@@ -172,6 +172,7 @@ import type { ServerMessage } from '../types/chat'
 import { useSettingsStore } from './settingsStore'
 import { runsForOwner, runsForSession, useWorkflowStore } from './workflowStore'
 import {
+  __flushPendingThinkingDeltaForTesting,
   __resetCompactionThrashForTesting,
   __resetHistoryLoadStateForTesting,
   mapHistoryMessagesToUiMessages,
@@ -185,6 +186,14 @@ import {
 
 const TEST_SESSION_ID = 'test-session-1'
 const initialState = useChatStore.getState()
+
+/** Thinking deltas are buffered for ~50ms before they reach the transcript.
+ *  Tests that assert on thinking content straight after a delta flush the
+ *  buffer explicitly rather than adopting fake timers, so what they check is
+ *  still the real merge path (the timer calls the same function). */
+function flushThinking(sessionId = TEST_SESSION_ID): void {
+  __flushPendingThinkingDeltaForTesting(sessionId)
+}
 
 function makeSession(overrides: Partial<PerSessionState> = {}): PerSessionState {
   return {
@@ -411,6 +420,7 @@ describe('chatStore background agent activity interleaving', () => {
     emitChildToolActivity(store, 'child-grep-2')
     store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: 'Let me wait a bit.' })
 
+    flushThinking()
     const messages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
     const thinking = messages.filter((message) => message.type === 'thinking')
     expect(thinking).toHaveLength(1)
@@ -460,6 +470,7 @@ describe('chatStore background agent activity interleaving', () => {
       isError: false,
     })
     store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: 'After the tool.' })
+    flushThinking()
 
     const messages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
     const thinking = messages.filter((message) => message.type === 'thinking')
@@ -556,6 +567,7 @@ describe('chatStore history mapping', () => {
       }
 
       const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+      flushThinking()
       expect(session?.messages).toEqual([
         expect.objectContaining({ type: 'user_text', content: 'Previously saved question' }),
         expect.objectContaining({ type: 'assistant_text', content: 'Previously saved answer' }),
@@ -2017,6 +2029,7 @@ describe('chatStore history mapping', () => {
     })
     await historyLoad
 
+    flushThinking()
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
       { type: 'user_text', content: 'old prompt' },
       { type: 'assistant_text', content: 'old answer' },
@@ -2340,6 +2353,10 @@ describe('chatStore history mapping', () => {
       text: 'live work after the repeated reply',
       complete: true,
     })
+    // The live reply has to be a real message before history is applied, or
+    // there is nothing for the restored transcript to hydrate and no second
+    // copy to compare against. Flushing thinking also flushes buffered text.
+    flushThinking()
     resolveHistory({
       messages: [
         {
@@ -2416,6 +2433,7 @@ describe('chatStore history mapping', () => {
     const repeatedReplies = (
       useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
     ).filter((message) => message.type === 'assistant_text' && message.content === 'Done.')
+    flushThinking()
     expect(repeatedReplies).toHaveLength(2)
     expect(repeatedReplies[0]).toMatchObject({
       transcriptMessageId: 'restored-old-assistant',
@@ -3357,6 +3375,7 @@ describe('chatStore history mapping', () => {
       store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: 'plan the ' })
       store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: 'fix' })
 
+      flushThinking()
       const thinking = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
         .filter((message) => message.type === 'thinking')
       expect(thinking).toHaveLength(1)
@@ -3369,11 +3388,79 @@ describe('chatStore history mapping', () => {
       store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: 'plan the fix carefully', complete: true })
       store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: 'then run tests', complete: true })
 
+      flushThinking()
       const thinking = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
         .filter((message) => message.type === 'thinking')
       expect(thinking).toHaveLength(1)
       expect(thinking?.[0]).toMatchObject({ content: 'plan the fix carefully\n\nthen run tests' })
       expect(thinking?.[0]?.content).not.toContain('carefullythen')
+    })
+
+    it('lands a final fragment before an idle snapshot instead of after it', () => {
+      vi.useFakeTimers()
+      useChatStore.setState({
+        sessions: {
+          [TEST_SESSION_ID]: makeSession({ chatState: 'thinking', activeThinkingId: null }),
+        },
+      })
+
+      const store = useChatStore.getState()
+      store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: 'last thought' })
+      store.handleServerMessage(TEST_SESSION_ID, {
+        type: 'session_state',
+        turnState: 'idle',
+      })
+
+      // The fragment belongs to the turn that just ended, so it is on screen...
+        flushThinking()
+      const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+      expect(session?.messages.filter((m) => m.type === 'thinking').map((m) => m.content))
+        .toEqual(['last thought'])
+
+      vi.advanceTimersByTime(120)
+
+      // ...and the turn stays over. A late flush would flip chatState back to
+      // 'thinking' and re-arm activeThinkingId on a session the snapshot just
+      // declared idle — a finished answer lighting up as if it were still running.
+      const settled = useChatStore.getState().sessions[TEST_SESSION_ID]
+      expect(settled?.chatState).toBe('idle')
+      expect(settled?.activeThinkingId).toBeNull()
+
+      vi.runOnlyPendingTimers()
+      vi.useRealTimers()
+    })
+
+    it('keeps a fragment that arrived just before a non-streaming fallback', () => {
+      vi.useFakeTimers()
+      useChatStore.setState({
+        sessions: {
+          [TEST_SESSION_ID]: makeSession({ chatState: 'thinking', activeThinkingId: 'live' }),
+        },
+      })
+
+      const store = useChatStore.getState()
+      store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: 'still reasoning' })
+      store.handleServerMessage(TEST_SESSION_ID, {
+        type: 'streaming_fallback',
+        cause: 'watchdog',
+      })
+
+      // The degrade branch keeps what was already produced (the synchronous path
+      // never removed it) — it only stops marking a block as the live one.
+      expect(
+        useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
+          .filter((m) => m.type === 'thinking').map((m) => m.content),
+      ).toEqual(['still reasoning'])
+
+      vi.advanceTimersByTime(120)
+
+      // A late flush would re-attach activeThinkingId to that block, so the UI
+      // would show it as still streaming while the request is actually in the
+      // non-streaming wait.
+      expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.activeThinkingId).toBeNull()
+
+      vi.runOnlyPendingTimers()
+      vi.useRealTimers()
     })
   })
 
@@ -12826,6 +12913,7 @@ describe('chatStore history mapping', () => {
       type: 'thinking',
       text: 'orphan background follow-up thinking',
     })
+    flushThinking()
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toContainEqual(
       expect.objectContaining({
         type: 'thinking',
@@ -13334,6 +13422,7 @@ describe('chatStore history mapping', () => {
       text: 'Planning the fix.',
     })
 
+    flushThinking()
     const session = useChatStore.getState().sessions[TEST_SESSION_ID]
     expect(session?.apiRetry).toBeNull()
     expect(session?.streamingFallback).toBeNull()
@@ -13366,6 +13455,7 @@ describe('chatStore history mapping', () => {
       text: 'The non-streaming response is flowing.',
     })
 
+    flushThinking()
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.streamingFallback).toBeNull()
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.apiRetry).toBeNull()
   })
@@ -14017,6 +14107,7 @@ describe('chatStore history mapping', () => {
       text: 'internal note',
     })
 
+    flushThinking()
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
       { type: 'assistant_text', content: 'visible answer before thinking' },
       { type: 'thinking', content: 'internal note' },
@@ -14056,6 +14147,7 @@ describe('chatStore history mapping', () => {
     const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
       .filter((message) => message.type === 'user_text')
     expect(userMessages).toHaveLength(1)
+    flushThinking()
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
       { type: 'user_text', content: prompt },
       { type: 'thinking', content: 'I need to plan the implementation.' },
@@ -14970,6 +15062,7 @@ describe('chatStore history mapping', () => {
       type: 'thinking',
       text: 'pondering',
     })
+    flushThinking()
     expect(charsOf()).toBe(56)
 
     vi.runOnlyPendingTimers()
