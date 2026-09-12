@@ -101,6 +101,14 @@ async function runRelay(options: {
     const [exitCode, stdout, stderr] = await Promise.all([
       child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
     ])
+    // The desktop-selection provider cases crash the CLI early on CI (Linux)
+    // while passing locally. Surface stderr in every assertion message of
+    // these tests so the next red run shows the actual CLI error instead of
+    // an empty stdout.
+    if (options.provider) {
+      const note = JSON.stringify({ exitCode, stdout, stderr: stderr.slice(0, 2000) })
+      return { exitCode, stdout, stderr: note, requests }
+    }
     return { exitCode, stdout, stderr, requests }
   } finally {
     clearTimeout(timer)
