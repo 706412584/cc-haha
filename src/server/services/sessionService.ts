@@ -2014,7 +2014,6 @@ export class SessionService {
     } finally {
       await handle.close()
     }
-    await fs.appendFile(filePath, line, 'utf-8')
     this.invalidateReadCache(filePath)
   }
 

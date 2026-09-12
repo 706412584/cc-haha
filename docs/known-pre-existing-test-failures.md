@@ -66,6 +66,15 @@ fork 之前把后台 agent 的完成通知从「完成即直塞命令队列」�
   `labels a cached workflow agent explicitly instead of calling it merely completed` / `renders a workflow as phase headers with their agents, each opening the subagent page`
 - `src/components/layout/Sidebar.test.tsx`（多个，基线同样红）— project display-name / repo 上下文相关的一组。
 
+### `claudeBetas.integration.test.ts`（Windows 本地专用，CI 正常）
+
+7 个用例在 **Windows 本地**全部报 `EBUSY: resource busy or locked, rm 'C:\Users\...\cc-haha-context-beta-*'`
+（`runRelay` 的 `finally` 里 `rm(sandbox)` 与刚被 `child.kill()` 的 CLI 子进程抢文件句柄）。CI 是 Linux/macOS，
+无此句柄竞争，7/7 通过 —— 上面 `check:server` 的红即由此而来，不是断言失败。
+
+本地验证真实行为时，可临时给该 `rm` 加退避重试；加完 7 pass / 0 fail。**不要把这个补丁提交**：
+CI 上不需要，且会把「清理失败」从可见的红变成静默重试。
+
 ## desktop（vitest）——Windows 环境限制（非 quarantine 覆盖）
 
 下列两个文件与其**全部 import 的源文件**均与 pre-merge 基线（`b28d2fa3`）逐字节相同，desktop 的 vitest 配置也未改动，故与上游合并无关，属 Windows 本地环境限制：

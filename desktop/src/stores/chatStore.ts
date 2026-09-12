@@ -3769,19 +3769,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                       activityReconnectBoundary,
                     )
                   : restoredNotifications
-              const backgroundAgentTasks = reconcileBackgroundActivityAtApply &&
-                activityReconnectBoundary
-                ? mergeBackgroundAgentTaskRecords(
-                    applyReconnectActiveTaskSnapshot(
+              const backgroundAgentTasks = applyKnownStoppedTasks(killStaleRunningTasks(
+                reconcileBackgroundActivityAtApply && activityReconnectBoundary
+                  ? mergeBackgroundAgentTaskRecords(
+                      applyReconnectActiveTaskSnapshot(
+                        restoredBackgroundTasks,
+                        activityReconnectBoundary.snapshotActiveBackgroundTaskIds,
+                      ),
+                      currentBackgroundAgentTasks,
+                    )
+                  : mergeBackgroundAgentTaskRecords(
+                      currentBackgroundAgentTasks,
                       restoredBackgroundTasks,
-                      activityReconnectBoundary.snapshotActiveBackgroundTaskIds,
                     ),
-                    currentBackgroundAgentTasks,
-                  )
-                : mergeBackgroundAgentTaskRecords(
-                    currentBackgroundAgentTasks,
-                    restoredBackgroundTasks,
-                  )
+                activityReconnectBoundary?.snapshotActiveBackgroundTaskIds,
+              ), sessionId)
               const currentLiveMessages = discardBaselineMessages
                 ? s.messages.filter((message) =>
                   discardedBaselineMessagesById?.get(message.id) !== message)
@@ -3887,19 +3889,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                     activityReconnectBoundary,
                   )
                 : restoredNotifications
-            const backgroundAgentTasks = reconcileBackgroundActivityAtApply &&
-              activityReconnectBoundary
-              ? mergeBackgroundAgentTaskRecords(
-                  applyReconnectActiveTaskSnapshot(
+            const backgroundAgentTasks = applyKnownStoppedTasks(killStaleRunningTasks(
+              reconcileBackgroundActivityAtApply && activityReconnectBoundary
+                ? mergeBackgroundAgentTaskRecords(
+                    applyReconnectActiveTaskSnapshot(
+                      restoredBackgroundTasks,
+                      activityReconnectBoundary.snapshotActiveBackgroundTaskIds,
+                    ),
+                    currentBackgroundAgentTasks,
+                  )
+                : mergeBackgroundAgentTaskRecords(
+                    currentBackgroundAgentTasks,
                     restoredBackgroundTasks,
-                    activityReconnectBoundary.snapshotActiveBackgroundTaskIds,
                   ),
-                  currentBackgroundAgentTasks,
-                )
-              : mergeBackgroundAgentTaskRecords(
-                  currentBackgroundAgentTasks,
-                  restoredBackgroundTasks,
-                )
+              activityReconnectBoundary?.snapshotActiveBackgroundTaskIds,
+            ), sessionId)
             const messages = mergeBackgroundTaskMessages(uiMessages, backgroundAgentTasks)
             const agentTaskNotifications = mergeAgentTaskNotificationRecords(
               currentAgentTaskNotifications,
@@ -7109,23 +7113,34 @@ export function mergeBackgroundAgentTaskRecords(
 // dead (sidecar or CLI crash) and the user has no way to stop it otherwise.
 // Call this only at session-restore boundaries (loadHistory / reloadHistory),
 // not on every merge — transcript timestamps can be arbitrarily old.
+// `confirmedActiveTaskIds` (from a reconnect snapshot) is authoritative: a task
+// the server still reports as active must not be aged out, otherwise a
+// long-running task that outlives the 24h window is killed on every reconnect.
 function killStaleRunningTasks(
   tasks: Record<string, BackgroundAgentTask>,
+  confirmedActiveTaskIds?: Set<string> | null,
 ): Record<string, BackgroundAgentTask> {
   const now = Date.now()
   const STALE_MS = 24 * 60 * 60 * 1000
   let changed = false
   const result: Record<string, BackgroundAgentTask> = { ...tasks }
   for (const [taskId, task] of Object.entries(result)) {
-    if (task.status === 'running' && task.startedAt > 0 && now - task.startedAt > STALE_MS) {
-      result[taskId] = {
-        ...task,
-        status: 'killed',
-        summary: task.summary ? task.summary + ' (killed: stale)' : '(killed: stale)',
-        updatedAt: now,
-      }
-      changed = true
+    if (task.status !== 'running' || !(task.startedAt > 0) || now - task.startedAt <= STALE_MS) {
+      continue
     }
+    if (
+      confirmedActiveTaskIds?.has(task.taskId) ||
+      Boolean(task.toolUseId && confirmedActiveTaskIds?.has(task.toolUseId))
+    ) {
+      continue
+    }
+    result[taskId] = {
+      ...task,
+      status: 'killed',
+      summary: task.summary ? task.summary + ' (killed: stale)' : '(killed: stale)',
+      updatedAt: now,
+    }
+    changed = true
   }
   return changed ? result : tasks
 }

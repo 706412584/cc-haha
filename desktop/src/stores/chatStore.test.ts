@@ -11881,6 +11881,55 @@ describe('chatStore history mapping', () => {
     ).toBe('stopped')
   })
 
+  it('keeps a cold-restore task stopped from persisted confirmation alone', async () => {
+    // Cold start: nothing is in memory, so the stop can only come from the
+    // persisted confirmation. The sibling test above seeds a live session and
+    // calls handleServerMessage first, which already marks the task stopped —
+    // it therefore passes with or without the restore-time reconciliation and
+    // cannot catch a regression here.
+    localStorage.clear()
+    const stoppedAt = Date.now() - 60_000
+    recordStoppedBackgroundTask(TEST_SESSION_ID, 'agent-task-1', stoppedAt)
+    useChatStore.setState({
+      sessions: { [TEST_SESSION_ID]: makeSession({ messages: [] }) },
+    })
+    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
+      messages: [
+        {
+          id: 'root-shell-use',
+          type: 'assistant',
+          timestamp: new Date(stoppedAt - 30_000).toISOString(),
+          content: [{
+            type: 'tool_use',
+            id: 'agent-tool-1',
+            name: 'Bash',
+            input: { command: 'bun run build', run_in_background: true },
+          }],
+        },
+        {
+          id: 'root-shell-result',
+          type: 'tool_result',
+          timestamp: new Date(stoppedAt - 29_000).toISOString(),
+          content: [{
+            type: 'tool_result',
+            tool_use_id: 'agent-tool-1',
+            content: 'Command running in background with ID: agent-task-1',
+          }],
+        },
+      ],
+      taskNotifications: [],
+    })
+
+    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
+
+    // The transcript never says the task is still running; only the persisted
+    // stop confirmation does, so this asserts the restore-time reconciliation.
+    expect(
+      useChatStore.getState().sessions[TEST_SESSION_ID]
+        ?.backgroundAgentTasks?.['agent-task-1']?.status,
+    ).toBe('stopped')
+  })
+
   it('does not resurrect a new lifecycle sharing a stopped task id', async () => {
     localStorage.clear()
     const stoppedAt = Date.now() - 60_000
