@@ -23,20 +23,14 @@ import {
   permissionRuleValueToString,
 } from './permissionRuleParser.js'
 import { addPermissionRulesToSettings } from './permissionsLoader.js'
+import { transitionPermissionMode } from './permissionSetup.js'
 
-/* eslint-disable @typescript-eslint/no-require-imports */
-// permissionSetup imports this module back (`applyPermissionUpdate`), so a
-// static import would close a cycle. Resolve it at call time instead.
-//
-// The lookup must happen on every call, not once at module scope: this module
-// is evaluated *inside* that cycle, so a top-level `require` captures the
-// half-initialized namespace and caches it forever (Bun returns a snapshot,
-// not live bindings) — `transitionPermissionMode` then stays undefined even
-// after permissionSetup finishes loading.
-function loadPermissionSetup(): typeof import('./permissionSetup.js') {
-  return require('./permissionSetup.js') as typeof import('./permissionSetup.js')
-}
-/* eslint-enable @typescript-eslint/no-require-imports */
+// permissionSetup imports this module back (`applyPermissionUpdate`), but it
+// only ever calls it from inside functions — never at module scope — so a
+// static import cannot observe a partially-initialized binding. `require()`
+// cannot be used here: under `bun test --feature=...` the cycle makes it
+// return an empty, permanently-cached snapshot, so every setMode update threw
+// `transitionPermissionMode is not a function`.
 
 // Re-export for backwards compatibility
 export type { AdditionalWorkingDirectory, WorkingDirectorySource }
@@ -96,7 +90,7 @@ export function applyPermissionUpdate(
       // update — the plan-approval dialog, a host, an edit suggestion — used to
       // skip it and leave a half-applied plan exit behind.
       return {
-        ...loadPermissionSetup().transitionPermissionMode(
+        ...transitionPermissionMode(
           context.mode,
           update.mode,
           context,
