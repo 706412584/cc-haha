@@ -543,9 +543,19 @@ final class AXTreePublicationIntegrationTests: XCTestCase {
                 WindowExposure.resetForTests()
                 return WindowExposure.targetWindowExposed(at: point, targetPid: pid) == exposed
             }
+            diagDump("feedback-before-hide", exposed ? 100 : 200)
             cursor.hide()
+            diagDump("feedback-after-hide", exposed ? 100 : 200)
             cursor.show()
-            try await click()
+            diagDump("feedback-after-show", exposed ? 100 : 200)
+            do {
+                try await click()
+            } catch {
+                diagDump("feedback-click-threw", exposed ? 100 : 200)
+                print("[TEMP-DIAG] error=\(error)")
+                throw error
+            }
+            diagDump("feedback-after-click", exposed ? 100 : 200)
             XCTAssertEqual(overlays.contains { $0.isVisible }, exposed)
             XCTAssertEqual(!ripples().isEmpty, exposed)
             XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, getpid())
