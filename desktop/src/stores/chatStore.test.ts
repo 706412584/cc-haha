@@ -2391,6 +2391,125 @@ describe('chatStore history mapping', () => {
     if (timer) clearInterval(timer)
   })
 
+  // The mirror of the guards above. When the live turn *is* the restored turn —
+  // its own user message matched durable history — the reply that durable row
+  // already contains must be coalesced, not appended. The live copy carries no
+  // transcriptMessageId (appendAssistantTextMessage only sets one when the
+  // caller has it), and the cold merge coalesces by identity, so without a
+  // backfill the same reply renders twice and the user bubble alongside it
+  // renders twice as well. Nothing later removes the copy: the completion
+  // reconcile and the idle hydration retry both go through the same merge.
+  it('coalesces a live reply onto its durable row when the same turn is restored mid-stream', async () => {
+    let resolveHistory!: (value: { messages: MessageEntry[] }) => void
+    vi.mocked(sessionsApi.getMessages).mockReturnValueOnce(new Promise((resolve) => {
+      resolveHistory = resolve
+    }))
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'streaming',
+          historyHydrated: false,
+          // The renderer writes the user's own turn without a transcript id.
+          messages: [{ id: 'live-user', type: 'user_text', content: 'go', timestamp: 1 }],
+        }),
+      },
+    })
+
+    const historyLoad = useChatStore.getState().loadHistory(TEST_SESSION_ID)
+    const store = useChatStore.getState()
+    store.handleServerMessage(TEST_SESSION_ID, { type: 'content_start', blockType: 'text' })
+    store.handleServerMessage(TEST_SESSION_ID, { type: 'content_delta', text: 'All green.' })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_use_complete', toolName: 'Bash', toolUseId: 'tool-1', input: {},
+    })
+
+    resolveHistory({
+      messages: [
+        { id: 'restored-user', type: 'user', timestamp: '2026-08-31T00:00:00.000Z', content: 'go' },
+        {
+          id: 'restored-assistant', type: 'assistant', timestamp: '2026-08-31T00:00:01.000Z',
+          content: 'All green.',
+        },
+        {
+          id: 'restored-tool', type: 'tool_use', timestamp: '2026-08-31T00:00:02.000Z',
+          content: '', toolUseId: 'tool-1', toolName: 'Bash', input: {},
+        } as unknown as MessageEntry,
+      ],
+    })
+    await historyLoad
+    flushThinking()
+
+    const messages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
+    const replies = messages.filter((message) => message.type === 'assistant_text')
+    const prompts = messages.filter((message) => message.type === 'user_text')
+    const toolCalls = messages.filter((message) => message.type === 'tool_use')
+
+    expect(replies).toHaveLength(1)
+    expect(replies[0]).toMatchObject({
+      content: 'All green.',
+      transcriptMessageId: 'restored-assistant',
+    })
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toMatchObject({ transcriptMessageId: 'restored-user' })
+    // The tool call already coalesced by toolUseId; the fix must not regress it.
+    expect(toolCalls).toHaveLength(1)
+
+    const timer = useChatStore.getState().sessions[TEST_SESSION_ID]?.elapsedTimer
+    if (timer) clearInterval(timer)
+  })
+
+  // The backfill above is not free: once the live reply owns a
+  // transcriptMessageId, appendAssistantTextMessage's merge condition flips
+  // (`last.transcriptMessageId === transcriptMessageId` fails for the id-less
+  // stream), so the rest of the same reply would land in a second bubble.
+  it('keeps streaming one continuous reply after the backfill assigns an id', async () => {
+    let resolveHistory!: (value: { messages: MessageEntry[] }) => void
+    vi.mocked(sessionsApi.getMessages).mockReturnValueOnce(new Promise((resolve) => {
+      resolveHistory = resolve
+    }))
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'streaming',
+          historyHydrated: false,
+          // The first half of the reply is already flushed to a live row.
+          messages: [
+            { id: 'live-user', type: 'user_text', content: 'go', timestamp: 1 },
+            { id: 'live-assistant', type: 'assistant_text', content: 'part one ', timestamp: 2 },
+          ],
+        }),
+      },
+    })
+
+    const historyLoad = useChatStore.getState().loadHistory(TEST_SESSION_ID)
+    const store = useChatStore.getState()
+    resolveHistory({
+      messages: [
+        { id: 'restored-user', type: 'user', timestamp: '2026-08-31T00:00:00.000Z', content: 'go' },
+        { id: 'restored-assistant', type: 'assistant', timestamp: '2026-08-31T00:00:01.000Z', content: 'part one ' },
+      ],
+    })
+    await historyLoad
+
+    // The same reply keeps streaming after the backfill.
+    store.handleServerMessage(TEST_SESSION_ID, { type: 'content_delta', text: 'part two' })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'message_complete', usage: { input_tokens: 1, output_tokens: 1 },
+    })
+
+    const all = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
+    const replies = all.filter((message) => message.type === 'assistant_text')
+    expect(replies).toHaveLength(1)
+    expect(replies[0]).toMatchObject({
+      content: 'part one part two',
+      transcriptMessageId: 'restored-assistant',
+    })
+    expect(all.filter((message) => message.type === 'user_text')).toHaveLength(1)
+
+    const timer = useChatStore.getState().sessions[TEST_SESSION_ID]?.elapsedTimer
+    if (timer) clearInterval(timer)
+  })
+
   it('does not mistake an identical completed reply for cold history loaded in parallel', async () => {
     let resolveHistory!: (value: { messages: MessageEntry[] }) => void
     vi.mocked(sessionsApi.getMessages).mockReturnValueOnce(new Promise((resolve) => {
