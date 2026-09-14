@@ -27,12 +27,20 @@ export async function runSwiftChecks(options: {
     return await child.exited
   })
   try {
-    return await run([
+    const env = createSandboxedTestEnvironment(sandboxHome, { CFFIXED_USER_HOME: sandboxHome })
+    const swiftExit = await run([
       'swift', 'test',
       '--package-path', join(root, 'native/cu-helper'),
       '--scratch-path', join(sandboxHome, 'build'),
       '--enable-xctest',
-    ], { cwd: root, env: createSandboxedTestEnvironment(sandboxHome) })
+    ], { cwd: root, env })
+    if (swiftExit !== 0) return swiftExit
+    // The macOS PR job and local check:native share this entrypoint. Keep the
+    // shell packaging/probe regressions here so they cannot silently remain
+    // unexecuted while Swift XCTest alone reports the native lane green.
+    return await run([
+      'bun', 'test', join(root, 'native/cu-helper/build.test.ts'),
+    ], { cwd: root, env })
   } finally {
     rmSync(sandboxHome, { recursive: true, force: true })
   }

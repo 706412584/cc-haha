@@ -7,6 +7,8 @@ describe('macOS action and observation guidance', () => {
     expect(COMPUTER_USE_INSTRUCTIONS).toContain('then observe at a decision point')
     expect(COMPUTER_USE_INSTRUCTIONS).toContain('Do not add a fixed sleep before observing')
     expect(COMPUTER_USE_INSTRUCTIONS).toContain('Use copied `gN:id` handles')
+    expect(COMPUTER_USE_INSTRUCTIONS).toContain('new Promise(resolve => setTimeout(resolve, milliseconds))')
+    expect(COMPUTER_USE_INSTRUCTIONS).toContain('Timers belong to the current cell and are cleared when it')
   })
 
   test('keeps standalone receipts and unknown paste results subject to observation', () => {

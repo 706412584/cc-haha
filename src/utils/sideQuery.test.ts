@@ -15,6 +15,19 @@ const explanation = {
   riskLevel: 'LOW',
 }
 
+test('local proxy side queries keep their explicit small budget despite a provider reply budget', async () => {
+  const { requests, headers } = await withCapturedRequests('claude-sonnet-4-6', () => {
+    process.env.ANTHROPIC_BASE_URL += '/proxy/providers/fixture'
+    process.env.CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS = '131072'
+    return sideQuery({
+      model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: 'Return OK' }],
+      max_tokens: 256, thinking: false, querySource: 'permission_explainer',
+    })
+  }, [{ type: 'text', text: 'OK' }])
+  expect(requests[0]?.max_tokens).toBe(256)
+  expect(headers[0]?.get('x-cc-haha-output-budget-source')).toBe('explicit')
+})
+
 async function withCapturedRequests<T>(
   model: string,
   run: () => Promise<T>,

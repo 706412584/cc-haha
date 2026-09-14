@@ -6614,6 +6614,95 @@ describe('Sessions API', () => {
     ])
   })
 
+  it('does not repeat carried-forward file checkpoints on text and Read turns', async () => {
+    const sessionId = '99999999-bbbb-cccc-dddd-000000001305'
+    const workDir = path.join(tmpDir, 'carried-forward-chat-checkpoints')
+    const filePath = path.join(workDir, 'created.txt')
+    const userIds = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()]
+    await fs.mkdir(workDir, { recursive: true })
+    await fs.writeFile(filePath, 'created in the first turn\n')
+    const entries: Record<string, unknown>[] = [makeSessionMetaEntry(workDir)]
+    for (const [index, userId] of userIds.entries()) {
+      entries.push(
+        makeFileHistorySnapshotEntry(userId, {
+          'created.txt': { backupFileName: null, version: 1, backupTime: `2026-01-01T00:0${index}:00.000Z` },
+        }),
+        { ...makeUserEntry(['create a file', 'hello', 'read the file'][index]!, userId), cwd: workDir, sessionId },
+      )
+      if (index !== 1) {
+        const toolName = index === 0 ? 'Write' : 'Read'
+        const toolId = `${toolName}:carry-forward-${index}`
+        entries.push(
+          makeAssistantToolUseEntry([{
+            id: toolId,
+            name: toolName,
+            input: { file_path: filePath, ...(index === 0 ? { content: 'created in the first turn\n' } : {}) },
+          }], userId),
+          makeToolResultUserEntry(toolId, 'success', undefined, undefined, sessionId),
+        )
+      }
+      entries.push(makeAssistantEntry('Done.', userId))
+    }
+    await writeSessionFile('-tmp-carried-forward-chat-checkpoints', sessionId, entries)
+
+    const response = await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)
+    expect(response.status).toBe(200)
+    const body = await response.json() as { checkpoints: Array<{ code: { filesChanged: string[] } }> }
+    expect(body.checkpoints.map((checkpoint) => checkpoint.code.filesChanged)).toEqual([[filePath], [], []])
+
+    const rewindPreview = await fetch(`${baseUrl}/api/sessions/${sessionId}/rewind`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUserMessageId: userIds[1], dryRun: true }),
+    })
+    expect(await rewindPreview.json()).toMatchObject({ code: { available: true, filesChanged: [] } })
+    const rewind = await fetch(`${baseUrl}/api/sessions/${sessionId}/rewind`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUserMessageId: userIds[1] }),
+    })
+    expect(rewind.status).toBe(200)
+    expect(await fs.readFile(filePath, 'utf8')).toBe('created in the first turn\n')
+  })
+
+  it('preserves fresh snapshot-only evidence after a recorded Write turn', async () => {
+    const sessionId = '99999999-bbbb-cccc-dddd-000000001306'
+    const workDir = path.join(tmpDir, 'mixed-snapshot-only-checkpoints')
+    const filePath = path.join(workDir, 'created.txt')
+    const legacyPath = path.join(workDir, 'legacy.txt')
+    const firstUserId = crypto.randomUUID()
+    const secondUserId = crypto.randomUUID()
+    const freshBackup = 'mixed-snapshot-created@v2'
+    await fs.mkdir(workDir, { recursive: true })
+    await fs.writeFile(filePath, 'second version\n')
+    await fs.writeFile(legacyPath, 'legacy write\n')
+    await writeFileHistoryBackup(sessionId, freshBackup, 'first version\n')
+    await writeSessionFile('-tmp-mixed-snapshot-only-checkpoints', sessionId, [
+      makeSessionMetaEntry(workDir),
+      makeFileHistorySnapshotEntry(firstUserId, {
+        'created.txt': { backupFileName: null, version: 1, backupTime: '2026-01-01T00:00:00.000Z' },
+      }),
+      { ...makeUserEntry('create a file', firstUserId), cwd: workDir, sessionId },
+      makeAssistantToolUseEntry([{
+        id: 'Write:mixed-snapshot', name: 'Write', input: { file_path: filePath, content: 'first version\n' },
+      }], firstUserId),
+      makeToolResultUserEntry('Write:mixed-snapshot', 'success', undefined, undefined, sessionId),
+      makeAssistantEntry('Done.', firstUserId),
+      makeFileHistorySnapshotEntry(secondUserId, {
+        'created.txt': { backupFileName: freshBackup, version: 2, backupTime: '2026-01-01T00:01:00.000Z' },
+        'legacy.txt': { backupFileName: null, version: 1, backupTime: '2026-01-01T00:01:00.000Z' },
+      }),
+      { ...makeUserEntry('edit using an older provider', secondUserId), cwd: workDir, sessionId },
+      makeAssistantEntry('Done.', secondUserId),
+    ])
+    const response = await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)
+    expect(response.status).toBe(200)
+    const body = await response.json() as { checkpoints: Array<{ code: { filesChanged: string[] } }> }
+    expect(body.checkpoints.map((checkpoint) => checkpoint.code.filesChanged)).toEqual([
+      [filePath], [filePath, legacyPath],
+    ])
+  })
+
   it('should expose authoritative conversation targets for text, provider errors, and repeated continues', async () => {
     const sessionId = '99999999-bbbb-cccc-dddd-000000001273'
     const workDir = path.join(tmpDir, 'conversation-only-turn-targets')
@@ -7415,6 +7504,7 @@ describe('Sessions API', () => {
     const changedFile = path.join(workDir, 'changed.ts')
     const restoredFile = path.join(workDir, 'restored.ts')
     const userId = crypto.randomUUID()
+    const chatUserId = crypto.randomUUID()
     const changedBackup = 'snapshot-covered-changed@v1'
     const restoredBackup = 'snapshot-covered-restored@v1'
     const changedBefore = "export const changed = 'before'\n"
@@ -7479,6 +7569,12 @@ describe('Sessions API', () => {
       makeToolResultUserEntry('Edit:restored-forward', 'Updated successfully.', undefined, undefined, sessionId),
       makeToolResultUserEntry('Edit:restored-back', 'Updated successfully.', undefined, undefined, sessionId),
       makeAssistantEntry('Finished.', userId),
+      makeFileHistorySnapshotEntry(chatUserId, {
+        'changed.ts': { backupFileName: changedBackup, version: 1, backupTime: '2026-01-01T00:01:00.000Z' },
+        'restored.ts': { backupFileName: restoredBackup, version: 1, backupTime: '2026-01-01T00:01:00.000Z' },
+      }),
+      { ...makeUserEntry('say hello without tools', chatUserId), cwd: workDir, sessionId },
+      makeAssistantEntry('Hello.', chatUserId),
     ])
 
     const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)
@@ -7489,7 +7585,8 @@ describe('Sessions API', () => {
         restoreAvailable?: boolean
       }>
     }
-    expect(body.checkpoints).toHaveLength(1)
+    expect(body.checkpoints).toHaveLength(2)
+    expect(body.checkpoints[1]).toMatchObject({ code: { filesChanged: [], insertions: 0, deletions: 0 } })
     expect(body.checkpoints[0]).toMatchObject({
       code: {
         filesChanged: [changedFile],

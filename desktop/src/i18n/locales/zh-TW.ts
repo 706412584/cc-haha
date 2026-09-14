@@ -1,6 +1,25 @@
 import type { TranslationKey } from './en'
 
 export const zh: Record<TranslationKey, string> = {
+  'settings.providers.compatibilityJsonHint': 'requestCompatibility 僅儲存到目前供應商，不寫入全域設定。',
+  'settings.providers.compatibilityBudget': '回覆輸出預算',
+  'settings.providers.compatibilityBudgetHint': '一般回覆請求的最大輸出 token 數。留空自動選擇；背景短請求仍使用較小預算。',
+  'settings.providers.compatibilityAdvanced': '進階相容設定',
+  'settings.providers.compatibilityReset': '重設相容設定',
+  'settings.providers.compatibilityLimit': '已知端點輸出上限',
+  'settings.providers.compatibilityLimitHint': '僅在供應商明確提供硬上限時填寫，請求預算不會超過此值。',
+  'settings.providers.compatibilityTokenField': '輸出 token 參數',
+  'settings.providers.compatibilityAuto': '自動',
+  'settings.providers.compatibilityUnknown': '未知',
+  'settings.providers.compatibilitySupported': '支援',
+  'settings.providers.compatibilityUnsupported': '不支援',
+  'settings.providers.compatibilityOmit': '不傳送上限',
+  'settings.providers.compatibilitySampling': '取樣參數',
+  'settings.providers.compatibilityReasoning': '推理參數',
+  'settings.providers.compatibilityParallelTools': '平行工具呼叫',
+  'settings.providers.compatibilityStructuredOutput': '結構化輸出',
+  'settings.providers.compatibilityNumberError': '請輸入正整數，或留空自動選擇。',
+  'settings.providers.compatibilityJsonError': '請求相容設定必須是包含有效選項的物件。',
   'sidebar.projectHistoryFailed': '無法載入更早的對話。',
   // ─── Common ──────────────────────────────────────
   'common.cancel': '取消',
@@ -2109,7 +2128,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.general.networkProxyUrlRequired': '請輸入代理地址。',
   'settings.general.networkTimeout': 'AI 請求超時',
   'settings.general.networkTimeoutValue': '{seconds} 秒',
-  'settings.general.networkTimeoutHint': '用於服務商請求、流式首個響應，以及服務商連線測試。支援 30-1800 秒；部分服務商在大上下文下首個流式位元組可能需要等待數分鐘。',
+  'settings.general.networkTimeoutHint': '用於服務商請求、流式首個響應，以及服務商連線測試。支援 30-1800 秒；部分服務商在大上下文下首個流式位元組可能需要等待數分鐘。調大後，單次流式回應的總時長上限同步放寬（不低於 600 秒）。',
   'settings.general.networkTimeoutUnit': '秒',
   'settings.general.networkTimeoutDecrease': '減少 30 秒',
   'settings.general.networkTimeoutIncrease': '增加 30 秒',
@@ -2630,6 +2649,8 @@ export const zh: Record<TranslationKey, string> = {
   'chat.turnChangesOpenInWorkspaceAria': '在工作區開啟 {path}',
   'chat.turnChangesOpenFileAria': '開啟 {path}',
   'chat.turnChangesShowMore': '再顯示 {count} 個檔案',
+  'chat.turnChangesExpand': '展開 {count} 個變更檔案',
+  'chat.turnChangesCollapse': '摺疊變更檔案',
   'chat.turnChangesShowLess': '收起',
 
   // ─── Streaming Indicator ──────────────────────────────────────
@@ -2654,6 +2675,8 @@ export const zh: Record<TranslationKey, string> = {
   'permission.planPreviewTitle': 'Claude 的計劃',
   'permission.planRequestedPermissions': '請求的權限',
   'permission.planApprove': '批准計劃',
+  'permission.planApproveAcceptEdits': '批准並自動接受編輯',
+  'permission.planApproveBypass': '批准並跳過權限',
   'permission.planKeepPlanning': '繼續規劃',
   'permission.planFeedbackPlaceholder': '告訴 Claude 需要修改什麼',
   'permission.planEmpty': '暫無計劃內容。',

@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'n
 import { createTwoFilesPatch, diffLines } from 'diff'
 import { ApiError } from '../middleware/errorHandler.js'
 import { recordedCommandIsReadOnly } from '../../tools/BashTool/readOnlyValidation.js'
+import { applyEditToFile } from '../../tools/FileEditTool/utils.js'
 import {
   type FileHistorySnapshot,
   readBackupFileSafely,
@@ -1659,6 +1660,110 @@ async function buildCodePreview(
   }
 }
 
+function replayKnownTurnFileContent(
+  messages: MessageEntry[],
+  baseDir: string,
+  identity: string,
+  before: string | null,
+): string | null | undefined {
+  let content = before
+  const successfulIds = collectSuccessfulToolUseIds(messages)
+  for (const message of messages) {
+    if (message.type !== 'tool_use' || !Array.isArray(message.content)) continue
+    for (const block of message.content) {
+      if (!block || typeof block !== 'object') continue
+      const tool = block as { type?: string; id?: string; name?: string; input?: Record<string, unknown> }
+      if (tool.type !== 'tool_use' || !tool.id || !successfulIds.has(tool.id) || !tool.name || !tool.input) continue
+      const changes = extractTranscriptChangesFromTool(tool.name, tool.input, message.cwd ?? baseDir)
+      if (!changes.some((change) => change.identityPath === identity)) continue
+      if (tool.name.toLowerCase() === 'write' && typeof tool.input.content === 'string') {
+        content = tool.input.content
+        continue
+      }
+      const edits = tool.name.toLowerCase() === 'edit'
+        ? [tool.input]
+        : tool.name.toLowerCase() === 'multiedit' && Array.isArray(tool.input.edits)
+          ? tool.input.edits
+          : null
+      if (!edits) return undefined
+      for (const edit of edits) {
+        if (!edit || typeof edit !== 'object' || typeof edit.old_string !== 'string' || typeof edit.new_string !== 'string') return undefined
+        if (edit.old_string === '') {
+          content = edit.new_string
+          continue
+        }
+        if (content === null || !content.includes(edit.old_string)) return undefined
+        // Ambiguous or normalized matches cannot prove the file's final state.
+        if (edit.replace_all !== true && content.indexOf(edit.old_string) !== content.lastIndexOf(edit.old_string)) return undefined
+        content = applyEditToFile(content, edit.old_string, edit.new_string, edit.replace_all === true)
+      }
+    }
+  }
+  return content
+}
+
+/**
+ * Some resumed providers repeat an earlier turn's pre-edit backups in later
+ * snapshots. Those backups cannot be the later turn's before-state. Discard
+ * only entries we can trace to a nonzero earlier mutation with the same
+ * backup/version. Exact tool replay distinguishes stale backups from legitimate
+ * reuse after an edit was reverted; unknown and snapshot-only evidence stays intact.
+ * Use this view for both sides of a turn boundary, otherwise a carried backup
+ * also makes the original edit look like a zero-net change.
+ */
+async function scopeCarriedForwardSnapshots(
+  sessionId: string,
+  snapshots: FileHistorySnapshot[] | null,
+  activeMessages: MessageEntry[],
+  transcriptEvidenceComplete: boolean,
+  workDir: string,
+): Promise<FileHistorySnapshot[] | null> {
+  if (!snapshots || !transcriptEvidenceComplete) return snapshots
+  const snapshotsByMessageId = new Map<string, FileHistorySnapshot>(
+    snapshots.map((snapshot) => [snapshot.messageId, snapshot]),
+  )
+  const attributedBackups = new Map<string, { backupFileName: string | null; version: number }>()
+  const scopedByMessageId = new Map<string, FileHistorySnapshot>()
+
+  for (const turn of buildTranscriptTurnContexts(activeMessages)) {
+    const baseDir = turn.userMessage.cwd ?? workDir
+    const evidence = collectTranscriptFileChanges(turn.messages, baseDir)
+    if (evidence.unverifiedChangeSources.length > 0) {
+      // Unknown writes break the attribution chain; do not infer their effects.
+      attributedBackups.clear()
+      continue
+    }
+    const snapshot = snapshotsByMessageId.get(turn.userMessage.id)
+    const attemptedPaths = new Set([
+      ...evidence.confirmedChanges,
+      ...evidence.uncertainChanges,
+    ].map((change) => change.identityPath))
+    const uncertainPaths = new Set(evidence.uncertainChanges.map((change) => change.identityPath))
+    const confirmedPaths = new Set(evidence.confirmedChanges.map((change) => change.identityPath))
+    for (const identity of attemptedPaths) attributedBackups.delete(identity)
+    const backups = { ...snapshot?.trackedFileBackups }
+    for (const [trackingPath, backup] of Object.entries(backups)) {
+      const identity = toFileIdentityPath(expandTrackingPath(baseDir, trackingPath))
+      const previous = attributedBackups.get(identity)
+      if (previous?.backupFileName === backup.backupFileName && previous.version === backup.version) {
+        if (!attemptedPaths.has(identity)) delete backups[trackingPath]
+      } else {
+        attributedBackups.delete(identity)
+      }
+      if (confirmedPaths.has(identity) && !uncertainPaths.has(identity)) {
+        attributedBackups.delete(identity)
+        const before = await readBackupContent(sessionId, backup.backupFileName)
+        if (before !== undefined) {
+          const after = replayKnownTurnFileContent(turn.messages, baseDir, identity, before)
+          if (after !== undefined && after !== before) attributedBackups.set(identity, backup)
+        }
+      }
+    }
+    if (snapshot) scopedByMessageId.set(snapshot.messageId, { ...snapshot, trackedFileBackups: backups })
+  }
+  return snapshots.map((snapshot) => scopedByMessageId.get(snapshot.messageId) ?? snapshot)
+}
+
 async function buildTurnCheckpointState(
   sessionId: string,
   activeMessages: MessageEntry[],
@@ -1739,6 +1844,9 @@ async function buildRewindTurnCheckpointState(
   workDir: string,
   target: RewindTarget,
 ): Promise<SessionTurnCheckpointPreview> {
+  const scopedSnapshots = await scopeCarriedForwardSnapshots(
+    sessionId, snapshots, activeMessages, transcriptEvidenceComplete, workDir,
+  )
   const userMessages = activeMessages.filter((message) => message.type === 'user')
   const checkpoints: SessionTurnCheckpointPreview[] = []
 
@@ -1751,7 +1859,7 @@ async function buildRewindTurnCheckpointState(
       sessionId,
       activeMessages,
       transcriptEvidenceComplete,
-      snapshots,
+      scopedSnapshots,
       workDir,
       {
         targetUserMessageId: userMessage.id,
@@ -1768,7 +1876,7 @@ async function buildRewindTurnCheckpointState(
       sessionId,
       activeMessages,
       transcriptEvidenceComplete,
-      snapshots,
+      scopedSnapshots,
       workDir,
       target,
     )
@@ -1880,7 +1988,9 @@ export async function listSessionTurnCheckpoints(
   }
 
   const workDir = await resolveSessionWorkDir(sessionId)
-  const snapshots = await loadFileHistorySnapshots(sessionId)
+  const snapshots = await scopeCarriedForwardSnapshots(
+    sessionId, await loadFileHistorySnapshots(sessionId), activeMessages, transcriptEvidenceComplete, workDir,
+  )
   signal?.throwIfAborted()
   const snapshotByMessageId = new Map<string, FileHistorySnapshot>()
   for (const snapshot of snapshots ?? []) {
@@ -1930,9 +2040,11 @@ export async function getSessionTurnCheckpointDiff(
     target.targetUserMessageId,
     workDir,
   )
-  const { messages: activeMessages } =
+  const { messages: activeMessages, transcriptEvidenceComplete } =
     await sessionService.getSessionMessagesWithEvidence(sessionId)
-  const snapshots = await loadFileHistorySnapshots(sessionId)
+  const snapshots = await scopeCarriedForwardSnapshots(
+    sessionId, await loadFileHistorySnapshots(sessionId), activeMessages, transcriptEvidenceComplete, workDir,
+  )
   const missingResult = {
     target: buildTurnPreview(
       target,

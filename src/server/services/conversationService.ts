@@ -55,6 +55,7 @@ import { attributionHeaderEnvForModel } from './attributionHeaderPolicy.js'
 import {
   buildNetworkEnvironment,
   loadNetworkSettings,
+  resolveStreamMaxDurationMs,
   SYSTEM_PROXY_URL_ENV,
   type NetworkSettings,
 } from './networkSettings.js'
@@ -226,6 +227,7 @@ type SessionProcess = {
   permissionMode: string
   networkRoutingFingerprint: string
   networkDerivedFirstTokenTimeout: boolean
+  networkDerivedStreamMaxDuration: boolean
   sdkToken: string
   sdkSocket: { send(data: string): void } | null
   sdkAttached: Promise<void>
@@ -493,7 +495,10 @@ export class ConversationService {
     // chdir 后落到正确目录。
     //
     const networkSettings = await loadNetworkSettings()
-    const networkRuntimeMetadata = { firstTokenTimeoutDerived: false }
+    const networkRuntimeMetadata = {
+      firstTokenTimeoutDerived: false,
+      streamMaxDurationDerived: false,
+    }
     const childEnv = await this.buildChildEnv(
       launchWorkDir,
       sdkUrl,
@@ -540,6 +545,7 @@ export class ConversationService {
       permissionMode: options?.permissionMode || 'default',
       networkRoutingFingerprint: networkRoutingFingerprint(networkSettings, childEnv),
       networkDerivedFirstTokenTimeout: networkRuntimeMetadata.firstTokenTimeoutDerived,
+      networkDerivedStreamMaxDuration: networkRuntimeMetadata.streamMaxDurationDerived,
       sdkToken: this.getSdkTokenFromUrl(sdkUrl),
       sdkSocket: null,
       seenSdkMessageUuids: new Set<string>(),
@@ -729,6 +735,14 @@ export class ConversationService {
     }
     if (session.networkDerivedFirstTokenTimeout) {
       variables.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS = networkEnv.API_TIMEOUT_MS
+    }
+    // The CLI re-reads this per request, so the fix for #1307 must reach a
+    // session that is already running — otherwise the user sees the 600s error,
+    // raises the timeout, retries in the same conversation and hits it again.
+    if (session.networkDerivedStreamMaxDuration) {
+      variables.CLAUDE_STREAM_MAX_DURATION_MS = String(
+        resolveStreamMaxDurationMs(networkEnv.API_TIMEOUT_MS),
+      )
     }
 
     const sent = this.sendSdkMessage(sessionId, {
@@ -1652,7 +1666,10 @@ export class ConversationService {
     sdkUrl?: string,
     options?: SessionStartOptions,
     networkSettingsOverride?: NetworkSettings,
-    networkRuntimeMetadata?: { firstTokenTimeoutDerived: boolean },
+    networkRuntimeMetadata?: {
+      firstTokenTimeoutDerived: boolean
+      streamMaxDurationDerived: boolean
+    },
   ): Promise<Record<string, string>> {
     // Provider isolation: when Desktop has its own provider config/index,
     // strip inherited provider env vars so the child CLI reads fresh values
@@ -1665,6 +1682,8 @@ export class ConversationService {
     if (networkRuntimeMetadata) {
       networkRuntimeMetadata.firstTokenTimeoutDerived =
         !cleanEnv.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS
+      networkRuntimeMetadata.streamMaxDurationDerived =
+        !cleanEnv.CLAUDE_STREAM_MAX_DURATION_MS
     }
     delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN
     if (options?.resumeInterruptedTurn === false) {
@@ -1706,6 +1725,14 @@ export class ConversationService {
       networkSettingsOverride ?? await loadNetworkSettings(),
       cleanEnv,
     )
+    // The overall-duration cap has to scale with the user's "请求超时" or raising
+    // that setting can never extend a long response — the cap is a wall-clock
+    // budget that no chunk resets, so a slow local model that legitimately
+    // thinks past it is killed mid-stream (#1307). The floor keeps the existing
+    // 600s protection from being TIGHTENED when the user configures a short
+    // first-byte budget (a lower cap would kill legitimate long responses even
+    // earlier); the per-turn hot update below mirrors this for live turns.
+    const streamMaxDurationMs = resolveStreamMaxDurationMs(networkEnv.API_TIMEOUT_MS)
     const traceCaptureEnabled = (await readTraceCaptureSettings()).enabled
     if (explicitProviderEnv && options?.model?.trim()) {
       applyProviderRuntimeModel(explicitProviderEnv, options.model)
@@ -1742,7 +1769,12 @@ export class ConversationService {
       // just under 240s apart keeps it alive forever and the request hangs with
       // no completion (#766: "卡住" with slowly growing tokens). This independent
       // cap frees such a stream after a fixed duration regardless of trickle.
-      CLAUDE_STREAM_MAX_DURATION_MS: cleanEnv.CLAUDE_STREAM_MAX_DURATION_MS || '600000',
+      // It tracks the user's "请求超时" (never below MIN_STREAM_MAX_DURATION_MS)
+      // so that raising the timeout also extends legitimately long responses,
+      // and a provider preset's own CLAUDE_STREAM_MAX_DURATION_MS still wins
+      // via the explicitProviderEnv spread below (#1307).
+      CLAUDE_STREAM_MAX_DURATION_MS:
+        cleanEnv.CLAUDE_STREAM_MAX_DURATION_MS || String(streamMaxDurationMs),
       // Abort a local tool call when its JSON arguments stop making progress.
       // Healthy input_json_delta events reset this budget; the independent full
       // response cap above still bounds a stream that trickles forever.

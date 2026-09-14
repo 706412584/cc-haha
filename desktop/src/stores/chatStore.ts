@@ -1421,12 +1421,19 @@ function appendAssistantTextMessage(
   // 记录的最坏情况是 858 条消息重放 31 次 —— 858 < 2000，整个重放窗口都在集合里，
   // 逐条按身份挡掉。上面那道尾部子串守卫保留：它只在尾部仍是那条 hydrated 消息时
   // 才生效，够不到一轮之内被工具调用隔开的重复。
+  // An id-less arrival is the live stream continuing: the server drops replayed
+  // SDK messages by uuid before they reach this store, so there is no replay for
+  // the store to defend against here (see the wake-replay suite). It must merge
+  // into the tail even when that tail carries a transcriptMessageId — a mid-turn
+  // history backfill stamps one onto the live row, and refusing the merge would
+  // split one reply into two bubbles. An id-bearing arrival still has to match,
+  // so a replayed durable row cannot be glued onto a different turn's text.
   const canMergeIntoLast =
     last?.type === 'assistant_text' &&
     (
       transcriptMessageId
         ? last.transcriptMessageId === transcriptMessageId
-        : !last.transcriptMessageId
+        : true
     )
   if (canMergeIntoLast) {
     const merged: UIMessage = {
@@ -1682,6 +1689,11 @@ function mergeRestoredTranscriptMessageIds(
   )))
   let restoredCursor = 0
   let currentTurnAssistantTranscriptIds = new Set<string>()
+  // Only a turn whose own user message matched durable history is the *same*
+  // turn as the restored one. A live reply that merely reads identically to an
+  // older restored reply — no live user message, or one that matched nothing —
+  // is a new turn, not a replay, and must keep its own copy.
+  let currentTurnUserAnchored = false
   let changed = false
   const merged = messages.map((message) => {
     if (message.type !== 'user_text' && message.type !== 'assistant_text') {
@@ -1690,6 +1702,7 @@ function mergeRestoredTranscriptMessageIds(
 
     if (message.type === 'user_text') {
       currentTurnAssistantTranscriptIds = new Set<string>()
+      currentTurnUserAnchored = false
     }
 
     if (message.transcriptMessageId) {
@@ -1697,9 +1710,15 @@ function mergeRestoredTranscriptMessageIds(
         index >= restoredCursor &&
         candidate.transcriptMessageId === message.transcriptMessageId)
       if (anchorIndex >= 0) restoredCursor = anchorIndex + 1
-      if (message.type === 'assistant_text') {
+      if (message.type === 'user_text') {
+        currentTurnUserAnchored = true
+      } else {
         currentTurnAssistantTranscriptIds.add(message.transcriptMessageId)
       }
+      return message
+    }
+
+    if (message.type === 'assistant_text' && !currentTurnUserAnchored) {
       return message
     }
 
@@ -1726,7 +1745,9 @@ function mergeRestoredTranscriptMessageIds(
       restoredCursor = matchIndex + 1
       claimedTranscriptMessageIds.add(transcriptMessageId)
     }
-    if (message.type === 'assistant_text') {
+    if (message.type === 'user_text') {
+      currentTurnUserAnchored = true
+    } else {
       currentTurnAssistantTranscriptIds.add(transcriptMessageId)
     }
     changed = true
@@ -3984,7 +4005,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 ? dropDuplicateTranscriptTextMessages(
                     mergeRestoredTranscriptMessageIds(s.messages, uiMessages),
                   )
-                : currentLiveMessages
+                // Mid-stream (and any other case where the live transcript moved
+                // while the fetch was in flight) still has to claim transcript ids.
+                // Live text rows are written without one — appendAssistantTextMessage
+                // only carries the id when the caller has it — and the cold merge
+                // below coalesces rows by identity. Without the backfill the live
+                // copy has no identity to match, so it is *appended* beside the
+                // durable row it duplicates and the turn renders twice, text and
+                // user bubble alike, with no path that ever removes the copy.
+                : mergeRestoredTranscriptMessageIds(currentLiveMessages, uiMessages)
               const messages = shouldBackfillColdHistory
                 ? mergeBackgroundTaskMessages(
                     mergeColdRestoredHistoryIntoLiveMessages(

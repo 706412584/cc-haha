@@ -16,6 +16,7 @@ import { readRecoverableJsonFile } from './recoverableJsonFile.js'
 import { ManagedSettingsService } from './managedSettingsService.js'
 import { anthropicToOpenaiChat } from '../proxy/transform/anthropicToOpenaiChat.js'
 import { anthropicToOpenaiResponses } from '../proxy/transform/anthropicToOpenaiResponses.js'
+import { resolveRequestCompatibility } from '../proxy/transform/requestCompatibility.js'
 import { hoistToolResultMediaForCompatibility } from '../proxy/transform/anthropicMediaHoist.js'
 import { openaiChatToAnthropic } from '../proxy/transform/openaiChatToAnthropic.js'
 import { openaiResponsesToAnthropic } from '../proxy/transform/openaiResponsesToAnthropic.js'
@@ -64,6 +65,7 @@ import type {
   ProviderTestStepResult,
   ApiFormat,
   ProviderAuthStrategy,
+  RequestCompatibility,
 } from '../types/provider.js'
 import {
   BUILT_IN_PROVIDER_IDS,
@@ -132,6 +134,7 @@ function buildSavedProvider(input: CreateProviderInput): SavedProvider {
     toolSearchEnabled: input.toolSearchEnabled ?? false,
     ...(input.disableExperimentalBetas === true && { disableExperimentalBetas: true }),
     ...(input.supportsNestedToolResultMedia !== undefined && { supportsNestedToolResultMedia: input.supportsNestedToolResultMedia }),
+    ...(input.requestCompatibility !== undefined && { requestCompatibility: input.requestCompatibility }),
     ...(imageGeneration !== undefined && { imageGeneration }),
     ...(input.notes !== undefined && { notes: input.notes }),
   }
@@ -306,6 +309,7 @@ export class ProviderService {
       ...(input.modelContextWindows !== undefined && input.modelContextWindows !== null && { modelContextWindows: input.modelContextWindows }),
       ...(input.toolSearchEnabled !== undefined && { toolSearchEnabled: input.toolSearchEnabled }),
       ...(input.supportsNestedToolResultMedia !== undefined && { supportsNestedToolResultMedia: input.supportsNestedToolResultMedia }),
+      ...(input.requestCompatibility !== undefined && input.requestCompatibility !== null && { requestCompatibility: input.requestCompatibility }),
       ...(input.disableExperimentalBetas === true && { disableExperimentalBetas: true }),
       ...(imageGeneration !== undefined && imageGeneration !== null && { imageGeneration }),
       ...(input.notes !== undefined && { notes: input.notes }),
@@ -332,6 +336,9 @@ export class ProviderService {
     // and forces a CLI restart even when the (providerId, modelId, effort)
     // tuple is unchanged. See SavedProviderSchema.revision docstring.
     updated.revision = (existing.revision ?? 0) + 1
+    if (input.requestCompatibility === null) {
+      delete updated.requestCompatibility
+    }
     if (input.disableExperimentalBetas === false) {
       delete updated.disableExperimentalBetas
     }
@@ -645,6 +652,7 @@ export class ProviderService {
     apiFormat: ApiFormat
     supportsNestedToolResultMedia: boolean
     authStrategy: ProviderAuthStrategy
+    requestCompatibility?: RequestCompatibility
   } | null> {
     const toProxyConfig = (provider: SavedProvider) => {
       const presetDefaultEnv = getPresetDefaultEnv(provider.presetId)
@@ -656,6 +664,7 @@ export class ProviderService {
         apiFormat: provider.apiFormat ?? 'anthropic',
         supportsNestedToolResultMedia: provider.supportsNestedToolResultMedia ?? true,
         authStrategy: provider.authStrategy ?? getPresetAuthStrategy(provider.presetId),
+        ...(provider.requestCompatibility !== undefined && { requestCompatibility: provider.requestCompatibility }),
       }
     }
     if (providerId) {
@@ -680,6 +689,7 @@ export class ProviderService {
     apiFormat: ApiFormat
     supportsNestedToolResultMedia: boolean
     authStrategy: ProviderAuthStrategy
+    requestCompatibility?: RequestCompatibility
   } | null> {
     return this.getProviderForProxy()
   }
@@ -709,6 +719,7 @@ export class ProviderService {
       authStrategy,
       apiFormat,
       supportsNestedToolResultMedia: provider.supportsNestedToolResultMedia,
+      requestCompatibility: provider.requestCompatibility,
     })
   }
 
@@ -721,7 +732,7 @@ export class ProviderService {
 
     // ── Step 1: Basic connectivity ───────────────────────────
     // Directly call the upstream API to verify URL, key, and model.
-    const step1 = await this.testConnectivity(base, input.apiKey, modelId, format, authStrategy, networkSettings)
+    const step1 = await this.testConnectivity(base, input.apiKey, modelId, format, authStrategy, networkSettings, input.requestCompatibility)
 
     // If connectivity failed, no point running step 2
     if (!step1.success) {
@@ -741,6 +752,7 @@ export class ProviderService {
       format,
       authStrategy,
       networkSettings,
+      input.requestCompatibility,
     )
 
     return { connectivity: step1, proxy: step2 }
@@ -830,10 +842,11 @@ export class ProviderService {
     format: ApiFormat,
     authStrategy: ProviderAuthStrategy,
     networkSettings: NetworkSettings,
+    requestCompatibility?: RequestCompatibility,
   ): Promise<ProviderTestStepResult> {
     const start = Date.now()
     try {
-      const { url, headers, body } = buildDirectTestRequest(base, apiKey, modelId, format, authStrategy)
+      const { url, headers, body } = buildDirectTestRequest(base, apiKey, modelId, format, authStrategy, requestCompatibility)
       const proxyOptions = getNetworkProxyFetchOptions(networkSettings, url)
       const response = await fetch(url, {
         method: 'POST',
@@ -878,6 +891,7 @@ export class ProviderService {
     format: ApiFormat,
     authStrategy: ProviderAuthStrategy,
     networkSettings: NetworkSettings,
+    requestCompatibility?: RequestCompatibility,
   ): Promise<ProviderTestStepResult> {
     const start = Date.now()
     try {
@@ -892,11 +906,11 @@ export class ProviderService {
       let transformedBody: unknown
       let headers: Record<string, string>
       if (format === 'openai_chat') {
-        transformedBody = anthropicToOpenaiChat(anthropicReq)
+        transformedBody = anthropicToOpenaiChat(anthropicReq, { requestCompatibility, budgetSource: 'explicit' })
         upstreamUrl = buildOpenaiEndpoint(base, 'chat/completions')
         headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }
       } else if (format === 'openai_responses') {
-        transformedBody = anthropicToOpenaiResponses(anthropicReq)
+        transformedBody = anthropicToOpenaiResponses(anthropicReq, { requestCompatibility, budgetSource: 'explicit' })
         upstreamUrl = buildOpenaiEndpoint(base, 'responses')
         headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }
       } else {
@@ -961,21 +975,32 @@ function buildDirectTestRequest(
   modelId: string,
   format: ApiFormat,
   authStrategy: ProviderAuthStrategy,
+  requestCompatibility?: RequestCompatibility,
 ): { url: string; headers: Record<string, string>; body: Record<string, unknown> } {
   const prompt = 'Say "ok" and nothing else.'
+  const outputBudget = format !== 'anthropic'
+    ? resolveRequestCompatibility({ model: modelId, max_tokens: 16, messages: [] }, {
+        protocol: format,
+        requestCompatibility,
+        budgetSource: 'explicit',
+      }).outputBudget
+    : undefined
+  const budgetParams = outputBudget && outputBudget.field !== 'omit' && outputBudget.effective !== undefined
+    ? { [outputBudget.field]: outputBudget.effective }
+    : {}
 
   if (format === 'openai_chat') {
     return {
       url: buildOpenaiEndpoint(base, 'chat/completions'),
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: { model: modelId, max_tokens: 16, stream: false, messages: [{ role: 'user', content: prompt }] },
+      body: { model: modelId, ...budgetParams, stream: false, messages: [{ role: 'user', content: prompt }] },
     }
   }
   if (format === 'openai_responses') {
     return {
       url: buildOpenaiEndpoint(base, 'responses'),
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: { model: modelId, max_output_tokens: 16, input: [{ type: 'message', role: 'user', content: prompt }] },
+      body: { model: modelId, ...budgetParams, input: [{ type: 'message', role: 'user', content: prompt }] },
     }
   }
   // anthropic

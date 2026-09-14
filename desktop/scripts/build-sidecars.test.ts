@@ -1,10 +1,11 @@
 // @vitest-environment node
 
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { copyFile, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, cp, mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path, { join as joinPath } from 'node:path'
+import { promisify } from 'node:util'
 
 import { describe, expect, it } from 'vitest'
 import {
@@ -717,21 +718,64 @@ describe('build-sidecars cu-helper macOS gating', () => {
     expect(source).toContain('env: createCuHelperBuildEnv(targetTriple, process.env)')
   })
 
-  it('copies the cu-helper binary and its resource bundle into the binaries dir', () => {
+  it('preserves the helper app signature while staging the complete signed bundle', () => {
     const source = readBuildScript()
-    // Both the bare binary AND the SwiftPM resource bundle must be copied, or the
-    // LensSequence overlay assets fail to load at runtime via Bundle.module.
-    expect(source).toContain('cu-helper_cc-haha-computer-use.bundle')
-    expect(source).toMatch(/binariesDir,\s*'cc-haha-computer-use'/)
+    const start = source.indexOf('async function buildCuHelper(')
+    expect(start).toBeGreaterThanOrEqual(0)
+    const end = source.indexOf('\nasync function copyPreserving(', start)
+    expect(end).toBeGreaterThan(start)
+    const buildCuHelperBody = source.slice(start, end)
+    expect(buildCuHelperBody).toContain('await copyPreserving(builtBinary, destApp)')
+    expect(buildCuHelperBody).not.toContain('signMacBinary(')
+    expect(buildCuHelperBody).not.toContain('codesign')
   })
+})
 
-  it('does NOT ad-hoc re-sign cu-helper (would rotate its stable TCC identity)', () => {
-    const source = readBuildScript()
-    // adHocSignMacBinary must only be applied to the bun-compiled sidecar, never
-    // to cu-helper (build.sh already signs it with a stable hardened-runtime identity).
-    const buildCuHelperBody = source.slice(source.indexOf('async function buildCuHelper()'))
-    expect(buildCuHelperBody).not.toContain('adHocSignMacBinary')
-  })
+describe.skipIf(!compiledSidecarSmokeEnabled || process.platform !== 'darwin')('staged cu-helper resource smoke', () => {
+  it('loads optional cursor resources from a relocated staged app instead of the build tree', async context => {
+    const exec = promisify(execFile)
+    const sourceApp = path.resolve(import.meta.dirname, '../src-tauri/binaries/cc-haha-computer-use.app')
+    const inner = path.join('Contents', 'MacOS', 'cc-haha-computer-use')
+    const { stdout: architectures } = await exec('/usr/bin/lipo', ['-archs', path.join(sourceApp, inner)])
+    const hostArch = process.arch === 'arm64' ? 'arm64' : 'x86_64'
+    if (!architectures.trim().split(/\s+/).includes(hostArch)) {
+      console.warn(`[cu-helper resource smoke] skipped execution: target ${architectures.trim()}, host ${hostArch}`)
+      context.skip()
+      return
+    }
+    const fixtureRoot = await mkdtemp(path.join(tmpdir(), 'cu-helper-staged-resources-'))
+    try {
+      const app = path.join(fixtureRoot, 'cc-haha-computer-use.app')
+      await cp(sourceApp, app, { recursive: true, verbatimSymlinks: true })
+      const home = path.join(fixtureRoot, 'home')
+      const config = path.join(fixtureRoot, 'config')
+      const temp = path.join(fixtureRoot, 'tmp')
+      await Promise.all([home, config, temp].map(directory => mkdir(directory)))
+      const { stdout } = await exec(path.join(app, inner), ['--probe-cursor-resources'], {
+        cwd: fixtureRoot,
+        env: {
+          PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: home,
+          CFFIXED_USER_HOME: home, CLAUDE_CONFIG_DIR: config, TMPDIR: `${temp}/`,
+        },
+        timeout: 10_000,
+        maxBuffer: 1024 * 1024,
+      })
+      const report = JSON.parse(stdout) as {
+        resourceDirectory: string | null
+        frameCount: number
+        proceduralFallback: boolean
+      }
+      expect(report.resourceDirectory).not.toBeNull()
+      expect(await realpath(report.resourceDirectory!)).toBe(await realpath(path.join(
+        app, 'Contents', 'Resources', 'cu-helper_cc-haha-computer-use.bundle', 'LensSequence',
+      )))
+      expect(Number.isInteger(report.frameCount)).toBe(true)
+      expect(report.frameCount).toBeGreaterThanOrEqual(0)
+      expect(report.proceduralFallback).toBe(report.frameCount === 0)
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true })
+    }
+  }, 20_000)
 })
 
 /**

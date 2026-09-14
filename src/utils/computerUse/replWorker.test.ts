@@ -347,16 +347,204 @@ describe('computer use persistent REPL worker', () => {
     expect(messages.some(message => message.type === 'done')).toBe(true)
   })
 
-  test('exposes no Node host objects, module loader, timers or code generation', async () => {
+  test('observes after an awaited timer between paste and observation', async () => {
+    const messages: Message[] = []
+    const worker = createComputerUseReplWorker(message => {
+      messages.push(message)
+      if (message.type === 'invoke') queueMicrotask(() => worker.receive({
+        type: 'response', cellId: message.cellId, requestId: message.requestId,
+        result: { app: 'Fixture', content: [{ type: 'text', text: 'fixture state' }] },
+      }))
+    })
+    await worker.receive({ type: 'init', bootstrap: REPL_BOOTSTRAP_SOURCE })
+    await worker.receive({ type: 'run', cellId: 1, code: `
+      let app = await cua.getApp('Fixture')
+      await app.paste('query')
+      await new Promise(resolve => setTimeout(resolve, 0))
+      await app.getAXState()
+    ` })
+    expect(messages.find(message => message.type === 'done').error).toBeUndefined()
+    expect(messages.filter(message => message.type === 'invoke').map(message => message.name))
+      .toEqual(['get_app_state', 'paste', 'get_app_state'])
+  })
+
+  test('supports timer callback arguments, asynchronous zero delay, and either clear function', async () => {
+    const { worker, messages } = fixture()
+    await init(worker)
+    await worker.receive({ type: 'run', cellId: 1, code: `
+      let order = ['sync']
+      let original = {name: 'same object'}
+      let canceled = setTimeout(() => order.push('canceled'), 0)
+      clearInterval(canceled)
+      clearTimeout(undefined)
+      let ticks = 0
+      await new Promise(resolve => {
+        const id = setInterval((text, object) => {
+          order.push([text, object === original, typeof id])
+          if (++ticks === 2) { clearTimeout(id); resolve() }
+        }, 0, 'tick', original)
+      })
+      await new Promise(resolve => setTimeout((value) => {order.push(value); resolve()}, undefined, 'last'))
+      nodeRepl.write(order)
+    ` })
+    expect(texts(messages)).toEqual(['["sync",["tick",true,"number"],["tick",true,"number"],"last"]'])
+    expect(messages.find(message => message.type === 'done').error).toBeUndefined()
+  })
+
+  test('allows an awaited timer callback to dispatch in its active cell', async () => {
+    const { worker, messages } = fixture()
+    await init(worker)
+    const running = worker.receive({ type: 'run', cellId: 1, code: `
+      await new Promise(resolve => {
+        const id = setInterval(async () => {
+          clearInterval(id)
+          await __cuInvoke('click', {x: 12, y: 34})
+          resolve()
+        }, 0)
+      })
+      nodeRepl.write('finished')
+    ` })
+    await until(() => messages.some(message => message.type === 'invoke'))
+    const request = messages.find(message => message.type === 'invoke')!
+    expect(request).toMatchObject({ cellId: 1, name: 'click', args: { x: 12, y: 34 } })
+    await worker.receive({ type: 'response', cellId: 1, requestId: request.requestId, result: {} })
+    await running
+    expect(messages.filter(message => message.type === 'invoke')).toHaveLength(1)
+    expect(messages.find(message => message.type === 'done').error).toBeUndefined()
+    expect(texts(messages)).toEqual(['"finished"'])
+  })
+
+  test('clears detached timers on successful and failed cells before another cell can run', async () => {
+    const { worker, messages } = fixture()
+    await init(worker)
+    await worker.receive({ type: 'run', cellId: 1, code: `
+      let late = 0
+      setTimeout(() => { late++; __cuInvoke('click', {}) }, 0)
+      setInterval(() => { late++; __cuInvoke('paste', {}) }, 0)
+    ` })
+    await worker.receive({ type: 'run', cellId: 2, code: `
+      setTimeout(() => { late++; __cuInvoke('click', {}) }, 0)
+      setInterval(() => { late++; __cuInvoke('paste', {}) }, 0)
+      throw Error('expected cell failure')
+    ` })
+    await worker.receive({ type: 'run', cellId: 3, code: `
+      await new Promise(resolve => setTimeout(resolve, 30))
+      nodeRepl.write(late)
+    ` })
+    expect(messages.find(message => message.type === 'done' && message.cellId === 2).error).toContain('expected cell failure')
+    expect(messages.find(message => message.type === 'done' && message.cellId === 3).error).toBeUndefined()
+    expect(messages.filter(message => message.type === 'invoke')).toEqual([])
+    expect(texts(messages)).toEqual(['0'])
+  })
+
+  test('rejects timer scheduling or clearing from a previous cell continuation', async () => {
+    const { worker, messages } = fixture()
+    await init(worker)
+    await worker.receive({ type: 'run', cellId: 1, code: `
+      let release, currentTimer, staleErrors = []
+      const gate = new Promise(resolve => { release = resolve })
+      gate.then(() => {
+        try { clearTimeout(currentTimer) } catch (error) { staleErrors.push(error.message) }
+        try { setTimeout(() => __cuInvoke('click', {}), 0) } catch (error) { staleErrors.push(error.message) }
+      })
+    ` })
+    await worker.receive({ type: 'run', cellId: 2, code: `
+      await new Promise(resolve => {
+        currentTimer = setTimeout(resolve, 5)
+        release()
+      })
+      nodeRepl.write(staleErrors)
+    ` })
+    expect(messages.find(message => message.type === 'done' && message.cellId === 2).error).toBeUndefined()
+    expect(JSON.parse(texts(messages)[0]!)).toEqual([
+      expect.stringContaining('cell has ended'), expect.stringContaining('cell has ended'),
+    ])
+    expect(messages.filter(message => message.type === 'invoke')).toEqual([])
+  })
+
+  test.each(['throw Error("timer broke")', 'await Promise.resolve(); throw Error("timer broke")'])(
+    'fails the awaiting cell on timer callback error: %s', async body => {
+      const { worker, messages } = fixture()
+      await init(worker)
+      await worker.receive({ type: 'run', cellId: 1, code: `
+        setTimeout(${body.includes('await') ? 'async ' : ''}() => { ${body} }, 0)
+        setTimeout(() => __cuInvoke('click', {}), 10)
+        await new Promise(() => {})
+      ` })
+      await worker.receive({ type: 'run', cellId: 2, code: `
+        await new Promise(resolve => setTimeout(resolve, 20))
+        nodeRepl.write('recovered')
+      ` })
+      expect(messages.find(message => message.type === 'done' && message.cellId === 1).error).toContain('timer broke')
+      expect(messages.find(message => message.type === 'done' && message.cellId === 2).error).toBeUndefined()
+      expect(messages.filter(message => message.type === 'invoke')).toEqual([])
+      expect(texts(messages)).toEqual(['"recovered"'])
+    },
+  )
+
+  test('does not dispatch a suspended timer callback after its cell has ended', async () => {
+    const { worker, messages } = fixture()
+    await init(worker)
+    await worker.receive({ type: 'run', cellId: 1, code: `
+      let release
+      await new Promise(started => {
+        setTimeout(async () => {
+          started()
+          await new Promise(resolve => { release = resolve })
+          await __cuInvoke('click', {})
+        }, 0)
+      })
+    ` })
+    await worker.receive({ type: 'run', cellId: 2, code: `
+      release()
+      await new Promise(resolve => setTimeout(resolve, 10))
+      nodeRepl.write('current cell')
+    ` })
+    expect(messages.filter(message => message.type === 'invoke')).toEqual([])
+    expect(messages.filter(message => message.type === 'done').every(message => !message.error)).toBe(true)
+    expect(texts(messages)).toEqual(['"current cell"'])
+  })
+
+  test('rejects string callbacks and bounds active timers while retaining a usable cell', async () => {
+    const { worker, messages } = fixture()
+    await init(worker)
+    await worker.receive({ type: 'run', cellId: 1, code: `
+      try { setTimeout('globalThis.escaped=true', 0) } catch (error) { nodeRepl.write(error.message) }
+      try { setInterval(null, 0) } catch (error) { nodeRepl.write(error.message) }
+      let timers = []
+      for (let i=0; i<1024; i++) timers.push(setTimeout(() => {}, 60000))
+      try { setTimeout(() => {}, 0) } catch (error) { nodeRepl.write(error.message) }
+      timers.forEach(clearTimeout)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      nodeRepl.write(typeof escaped)
+    ` })
+    expect(texts(messages)).toEqual([
+      '"Timer callback must be a function"', '"Timer callback must be a function"',
+      '"Too many active JavaScript timers (maximum 1024)"', '"undefined"',
+    ])
+    expect(messages.find(message => message.type === 'done').error).toBeUndefined()
+  })
+
+  test('exposes realm timers without Node host objects, a module loader or code generation', async () => {
     const { worker, messages } = fixture()
     await init(worker)
     await worker.receive({ type: 'run', cellId: 1, code: `
       nodeRepl.write([typeof process, typeof require, typeof Buffer, typeof setTimeout, typeof arguments])
-      for (const candidate of [() => Function('return 1')(), () => __cuInvoke.constructor('return process')(), () => console.log.constructor('return process')()]) {
+      for (const candidate of [() => Function('return 1')(), () => __cuInvoke.constructor('return process')(),
+        () => console.log.constructor('return process')(), ...[setTimeout, clearTimeout, setInterval, clearInterval]
+          .map(timer => () => timer.constructor('return process')())]) {
         try { candidate(); nodeRepl.write('escaped') } catch { nodeRepl.write('blocked') }
       }
+      await new Promise(resolve => setTimeout(function () {
+        nodeRepl.write(this === globalThis)
+        const handle = setTimeout(resolve, 0)
+        nodeRepl.write([typeof handle, typeof handle.ref, setTimeout instanceof Function])
+      }, 0))
     ` })
-    expect(texts(messages)).toEqual(['["undefined","undefined","undefined","undefined","undefined"]', '"blocked"', '"blocked"', '"blocked"'])
+    expect(texts(messages)).toEqual([
+      '["undefined","undefined","undefined","function","undefined"]',
+      ...Array(7).fill('"blocked"'), 'false', '["number","undefined",true]',
+    ])
     await worker.receive({ type: 'run', cellId: 2, code: 'await import("node:fs")' })
     expect(messages.find(message => message.type === 'done' && message.cellId === 2).error).toContain('not available')
   })
@@ -432,7 +620,10 @@ describe('computer use persistent REPL worker', () => {
       stderr: 'pipe',
     })
     const messages: Message[] = []
-    const write = (message: Message) => child.stdin.write(`${JSON.stringify(message)}\n`)
+    const write = (message: Message) => {
+      child.stdin.write(`${JSON.stringify(message)}\n`)
+      child.stdin.flush()
+    }
     const reading = (async () => {
       let buffered = ''
       const decoder = new TextDecoder()
@@ -458,6 +649,7 @@ describe('computer use persistent REPL worker', () => {
       await until(() => messages.some(message => message.type === 'done' && message.cellId === 1))
       write({ type: 'run', cellId: 2, code: `
         for (const value of [3, 4]) { total += (await __cuInvoke('fixture', {value})).value }
+        await new Promise(resolve => setTimeout(resolve, 0))
         __cuEmit({type:'text', text:String(total)})
       ` })
       await until(() => messages.some(message => message.type === 'done' && message.cellId === 2))

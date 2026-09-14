@@ -73,6 +73,26 @@ afterEach(async () => {
 })
 
 describe('trace capture service', () => {
+  test('reads legacy metadata without protocol summaries alongside additive diagnostic metadata', async () => {
+    const common = {
+      sessionId: 'protocol-metadata-upgrade', source: 'proxy' as const,
+      startedAt: '2026-06-09T08:00:00.000Z', completedAt: '2026-06-09T08:00:01.000Z',
+      request: { body: { model: 'fixture' } }, response: { status: 200, body: { ok: true } },
+    }
+    await traceCaptureService.recordCall({ ...common, id: 'legacy', metadata: { phase: 'upstream_fetch_completed', futureField: 'preserve' } })
+    const protocolTrace = {
+      version: 1, protocol: 'openai_chat', transport: 'eof',
+      termination: { finishReason: 'length' },
+      usage: { completion_tokens: 64 },
+      outputBudget: { field: 'max_completion_tokens', effective: 64, source: 'explicit', wireFields: { max_completion_tokens: 64 } },
+    }
+    await traceCaptureService.recordCall({ ...common, id: 'current', metadata: { phase: 'upstream_fetch_completed', protocolTrace } })
+    clearTraceCaptureStateForTests()
+    const trace = await traceCaptureService.getSessionTrace(common.sessionId)
+    expect(trace.calls.find(call => call.id === 'legacy')?.metadata).toEqual({ phase: 'upstream_fetch_completed', futureField: 'preserve' })
+    expect(trace.calls.find(call => call.id === 'current')?.metadata?.protocolTrace).toEqual(protocolTrace)
+  })
+
   test('keeps a queued trace append and projection in the scope captured by its caller', async () => {
     const root = tmpDir
     const scopeA = path.join(root, 'scope-a')

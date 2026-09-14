@@ -2,6 +2,39 @@ import { describe, expect, test } from 'bun:test'
 import { compileReplCell } from './replCompiler'
 
 describe('computer use REPL compiler', () => {
+  test.each([
+    'first()\nsecond()',
+    'first() // a comment must not consume the boundary\nsecond()',
+    'let value = first()\nsecond(value)',
+    'var value = first()\nsecond(value)',
+    'function run() { return first()\nsecond() }\nsecond(run())',
+    'try { throw first()\nsecond() } catch (value) { second(value) }',
+    'if (true) first()\nelse second()\nsecond()',
+    'for (let i = 0; i < 2; i++) first()\nsecond()',
+    'for (var value of [1, 2]) first()\nsecond(value)',
+    'for (var value in {a: 1}) { first()\nsecond(value) }',
+    'first()\nsecond`text`',
+  ])('preserves JavaScript statement boundaries when rewriting free calls: %s', async code => {
+    async function execute(compiled: boolean) {
+      const calls: unknown[][] = []
+      const values: Record<string, unknown> = {
+        first: () => { calls.push(['first']); return 7 },
+        second: (...args: unknown[]) => { calls.push(['second', ...args]); return 9 },
+      }
+      if (compiled) {
+        const cell = compileReplCell(code, [])
+        const run = new Function(`return ${cell.source}`)()
+        await run(() => ({ values }), (bindings: Array<[string, string, () => unknown, (value: unknown) => void]>) => {
+          for (const [name, , get, set] of bindings) Object.defineProperty(values, name, { get, set, configurable: true })
+        }, () => {})
+      } else {
+        await new Function('first', 'second', `return (async () => { ${code}\n})()`)(values.first, values.second)
+      }
+      return calls
+    }
+    expect(await execute(true)).toEqual(await execute(false))
+  })
+
   test('collects persistent declarations without capturing nested lexical scopes', () => {
     const compiled = compileReplCell(`
       const { x, nested: { y = 2 }, ...rest } = source

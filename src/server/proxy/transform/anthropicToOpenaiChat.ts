@@ -16,6 +16,7 @@ import type {
 } from './types.js'
 import { stripLeadingBillingHeader } from './billingHeader.js'
 import { normalizeOpenAIReasoningEffort } from './effort.js'
+import { resolveRequestCompatibility, type RequestCompatibilityOptions } from './requestCompatibility.js'
 import type { ToolNameWireMap } from './toolNameWire.js'
 
 type OpenAIChatImageContentMode = 'vision' | 'text_only'
@@ -25,7 +26,7 @@ type OpenAIChatImageContentMode = 'vision' | 'text_only'
 // before content parts reach the wire.
 type UserTextPart = OpenAIChatContentPart & { synthetic?: boolean }
 
-type OpenAIChatTransformOptions = {
+export type OpenAIChatTransformOptions = RequestCompatibilityOptions & {
   roundTripReasoningContent?: boolean
   passThinkingToggle?: boolean
   passSamplingParams?: boolean
@@ -48,6 +49,7 @@ export function anthropicToOpenaiChat(
   body: AnthropicRequest,
   options: OpenAIChatTransformOptions = {},
 ): OpenAIChatRequest {
+  const compatibility = resolveRequestCompatibility(body, { ...options, protocol: 'openai_chat' })
   const messages: OpenAIChatMessage[] = []
 
   // Convert system prompt, minus the leading billing attribution: its
@@ -63,8 +65,9 @@ export function anthropicToOpenaiChat(
   }
 
   // Convert messages
+  const messageOptions = compatibility.passReasoning ? options : { ...options, roundTripReasoningContent: false }
   for (const msg of body.messages) {
-    convertMessage(msg, messages, options)
+    convertMessage(msg, messages, messageOptions)
   }
 
   // Build request
@@ -79,13 +82,14 @@ export function anthropicToOpenaiChat(
     result.stream_options = { include_usage: true }
   }
 
-  // max_tokens — omit to let upstream provider use its own default/max.
-  // Claude Code sends very large values (e.g. 128K) that exceed many
-  // providers' limits (DeepSeek: 8192, etc.).
+  const { outputBudget } = compatibility
+  if (outputBudget.field === 'max_tokens' || outputBudget.field === 'max_completion_tokens') {
+    result[outputBudget.field] = outputBudget.effective
+  }
 
   // Claude Code sends Anthropic sampling params that some compatible
   // providers reject. Keep them opt-in for providers known to accept them.
-  if (options.passSamplingParams) {
+  if (compatibility.passSamplingParams) {
     if (body.temperature !== undefined) result.temperature = body.temperature
     if (body.top_p !== undefined) result.top_p = body.top_p
   }
@@ -97,7 +101,7 @@ export function anthropicToOpenaiChat(
 
   // tools
   if (body.tools && body.tools.length > 0) {
-    result.tools = body.tools
+    const tools = body.tools
       .filter((t) => t.name !== 'BatchTool')
       .map((t): OpenAITool => ({
         type: 'function',
@@ -107,15 +111,21 @@ export function anthropicToOpenaiChat(
           parameters: t.input_schema,
         },
       }))
+    if (tools.length > 0) result.tools = tools
   }
 
   // tool_choice
   if (body.tool_choice !== undefined) {
-    result.tool_choice = convertToolChoice(body.tool_choice, options.toolNames)
+    const choice = convertToolChoice(body.tool_choice, options.toolNames)
+    const selectedName = typeof choice === 'object' && choice !== null
+      ? (choice as { function?: { name?: string } }).function?.name : undefined
+    if (result.tools?.length && (!selectedName || result.tools.some(tool => tool.function.name === selectedName))) {
+      result.tool_choice = choice
+    }
   }
 
   // thinking → reasoning_effort
-  if (body.thinking) {
+  if (compatibility.passReasoning && body.thinking) {
     const budget = body.thinking.budget_tokens
     if (budget !== undefined) {
       if (budget <= 1024) result.reasoning_effort = 'low'
@@ -129,8 +139,16 @@ export function anthropicToOpenaiChat(
     }
   }
   const outputConfigEffort = normalizeOpenAIReasoningEffort(body.output_config?.effort)
-  if (outputConfigEffort !== undefined) {
+  if (compatibility.passReasoning && outputConfigEffort !== undefined) {
     result.reasoning_effort = outputConfigEffort
+  }
+
+  if (compatibility.parallelToolCalls !== undefined && result.tools?.length) {
+    result.parallel_tool_calls = compatibility.parallelToolCalls
+  }
+  if (compatibility.structuredOutput) {
+    const { type, ...jsonSchema } = compatibility.structuredOutput
+    result.response_format = { type, json_schema: jsonSchema }
   }
 
   return result
@@ -614,7 +632,7 @@ function convertAssistantMessage(
 }
 
 function convertToolChoice(choice: unknown, toolNames?: ToolNameWireMap): unknown {
-  if (typeof choice === 'string') return choice
+  if (typeof choice === 'string') return choice === 'any' ? 'required' : choice
   if (typeof choice === 'object' && choice !== null) {
     const c = choice as Record<string, unknown>
     if (c.type === 'auto') return 'auto'

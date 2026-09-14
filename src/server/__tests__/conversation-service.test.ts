@@ -219,11 +219,13 @@ describe('ConversationService', () => {
     sessionId: string,
     sent: string[],
     networkDerivedFirstTokenTimeout = true,
+    networkDerivedStreamMaxDuration = true,
   ) {
     const session = {
       outputCallbacks: [],
       networkRoutingFingerprint: '',
       networkDerivedFirstTokenTimeout,
+      networkDerivedStreamMaxDuration,
       sdkSocket: {
         send(line: string) {
           sent.push(line)
@@ -537,6 +539,51 @@ describe('ConversationService', () => {
     }
   })
 
+  test('buildChildEnv raises the overall stream cap with the user request timeout so an active long response is not killed (#1307)', async () => {
+    const prev = process.env.CLAUDE_STREAM_MAX_DURATION_MS
+    delete process.env.CLAUDE_STREAM_MAX_DURATION_MS
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({ network: { aiRequestTimeoutMs: 1_800_000 } }),
+      'utf-8',
+    )
+    try {
+      const service = new ConversationService() as any
+      const env = (await service.buildChildEnv('/tmp')) as Record<string, string>
+
+      // The overall cap is NOT reset by incoming chunks, so a local model that
+      // keeps streaming thinking_delta events past it is killed mid-response.
+      // Raising "请求超时" must therefore extend the cap too — otherwise the
+      // user's timeout setting is silently capped at 600s (#1307).
+      expect(env.CLAUDE_STREAM_MAX_DURATION_MS).toBe('1800000')
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_STREAM_MAX_DURATION_MS
+      else process.env.CLAUDE_STREAM_MAX_DURATION_MS = prev
+    }
+  })
+
+  test('buildChildEnv keeps the overall stream cap floor for a short request timeout (#766)', async () => {
+    const prev = process.env.CLAUDE_STREAM_MAX_DURATION_MS
+    delete process.env.CLAUDE_STREAM_MAX_DURATION_MS
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({ network: { aiRequestTimeoutMs: 30_000 } }),
+      'utf-8',
+    )
+    try {
+      const service = new ConversationService() as any
+      const env = (await service.buildChildEnv('/tmp')) as Record<string, string>
+
+      // Shrinking the cap for a short first-byte budget would re-open #766:
+      // a stream that trickles content deltas just under the idle window must
+      // still be freed after a fixed overall duration.
+      expect(env.CLAUDE_STREAM_MAX_DURATION_MS).toBe('600000')
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_STREAM_MAX_DURATION_MS
+      else process.env.CLAUDE_STREAM_MAX_DURATION_MS = prev
+    }
+  })
+
   test('buildChildEnv lets caller env override the first-token watchdog (#826)', async () => {
     const prev = process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS
     process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS = '900000'
@@ -841,7 +888,48 @@ describe('ConversationService', () => {
       all_proxy: 'http://127.0.0.1:17892',
       API_TIMEOUT_MS: '180000',
       CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS: '180000',
+      // The floor still holds on the hot-update path: lowering the request
+      // timeout must not shrink the overall cap below its 600s default.
+      CLAUDE_STREAM_MAX_DURATION_MS: '600000',
     })
+    expect(JSON.parse(sent[1]!).type).toBe('user')
+  })
+
+  test('sendMessage hot-applies a raised request timeout to the stream cap so a running session is not stuck at 600s (#1307)', async () => {
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({
+        network: {
+          aiRequestTimeoutMs: 600_000,
+          proxy: { mode: 'direct', url: '' },
+        },
+      }),
+      'utf-8',
+    )
+    const service = new ConversationService() as any
+    const sent: string[] = []
+    const session = installNetworkTestSession(service, 'raised-timeout', sent)
+    await service.refreshNetworkEnvironmentBeforeTurn('raised-timeout', session)
+
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({
+        network: {
+          aiRequestTimeoutMs: 1_800_000,
+          proxy: { mode: 'direct', url: '' },
+        },
+      }),
+      'utf-8',
+    )
+
+    expect(await service.sendMessage('raised-timeout', 'retry the long prompt')).toBe(true)
+    expect(sent).toHaveLength(2)
+    const update = JSON.parse(sent[0]!)
+    expect(update.type).toBe('update_environment_variables')
+    // The reported path is: user hits the 600s error, raises the timeout, and
+    // retries in the SAME conversation. The live CLI re-reads this per request,
+    // so it has to be pushed down — otherwise the retry dies at 600s again.
+    expect(update.variables.CLAUDE_STREAM_MAX_DURATION_MS).toBe('1800000')
     expect(JSON.parse(sent[1]!).type).toBe('user')
   })
 

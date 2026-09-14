@@ -300,8 +300,20 @@ export function compileReplCell(code: string, prior: readonly ReplBinding[]) {
   const current = new Map<string, ReplBinding>()
   const identifiers = new Set<string>()
   const hoistedDeclarations: Array<{ node: SyntaxNode; parent?: SyntaxNode }> = []
+  const insertions: Array<{ position: number; text: string }> = []
 
   function inspect(node: SyntaxNode, depth: number, inFunctionScope: boolean, parent?: SyntaxNode) {
+    // A free call becomes `(0, scope.values[name])(...)`. Its new leading
+    // parenthesis can undo ASI after the preceding expression, initializer,
+    // return, or throw. Preserve boundaries from the original parsed program,
+    // including nested function bodies, without altering for-loop headers.
+    const variableStatement = node.type === 'VariableDeclaration'
+      && !(parent?.type === 'ForStatement' && parent.init === node)
+      && !((parent?.type === 'ForOfStatement' || parent?.type === 'ForInStatement') && parent.left === node)
+    if ((variableStatement || node.type === 'ExpressionStatement' || node.type === 'ReturnStatement' || node.type === 'ThrowStatement')
+      && code[node.end - 1] !== ';') {
+      insertions.push({ position: node.end, text: ';' })
+    }
     if (node.type === 'Identifier') {
       identifiers.add(node.name as string)
     }
@@ -359,7 +371,6 @@ export function compileReplCell(code: string, prior: readonly ReplBinding[]) {
   // Hoisted values exist before their declaration executes. In a failed cell,
   // only reached declarations should replace saved bindings. Insert markers
   // without rewriting user initializers, destructuring or nested function code.
-  const insertions: Array<{ position: number; text: string }> = []
   let markerCounter = 0
   for (const { node, parent } of hoistedDeclarations) {
     if (node.type === 'FunctionDeclaration') {

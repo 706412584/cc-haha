@@ -60,6 +60,8 @@ export type OpenAIChatRequest = {
   tool_choice?: unknown
   reasoning_effort?: OpenAIReasoningEffort
   thinking?: { type: string }
+  parallel_tool_calls?: boolean
+  response_format?: { type: 'json_schema'; json_schema: { name: string; description?: string; schema: Record<string, unknown>; strict: boolean } }
 }
 
 /**
@@ -155,6 +157,8 @@ export type OpenAIResponsesRequest = {
   reasoning?: { effort?: OpenAIReasoningEffort }
   include?: string[]
   prompt_cache_key?: string
+  parallel_tool_calls?: boolean
+  text?: { format: { type: 'json_schema'; name: string; description?: string; schema: Record<string, unknown>; strict: boolean } }
 }
 
 export type OpenAIResponsesReasoningItem = {
@@ -176,6 +180,8 @@ export type OpenAIResponsesResponse = {
   created_at: number
   model: string
   status: string
+  incomplete_details?: { reason?: string } | null
+  error?: { code?: string; type?: string; message?: string } | null
   output: OpenAIResponsesOutputItem[]
   usage?: OpenAICompatibleUsage
 }
@@ -247,6 +253,7 @@ export type AnthropicRequest = {
     type: string
     budget_tokens?: number
   }
+  output_format?: unknown
   output_config?: {
     effort?: unknown
     [key: string]: unknown

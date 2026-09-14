@@ -27,6 +27,21 @@ export type NetworkSettings = {
 export const DEFAULT_AI_REQUEST_TIMEOUT_MS = 600_000
 export const MIN_AI_REQUEST_TIMEOUT_MS = 30_000
 export const MAX_AI_REQUEST_TIMEOUT_MS = 1_800_000
+// Floor for the CLI's overall stream-duration cap (CLAUDE_STREAM_MAX_DURATION_MS).
+// That cap is what frees an endlessly-trickling provider stream (#766), but it is
+// a wall-clock budget that no incoming chunk resets. It must therefore never be
+// LOWER than the user's own "请求超时": a local model that legitimately spends
+// longer than that thinking or generating would otherwise be killed mid-response
+// no matter how far the user raises the timeout (#1307). The floor keeps the
+// #766 protection intact when the user configures a very short first-byte budget.
+export const MIN_STREAM_MAX_DURATION_MS = 600_000
+// Shared by the spawn-time child env and the per-turn hot update so the two
+// cannot drift apart.
+export function resolveStreamMaxDurationMs(
+  apiTimeoutMs: string | number | undefined,
+): number {
+  return Math.max(MIN_STREAM_MAX_DURATION_MS, Number(apiTimeoutMs) || 0)
+}
 export const SYSTEM_PROXY_URL_ENV = 'CC_HAHA_SYSTEM_PROXY_URL'
 export const SYSTEM_PROXY_ERROR_ENV = 'CC_HAHA_SYSTEM_PROXY_ERROR'
 

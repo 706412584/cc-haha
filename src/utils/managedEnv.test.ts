@@ -17,6 +17,7 @@ const originalEnv = {
   CC_HAHA_IMAGE_PROVIDER_KIND: process.env.CC_HAHA_IMAGE_PROVIDER_KIND,
   CC_HAHA_IMAGE_PROVIDER_ID: process.env.CC_HAHA_IMAGE_PROVIDER_ID,
   CC_HAHA_IMAGE_MODEL: process.env.CC_HAHA_IMAGE_MODEL,
+  CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS: process.env.CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS,
 }
 
 function restoreEnv(key: keyof typeof originalEnv): void {
@@ -46,6 +47,7 @@ describe('managedEnv', () => {
     delete process.env.CC_HAHA_IMAGE_PROVIDER_KIND
     delete process.env.CC_HAHA_IMAGE_PROVIDER_ID
     delete process.env.CC_HAHA_IMAGE_MODEL
+    delete process.env.CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS
   })
 
   afterEach(async () => {
@@ -63,6 +65,7 @@ describe('managedEnv', () => {
     restoreEnv('CC_HAHA_IMAGE_PROVIDER_KIND')
     restoreEnv('CC_HAHA_IMAGE_PROVIDER_ID')
     restoreEnv('CC_HAHA_IMAGE_MODEL')
+    restoreEnv('CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS')
   })
 
   test('starts a standalone provider proxy for CLI-only OpenAI-compatible providers', async () => {
@@ -106,6 +109,7 @@ describe('managedEnv', () => {
         CC_HAHA_IMAGE_PROVIDER_KIND: 'openai_oauth',
         CC_HAHA_IMAGE_PROVIDER_ID: 'openai-official',
         CC_HAHA_IMAGE_MODEL: 'gpt-image-2',
+        CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS: '32000',
       },
     })
     process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1'
@@ -113,6 +117,7 @@ describe('managedEnv', () => {
     process.env.CC_HAHA_IMAGE_PROVIDER_KIND = 'grok_oauth'
     process.env.CC_HAHA_IMAGE_PROVIDER_ID = 'grok-official'
     process.env.CC_HAHA_IMAGE_MODEL = 'grok-imagine-image-quality'
+    process.env.CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS = '96000'
 
     applySafeConfigEnvironmentVariables()
 
@@ -121,5 +126,6 @@ describe('managedEnv', () => {
     expect(process.env.CC_HAHA_IMAGE_PROVIDER_KIND).toBe('grok_oauth')
     expect(process.env.CC_HAHA_IMAGE_PROVIDER_ID).toBe('grok-official')
     expect(process.env.CC_HAHA_IMAGE_MODEL).toBe('grok-imagine-image-quality')
+    expect(process.env.CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS).toBe('96000')
   })
 })
