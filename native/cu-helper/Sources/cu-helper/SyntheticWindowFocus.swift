@@ -79,6 +79,7 @@ enum SyntheticWindowFocus {
                 if belief.applicationBelievesItIsActive != active
                     || belief.applicationBelievesItHasFocus != active {
                     belief.generation &+= 1
+                    print("[TEMP-BUMP] observeApplication pid=\(pid) active=\(active) wasActive=\(wasActive) gen=\(belief.generation)")
                 }
                 belief.applicationBelievesItIsActive = active
                 belief.applicationBelievesItHasFocus = active
@@ -98,6 +99,7 @@ enum SyntheticWindowFocus {
             belief.applicationBelievesItIsActive = false
             belief.applicationBelievesItHasFocus = false
             belief.generation &+= 1
+            print("[TEMP-BUMP] observeDeactivation pid=\(pid) gen=\(belief.generation)")
             targets[pid] = belief
         }
 
@@ -106,7 +108,10 @@ enum SyntheticWindowFocus {
             belief.applicationBelievesItHasFocus = hasFocus
             // A loss during an in-flight establishment invalidates its receipt
             // even when the old belief was already false. A gain can confirm it.
-            if !hasFocus { belief.generation &+= 1 }
+            if !hasFocus {
+                belief.generation &+= 1
+                print("[TEMP-BUMP] observeFocus pid=\(pid) hasFocus=\(hasFocus) gen=\(belief.generation)")
+            }
             targets[pid] = belief
         }
 
