@@ -27,7 +27,15 @@ import { addPermissionRulesToSettings } from './permissionsLoader.js'
 /* eslint-disable @typescript-eslint/no-require-imports */
 // permissionSetup imports this module back (`applyPermissionUpdate`), so a
 // static import would close a cycle. Resolve it at call time instead.
-const permissionSetupModule = require('./permissionSetup.js') as typeof import('./permissionSetup.js')
+//
+// The lookup must happen on every call, not once at module scope: this module
+// is evaluated *inside* that cycle, so a top-level `require` captures the
+// half-initialized namespace and caches it forever (Bun returns a snapshot,
+// not live bindings) — `transitionPermissionMode` then stays undefined even
+// after permissionSetup finishes loading.
+function loadPermissionSetup(): typeof import('./permissionSetup.js') {
+  return require('./permissionSetup.js') as typeof import('./permissionSetup.js')
+}
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 // Re-export for backwards compatibility
@@ -88,7 +96,7 @@ export function applyPermissionUpdate(
       // update — the plan-approval dialog, a host, an edit suggestion — used to
       // skip it and leave a half-applied plan exit behind.
       return {
-        ...permissionSetupModule.transitionPermissionMode(
+        ...loadPermissionSetup().transitionPermissionMode(
           context.mode,
           update.mode,
           context,
