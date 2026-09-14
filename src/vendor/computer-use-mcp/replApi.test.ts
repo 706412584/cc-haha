@@ -344,6 +344,8 @@ describe('native Computer Use JavaScript facade', () => {
     expect(f.emitted).toEqual([])
     await f.cua.getApp('Fixture')
     expect(f.emitted[0]?.value).toContain('Native App API')
+    expect(f.emitted[0]?.value).toContain('setTimeout/clearTimeout and setInterval/clearInterval')
+    expect(f.emitted[0]?.value).toContain('Do not schedule actions after the cell returns')
     await f.cua.getApp('Fixture again')
     expect(f.emitted[1]?.value).toBe(full)
     f.results.push({ content: [] })

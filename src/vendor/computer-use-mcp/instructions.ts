@@ -52,6 +52,12 @@ A click may do nothing in some canvas apps; after inspecting that result, a shor
 0–1 pixel drag can be an alternative. Inspect before repeating the strategy.
 Do not add a fixed sleep before observing, or blindly replay a partial batch.
 
+When a task explicitly needs a delay, await
+\`new Promise(resolve => setTimeout(resolve, milliseconds))\`.
+\`setTimeout\`/\`clearTimeout\` and \`setInterval\`/\`clearInterval\` are available
+with numeric handles. Timers belong to the current cell and are cleared when it
+ends; do not schedule actions to run after the cell returns.
+
 Each JS cell allows 256 native calls, 256 KiB of code, and 128 output blocks up
 to 16 MiB. \`timeout_ms\` defaults to 30000 and cannot exceed 60000. Ordinary
 script errors retain bindings. Timeout, cancellation, and \`js_reset\` discard

@@ -64,7 +64,7 @@ export function buildOpenAICodexFetch(
         ...originalBody,
         model: mappedModel,
       },
-      { preserveOpenAIReasoning: true, cacheKey, toolNames },
+      { preserveOpenAIReasoning: true, cacheKey, openAICodexOAuth: true, toolNames },
     )
     // Keep a valid native request-scoped value ahead of the transformed value,
     // the session env, and the model default. The generic transformer preserves

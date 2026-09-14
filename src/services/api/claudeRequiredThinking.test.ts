@@ -659,6 +659,7 @@ async function captureQueryRequest({
   provider,
   responseFactory,
   continuationSystemPrompts,
+  localProxy = false,
   env,
 }: {
   model: string
@@ -670,6 +671,7 @@ async function captureQueryRequest({
   provider?: SavedProvider
   responseFactory?: (model: string, body: Record<string, unknown>, headers: Headers) => Response
   continuationSystemPrompts?: string[][]
+  localProxy?: boolean
   env?: Readonly<Record<string, string | undefined>>
 }): Promise<{
   content: unknown
@@ -725,7 +727,7 @@ async function captureQueryRequest({
     delete process.env.CLAUDE_CODE_EFFORT_LEVEL
     delete process.env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT
     delete process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
-    process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${server.port}`
+    process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${server.port}${localProxy ? "/proxy/providers/fixture" : ""}`
     delete process.env.ANTHROPIC_AUTH_TOKEN
     process.env.ANTHROPIC_API_KEY = 'loopback-test-key'
     process.env.ANTHROPIC_MODEL = model
@@ -1098,3 +1100,38 @@ function clearCapabilityCache() {
     cache?: { clear?: () => void }
   }).cache?.clear?.()
 }
+
+
+test('marks model defaults separately from explicit proxy output budgets', async () => {
+  const defaults = await captureQueryRequest({ model: 'fixture-output-model', localProxy: true,
+    configureCapabilityOverrides: false,
+    env: { CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS: undefined, CLAUDE_CODE_MAX_OUTPUT_TOKENS: undefined },
+  })
+  expect(defaults.requests[0]?.max_tokens).toBe(32_000)
+  expect(defaults.requestHeaders[0]?.get('x-cc-haha-output-budget-source')).toBe('default')
+
+  const configured = await captureQueryRequest({ model: 'fixture-output-model', localProxy: true,
+    configureCapabilityOverrides: false,
+    env: { CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS: '131072', CLAUDE_CODE_MAX_OUTPUT_TOKENS: undefined },
+  })
+  expect(configured.requests[0]?.max_tokens).toBe(131_072)
+  expect(configured.requestHeaders[0]?.get('x-cc-haha-output-budget-source')).toBe('explicit')
+}, 10_000)
+
+test('does not attach internal budget provenance to direct provider requests', async () => {
+  const { requestHeaders } = await captureQueryRequest({ model: 'fixture-output-model',
+    configureCapabilityOverrides: false,
+  })
+  expect(requestHeaders[0]?.has('x-cc-haha-output-budget-source')).toBe(false)
+}, 10_000)
+
+test('invalid global output overrides fall back to the configured provider budget', async () => {
+  for (const globalBudget of ['0', 'NaN', 'garbage', '1.5', '123bad', '64']) {
+    const result = await captureQueryRequest({ model: 'fixture-output-model', localProxy: true,
+      configureCapabilityOverrides: false,
+      env: { CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS: '96000', CLAUDE_CODE_MAX_OUTPUT_TOKENS: globalBudget },
+    })
+    expect(result.requests[0]?.max_tokens).toBe(globalBudget === '64' ? 64 : 96_000)
+    expect(result.requestHeaders[0]?.get('x-cc-haha-output-budget-source')).toBe('explicit')
+  }
+}, 10_000)

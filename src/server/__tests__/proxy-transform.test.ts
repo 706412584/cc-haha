@@ -28,7 +28,7 @@ describe('anthropicToOpenaiChat', () => {
     }
     const result = anthropicToOpenaiChat(req)
     expect(result.model).toBe('gpt-4')
-    expect(result.max_tokens).toBeUndefined()
+    expect(result.max_tokens).toBe(1024)
     expect(result.messages).toEqual([{ role: 'user', content: 'Hello' }])
   })
 
@@ -132,6 +132,7 @@ describe('anthropicToOpenaiChat', () => {
       model: 'gpt-4',
       max_tokens: 100,
       messages: [{ role: 'user', content: 'Hi' }],
+      tools: [{ name: 'get_weather', input_schema: { type: 'object' } }],
       tool_choice: { type: 'any' },
     }
     const result = anthropicToOpenaiChat(req)
@@ -143,6 +144,7 @@ describe('anthropicToOpenaiChat', () => {
       model: 'gpt-4',
       max_tokens: 100,
       messages: [{ role: 'user', content: 'Hi' }],
+      tools: [{ name: 'get_weather', input_schema: { type: 'object' } }],
       tool_choice: { type: 'tool', name: 'get_weather' },
     }
     const result = anthropicToOpenaiChat(req)
@@ -1213,18 +1215,16 @@ describe('openaiChatToAnthropic', () => {
 
     expect(openaiChatToAnthropic(make('stop'), 'gpt-4').stop_reason).toBe('end_turn')
     expect(openaiChatToAnthropic(make('length'), 'gpt-4').stop_reason).toBe('max_tokens')
-    expect(openaiChatToAnthropic(make('tool_calls'), 'gpt-4').stop_reason).toBe('tool_use')
+    expect(() => openaiChatToAnthropic(make('tool_calls'), 'gpt-4')).toThrow('no tool calls')
     expect(openaiChatToAnthropic(make('content_filter'), 'gpt-4').stop_reason).toBe('end_turn')
   })
 
-  test('empty choices', () => {
+  test('empty choices cannot become a successful response', () => {
     const res: OpenAIChatResponse = {
       id: 'x', object: 'chat.completion', created: 0, model: 'gpt-4',
       choices: [],
     }
-    const result = openaiChatToAnthropic(res, 'gpt-4')
-    expect(result.content).toEqual([{ type: 'text', text: '' }])
-    expect(result.stop_reason).toBe('end_turn')
+    expect(() => openaiChatToAnthropic(res, 'gpt-4')).toThrow('no message choice')
   })
 
   test('cached tokens mapping', () => {
@@ -1288,7 +1288,7 @@ describe('anthropicToOpenaiResponses', () => {
     expect(result.instructions).toBe('Be helpful')
     expect(result.store).toBe(false)
     expect(result.tools).toBeUndefined()
-    expect(result.max_output_tokens).toBeUndefined()
+    expect(result.max_output_tokens).toBe(1024)
     expect(result.input).toEqual([{ type: 'message', role: 'user', content: 'Hello' }])
   })
 
@@ -2068,6 +2068,7 @@ describe('openaiResponsesToAnthropic', () => {
 
   test('status incomplete → max_tokens', () => {
     const res: OpenAIResponsesResponse = {
+      incomplete_details: { reason: 'max_output_tokens' },
       id: 'resp_4',
       object: 'response',
       created_at: 0,

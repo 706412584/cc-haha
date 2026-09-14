@@ -116,6 +116,7 @@ describe('PR quality workflow', () => {
     expect(gate.needs).toContain('desktop-native-checks')
     expect(packageJson.scripts['check:swift']).toBe('bun run scripts/pr/run-swift-checks.ts')
     expect(packageJson.scripts['check:policy']).toContain('scripts/pr/run-swift-checks.test.ts')
+    expect(packageJson.scripts['check:policy']).toContain('scripts/quality-gate/package-smoke/index.test.ts')
     for (const command of ['check:swift', 'build:sidecars', 'test:compiled-sidecar-smoke', 'check:electron', 'electron:package:dir', 'test:package-smoke:current']) {
       expect(packageJson.scripts['check:native']).toContain(`bun run ${command}`)
     }

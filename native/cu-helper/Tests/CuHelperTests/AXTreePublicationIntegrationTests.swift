@@ -38,6 +38,10 @@ final class AXTreePublicationIntegrationTests: XCTestCase {
         try await verifyPublishedControl(mismatchedWindowTitle: false, exerciseDrags: true, wideWindow: true)
     }
 
+    func testVisibleCursorSurvivesRepeatedClicksAndTracksExposedBackgroundWindow() async throws {
+        try await verifyPublishedControl(mismatchedWindowTitle: false, exerciseVisualClicks: true)
+    }
+
     func testTextScrollAndSecondaryMethodsReachTheSameOfficialReceiver() async throws {
         if ProcessInfo.processInfo.environment[Self.fixtureFlag] == "1" {
             try await runFixtureProcess(mismatchedWindowTitle: false, regularActivation: true, wideWindow: false)
@@ -174,7 +178,7 @@ final class AXTreePublicationIntegrationTests: XCTestCase {
         try await waitUntil(description: "method fixture exit") { process.isTerminated }
     }
 
-    private func verifyPublishedControl(mismatchedWindowTitle: Bool, exerciseDrags: Bool = false, exerciseKeys: Bool = false, wideWindow: Bool = false) async throws {
+    private func verifyPublishedControl(mismatchedWindowTitle: Bool, exerciseDrags: Bool = false, exerciseKeys: Bool = false, wideWindow: Bool = false, exerciseVisualClicks: Bool = false) async throws {
         if ProcessInfo.processInfo.environment[Self.fixtureFlag] == "1" {
             try await runFixtureProcess(
                 mismatchedWindowTitle: ProcessInfo.processInfo.environment[Self.fixtureMismatchedTitle] == "1",
@@ -188,7 +192,7 @@ final class AXTreePublicationIntegrationTests: XCTestCase {
             AXIsProcessTrusted(),
             "Live AX publication requires Accessibility permission for the test runner"
         )
-        if mismatchedWindowTitle || exerciseDrags {
+        if mismatchedWindowTitle || exerciseDrags || exerciseVisualClicks {
             try XCTSkipUnless(
                 Capture.hasScreenRecordingPermission(),
                 "Coordinate publication requires Screen Recording permission for the test runner"
@@ -220,7 +224,7 @@ final class AXTreePublicationIntegrationTests: XCTestCase {
             Self.fixtureGesturePath: gestures.path,
             // A full-suite child enters the first test, so fixture modes must
             // travel with this launch rather than that test method's defaults.
-            Self.fixtureRegularActivation: exerciseKeys ? "1" : "0",
+            Self.fixtureRegularActivation: exerciseKeys || exerciseVisualClicks ? "1" : "0",
             Self.fixtureWideWindow: wideWindow ? "1" : "0",
         ]) { _, fixture in fixture }
         configuration.activates = false
@@ -272,6 +276,10 @@ final class AXTreePublicationIntegrationTests: XCTestCase {
         let clickedState = try await AXTree.appState(pid: pid, disableDiff: true)
         let (_, clickedLine) = try publishedHandle(label: "Bold", state: clickedState)
         XCTAssertTrue(clickedLine.contains("Value: 1"), clickedLine)
+
+        if exerciseVisualClicks {
+            try await verifyVisibleClicks(cursor: cursor, router: router, process: process, gestures: gestures)
+        }
 
         if exerciseKeys {
             let (canvasHandle, _) = try publishedHandle(label: "Drag fixture", state: clickedState)
@@ -433,6 +441,114 @@ final class AXTreePublicationIntegrationTests: XCTestCase {
 
         FileManager.default.createFile(atPath: stop.path, contents: Data())
         try await waitUntil(description: "fixture exit") { process.isTerminated }
+    }
+
+    private func verifyVisibleClicks(
+        cursor: VirtualCursor, router: CommandRouter, process: NSRunningApplication, gestures: URL
+    ) async throws {
+        let pid = process.processIdentifier
+        let captured = try await router.handle(cmd: "get_app_state", payload: .object([
+            "pid": .int(Int(pid)), "disableDiff": .bool(true),
+        ]))
+        let shot = try XCTUnwrap(captured["screenshot"])
+        let observed = try await AXTree.appState(pid: pid, disableDiff: true)
+        let (handle, _) = try publishedHandle(label: "Drag fixture", state: observed)
+        let frame = try XCTUnwrap(AXTree.record(pid: pid, index: handle.index)?.frameGlobal)
+        let point = CGPoint(x: frame.x + frame.w / 2, y: frame.y + frame.h / 2)
+        let x = (point.x - (try XCTUnwrap(shot["originX"]?.asDouble)))
+            * Double(try XCTUnwrap(shot["width"]?.asInt)) / (try XCTUnwrap(shot["pointWidth"]?.asDouble))
+        let y = (point.y - (try XCTUnwrap(shot["originY"]?.asDouble)))
+            * Double(try XCTUnwrap(shot["height"]?.asInt)) / (try XCTUnwrap(shot["pointHeight"]?.asDouble))
+
+        // Observe real AppKit layers, not a mock callback or just a successful
+        // input result. A non-headless cursor that was never shown used to let
+        // every integration test skip the exact showClick branch that crashed.
+        // The first indexed action already preloaded this cursor's windows.
+        let overlays = NSApplication.shared.windows.filter { $0.ignoresMouseEvents && $0.level.rawValue == Int(CGShieldingWindowLevel()) }
+        XCTAssertFalse(overlays.isEmpty)
+        func ripples() -> [CALayer] {
+            overlays.flatMap { $0.contentView?.layer?.sublayers ?? [] }.filter {
+                $0.animation(forKey: "ripple") != nil || $0.animation(forKey: "rasterRipple") != nil
+            }
+        }
+        func click(button: String = "left", count: Int = 1) async throws {
+            let result = try await router.handle(cmd: "click", payload: .object([
+                "pid": .int(Int(pid)), "x": .double(x), "y": .double(y),
+                "mouse_button": .string(button), "click_count": .int(count),
+            ]))
+            XCTAssertEqual(result, .bool(true))
+        }
+        cursor.show()
+        XCTAssertTrue(process.activate(options: []))
+        try await waitUntil(description: "disposable receiver is foreground") {
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+        }
+        for step in 0..<12 {
+            // Retain the layers across await: a removed ripple's address can
+            // otherwise be reused by the next layer and look like no new ring.
+            let before = ripples()
+            try await click(button: step % 3 == 2 ? "right" : "left", count: step % 3 == 1 ? 2 : 1)
+            XCTAssertTrue(overlays.contains { $0.isVisible })
+            XCTAssertTrue(ripples().contains { layer in !before.contains { $0 === layer } }, "Click \(step) must create visible feedback")
+        }
+        try await waitUntil(description: "16 mouse-up receipts from 12 single/double/right click commands") {
+            guard let data = try? Data(contentsOf: gestures),
+                  let receipt = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            return receipt["completed"] as? Int == 16
+        }
+        let receipt = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: gestures)) as? [String: Any])
+        let events = try XCTUnwrap(receipt["events"] as? [[String: Any]])
+        XCTAssertEqual(events.filter { $0["type"] as? UInt == NSEvent.EventType.rightMouseUp.rawValue }.count, 4)
+        XCTAssertEqual(receipt["unpaired"] as? Int, 0)
+
+        // Put an independent host window to the right of the background
+        // receiver, then cover it, then uncover it. WindowServer supplies the
+        // actual occlusion evidence, as in the user's two-app layout.
+        let app = NSApplication.shared
+        let previousPolicy = app.activationPolicy()
+        app.setActivationPolicy(.regular)
+        let host = NSWindow(contentRect: NSRect(x: 660, y: 200, width: 240, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
+        host.isReleasedWhenClosed = false
+        host.collectionBehavior = [.canJoinAllApplications]
+        host.title = "Disposable Computer Use host"
+        defer {
+            host.orderOut(nil)
+            host.close()
+            app.setActivationPolicy(previousPolicy)
+            WindowExposure.resetForTests()
+        }
+        host.makeKeyAndOrderFront(nil)
+        app.activate(ignoringOtherApps: true)
+        try await waitUntil(description: "disposable host is foreground") {
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid()
+        }
+        func expectFeedback(exposed: Bool) async throws {
+            try await waitUntil(description: exposed ? "target exposed" : "target covered") {
+                WindowExposure.resetForTests()
+                return WindowExposure.targetWindowExposed(at: point, targetPid: pid) == exposed
+            }
+            cursor.hide()
+            cursor.show()
+            try await click()
+            XCTAssertEqual(overlays.contains { $0.isVisible }, exposed)
+            XCTAssertEqual(!ripples().isEmpty, exposed)
+            XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, getpid())
+        }
+        try await expectFeedback(exposed: true)
+        host.setFrame(NSRect(x: point.x - 40, y: CGDisplayBounds(CGMainDisplayID()).height - point.y - 40, width: 240, height: 200), display: true)
+        try await expectFeedback(exposed: false)
+        host.setFrame(NSRect(x: 660, y: 200, width: 240, height: 200), display: true)
+        try await expectFeedback(exposed: true)
+        try await waitUntil(description: "three background clicks received, including covered target") {
+            guard let data = try? Data(contentsOf: gestures),
+                  let receipt = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            return receipt["completed"] as? Int == 19
+        }
+        cursor.hide()
+        cursor.showClick(at: point, kind: .single)
+        XCTAssertTrue(ripples().isEmpty, "Turn end must clear feedback")
+        XCTAssertFalse(overlays.contains { $0.isVisible })
+        print("[native-visible-click-smoke] observed 15 commands, 19 received clicks; checked foreground/exposed/covered/re-exposed/hidden feedback")
     }
 
     private func runFixtureProcess(mismatchedWindowTitle: Bool, regularActivation: Bool, wideWindow: Bool) async throws {
@@ -636,6 +752,9 @@ private final class DragReceiptView: NSView {
         held = false
         record(event)
     }
+
+    override func rightMouseDown(with event: NSEvent) { mouseDown(with: event) }
+    override func rightMouseUp(with event: NSEvent) { mouseUp(with: event) }
 
     private func record(_ event: NSEvent) {
         events.append([

@@ -15,9 +15,10 @@ import type {
 import { stripLeadingBillingHeader } from './billingHeader.js'
 import { normalizeOpenAIReasoningEffort } from './effort.js'
 import { decodeOpenAIReasoningEnvelope } from './openaiReasoning.js'
+import { resolveRequestCompatibility, type RequestCompatibilityOptions } from './requestCompatibility.js'
 import type { ToolNameWireMap } from './toolNameWire.js'
 
-export type OpenAIResponsesTransformOptions = {
+export type OpenAIResponsesTransformOptions = RequestCompatibilityOptions & {
   /** Stable cache routing key, forwarded as `prompt_cache_key`. */
   cacheKey?: string
   passSamplingParams?: boolean
@@ -34,6 +35,7 @@ export function anthropicToOpenaiResponses(
   body: AnthropicRequest,
   options: OpenAIResponsesTransformOptions = {},
 ): OpenAIResponsesRequest {
+  const compatibility = resolveRequestCompatibility(body, { ...options, protocol: 'openai_responses' })
   const input: OpenAIResponsesInputItem[] = []
 
   // Convert messages to input items
@@ -64,12 +66,13 @@ export function anthropicToOpenaiResponses(
     result.prompt_cache_key = options.cacheKey
   }
 
-  // max_tokens — omit to let upstream provider use its own default/max.
-  // Claude Code sends very large values that exceed many providers' limits.
+  if (compatibility.outputBudget.field === 'max_output_tokens') {
+    result.max_output_tokens = compatibility.outputBudget.effective
+  }
 
   // Claude Code sends Anthropic sampling params that some compatible
   // providers reject. Keep them opt-in for providers known to accept them.
-  if (options.passSamplingParams) {
+  if (compatibility.passSamplingParams) {
     if (body.temperature !== undefined) result.temperature = body.temperature
     if (body.top_p !== undefined) result.top_p = body.top_p
   }
@@ -106,7 +109,7 @@ export function anthropicToOpenaiResponses(
   }
 
   // thinking → reasoning
-  if (body.thinking) {
+  if (compatibility.passReasoning && body.thinking) {
     const budget = body.thinking.budget_tokens
     if (budget !== undefined) {
       if (budget <= 1024) result.reasoning = { effort: 'low' }
@@ -117,8 +120,15 @@ export function anthropicToOpenaiResponses(
     }
   }
   const outputConfigEffort = normalizeOpenAIReasoningEffort(body.output_config?.effort)
-  if (outputConfigEffort !== undefined) {
+  if (compatibility.passReasoning && outputConfigEffort !== undefined) {
     result.reasoning = { ...(result.reasoning ?? {}), effort: outputConfigEffort }
+  }
+
+  if (compatibility.parallelToolCalls !== undefined && result.tools?.length) {
+    result.parallel_tool_calls = compatibility.parallelToolCalls
+  }
+  if (compatibility.structuredOutput) {
+    result.text = { format: compatibility.structuredOutput }
   }
 
   // stop_sequences not supported in Responses API, dropped
@@ -319,7 +329,7 @@ function convertMessageToInputItems(
 }
 
 function convertToolChoice(choice: unknown, toolNames?: ToolNameWireMap): unknown {
-  if (typeof choice === 'string') return choice
+  if (typeof choice === 'string') return choice === 'any' ? 'required' : choice
   if (typeof choice === 'object' && choice !== null) {
     const c = choice as Record<string, unknown>
     if (c.type === 'auto') return 'auto'

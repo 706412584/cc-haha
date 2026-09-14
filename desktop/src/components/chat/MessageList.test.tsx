@@ -298,6 +298,11 @@ async function selectAcrossMessageText(
   await waitForSelectionMenuUpdate()
 }
 
+async function expandChangedFileCards() {
+  const toggles = await screen.findAllByRole('button', { name: /^Show \d+ changed files$/ })
+  for (const toggle of toggles) fireEvent.click(toggle)
+}
+
 describe('MessageList nested tool calls', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
@@ -7034,9 +7039,143 @@ describe('MessageList nested tool calls', () => {
 
     const cards = await screen.findAllByLabelText('Turn changed files')
     expect(cards).toHaveLength(2)
+    expect(cards.map((card) => card.closest<HTMLElement>('[data-chat-render-item-key]')?.dataset.chatRenderItemKey))
+      .toEqual(['assistant-1', 'assistant-2'])
+    for (const card of cards) {
+      expect(within(card).getByRole('button', { name: 'Show 1 changed files' }).getAttribute('aria-expanded'))
+        .toBe('false')
+      expect(within(card).queryByRole('button', { name: /^Open .* in workspace$/ })).toBeNull()
+    }
+    await expandChangedFileCards()
     expect(screen.getByText('first.ts')).toBeTruthy()
     expect(screen.getByText('second.ts')).toBeTruthy()
     expect(screen.queryByText('third.ts')).toBeNull()
+  })
+
+  it('keeps a chosen file list expanded when a later non-editing turn completes', async () => {
+    const firstCheckpoint = {
+      target: { targetUserMessageId: 'user-edit', userMessageIndex: 0, userMessageCount: 1 },
+      code: { available: true, filesChanged: ['src/kept.ts'], insertions: 1, deletions: 0 },
+    }
+    const getTurnCheckpoints = vi.mocked(sessionsApi.getTurnCheckpoints)
+      .mockResolvedValue({ checkpoints: [firstCheckpoint] })
+    const initialMessages: UIMessage[] = [
+      { id: 'user-edit', type: 'user_text', content: 'Create a source file', timestamp: 1 },
+      { id: 'assistant-edit', type: 'assistant_text', content: 'Created it.', timestamp: 2 },
+    ]
+    useChatStore.setState({
+      sessions: { [ACTIVE_TAB]: makeSessionState({ messages: initialMessages }) },
+    })
+    const { container } = render(<MessageList />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Show 1 changed files' }))
+    expect(screen.getByRole('button', { name: 'Open src/kept.ts in workspace' })).toBeTruthy()
+
+    getTurnCheckpoints.mockResolvedValue({
+      checkpoints: [
+        { ...firstCheckpoint, target: { ...firstCheckpoint.target, userMessageCount: 2 } },
+        {
+          target: { targetUserMessageId: 'user-chat', userMessageIndex: 1, userMessageCount: 2 },
+          code: { available: true, filesChanged: [], insertions: 0, deletions: 0 },
+        },
+      ],
+    })
+    act(() => {
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({ messages: [
+            ...initialMessages,
+            { id: 'user-chat', type: 'user_text', content: 'What is two plus two?', timestamp: 3 },
+            { id: 'assistant-chat', type: 'assistant_text', content: 'Four.', timestamp: 4 },
+          ] }),
+        },
+      })
+    })
+    await waitFor(() => expect(getTurnCheckpoints).toHaveBeenCalledTimes(2))
+    expect(screen.getByRole('button', { name: 'Hide changed files' }).getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByRole('button', { name: 'Open src/kept.ts in workspace' })).toBeTruthy()
+    expect(screen.getAllByRole('region', { name: 'Turn changed files' })).toHaveLength(1)
+    const unrelatedReply = container.querySelector<HTMLElement>('[data-chat-render-item-key="assistant-chat"]')!
+    expect(within(unrelatedReply).queryByRole('region', { name: 'Turn changed files' })).toBeNull()
+  })
+
+  it('returns focus to the change summary when its file list was collapsed with the diff open', async () => {
+    vi.mocked(sessionsApi.getTurnCheckpoints).mockResolvedValue({ checkpoints: [{
+      target: { targetUserMessageId: 'user-origin-file', userMessageIndex: 0, userMessageCount: 1 },
+      code: { available: true, filesChanged: ['src/origin.ts'], insertions: 1, deletions: 0 },
+    }] })
+    vi.spyOn(sessionsApi, 'getWorkspaceDiff').mockResolvedValue({
+      state: 'ok', path: 'src/origin.ts', diff: 'diff --git a/src/origin.ts b/src/origin.ts\n+new',
+    })
+    useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState({ messages: [
+      { id: 'user-origin-file', type: 'user_text', content: 'Create a source file', timestamp: 1 },
+      { id: 'assistant-origin-file', type: 'assistant_text', content: 'Created it.', timestamp: 2 },
+    ] }) } })
+    const { container } = render(<MessageList />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Show 1 changed files' }))
+    const opener = screen.getByRole('button', { name: 'Open src/origin.ts in workspace' })
+    const renderItem = container.querySelector<HTMLElement>('[data-chat-render-item-key="assistant-origin-file"]')!
+    const scrollIntoView = vi.fn()
+    Object.defineProperty(renderItem, 'scrollIntoView', { configurable: true, value: scrollIntoView })
+
+    fireEvent.click(opener)
+    await waitFor(() => expect(useWorkspacePanelStore.getState().getOrigin(ACTIVE_TAB))
+      .toEqual({ sourceTurnKey: 'assistant-origin-file', sourceElementId: opener.id }))
+    fireEvent.click(screen.getByRole('button', { name: 'Hide changed files' }))
+    expect(screen.queryByRole('button', { name: 'Open src/origin.ts in workspace' })).toBeNull()
+    const summary = screen.getByRole('button', { name: 'Show 1 changed files' })
+    // The user can focus another surface while the original file opener is gone.
+    screen.getByRole('button', { name: 'Copy reply' }).focus()
+    act(() => useWorkspacePanelStore.getState().closePanel(ACTIVE_TAB))
+
+    await waitFor(() => expect(document.activeElement).toBe(summary))
+    expect(summary.getAttribute('aria-expanded')).toBe('false')
+    expect(useWorkspacePanelStore.getState().getOrigin(ACTIVE_TAB)).toBeNull()
+    fireEvent.click(summary)
+    expect(screen.getByRole('button', { name: 'Open src/origin.ts in workspace' })).toBeTruthy()
+  })
+
+  it('preserves the expanded change card through virtual unmount and returns to its file opener', async () => {
+    vi.mocked(sessionsApi.getTurnCheckpoints).mockResolvedValue({ checkpoints: [{
+      target: { targetUserMessageId: 'user-virtual-file', userMessageIndex: 0, userMessageCount: 221 },
+      code: { available: true, filesChanged: ['src/virtual.ts'], insertions: 1, deletions: 0 },
+    }] })
+    vi.spyOn(sessionsApi, 'getWorkspaceDiff').mockResolvedValue({
+      state: 'ok', path: 'src/virtual.ts', diff: 'diff --git a/src/virtual.ts b/src/virtual.ts\n+new',
+    })
+    useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState({ messages: [
+      { id: 'user-virtual-file', type: 'user_text', content: 'Create a source file', timestamp: 0 },
+      { id: 'assistant-virtual-file', type: 'assistant_text', content: 'Created it.', timestamp: 1 },
+      ...Array.from({ length: 220 }, (_, index) => ({
+        id: `later-virtual-prompt-${index}`,
+        type: 'user_text' as const,
+        content: `Later prompt ${index}`,
+        timestamp: index + 2,
+      })),
+    ] }) } })
+    const { container } = render(<MessageList />)
+    const scrollArea = container.querySelector<HTMLElement>('.chat-scroll-area')!
+    Object.defineProperty(scrollArea, 'clientHeight', { configurable: true, value: 500 })
+    Object.defineProperty(scrollArea, 'scrollHeight', { configurable: true, value: 222 * 112 })
+    await waitForProgrammaticScrollReset()
+    scrollArea.scrollTop = 0
+    fireEvent.scroll(scrollArea)
+    fireEvent.click(await screen.findByRole('button', { name: 'Show 1 changed files' }))
+    const opener = screen.getByRole('button', { name: 'Open src/virtual.ts in workspace' })
+    fireEvent.click(opener)
+    await waitFor(() => expect(useWorkspacePanelStore.getState().getOrigin(ACTIVE_TAB))
+      .toEqual({ sourceTurnKey: 'assistant-virtual-file', sourceElementId: opener.id }))
+
+    await waitForProgrammaticScrollReset()
+    scrollArea.scrollTop = 222 * 112 - 500
+    fireEvent.scroll(scrollArea)
+    await waitFor(() => expect(container.querySelector('[data-chat-render-item-key="assistant-virtual-file"]')).toBeNull())
+    act(() => useWorkspacePanelStore.getState().closePanel(ACTIVE_TAB))
+
+    const remountedOpener = await screen.findByRole('button', { name: 'Open src/virtual.ts in workspace' })
+    expect(remountedOpener).not.toBe(opener)
+    await waitFor(() => expect(document.activeElement).toBe(remountedOpener))
+    expect(screen.getByRole('button', { name: 'Hide changed files' }).getAttribute('aria-expanded')).toBe('true')
+    expect(useWorkspacePanelStore.getState().getOrigin(ACTIVE_TAB)).toBeNull()
   })
 
   it('opens the workspace diff (working-tree) when a historical turn change row is clicked', async () => {
@@ -7115,6 +7254,7 @@ describe('MessageList nested tool calls', () => {
     // Clicking the row no longer expands an inline diff inside the card — it jumps to
     // the right-side workspace and opens a diff tab (via workspacePanelStore.openPreview,
     // which fetches the *current working-tree* diff through getWorkspaceDiff).
+    await expandChangedFileCards()
     fireEvent.click(await screen.findByRole('button', { name: 'Open src/first.ts in workspace' }))
 
     await waitFor(() => {
@@ -7188,6 +7328,7 @@ describe('MessageList nested tool calls', () => {
     // workspace diff for that relative path. Caveat (intended): the workspace diff is the
     // current working-tree diff, NOT the historical turn snapshot — so the turn cwd is no
     // longer carried through, and getTurnCheckpointDiff is not called.
+    await expandChangedFileCards()
     fireEvent.click(await screen.findByRole('button', { name: 'Open src/first.ts in workspace' }))
 
     await waitFor(() => {
@@ -7252,6 +7393,7 @@ describe('MessageList nested tool calls', () => {
 
     // The card only renders if the transcript checkpoint (id 'transcript-user-1') was
     // matched to the local message ('local-user-temp-id') by userMessageIndex.
+    await expandChangedFileCards()
     expect(await screen.findByText('live.ts')).toBeTruthy()
     // Clicking the row jumps to the right-side workspace diff for the relativized path.
     fireEvent.click(screen.getByRole('button', { name: 'Open src/live.ts in workspace' }))
@@ -7324,6 +7466,7 @@ describe('MessageList nested tool calls', () => {
       }))
     })
 
+    await expandChangedFileCards()
     expect(await screen.findByText('App.jsx')).toBeTruthy()
     expect(getTurnCheckpoints).toHaveBeenCalledTimes(2)
   })
@@ -7422,6 +7565,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    await expandChangedFileCards()
     await screen.findByText('live.ts')
     fireEvent.click(screen.getByRole('button', { name: 'Undo current turn changes' }))
     const dialog = await screen.findByRole('dialog', { name: 'Undo current turn?' })
@@ -7479,6 +7623,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    await expandChangedFileCards()
     expect(await screen.findByText('blank-response.ts')).toBeTruthy()
   })
 
@@ -7524,6 +7669,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    await expandChangedFileCards()
     expect(await screen.findByText('first.ts')).toBeTruthy()
     expect(screen.queryByText('Markdown')).toBeNull()
 
@@ -7782,6 +7928,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    await expandChangedFileCards()
     const historicalCard = (await screen.findByText('first.ts')).closest('section')
     expect(historicalCard).toBeTruthy()
     fireEvent.click(
@@ -7862,6 +8009,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    await expandChangedFileCards()
     await screen.findByText('first.ts')
     const undoButton = screen.getByRole('button', { name: 'Undo current turn changes' })
     expect((undoButton as HTMLButtonElement).disabled).toBe(false)
@@ -8099,6 +8247,7 @@ describe('MessageList nested tool calls', () => {
       store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
     })
 
+    await expandChangedFileCards()
     expect(await screen.findByText('kept.ts')).toBeTruthy()
     const conversationUndo = await screen.findByRole('button', { name: 'Roll back conversation' })
     expect(screen.getByText('Provider request failed')).toBeTruthy()
@@ -8152,6 +8301,7 @@ describe('MessageList nested tool calls', () => {
         ],
       })
     })
+    await expandChangedFileCards()
     expect(await screen.findByText('kept.ts')).toBeTruthy()
     expect(useChatStore.getState().sessions[ACTIVE_TAB]?.composerPrefill).toMatchObject({
       text: 'continue',
@@ -8305,6 +8455,7 @@ describe('MessageList nested tool calls', () => {
 
     const cards = await screen.findAllByLabelText('Turn changed files')
     expect(cards).toHaveLength(1)
+    await expandChangedFileCards()
     expect(screen.getByText('first.ts')).toBeTruthy()
     expect(screen.queryByText('second.ts')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Roll back conversation' })).toBeNull()
@@ -8419,6 +8570,7 @@ describe('MessageList nested tool calls', () => {
     expect(within(firstProgressItem as HTMLElement).queryByRole('button', { name: 'Open' })).toBeNull()
     expect(within(secondProgressItem as HTMLElement).queryByRole('button', { name: 'Open' })).toBeNull()
     expect(within(finalItem as HTMLElement).getByRole('button', { name: 'Open' })).toBeTruthy()
+    await expandChangedFileCards()
     expect(within(turnCard).getByText('ink-survey-philosophy.md')).toBeTruthy()
   })
 

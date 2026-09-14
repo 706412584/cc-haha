@@ -2370,6 +2370,8 @@ export function MessageList({
     tailMessageMetricSignature: string | null
   }>())
   const t = useTranslation()
+  // Keep disclosure choices across virtualized row remounts and later turns.
+  const [expandedChangeCards, setExpandedChangeCards] = useState<Record<string, boolean>>({})
   const [turnChangeCards, setTurnChangeCards] = useState<TurnChangeCardModel[]>([])
   const [turnChangeLoadError, setTurnChangeLoadError] = useState<string | null>(null)
   const [turnActionErrors, setTurnActionErrors] = useState<Record<string, string>>({})
@@ -3512,6 +3514,9 @@ export function MessageList({
     const opener = renderItem
       ? [...renderItem.querySelectorAll<HTMLElement>('[id]')]
           .find((node) => node.id === origin.sourceElementId)
+          ?? (origin.sourceElementId.startsWith('turn-change-opener-')
+            ? renderItem.querySelector<HTMLElement>('[data-turn-change-disclosure="true"]')
+            : null)
       : null
 
     if (renderItem && opener) {
@@ -3676,6 +3681,11 @@ export function MessageList({
             <CurrentTurnChangeCard
               key={`turn-change-${card.target.messageId}`}
               sessionId={resolvedSessionId}
+              expanded={expandedChangeCards[`${resolvedSessionId}:${card.target.messageId}`] ?? false}
+              onExpandedChange={(expanded) => setExpandedChangeCards((current) => ({
+                ...current,
+                [`${resolvedSessionId}:${card.target.messageId}`]: expanded,
+              }))}
               checkpoint={card.checkpoint}
               workDir={card.workDir}
               error={error}

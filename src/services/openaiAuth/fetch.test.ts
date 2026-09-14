@@ -81,6 +81,30 @@ describe('buildOpenAICodexFetch', () => {
     })
   })
 
+  test('dedicated OAuth omits output budgets while preserving optional schema fields and serial tools', async () => {
+    let sent: Record<string, any> | undefined
+    const codexFetch = buildOpenAICodexFetch(async (_input, init) => {
+      sent = readWireBody(init)
+      return Response.json({ id: 'fixture', status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '{}' }] }] })
+    }, 'test')!
+    const schema = { type: 'object', properties: { optional: { type: 'string' } } }
+    const response = await codexFetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'gpt-6-astra', max_tokens: 64, messages: [{ role: 'user', content: 'fixture' }],
+        tools: [{ name: 'Read', input_schema: { type: 'object' } }],
+        tool_choice: { type: 'auto', disable_parallel_tool_use: true },
+        output_config: { format: { type: 'json_schema', schema } },
+      }),
+    })
+    expect(response.status).toBe(200)
+    expect(sent?.max_output_tokens).toBeUndefined()
+    expect(sent?.max_tokens).toBeUndefined()
+    expect(sent?.parallel_tool_calls).toBe(false)
+    expect(sent?.text.format).toEqual({ type: 'json_schema', name: 'response', schema, strict: false })
+    expect(sent?.text.format.schema.required).toBeUndefined()
+  })
+
   test('maps Anthropic messages to ChatGPT Codex responses endpoint with account header', async () => {
     const upstreamCalls: Array<{
       url: string

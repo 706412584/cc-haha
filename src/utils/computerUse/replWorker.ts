@@ -10,6 +10,9 @@ interface CellState {
   accepting: boolean
   finished: boolean
   pending: Map<number, { settled: Promise<void>; settle: () => void }>
+  timers: Map<number, ReturnType<typeof setTimeout>>
+  timerError?: string
+  failTimer(message: string): void
 }
 
 interface RealmRuntime {
@@ -20,7 +23,12 @@ interface RealmRuntime {
   commit(succeeded: boolean): string
   response(message: string): void
   unobservedError(): string | undefined
+  fireTimer(id: number): void
+  clearTimers(): void
+  execute(fn: unknown): Promise<unknown>
 }
+
+const MAX_ACTIVE_TIMERS = 1024
 
 function errorMessage(error: unknown): string {
   try {
@@ -34,7 +42,7 @@ function errorMessage(error: unknown): string {
  * Persistent JavaScript kernel. Production runs this in a disposable process;
  * vm is a language boundary, not the OS sandbox or hard time/memory limit.
  * Only JSON strings cross its host bridge. In particular no host Promise,
- * Error, timers, module loader, or Node object is passed into the realm.
+ * Error, timer handle/function, module loader, or Node object is passed into the realm.
  */
 export function createComputerUseReplWorker(send: (message: ReplOutput) => void) {
   const context = createContext(Object.create(null), {
@@ -61,6 +69,42 @@ export function createComputerUseReplWorker(send: (message: ReplOutput) => void)
       }
       if (message.type === 'emit') {
         send({ type: 'emit', cellId: cell.cellId, content: message.content })
+        return
+      }
+      if (message.type === 'submitted_done') {
+        cell.accepting = false
+        return
+      }
+      if (message.type === 'timer_error' && typeof message.message === 'string') {
+        cell.failTimer(message.message.slice(0, 8_000))
+        return
+      }
+      if (message.type === 'timer' && cell.accepting) {
+        const { id } = message
+        if (!Number.isSafeInteger(id) || id < 1) return 'Invalid JavaScript timer ID'
+        if (message.action === 'clear') {
+          const handle = cell.timers.get(id)
+          if (handle !== undefined) clearTimeout(handle)
+          cell.timers.delete(id)
+          return
+        }
+        if (message.action !== 'schedule' || typeof message.interval !== 'boolean'
+          || !Number.isInteger(message.delay) || message.delay < 0 || message.delay > 2_147_483_647) {
+          return 'Invalid JavaScript timer request'
+        }
+        if (cell.timers.has(id)) return 'Duplicate JavaScript timer ID'
+        if (cell.timers.size >= MAX_ACTIVE_TIMERS) return 'Too many active JavaScript timers (maximum 1024)'
+        const fire = () => {
+          if (cell !== active || cell.finished || !cell.accepting) return
+          if (!message.interval) cell.timers.delete(id)
+          try {
+            realm.fireTimer(id)
+          } catch (error) {
+            cell.failTimer(errorMessage(error))
+          }
+        }
+        const handle = message.interval ? setInterval(fire, message.delay) : setTimeout(fire, message.delay)
+        cell.timers.set(id, handle)
         return
       }
       if (message.type !== 'invoke' || !cell.accepting) {
@@ -114,6 +158,30 @@ export function createComputerUseReplWorker(send: (message: ReplOutput) => void)
     const previous = new Map()
     const reached = new Set()
     let candidate = []
+    const timers = new Map()
+    let timerCounter = 0
+    const scheduleTimer = (callback, delay, args, interval) => {
+      if (typeof callback !== 'function') throw new TypeError('Timer callback must be a function')
+      delay = Number(delay)
+      // Match Node's asynchronous minimum and integer delay normalization,
+      // without exposing Node functions or its Timeout objects to the guest.
+      delay = !Number.isFinite(delay) || delay < 1 || delay > 2147483647 ? 1 : Math.trunc(delay)
+      const id = ++timerCounter
+      timers.set(id, {callback, args, interval})
+      const failure = hostSend(JSON.stringify({type: 'timer', action: 'schedule', id, delay, interval}))
+      if (failure) {
+        timers.delete(id)
+        throw new Error(failure)
+      }
+      return id
+    }
+    const clearTimer = value => {
+      const id = typeof value === 'string' ? Number(value) : value
+      if (!timers.has(id)) return
+      const failure = hostSend(JSON.stringify({type: 'timer', action: 'clear', id}))
+      if (failure) throw new Error(failure)
+      timers.delete(id)
+    }
     const invoke = (name, args) => {
       const requestId = ++requestCounter
       const operation = {observed: false, error: undefined}
@@ -159,8 +227,41 @@ export function createComputerUseReplWorker(send: (message: ReplOutput) => void)
     Object.defineProperties(globalThis, {
       __cuInvoke: {value: invoke},
       __cuEmit: {value: emit},
+      setTimeout: {value: (callback, delay = 0, ...args) => scheduleTimer(callback, delay, args, false)},
+      clearTimeout: {value: clearTimer},
+      setInterval: {value: (callback, delay = 0, ...args) => scheduleTimer(callback, delay, args, true)},
+      clearInterval: {value: clearTimer},
     })
     return {
+      execute(fn) {
+        // Close dispatch at the submitted promise's first settlement, before
+        // the host's timer-error race adds another promise checkpoint. Keep
+        // these handlers guest-created; no host callbacks enter the realm.
+        return fn(this.scope, this.register, this.mark).then(value => {
+          hostSend(JSON.stringify({type: 'submitted_done'}))
+          return value
+        }, error => {
+          hostSend(JSON.stringify({type: 'submitted_done'}))
+          throw error
+        })
+      },
+      fireTimer(id) {
+        const entry = timers.get(id)
+        if (!entry) return
+        if (!entry.interval) timers.delete(id)
+        const result = Reflect.apply(entry.callback, undefined, entry.args)
+        // Async callbacks can reject while the submitted code awaits another
+        // event. Attribute that error to this cell instead of crashing the host.
+        Promise.resolve(result).catch(error => {
+          let message
+          try { message = String(error?.message ?? error).slice(0, 8000) }
+          catch { message = 'JavaScript timer callback failed' }
+          hostSend(JSON.stringify({type: 'timer_error', message}))
+        })
+      },
+      clearTimers() {
+        timers.clear()
+      },
       begin() {
         operations = []
         reached.clear()
@@ -269,7 +370,17 @@ export function createComputerUseReplWorker(send: (message: ReplOutput) => void)
       send({ type: 'done', cellId, error: 'A JavaScript cell is already running' })
       return
     }
-    const cell: CellState = { cellId, accepting: true, finished: false, pending: new Map() }
+    let rejectTimer!: (error: Error) => void
+    const timerFailure = new Promise<never>((_resolve, reject) => { rejectTimer = reject })
+    const cell: CellState = {
+      cellId, accepting: true, finished: false, pending: new Map(), timers: new Map(),
+      failTimer(message) {
+        if (cell.timerError !== undefined) return
+        cell.timerError = message || 'JavaScript timer callback failed'
+        cell.accepting = false
+        rejectTimer(new Error(cell.timerError))
+      },
+    }
     active = cell
     realm.begin()
     let error: string | undefined
@@ -281,12 +392,15 @@ export function createComputerUseReplWorker(send: (message: ReplOutput) => void)
         for (const warning of compiled.warnings) {
           send({ type: 'emit', cellId, content: { type: 'text', text: `Warning: ${warning}` } })
         }
-        await execute(realm.scope, realm.register, realm.mark)
+        await Promise.race([realm.execute(execute), timerFailure])
         submittedSucceeded = true
       } catch (failure) {
         error = errorMessage(failure)
       } finally {
         cell.accepting = false
+        for (const handle of cell.timers.values()) clearTimeout(handle)
+        cell.timers.clear()
+        realm.clearTimers()
         // A response can settle a pending call on another stdin callback. Keep
         // this cell alive until those calls finish, without reopening dispatch.
         while (cell.pending.size > 0) {
@@ -300,6 +414,7 @@ export function createComputerUseReplWorker(send: (message: ReplOutput) => void)
         // A detached infinite microtask chain also remains under its deadline.
         await new Promise<void>(resolve => setImmediate(resolve))
         const backgroundError = realm.unobservedError()
+        if (!error && cell.timerError !== undefined) error = cell.timerError
         if (!error && backgroundError) {
           error = `An unawaited Computer Use operation failed: ${backgroundError}. Observe the current state before continuing; do not replay prior actions.`
         }

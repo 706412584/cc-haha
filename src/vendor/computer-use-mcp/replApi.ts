@@ -65,6 +65,7 @@ Observe: app.getAXState({disableDiffing?,emit?}), app.getScreenshot({emit?}), ap
 Act: app.click([x,y] or element,{mouseButton?,clickCount?}), app.drag([x,y],[x,y]), app.pressKey(key), app.scroll([x,y] or element,direction,pages?), app.paste(text,{format?}), app.typeText(text), app.selectText(element,text,{prefix?,suffix?,selectionType?}), app.setValue(element,value), app.performSecondaryAction(element,action).
 The raw macOS window API is also available as cua.computer (target:"mac"): list_apps(), get_app_state({app,disableDiff?}), and the corresponding snake_case action methods with an explicit app. Raw methods return data without displaying it.
 Use observed gN:id handles. Integer indices require a current AX observation; after image-only capture use getAXState({disableDiffing:true}) before using integers. Coordinates refer to the returned screenshot.
+Timers: setTimeout/clearTimeout and setInterval/clearInterval use numeric handles and are cleared when the cell ends. If a delay is required, await new Promise(resolve => setTimeout(resolve, milliseconds)); observations normally need no added sleep. Do not schedule actions after the cell returns.
 Await actions in loops, then observe at the next decision point. nodeRepl.write(value) emits text; nodeRepl.emitImage(bytes) emits an image. Browser/DOM, imports, Node, filesystem, and networking APIs are unavailable.`
 
   function textOf(result: ReplToolResult): string {

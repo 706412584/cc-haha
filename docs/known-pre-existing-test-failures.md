@@ -4,7 +4,7 @@
 
 > 验证方法：在 pre-merge 基线（合并 commit 的第一父，`git worktree add <tmp> <first-parent> --detach`）上重跑同一批测试。若基线同样红 → 预存。
 
-最后核对日期：2026-09-12（合并上游 v0.6.1）。
+最后核对日期：2026-09-14（合并上游 v0.6.2）。
 
 ---
 
@@ -46,6 +46,14 @@ fork 之前把后台 agent 的完成通知从「完成即直塞命令队列」�
 
 - `src/utils/workflows/save.test.ts > refuses when the project .claude directory is itself a symlink` — Windows `symlink` 需要管理员权限，本地报 `EPERM`。
 - `src/server/__tests__/sessions.test.ts` 中可能与路径规范化/长度相关的用例（`branch name past the length cap`、`rewind ... unsafe tracked paths`、`turn-checkpoints ... canonical path`）— 在 CI(Linux) 与本地(Windows) 表现可能不同，逐项以基线对照为准。
+- `src/server/__tests__/workflows-api.test.ts > Workflows API > refuses to write through a symlinked target` — 同上，Windows `symlink` EPERM。
+- `src/server/__tests__/session-protocol-rollback.test.ts` 的 WebSocket 用例 — sandbox `cleanup()` 的 `rmSync` 撞上刚 kill 的子进程句柄，Windows 报 `EBUSY`（与下方 `claudeBetas` 同源）。
+- `src/server/__tests__/skills.test.ts > commands that exist only inside the binary > still lists bundled skills when nobody has signed in` — 子进程探针在 Windows 上无 stdout 输出，`JSON.parse` 拿到空串。
+- `src/server/__tests__/conversation-service.test.ts > buildChildEnv flushes desktop transcripts before the SDK reports turn completion (#1033)` — `nonSdkEnv.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS` 在 Windows 本地为 `'1'`；基线（`6bf0932a`）同样红。
+- `src/server/services/macAppIcon.test.ts`（7 个）与 `src/server/__tests__/mac-installed-apps.test.ts`（5 个）— macOS 专属（`sips`/`/usr/bin`/app bundle 枚举），Windows 本地全红；基线同样红。
+- `scripts/quality-gate/package-smoke/index.test.ts > final macOS helper cursor resource verification`（4 个）— 上游 v0.6.2 新增的 cursor 资源用例。Windows 本地红的两类原因：(1) `executes the {arm64,x64} final helper...` 断言命令路径含 `Relocated Helper.app/Contents/MacOS/...`，但 Windows 的 `join()` 产出反斜杠；(2) `rejects a final package with {external,external-frame}-symlink...` 需 `symlinkSync`，Windows 无管理员权限报 `EPERM`。CI(Linux/macOS) 上应通过。
+  > 注（2026-09-14）：该 describe 的 `fixture()` 未写入 fork 要求的 `plugin-seed/.../marketplace.json`，导致**额外** 2 个 `records a skipped execution...` 用例因 fork 的 plugin-seed presence check 变红。已在 fixture 中补上该文件（fork 的检查本身是有效不变量，不应放宽）。
+- `scripts/pr/change-policy.test.ts > evaluateChangePolicy > plan-only mode publishes a blocked scope without preventing product jobs` — 用 `Bun.spawn` 起子进程跑 `change-policy.ts`，在 Windows 本地超 5s 未返回而 timeout；基线（`6bf0932a`）同样红。手动直接执行该脚本本身正常。
 
 ## desktop（vitest，`desktop-checks`）——quarantine 覆盖不到
 

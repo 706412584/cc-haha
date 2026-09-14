@@ -82,6 +82,74 @@ suite('Computer Use isolated persistent runtime', () => {
     ])
   })
 
+  test('the sandboxed worker completes paste, timer, and observation without replaying paste', async () => {
+    const runtime = createRuntime()
+    const calls: string[] = []
+    const image = { type: 'image' as const, data: 'AAH+/w==', mimeType: 'image/png' }
+    const invoke = async (name: string) => {
+      calls.push(name)
+      return { content: [{ type: 'text' as const, text: 'fixture state' }, image] }
+    }
+    const selected = await runtime.run({ code: 'var app = await cua.getApp("Fixture")', timeoutMs: 5000 }, invoke)
+    expect(selected.isError).not.toBe(true)
+    const result = await runtime.run({ code: `
+      await app.paste('query')
+      await new Promise(resolve => setTimeout(resolve, 0))
+      await app.getAXStateAndScreenshot()
+    `, timeoutMs: 5000 }, invoke)
+    expect(result.isError).not.toBe(true)
+    expect(calls).toEqual(['get_app_state', 'paste', 'get_app_state'])
+    expect(result.content).toEqual([{ type: 'text', text: 'fixture state' }, image])
+  })
+
+  test('cancellation during a timer wait resets its bindings and prevents the following action', async () => {
+    const runtime = createRuntime()
+    const abort = new AbortController()
+    const calls: string[] = []
+    let scheduled!: () => void
+    const timerScheduled = new Promise<void>(resolve => { scheduled = resolve })
+    const result = runtime.run({ code: `
+      var app = await cua.getApp('Fixture')
+      var waiting = new Promise(resolve => setTimeout(resolve, 10000))
+      await app.getAXState()
+      await waiting
+      await app.click([2,2])
+    `, timeoutMs: 5000, signal: abort.signal }, async name => {
+      calls.push(name)
+      if (calls.length === 2) scheduled()
+      return { content: [{ type: 'text', text: 'fixture state' }] }
+    })
+    // Surface a worker startup failure directly instead of waiting for a
+    // marker that can no longer arrive.
+    expect(await Promise.race([timerScheduled.then(() => true), result.then(() => false)])).toBe(true)
+    abort.abort()
+    const cancelled = await result
+    expect(cancelled.isError).toBe(true)
+    expect(cancelled.structuredContent).toMatchObject({ bindingsReset: true, nativeResultUnknown: false })
+    expect(calls).toEqual(['get_app_state', 'get_app_state'])
+    const fresh = await runtime.run({ code: 'nodeRepl.write(typeof waiting)', timeoutMs: 5000 }, async () => {
+      throw new Error('No native action expected')
+    })
+    expect(fresh.content).toEqual([{ type: 'text', text: 'undefined' }])
+  })
+
+  test('the parent deadline also terminates an awaited timer and its pending action', async () => {
+    const runtime = createRuntime()
+    const invoke = async () => ({ content: [] })
+    expect((await runtime.run({ code: 'var retained = 1', timeoutMs: 5000 }, invoke)).isError).not.toBe(true)
+    const result = await runtime.run({ code: `
+      await new Promise(resolve => setTimeout(resolve, 10000))
+      await cua.getApp('Must not dispatch')
+    `, timeoutMs: 150 }, async () => {
+      throw new Error('No native action expected')
+    })
+    expect(result.isError).toBe(true)
+    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('timed out') }])
+    expect(result.structuredContent).toMatchObject({ bindingsReset: true, nativeCallsStarted: 0 })
+    const fresh = await runtime.run({ code: 'nodeRepl.write(typeof retained)', timeoutMs: 5000 }, invoke)
+    expect(fresh.content).toEqual([{ type: 'text', text: 'undefined' }])
+  })
+
   test('terminates CPU loops, discards bindings, and starts a fresh kernel', async () => {
     const runtime = createRuntime()
     const invoke = async () => ({ content: [] })

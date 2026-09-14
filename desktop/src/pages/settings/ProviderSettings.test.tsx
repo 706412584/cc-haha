@@ -56,6 +56,7 @@ describe('ApiSmart sponsor provider', () => {
     expect(dialog.getByDisplayValue('deepseek-v4-flash-0731-tem')).toBeInTheDocument()
     expect(dialog.getByRole('switch', { name: 'Enable image generation' })).toBeChecked()
     expect(dialog.getByDisplayValue('doubao-seedream-5-0')).toBeInTheDocument()
+    fireEvent.change(dialog.getByRole('textbox', { name: 'Reply output budget' }), { target: { value: '48000' } })
 
     fireEvent.click(dialog.getByRole('button', { name: /Get API Key/ }))
     expect(open).toHaveBeenCalledWith('https://www.apismart.ai')
@@ -69,6 +70,7 @@ describe('ApiSmart sponsor provider', () => {
       authStrategy: 'api_key',
       apiKey: 'fake-apismart-key',
       imageGeneration: { model: 'doubao-seedream-5-0' },
+      requestCompatibility: { maxOutputTokens: 48000 },
       models: {
         main: 'deepseek-v4-pro-0813',
         haiku: 'deepseek-v4-flash-0731-tem',
@@ -168,5 +170,79 @@ describe('retired sponsor providers', () => {
     expect(useProviderStore.getState().providers.find((saved) => saved.id === provider.id))
       .toMatchObject({ ...provider, name: `${provider.name} edited` })
     expect(screen.getByTestId(`provider-${provider.id}`)).toHaveTextContent(`${provider.name} edited`)
+  })
+})
+
+describe('provider request compatibility', () => {
+  const provider = {
+    ...savedProviders[0]!, id: 'compat-provider', apiFormat: 'openai_chat' as const,
+    requestCompatibility: { maxOutputTokens: 64000, sampling: 'unsupported' as const, futureOption: { keep: true } },
+  }
+  beforeEach(() => {
+    useSettingsStore.setState({ locale: 'en' })
+    vi.spyOn(useSettingsStore.getState(), 'fetchAll').mockResolvedValue()
+    vi.spyOn(providersApi, 'list').mockResolvedValue({ providers: [provider], activeId: null })
+    vi.spyOn(providersApi, 'getSettings').mockResolvedValue({ env: { CUSTOM_ENV: 'keep' }, futureSetting: true })
+    vi.spyOn(providersApi, 'updateSettings').mockResolvedValue({ ok: true })
+    vi.spyOn(providersApi, 'update').mockImplementation(async (_id, input) => ({ provider: { ...provider, ...input } as SavedProvider }))
+  })
+  afterEach(() => { cleanup(); vi.restoreAllMocks() })
+  const open = async () => {
+    render(<ProviderSettings />)
+    const card = await screen.findByTestId('provider-compat-provider')
+    fireEvent.click(within(card).getByRole('button', { name: 'Edit' }))
+    const dialog = within(screen.getByRole('dialog'))
+    await waitFor(() => expect((dialog.getByRole('textbox', { name: 'Settings JSON' }) as HTMLTextAreaElement).value).toContain('CUSTOM_ENV'))
+    return dialog
+  }
+  it('loads, edits and saves compatibility while preserving unknown provider fields', async () => {
+    const dialog = await open()
+    const budget = dialog.getByRole('textbox', { name: 'Reply output budget' })
+    expect(budget).toHaveValue('64000')
+    fireEvent.change(budget, { target: { value: '48000' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Advanced compatibility' }))
+    expect(dialog.getByRole('combobox', { name: 'Sampling parameters' })).toHaveValue('unsupported')
+    fireEvent.change(dialog.getByRole('combobox', { name: 'Output token field' }), { target: { value: 'max_completion_tokens' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalledWith('compat-provider', expect.objectContaining({ requestCompatibility: { maxOutputTokens: 48000, sampling: 'unsupported', outputTokenField: 'max_completion_tokens', futureOption: { keep: true } } })))
+    const settings = vi.mocked(providersApi.updateSettings).mock.calls.at(-1)?.[0]
+    expect(settings).not.toHaveProperty('requestCompatibility')
+    expect(settings).toMatchObject({ futureSetting: true, env: { CUSTOM_ENV: 'keep', CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS: '48000' } })
+  })
+  it('disables save for invalid budgets and clearing sends null', async () => {
+    const dialog = await open()
+    fireEvent.change(dialog.getByRole('textbox', { name: 'Reply output budget' }), { target: { value: '-3' } })
+    expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled()
+    expect(dialog.getByRole('alert')).toHaveTextContent('positive whole number')
+    fireEvent.click(dialog.getByRole('button', { name: 'Reset compatibility' }))
+    fireEvent.click(dialog.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalledWith('compat-provider', expect.objectContaining({ requestCompatibility: null })))
+    expect(vi.mocked(providersApi.updateSettings).mock.calls.at(-1)?.[0]).not.toHaveProperty('env.CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS')
+  })
+  it('raw JSON updates and removes the same provider configuration', async () => {
+    const dialog = await open()
+    const editor = dialog.getByRole('textbox', { name: 'Settings JSON' })
+    const parsed = JSON.parse((editor as HTMLTextAreaElement).value)
+    parsed.requestCompatibility = { maxOutputTokens: 42000, reasoning: 'unsupported' }
+    fireEvent.change(editor, { target: { value: JSON.stringify(parsed) } })
+    expect(dialog.getByRole('textbox', { name: 'Reply output budget' })).toHaveValue('42000')
+    const next = JSON.parse((editor as HTMLTextAreaElement).value)
+    delete next.requestCompatibility
+    fireEvent.change(editor, { target: { value: JSON.stringify(next) } })
+    expect(dialog.getByRole('textbox', { name: 'Reply output budget' })).toHaveValue('')
+    fireEvent.click(dialog.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalledWith('compat-provider', expect.objectContaining({ requestCompatibility: null, baseUrl: provider.baseUrl })))
+  })
+  it('shows Responses capabilities without Chat-only token parameter controls', async () => {
+    vi.mocked(providersApi.list).mockResolvedValue({ providers: [{ ...provider, apiFormat: 'openai_responses' }], activeId: null })
+    const dialog = await open()
+    fireEvent.click(dialog.getByRole('button', { name: 'Advanced compatibility' }))
+    expect(dialog.queryByRole('combobox', { name: 'Output token field' })).not.toBeInTheDocument()
+    expect(dialog.getByRole('combobox', { name: 'Reasoning parameters' })).toBeInTheDocument()
+  })
+  it('keeps compatibility controls hidden for Anthropic providers', async () => {
+    vi.mocked(providersApi.list).mockResolvedValue({ providers: [{ ...provider, apiFormat: 'anthropic' }], activeId: null })
+    const dialog = await open()
+    expect(dialog.queryByRole('textbox', { name: 'Reply output budget' })).not.toBeInTheDocument()
   })
 })

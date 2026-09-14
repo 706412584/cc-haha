@@ -1,4 +1,5 @@
-﻿import { OpenAICodexTurnState } from '../openaiAuth/turnState.js';
+﻿import { getConfiguredProviderOutputBudget, getOutputBudgetHeaders, markOutputBudgetSource } from './outputBudget.js'
+import { OpenAICodexTurnState } from '../openaiAuth/turnState.js';
 import type {
   BetaContentBlock,
   BetaContentBlockParam,
@@ -992,6 +993,7 @@ export async function* executeNonStreamingRequest(
           {
             signal: retryOptions.signal,
             timeout: fallbackTimeoutMs,
+            headers: getOutputBudgetHeaders(retryParams),
           },
         );
       } catch (err) {
@@ -2063,8 +2065,15 @@ async function* queryModel(
       : undefined;
 
     lastRequestBetas = betasParams;
+    const explicitOutputBudget = Boolean(
+      retryContext?.maxTokensOverride || options.maxOutputTokensOverride ||
+      getConfiguredProviderOutputBudget() ||
+      (Number.isSafeInteger(Number(process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS)) &&
+        Number(process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS) > 0) ||
+      extraBodyParams.max_tokens !== undefined
+    )
 
-    return {
+    return markOutputBudgetSource({
       model: normalizeModelStringForAPI(options.model),
       messages: addCacheBreakpoints(
         messagesForAPI,
@@ -2092,7 +2101,7 @@ async function* queryModel(
         output_config: outputConfig,
       }),
       ...(speed !== undefined && { speed }),
-    };
+    }, explicitOutputBudget ? 'explicit' : 'default');
   };
 
   // Compute log scalars synchronously so the fire-and-forget .then() closure
@@ -2198,9 +2207,10 @@ async function* queryModel(
             { ...params, stream: true },
             {
               signal,
-              ...(clientRequestId && {
-                headers: { [CLIENT_REQUEST_ID_HEADER]: clientRequestId },
-              }),
+              headers: {
+                ...getOutputBudgetHeaders(params),
+                ...(clientRequestId ? { [CLIENT_REQUEST_ID_HEADER]: clientRequestId } : {}),
+              },
             },
           )
           .withResponse();
@@ -4116,6 +4126,14 @@ function isMaxTokensCapEnabled(): boolean {
 
 export function getMaxOutputTokensForModel(model: string): number {
   const maxOutputTokens = getModelMaxOutputTokens(model);
+  const providerBudget = getConfiguredProviderOutputBudget()
+  const globalBudget = Number(process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS)
+  const hasValidGlobalBudget = Number.isSafeInteger(globalBudget) && globalBudget > 0
+  if (!hasValidGlobalBudget && providerBudget !== undefined) {
+    // The provider's explicit setting is not constrained by a guessed model
+    // family maximum. The proxy applies a known endpoint limit when configured.
+    return providerBudget
+  }
 
   // Slot-reservation cap: drop default to 8k for all models. BQ p99 output
   //  = 4,911 tokens; 32k/64k defaults over-reserve 8-16× slot capacity.

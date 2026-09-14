@@ -1,3 +1,4 @@
+import { getOutputBudgetHeaders } from '../services/api/outputBudget.js'
 import type Anthropic from '@anthropic-ai/sdk'
 import type { BetaToolUnion } from '@anthropic-ai/sdk/resources/beta/messages.js'
 import {
@@ -227,7 +228,7 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
       ...(betas.length > 0 && { betas }),
       metadata: getAPIMetadata(),
     },
-    { signal },
+    { signal, headers: getOutputBudgetHeaders({}) },
   )
 
   const requestId =
