@@ -42,6 +42,14 @@ fork 之前把后台 agent 的完成通知从「完成即直塞命令队列」�
 - `src/server/__tests__/ws-memory-events.test.ts > WebSocket memory events > forwards nested task ownership without marking the main turn as tool executing`（与根因 A 同源的 ownership 断言）
 - `src/utils/swarm/inProcessRunner.test.ts`（单跑 23 pass / 0 fail）
 
+### 端口竞争型 flaky（`check:server` 偶发）
+
+- `src/server/__tests__/diagnostics-service.test.ts > DiagnosticsService > keeps fatal startup errors visible on stderr while recording diagnostics`
+  - **现象**：断言 `stderr` 含 `Failed to start server. Is port <N> in use?`，实际收到 `[Server] Uncaught exception:\nError\n at startServer (src/server/index.ts:549:30)` —— 错误对象存在但 `message` 为空，于是 `index.ts:545` 走了 `error.message` 分支而非端口 fallback。
+  - **判定**：测试启动第二个 server 进程抢占同一端口，属环境时序竞争。**同一 commit 上重跑即通过**（2026-09-14：`server-checks` 首跑红、`gh run rerun --failed` 后 pass），本地单跑 38 pass / 0 fail。
+  - **与本仓库改动无关**：该文件在 pre-merge 基线（`6bf0932a`）即存在，本次合并与上游 v0.6.2 均未触及它（`git diff` 为空）。
+  - **处置**：重跑该 job，无需改代码。
+
 ## 根因 C：Windows 环境限制（路径/符号链接/长度）
 
 - `src/utils/workflows/save.test.ts > refuses when the project .claude directory is itself a symlink` — Windows `symlink` 需要管理员权限，本地报 `EPERM`。
