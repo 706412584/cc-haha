@@ -55,6 +55,24 @@ fork 之前把后台 agent 的完成通知从「完成即直塞命令队列」�
   > 注（2026-09-14）：该 describe 的 `fixture()` 未写入 fork 要求的 `plugin-seed/.../marketplace.json`，导致**额外** 2 个 `records a skipped execution...` 用例因 fork 的 plugin-seed presence check 变红。已在 fixture 中补上该文件（fork 的检查本身是有效不变量，不应放宽）。
 - `scripts/pr/change-policy.test.ts > evaluateChangePolicy > plan-only mode publishes a blocked scope without preventing product jobs` — 用 `Bun.spawn` 起子进程跑 `change-policy.ts`，在 Windows 本地超 5s 未返回而 timeout；基线（`6bf0932a`）同样红。手动直接执行该脚本本身正常。
 
+## 上游新增、但 CI 从未验证过的 GUI 集成测试（`macos-swift-checks`）
+
+> **与上文「预存」的区别**：下面这条**不在** pre-merge 基线上（基线没有这个测试），所以基线对照法不适用。它的性质是「上游新加的测试，其环境假设在本仓库 CI 上不成立」——不是我们的回归，也不能靠基线对照证明。
+
+### `testVisibleCursorSurvivesRepeatedClicksAndTracksExposedBackgroundWindow`
+
+- **位置**：`native/cu-helper/Tests/CuHelperTests/AXTreePublicationIntegrationTests.swift`（引入于上游 `0bcbfe69`，2026-09-11）
+- **失败**：`ForegroundLease.swift:417` — `[focus_changed] The target lost focus while preparing input.`
+- **归因证据**：
+  - v0.6.1(`7b80cef4`)→v0.6.2(`85e7f3a2`) 该文件**只新增这一个** `func test`（6 → 7）；PR #156(v0.6.1) 的 `macos-swift-checks` **success**，PR #157(v0.6.2) **fail**。
+  - 三次独立 CI 运行（`103829173862`/`103852529671`/`103865067520`）同测试、同错误、同行号 —— **确定性失败**，非 flaky。
+  - 同 suite 另 6 个测试全部通过，只有它失败。差异是它独有的 `verifyVisibleClicks` 分支要求真实**前台焦点**（`frontmostApplication?.processIdentifier == pid`，该文件 483/523 行），其余测试从不要求这个条件。
+  - 权限已授予（日志中无 `XCTSkip`/`Skipped`），测试确实执行；失败形态是 `focus_changed` **抛错**而非 `Timed out waiting`，即前台等待已通过、随后 click 循环中焦点被抢。
+  - **与 fork 无关**：`native/` 与上游 v0.6.2 逐字节相同；`scripts/pr/run-swift-checks.ts` 未改；`macos-swift-checks` job 定义与上游逐字相同（workflow 的差异全在 Linux job 的 ripgrep 安装，与此 job 无关）。
+- **上游从未验证过它**：三个 swift=success 的 run（`34139498857`/`34138429173`/`34138137420`）都在 2026-09-07，而该测试 09-11 才引入；用 `git show <sha>:<file> | grep -c testVisibleCursorSurvives` 证实这些 SHA 中计数为 0。该测试引入后，上游仅两次 PR Quality run，`macos-swift-checks` 均 **skipped**（只改 docs）。
+- **尚未证实**：未能证实「共享 runner 焦点竞争」是唯一根因，只证实该测试要求一个其余 6 个测试都不要求的环境条件（稳定前台焦点），且该条件在本 CI 上不成立。GitHub macOS runner 是否允许 GUI 前台切换、是否可配置 session 类型，未取证。
+- **处置**：按已知失败放行，合并后单独处理（可选方向：查清 runner 的 GUI 会话能力 / 按上游语义补 skip 条件）。
+
 ## desktop（vitest，`desktop-checks`）——quarantine 覆盖不到
 
 `quarantine.json` 只作用于 `check:server`，**不覆盖 desktop vitest**。下列 desktop 测试在 pre-merge 基线同样全红，属预存：
