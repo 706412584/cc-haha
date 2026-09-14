@@ -483,14 +483,30 @@ final class AXTreePublicationIntegrationTests: XCTestCase {
         try await waitUntil(description: "disposable receiver is foreground") {
             NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
         }
+        // TEMP-DIAG: dump the focus belief around each click so the CI log shows
+        // exactly what bumps `generation` before `confirm()` rejects it.
+        func diagDump(_ phase: String, _ step: Int) {
+            let belief = SyntheticWindowFocus.beliefs[pid]
+            print("[TEMP-DIAG] step=\(step) phase=\(phase) frontmost=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1) self=\(getpid()) target=\(pid) gen=\(belief?.generation ?? 0) believesActive=\(belief?.applicationBelievesItIsActive ?? false) believesFocus=\(belief?.applicationBelievesItHasFocus ?? false) realActive=\(belief?.applicationIsActive ?? false) focused=\(FocusEventMonitor.shared.isAppCurrentlyFocused(pid: pid))")
+        }
+        diagDump("before-loop", -1)
         for step in 0..<12 {
             // Retain the layers across await: a removed ripple's address can
             // otherwise be reused by the next layer and look like no new ring.
             let before = ripples()
-            try await click(button: step % 3 == 2 ? "right" : "left", count: step % 3 == 1 ? 2 : 1)
+            diagDump("pre-click", step)
+            do {
+                try await click(button: step % 3 == 2 ? "right" : "left", count: step % 3 == 1 ? 2 : 1)
+            } catch {
+                diagDump("click-threw", step)
+                print("[TEMP-DIAG] error=\(error)")
+                throw error
+            }
+            diagDump("post-click", step)
             XCTAssertTrue(overlays.contains { $0.isVisible })
             XCTAssertTrue(ripples().contains { layer in !before.contains { $0 === layer } }, "Click \(step) must create visible feedback")
         }
+        diagDump("after-loop", 12)
         try await waitUntil(description: "16 mouse-up receipts from 12 single/double/right click commands") {
             guard let data = try? Data(contentsOf: gestures),
                   let receipt = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
