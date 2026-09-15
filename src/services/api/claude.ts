@@ -2953,6 +2953,9 @@ async function* queryModel(
         // Prevent double-emit: this throw lands in the catch block below,
         // whose exit_path='error' probe guards on streamWatchdogFiredAt.
         streamWatchdogFiredAt = null;
+        // Every path that sets streamIdleAborted also sets
+        // streamWatchdogTimeoutError, so the right-hand side is only a
+        // type-level fallback.
         throw streamWatchdogTimeoutError ??
           streamWatchdogState.createTimeoutError(
             streamAbortReason ?? "idle",
@@ -2960,9 +2963,7 @@ async function* queryModel(
               ? STREAM_MAX_DURATION_MS
               : streamAbortReason === "tool_input_duration"
                 ? STREAM_TOOL_INPUT_MAX_DURATION_MS
-                : streamAbortReason === "thinking_duration"
-                  ? STREAM_MAX_THINKING_DURATION_MS
-                  : currentStreamIdleTimeoutMs,
+                : currentStreamIdleTimeoutMs,
           );
       }
 
