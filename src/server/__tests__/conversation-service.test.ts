@@ -279,8 +279,10 @@ describe('ConversationService', () => {
   test('buildChildEnv injects stream watchdog + overall max-duration so a trickling provider stream cannot hang the desktop forever (#766)', async () => {
     const prev = process.env.CLAUDE_STREAM_MAX_DURATION_MS
     const previousToolInputDuration = process.env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS
+    const previousThinkingDuration = process.env.CLAUDE_STREAM_MAX_THINKING_DURATION_MS
     delete process.env.CLAUDE_STREAM_MAX_DURATION_MS
     delete process.env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS
+    delete process.env.CLAUDE_STREAM_MAX_THINKING_DURATION_MS
     try {
       const service = new ConversationService() as any
       const env = (await service.buildChildEnv('/tmp')) as Record<string, string>
@@ -293,6 +295,11 @@ describe('ConversationService', () => {
       // 240s apart keeps it alive forever. The overall-duration cap is NOT reset
       // by chunks and is what actually frees that case (#766).
       expect(env.CLAUDE_STREAM_MAX_DURATION_MS).toBe('600000')
+      // A reasoning loop that only ever emits thinking chunks resets the idle
+      // timer too, and would otherwise wait out the full 600s cap. The CLI
+      // defaults this to 0 (disabled), so the desktop MUST inject it or the
+      // fast-fail silently never arms.
+      expect(env.CLAUDE_STREAM_MAX_THINKING_DURATION_MS).toBe('300000')
       // Tool JSON gets a shorter inactivity budget. Progress resets it, while
       // the overall response cap still bounds a stream that trickles forever.
       expect(env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS).toBe('120000')
@@ -305,6 +312,11 @@ describe('ConversationService', () => {
         delete process.env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS
       } else {
         process.env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS = previousToolInputDuration
+      }
+      if (previousThinkingDuration === undefined) {
+        delete process.env.CLAUDE_STREAM_MAX_THINKING_DURATION_MS
+      } else {
+        process.env.CLAUDE_STREAM_MAX_THINKING_DURATION_MS = previousThinkingDuration
       }
     }
   })

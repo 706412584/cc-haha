@@ -141,6 +141,122 @@ describe('stream watchdog state', () => {
     expect(error.message).toContain('last event: text_delta')
   })
 
+  test('classifies a thinking-only abort separately from other watchdog aborts', () => {
+    const state = createStreamWatchdogState()
+    state.recordEvent({ type: 'message_start' })
+    state.recordEvent({
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'thinking' },
+    })
+    state.recordEvent({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'thinking_delta', thinking: 'Let me write the commands.' },
+    })
+
+    const error = state.createTimeoutError('thinking_duration', 300_000)
+
+    expect(error.code).toBe('STREAM_THINKING_DURATION')
+    expect(error.safeToRetryStream()).toBe(false)
+    expect(error.message).toContain('Thinking stream exceeded 300s')
+    expect(error.message).toContain('last event: thinking_delta')
+  })
+
+  test('flags a stream that only ever emitted thinking deltas', () => {
+    const state = createStreamWatchdogState()
+    expect(state.isThinkingOnlyStall()).toBe(false)
+
+    state.recordEvent({ type: 'message_start' })
+    expect(state.isThinkingOnlyStall()).toBe(false)
+
+    state.recordEvent({
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'thinking' },
+    })
+    // Opening a reasoning block is already "entered reasoning" — a gateway may
+    // never send a thinking_delta at all (only signature_delta, or a redacted
+    // block). The guard only fires after the full budget, by which point a
+    // healthy stream has produced text.
+    expect(state.isThinkingOnlyStall()).toBe(true)
+
+    state.recordEvent({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'thinking_delta', thinking: 'working' },
+    })
+    expect(state.isThinkingOnlyStall()).toBe(true)
+  })
+
+  test('does not flag a long think once it produces text or a tool call', () => {
+    const thinking = (state: ReturnType<typeof createStreamWatchdogState>) => {
+      state.recordEvent({ type: 'message_start' })
+      state.recordEvent({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'thinking' },
+      })
+      state.recordEvent({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'thinking_delta', thinking: 'deep reasoning' },
+      })
+    }
+
+    const withText = createStreamWatchdogState()
+    thinking(withText)
+    withText.recordEvent({
+      type: 'content_block_delta',
+      index: 1,
+      delta: { type: 'text_delta', text: 'Here is the answer' },
+    })
+    expect(withText.isThinkingOnlyStall()).toBe(false)
+
+    const withTool = createStreamWatchdogState()
+    thinking(withTool)
+    withTool.recordEvent({
+      type: 'content_block_start',
+      index: 1,
+      content_block: { type: 'tool_use' },
+    })
+    expect(withTool.isThinkingOnlyStall()).toBe(false)
+
+    const afterStop = createStreamWatchdogState()
+    thinking(afterStop)
+    afterStop.recordEvent({ type: 'message_stop' })
+    expect(afterStop.isThinkingOnlyStall()).toBe(false)
+  })
+
+  test('flags a reasoning stall that never emits a thinking delta', () => {
+    // Some OpenAI-compatible gateways open the block and then only send
+    // signature_delta events, or open redacted_thinking outright. Neither
+    // increments thinkingDeltaCount, so the guard must not key on it alone.
+    const signatureOnly = createStreamWatchdogState()
+    signatureOnly.recordEvent({ type: 'message_start' })
+    signatureOnly.recordEvent({
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'thinking' },
+    })
+    signatureOnly.recordEvent({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'signature_delta', signature: 'abc' },
+    })
+    expect(signatureOnly.snapshot().thinkingDeltaCount).toBe(0)
+    expect(signatureOnly.isThinkingOnlyStall()).toBe(true)
+
+    const redacted = createStreamWatchdogState()
+    redacted.recordEvent({ type: 'message_start' })
+    redacted.recordEvent({
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'redacted_thinking', data: 'opaque' },
+    })
+    expect(redacted.isThinkingOnlyStall()).toBe(true)
+  })
+
   test('does not retry a tool input that exceeded its generation budget', () => {
     const state = createStreamWatchdogState()
     state.recordEvent({ type: 'message_start' })

@@ -450,7 +450,7 @@ export async function compactConversation(
   // hang with CPU still churning.
   const timeoutMs = getCompactTimeoutMs()
   const compactAbort = createChildAbortController(context.abortController)
-  const { compactTimeout, timedOut } = armCompactTimeout(compactAbort, timeoutMs)
+  const { compactTimeout, timedOut, deadline } = armCompactTimeout(compactAbort, timeoutMs)
   try {
     if (messages.length === 0) {
       throw new Error(ERROR_MESSAGE_NOT_ENOUGH_MESSAGES)
@@ -506,15 +506,18 @@ export async function compactConversation(
     let summary: string | null
     let ptlAttempts = 0
     for (;;) {
-      summaryResponse = await streamCompactSummary({
-        messages: messagesToSummarize,
-        summaryRequest,
-        appState,
-        context,
-        preCompactTokenCount,
-        cacheSafeParams: retryCacheSafeParams,
-        compactAbort,
-      })
+      summaryResponse = await raceCompactDeadline(
+        streamCompactSummary({
+          messages: messagesToSummarize,
+          summaryRequest,
+          appState,
+          context,
+          preCompactTokenCount,
+          cacheSafeParams: retryCacheSafeParams,
+          compactAbort,
+        }),
+        deadline,
+      )
       summary = getAssistantMessageText(summaryResponse)
       if (!summary?.startsWith(PROMPT_TOO_LONG_ERROR_MESSAGE)) break
 
@@ -838,20 +841,73 @@ export async function compactConversation(
  * the returned `timedOut` flag so the catch site can re-tag the surfaced
  * error (abort reasons are otherwise collapsed to APIUserAbortError
  * downstream and the timeout becomes indistinguishable from user Esc).
+ *
+ * `deadline` is the same expiry expressed as a rejecting promise. Aborting a
+ * signal only *asks* the in-flight request to stop: a relay that keeps
+ * streaming content deltas never observes it, so the summarize fork can stay
+ * inside its for-await loop indefinitely and `compactConversation`'s finally
+ * never runs — the desktop then sits on "thinking" until the unrelated 600s
+ * stream cap fires (or forever, when the watchdog is disabled). Racing the
+ * summarize call against this deadline makes the wall clock authoritative.
  */
 function armCompactTimeout(
   compactAbort: AbortController,
   timeoutMs: number,
-): { compactTimeout: ReturnType<typeof setTimeout> | undefined; timedOut: () => boolean } {
+): {
+  compactTimeout: ReturnType<typeof setTimeout> | undefined
+  timedOut: () => boolean
+  deadline: Promise<never>
+} {
   let timedOut = false
+  let rejectDeadline: (error: Error) => void = () => {}
+  const deadline = new Promise<never>((_resolve, reject) => {
+    rejectDeadline = reject
+  })
+  // The deadline promise is only awaited inside the race helper; on the paths
+  // that finish first (or throw before reaching a summarize call) nothing ever
+  // consumes its rejection. Mark it handled so an expiry after completion
+  // cannot surface as an unhandled rejection.
+  deadline.catch(() => {})
   const compactTimeout =
     timeoutMs > 0
       ? setTimeout(() => {
           timedOut = true
-          compactAbort.abort(new Error(ERROR_MESSAGE_COMPACT_TIMEOUT))
+          const error = new Error(ERROR_MESSAGE_COMPACT_TIMEOUT)
+          compactAbort.abort(error)
+          rejectDeadline(error)
         }, timeoutMs)
       : undefined
-  return { compactTimeout, timedOut: () => timedOut }
+  return { compactTimeout, timedOut: () => timedOut, deadline }
+}
+
+/**
+ * Await `operation`, but give up when the compaction deadline expires — even
+ * if the underlying request never observes the abort signal.
+ *
+ * Contract for callers: `operation` must be able to stop once abandoned, or it
+ * keeps running in the background. Both current callers are safe, for
+ * different reasons:
+ *   - the forked-agent path is aborted via `compactAbort` (the SDK fetch honors
+ *     the signal), and the fork runs on an isolated subagent context with
+ *     `skipTranscript`, so it cannot mutate parent state or write sidechain
+ *     transcripts;
+ *   - the streaming fallback path cannot be aborted through the signal when a
+ *     relay ignores it, but its generator chain unwinds because the consumer
+ *     stops pulling, and `queryModel`'s finally releases the socket. That path
+ *     passes the PARENT's `setStreamMode`/`setResponseLength` into the request,
+ *     so anything keeping it alive after abandonment would keep writing parent
+ *     UI. Do not restructure `queryModelWithStreaming` into a buffering
+ *     (non-passthrough) generator without preserving this.
+ */
+async function raceCompactDeadline<T>(
+  operation: Promise<T>,
+  deadline: Promise<never>,
+): Promise<T> {
+  // Defensive: if this helper is ever refactored away from Promise.race (which
+  // already subscribes to both inputs), the abandoned operation still has an
+  // owner for its rejection.
+  operation.catch(() => {})
+  return Promise.race([operation, deadline])
 }
 
 /**
@@ -872,7 +928,7 @@ export async function partialCompactConversation(
   // Same wall-clock bound as compactConversation — see the rationale there.
   const timeoutMs = getCompactTimeoutMs()
   const compactAbort = createChildAbortController(context.abortController)
-  const { compactTimeout, timedOut } = armCompactTimeout(compactAbort, timeoutMs)
+  const { compactTimeout, timedOut, deadline } = armCompactTimeout(compactAbort, timeoutMs)
   try {
     const messagesToSummarize =
       direction === 'up_to'
@@ -956,15 +1012,18 @@ export async function partialCompactConversation(
     let summary: string | null
     let ptlAttempts = 0
     for (;;) {
-      summaryResponse = await streamCompactSummary({
-        messages: apiMessages,
-        summaryRequest,
-        appState: context.getAppState(),
-        context,
-        preCompactTokenCount,
-        cacheSafeParams: retryCacheSafeParams,
-        compactAbort,
-      })
+      summaryResponse = await raceCompactDeadline(
+        streamCompactSummary({
+          messages: apiMessages,
+          summaryRequest,
+          appState: context.getAppState(),
+          context,
+          preCompactTokenCount,
+          cacheSafeParams: retryCacheSafeParams,
+          compactAbort,
+        }),
+        deadline,
+      )
       summary = getAssistantMessageText(summaryResponse)
       if (!summary?.startsWith(PROMPT_TOO_LONG_ERROR_MESSAGE)) break
 
