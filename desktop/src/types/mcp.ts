@@ -137,3 +137,8 @@ export type McpToggleResult = {
   server: McpServerRecord
   sessionSync?: McpSessionSync
 }
+
+// Create/reconnect responses carry a sessionSync receipt (create fans the
+// hot-injection out to open sessions). updateServer returns the same shape
+// but without sessionSync — editing a config does not sync running sessions.
+export type McpUpsertResult = McpToggleResult

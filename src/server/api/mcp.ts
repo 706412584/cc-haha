@@ -133,10 +133,11 @@ function parseScopeParam(value: string | null): ConfigScope {
   }
 }
 
-async function syncMcpToggleToSession(
+async function syncMcpControlToSession(
   sessionId: string | undefined,
   server: McpServerIdentity,
-  enabled: boolean,
+  buildRequest: (name: string) => Record<string, unknown>,
+  timeoutMs = 120_000,
 ): Promise<McpSessionSyncDto> {
   if (!sessionId) return { applied: false, reason: 'no_session' }
   if (!conversationService.hasSession(sessionId)) {
@@ -166,8 +167,8 @@ async function syncMcpToggleToSession(
   try {
     await conversationService.requestControl(
       sessionId,
-      { subtype: 'mcp_toggle', serverName: server.name, enabled, alreadyPersisted: true },
-      120_000,
+      buildRequest(server.name),
+      timeoutMs,
     )
     return { applied: true }
   } catch (error) {
@@ -177,6 +178,34 @@ async function syncMcpToggleToSession(
       error: error instanceof Error ? error.message : String(error),
     }
   }
+}
+
+async function syncMcpToggleToSession(
+  sessionId: string | undefined,
+  server: McpServerIdentity,
+  enabled: boolean,
+): Promise<McpSessionSyncDto> {
+  return syncMcpControlToSession(sessionId, server, (name) => ({
+    subtype: 'mcp_toggle',
+    serverName: name,
+    enabled,
+    alreadyPersisted: true,
+  }))
+}
+
+// Hot-inject a server the session never knew about (just added, or refreshed
+// after a missed injection). The CLI's mcp_reconnect handler resolves config
+// from disk first, so a brand-new server connects and its tools appear in
+// appState/dynamicMcpState for the next turn without restarting the session.
+async function syncMcpReconnectToSession(
+  sessionId: string | undefined,
+  server: McpServerIdentity,
+  timeoutMs?: number,
+): Promise<McpSessionSyncDto> {
+  return syncMcpControlToSession(sessionId, server, (name) => ({
+    subtype: 'mcp_reconnect',
+    serverName: name,
+  }), timeoutMs)
 }
 
 function resolveRequestCwd(url: URL, body?: Record<string, unknown>): string {
@@ -747,7 +776,21 @@ async function createServer(body: Record<string, unknown>): Promise<Response> {
     throw ApiError.internal(`Created MCP server "${name}" could not be reloaded`)
   }
 
-  return Response.json({ server: serializeServerSnapshot(name, created) }, { status: 201 })
+  // Hot-inject into every open session (and the requesting tab) so the new
+  // server's tools are available on the next turn without an IDE restart.
+  // Sessions in other projects are skipped by the per-session project guard;
+  // conversations opened later read the config from disk at startup.
+  // Shorter budget than the refresh path: a server that hangs on connect must
+  // not block this HTTP response past the desktop client's 120s timeout, which
+  // would make a second Save click hit 409 "already exists" while the user
+  // believes the create failed. The refresh button remains the recovery path.
+  const sessionSync = await syncMcpControlToSessions(
+    optionalString(body.sessionId),
+    getServerIdentity(name, created),
+    (id, server) => syncMcpReconnectToSession(id, server, 60_000),
+  )
+
+  return Response.json({ server: serializeServerSnapshot(name, created), sessionSync }, { status: 201 })
 }
 
 async function updateServer(name: string, body: Record<string, unknown>): Promise<Response> {
@@ -826,16 +869,16 @@ async function deleteServer(name: string, url: URL): Promise<Response> {
 // enable's connection. Persisting a disable never waits behind a slow probe.
 const enableProbeQueues = new Map<string, Promise<Response>>()
 
-async function syncMcpToggleToSessions(
+async function syncMcpControlToSessions(
   sessionId: string | undefined,
   server: McpServerIdentity,
-  enabled: boolean,
+  syncOne: (sessionId: string | undefined, server: McpServerIdentity) => Promise<McpSessionSyncDto>,
 ): Promise<McpSessionSyncDto> {
   const sessionIds = [...new Set([
     ...(sessionId ? [sessionId] : []),
     ...conversationService.getActiveSessions(),
   ])]
-  const results = await Promise.all(sessionIds.map(id => syncMcpToggleToSession(id, server, enabled)))
+  const results = await Promise.all(sessionIds.map(id => syncOne(id, server)))
   const failure = results.find(result => result.reason === 'failed')
   return failure ?? (sessionId ? results[sessionIds.indexOf(sessionId)]! : { applied: false, reason: 'no_session' })
 }
@@ -850,7 +893,11 @@ async function toggleServer(name: string, sessionId?: string): Promise<Response>
   const enabled = isMcpServerDisabledForExecution(name)
   setMcpServerEnabled(name, enabled)
   if (!enabled) await clearServerCache(name, existing).catch(() => {})
-  const sessionSync = await syncMcpToggleToSessions(sessionId, serverIdentity, enabled)
+  const sessionSync = await syncMcpControlToSessions(
+    sessionId,
+    serverIdentity,
+    (id, server) => syncMcpToggleToSession(id, server, enabled),
+  )
 
   if (!enabled) {
     const updated = serializeServerSnapshot(name, existing)
@@ -874,7 +921,7 @@ async function toggleServer(name: string, sessionId?: string): Promise<Response>
   return next
 }
 
-async function reconnectServer(name: string): Promise<Response> {
+async function reconnectServer(name: string, sessionId?: string): Promise<Response> {
   const existing = await resolveServerForRuntimeAction(name)
   if (!existing) {
     throw ApiError.notFound(`MCP server not found: ${name}`)
@@ -891,6 +938,15 @@ async function reconnectServer(name: string): Promise<Response> {
   const result = await reconnectMcpServerImpl(name, existing)
   await clearServerCache(name, existing).catch(() => {})
 
+  // The refresh button is the recovery path when a session missed hot
+  // injection (e.g. it started before the server was added). Fan out the
+  // same mcp_reconnect control message so open tabs pick the server up.
+  const sessionSync = await syncMcpControlToSessions(
+    sessionId,
+    getServerIdentity(name, existing),
+    syncMcpReconnectToSession,
+  )
+
   const server = await serializeServerWithLiveStatus(name, existing)
   const statusDetail =
     result.client.type === 'failed' && 'error' in result.client ? result.client.error : undefined
@@ -900,6 +956,7 @@ async function reconnectServer(name: string): Promise<Response> {
       ...server,
       ...(statusDetail ? { statusDetail } : {}),
     },
+    sessionSync,
   })
 }
 
@@ -992,7 +1049,7 @@ export async function handleMcpApi(
       }
 
       if (req.method === 'POST' && serverName && action === 'reconnect') {
-        return reconnectServer(serverName)
+        return reconnectServer(serverName, optionalString(body?.sessionId))
       }
 
       throw new ApiError(405, `Method ${req.method} not allowed`, 'METHOD_NOT_ALLOWED')

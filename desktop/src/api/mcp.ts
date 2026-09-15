@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { MarketplaceCatalog, MarketplaceRemoteSource, McpServerRecord, McpToggleResult, McpToolToggleResult, McpToolsResult, McpUpsertPayload } from '../types/mcp'
+import type { MarketplaceCatalog, MarketplaceRemoteSource, McpServerRecord, McpToggleResult, McpToolToggleResult, McpToolsResult, McpUpsertPayload, McpUpsertResult } from '../types/mcp'
 
 export const mcpApi = {
   list: (cwd?: string) => {
@@ -75,11 +75,12 @@ export const mcpApi = {
       ),
   },
 
-  create: (name: string, payload: McpUpsertPayload, cwd?: string) => {
-    return api.post<{ server: McpServerRecord }>('/api/mcp', {
+  create: (name: string, payload: McpUpsertPayload, cwd?: string, sessionId?: string) => {
+    return api.post<McpUpsertResult>('/api/mcp', {
       name,
       ...payload,
       ...(cwd ? { cwd } : {}),
+      ...(sessionId ? { sessionId } : {}),
     })
   },
 
@@ -107,7 +108,10 @@ export const mcpApi = {
     )
   },
 
-  reconnect: (name: string, cwd?: string) => {
-    return api.post<{ server: McpServerRecord }>(`/api/mcp/${encodeURIComponent(name)}/reconnect`, cwd ? { cwd } : {})
+  reconnect: (name: string, cwd?: string, sessionId?: string) => {
+    return api.post<McpUpsertResult>(`/api/mcp/${encodeURIComponent(name)}/reconnect`, {
+      ...(cwd ? { cwd } : {}),
+      ...(sessionId ? { sessionId } : {}),
+    })
   },
 }

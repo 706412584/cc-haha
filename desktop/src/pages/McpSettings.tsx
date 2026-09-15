@@ -21,7 +21,7 @@ import { useSessionStore } from '../stores/sessionStore'
 import { mcpApi } from '../api/mcp'
 import { getDesktopHost } from '../lib/desktopHost'
 import { MarketplacePage } from './McpMarketplace'
-import type { McpServerRecord, McpToolInfo, McpToolsResult, McpUpsertPayload, McpWritableScope } from '../types/mcp'
+import type { McpServerRecord, McpSessionSync, McpToolInfo, McpToolsResult, McpUpsertPayload, McpWritableScope } from '../types/mcp'
 
 type EditorMode =
   | { type: 'list' }
@@ -978,23 +978,26 @@ export function McpSettings() {
     }
   }, [servers, refreshServerStatus, currentWorkDir])
 
+  const syncWarningDetail = (sessionSync: McpSessionSync | undefined) => {
+    return sessionSync?.reason === 'failed'
+      ? t('settings.mcp.toast.syncFailed', { error: sessionSync.error || t('settings.mcp.toast.toggleFailed') })
+      : sessionSync?.reason === 'not_running'
+        ? t('settings.mcp.toast.syncNotRunning')
+        : sessionSync?.reason === 'different_project'
+          ? t('settings.mcp.toast.syncDifferentProject')
+          : sessionSync?.reason === 'no_session' || !activeSessionId
+            ? t('settings.mcp.toast.syncNoSession')
+            : t('settings.mcp.toast.syncUnconfirmed')
+  }
+
   const handleToggle = async (server: McpServerRecord) => {
     setBusyServerKey(getMcpServerIdentityKey(server))
     try {
       const { server: updated, sessionSync } = await toggleServer(server, resolveOperationCwd(server), activeSessionId ?? undefined)
       if (!sessionSync?.applied) {
-        const detail = sessionSync?.reason === 'failed'
-          ? t('settings.mcp.toast.syncFailed', { error: sessionSync.error || t('settings.mcp.toast.toggleFailed') })
-          : sessionSync?.reason === 'not_running'
-            ? t('settings.mcp.toast.syncNotRunning')
-            : sessionSync?.reason === 'different_project'
-              ? t('settings.mcp.toast.syncDifferentProject')
-              : sessionSync?.reason === 'no_session' || !activeSessionId
-                ? t('settings.mcp.toast.syncNoSession')
-                : t('settings.mcp.toast.syncUnconfirmed')
         addToast({
           type: 'warning',
-          message: `${t('settings.mcp.toast.saved', { name: server.name })}. ${detail}`,
+          message: `${t('settings.mcp.toast.saved', { name: server.name })}. ${syncWarningDetail(sessionSync)}`,
         })
         return
       }
@@ -1020,12 +1023,25 @@ export function McpSettings() {
     const key = getMcpServerIdentityKey(server)
     setBusyServerKey(key)
     try {
-      const updated = await refreshServerStatus(server, resolveOperationCwd(server))
+      // Refresh is the recovery path: reconnect the server and fan the
+      // mcp_reconnect control message out to open sessions so a tab that
+      // missed hot-injection picks the tools up without an IDE restart.
+      const { server: updated, sessionSync } = await reconnectServer(
+        server,
+        resolveOperationCwd(server),
+        activeSessionId ?? undefined,
+      )
       setView((current) => {
         if (current.type !== 'details' && current.type !== 'edit') return current
         if (getMcpServerIdentityKey(current.server) !== key) return current
         return { ...current, server: updated }
       })
+      if (!sessionSync?.applied && sessionSync?.reason !== 'no_session') {
+        addToast({
+          type: 'warning',
+          message: `${t('settings.mcp.toast.reconnected', { name: server.name })}. ${syncWarningDetail(sessionSync)}`,
+        })
+      }
     } catch {
       // silent — status stays as-is
     } finally {
@@ -1048,7 +1064,7 @@ export function McpSettings() {
       return { ...current, server: optimistic }
     })
     try {
-      const updated = await reconnectServer(server, resolveOperationCwd(server))
+      const { server: updated } = await reconnectServer(server, resolveOperationCwd(server), activeSessionId ?? undefined)
       addToast({
         type: updated.status === 'connected' ? 'success' : 'warning',
         message: updated.status === 'connected'
@@ -1122,18 +1138,26 @@ export function McpSettings() {
     try {
       const payload = buildPayload(draft)
       const operationCwd = scopeRequiresProject(draft.scope) ? draft.projectPath.trim() : undefined
-      const saved = view.type === 'edit'
+      const isEdit = view.type === 'edit'
+      const saved = isEdit
         ? await updateServer(view.server, payload, operationCwd)
-        : await createServer(draft.name.trim(), payload, operationCwd)
+        : await createServer(draft.name.trim(), payload, operationCwd, activeSessionId ?? undefined)
 
       await fetchServersForKnownProjects(currentWorkDir)
 
-      addToast({
-        type: 'success',
-        message: view.type === 'edit'
-          ? t('settings.mcp.toast.saved', { name: saved.name })
-          : t('settings.mcp.toast.created', { name: saved.name }),
-      })
+      if (!isEdit && !saved.sessionSync?.applied) {
+        addToast({
+          type: 'warning',
+          message: `${t('settings.mcp.toast.created', { name: saved.server.name })}. ${syncWarningDetail(saved.sessionSync)}`,
+        })
+      } else {
+        addToast({
+          type: 'success',
+          message: isEdit
+            ? t('settings.mcp.toast.saved', { name: saved.server.name })
+            : t('settings.mcp.toast.created', { name: saved.server.name }),
+        })
+      }
       setView({ type: 'list' })
       selectServer(null)
     } catch (error) {

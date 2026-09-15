@@ -915,6 +915,135 @@ describe('MCP API', () => {
     )
   })
 
+  it('hot-injects a newly added MCP server into the requesting session via mcp_reconnect', async () => {
+    const requestControl = mock(async () => ({}))
+    conversationService.hasSession = (() => true) as typeof conversationService.hasSession
+    conversationService.getSessionWorkDir = (() => projectRoot) as typeof conversationService.getSessionWorkDir
+    conversationService.getActiveSessions = () => []
+    conversationService.requestControl = requestControl as typeof conversationService.requestControl
+
+    const create = makeRequest('POST', '/api/mcp', {
+      cwd: projectRoot,
+      sessionId: 'session-1',
+      name: 'just-added',
+      scope: 'local',
+      config: { type: 'stdio', command: 'npx', args: ['just-added-mcp'], env: {} },
+    })
+    const res = await handleMcpApi(create.req, create.url, create.segments)
+    const body = await res.json()
+
+    expect(res.status).toBe(201)
+    expect(body.sessionSync).toEqual({ applied: true })
+    expect(requestControl).toHaveBeenCalledWith(
+      'session-1',
+      { subtype: 'mcp_reconnect', serverName: 'just-added' },
+      60_000,
+    )
+  })
+
+  it('fans hot injection out to every active session in the same project', async () => {
+    const requestControl = mock(async () => ({}))
+    conversationService.hasSession = (() => true) as typeof conversationService.hasSession
+    conversationService.getSessionWorkDir = (id: string) => (id === 'other' ? tmpDir : projectRoot) as typeof conversationService.getSessionWorkDir
+    conversationService.getActiveSessions = () => ['first', 'second', 'other']
+    conversationService.requestControl = requestControl as typeof conversationService.requestControl
+
+    const create = makeRequest('POST', '/api/mcp', {
+      cwd: projectRoot,
+      name: 'broadcast-add',
+      scope: 'local',
+      config: { type: 'stdio', command: 'npx', args: ['broadcast-add-mcp'], env: {} },
+    })
+    const res = await handleMcpApi(create.req, create.url, create.segments)
+
+    expect(res.status).toBe(201)
+    expect((await res.json()).sessionSync).toEqual({ applied: false, reason: 'no_session' })
+    expect(requestControl.mock.calls.map(call => call[0])).toEqual(['first', 'second'])
+  })
+
+  it('injects into the requesting session only once when it is also an active session', async () => {
+    const requestControl = mock(async () => ({}))
+    conversationService.hasSession = (() => true) as typeof conversationService.hasSession
+    conversationService.getSessionWorkDir = (() => projectRoot) as typeof conversationService.getSessionWorkDir
+    conversationService.getActiveSessions = () => ['session-1', 'second']
+    conversationService.requestControl = requestControl as typeof conversationService.requestControl
+
+    const create = makeRequest('POST', '/api/mcp', {
+      cwd: projectRoot,
+      sessionId: 'session-1',
+      name: 'dedupe-add',
+      scope: 'local',
+      config: { type: 'stdio', command: 'npx', args: ['dedupe-add-mcp'], env: {} },
+    })
+    const res = await handleMcpApi(create.req, create.url, create.segments)
+
+    expect(res.status).toBe(201)
+    expect((await res.json()).sessionSync).toEqual({ applied: true })
+    expect(requestControl.mock.calls.map(call => call[0])).toEqual(['session-1', 'second'])
+  })
+
+  it('surfaces a failed hot injection but keeps the created server persisted', async () => {
+    conversationService.hasSession = (() => true) as typeof conversationService.hasSession
+    conversationService.getSessionWorkDir = (() => projectRoot) as typeof conversationService.getSessionWorkDir
+    conversationService.getActiveSessions = () => []
+    conversationService.requestControl = (async () => {
+      throw new Error('control transport closed')
+    }) as typeof conversationService.requestControl
+
+    const create = makeRequest('POST', '/api/mcp', {
+      cwd: projectRoot,
+      sessionId: 'session-1',
+      name: 'injection-failed',
+      scope: 'local',
+      config: { type: 'stdio', command: 'npx', args: ['injection-failed-mcp'], env: {} },
+    })
+    const res = await handleMcpApi(create.req, create.url, create.segments)
+    const body = await res.json()
+
+    expect(res.status).toBe(201)
+    expect(body.server.name).toBe('injection-failed')
+    expect(body.sessionSync).toEqual({ applied: false, reason: 'failed', error: 'control transport closed' })
+  })
+
+  it('reconnect fallback syncs the server into active sessions when refreshing', async () => {
+    const create = makeRequest('POST', '/api/mcp', {
+      cwd: projectRoot, name: 'refresh-fallback', scope: 'local',
+      config: { type: 'stdio', command: 'npx', args: ['refresh-fallback-mcp'], env: {} },
+    })
+    await handleMcpApi(create.req, create.url, create.segments)
+
+    const requestControl = mock(async () => ({}))
+    conversationService.hasSession = (() => true) as typeof conversationService.hasSession
+    conversationService.getSessionWorkDir = (() => projectRoot) as typeof conversationService.getSessionWorkDir
+    conversationService.getActiveSessions = () => []
+    conversationService.requestControl = requestControl as typeof conversationService.requestControl
+    reconnectSpy = spyOn(mcpClient, 'reconnectMcpServerImpl').mockResolvedValue({
+      name: 'refresh-fallback',
+      client: {
+        name: 'refresh-fallback',
+        type: 'connected',
+        client: {} as never,
+        capabilities: {},
+        config: { type: 'stdio', command: 'npx', args: ['refresh-fallback-mcp'], env: {}, scope: 'local' } as never,
+        cleanup: mock(async () => {}),
+      },
+    })
+
+    const reconnect = makeRequest('POST', '/api/mcp/refresh-fallback/reconnect', {
+      cwd: projectRoot,
+      sessionId: 'session-1',
+    })
+    const res = await handleMcpApi(reconnect.req, reconnect.url, reconnect.segments)
+
+    expect(res.status).toBe(200)
+    expect((await res.json()).sessionSync).toEqual({ applied: true })
+    expect(requestControl).toHaveBeenCalledWith(
+      'session-1',
+      { subtype: 'mcp_reconnect', serverName: 'refresh-fallback' },
+      120_000,
+    )
+  })
+
   it('reports no selected session and clears every running session in the same project', async () => {
     const create = makeRequest('POST', '/api/mcp', {
       cwd: projectRoot, name: 'all-sessions', scope: 'local',
