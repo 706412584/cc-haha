@@ -283,7 +283,7 @@ describe('McpSettings', () => {
         },
       },
     } as const
-    const updateServer = vi.fn().mockResolvedValue(server)
+    const updateServer = vi.fn().mockResolvedValue({ server })
 
     useMcpStore.setState({ servers: [server], updateServer })
 
@@ -429,6 +429,76 @@ describe('McpSettings', () => {
     await waitFor(() => {
       expect(refreshServerStatus).toHaveBeenCalledWith(server, '/workspace/project')
     })
+  })
+
+  it('refresh button reconnects the server and syncs it into the active session', async () => {
+    const server = {
+      name: 'sync-on-refresh',
+      scope: 'user',
+      transport: 'stdio' as const,
+      enabled: true,
+      status: 'connected' as const,
+      statusLabel: 'Connected',
+      configLocation: '/tmp/config',
+      summary: 'npx sync-on-refresh-mcp',
+      canEdit: true,
+      canRemove: true,
+      canReconnect: true,
+      canToggle: true,
+      config: { type: 'stdio' as const, command: 'npx', args: ['sync-on-refresh-mcp'], env: {} },
+    }
+    const reconnectServer = vi.fn().mockResolvedValue({
+      server,
+      sessionSync: { applied: true },
+    })
+
+    useMcpStore.setState({
+      servers: [server],
+      reconnectServer,
+    })
+
+    await renderLoadedMcpSettings()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh sync-on-refresh' }))
+    })
+
+    expect(reconnectServer).toHaveBeenCalledWith(server, '/workspace/project', 'session-1')
+  })
+
+  it('refresh with no active session reports success without a sync warning', async () => {
+    const server = {
+      name: 'quiet-refresh',
+      scope: 'user',
+      transport: 'stdio' as const,
+      enabled: true,
+      status: 'connected' as const,
+      statusLabel: 'Connected',
+      configLocation: '/tmp/config',
+      summary: 'npx quiet-refresh-mcp',
+      canEdit: true,
+      canRemove: true,
+      canReconnect: true,
+      canToggle: true,
+      config: { type: 'stdio' as const, command: 'npx', args: ['quiet-refresh-mcp'], env: {} },
+    }
+    const addToast = vi.fn()
+    useUIStore.setState({ addToast })
+    useMcpStore.setState({
+      servers: [server],
+      reconnectServer: vi.fn().mockResolvedValue({
+        server,
+        sessionSync: { applied: false, reason: 'no_session' },
+      }),
+    })
+
+    await renderLoadedMcpSettings()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh quiet-refresh' }))
+    })
+
+    expect(addToast).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'warning' }))
   })
 
   it('shows another project server as configured without probing or counting it as connected', async () => {
@@ -684,7 +754,7 @@ describe('McpSettings', () => {
       projectPath: '/workspace/project',
       config: { type: 'stdio' as const, command: 'npx', args: ['@upstash/context7-mcp'], env: {} },
     }
-    const createServer = vi.fn().mockResolvedValue(createdServer)
+    const createServer = vi.fn().mockResolvedValue({ server: createdServer, sessionSync: { applied: true } })
 
     useMcpStore.setState({ createServer })
 
@@ -729,7 +799,66 @@ describe('McpSettings', () => {
         },
       },
       '/workspace/selected-project',
+      'session-1',
     )
+  })
+
+  it('warns when a newly created server could not be hot-injected into the session', async () => {
+    const createdServer = {
+      name: 'hang-mcp',
+      scope: 'local',
+      transport: 'stdio',
+      enabled: true,
+      status: 'checking' as const,
+      statusLabel: 'Checking',
+      configLocation: '/workspace/project/.claude.json',
+      summary: 'npx hang-mcp',
+      canEdit: true,
+      canRemove: true,
+      canReconnect: true,
+      canToggle: true,
+      projectPath: '/workspace/project',
+      config: { type: 'stdio' as const, command: 'npx', args: ['hang-mcp'], env: {} },
+    }
+    const addToast = vi.fn()
+    useUIStore.setState({ addToast })
+    useMcpStore.setState({
+      createServer: vi.fn().mockResolvedValue({
+        server: createdServer,
+        sessionSync: { applied: false, reason: 'failed', error: 'Control timeout' },
+      }),
+    })
+
+    await renderLoadedMcpSettings()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /add server/i }))
+    })
+
+    fireEvent.change(screen.getByLabelText(/Name/), { target: { value: 'hang-mcp' } })
+    fireEvent.change(screen.getByLabelText(/Command to launch/), { target: { value: 'npx' } })
+    fireEvent.change(screen.getByPlaceholderText('chrome-devtools-mcp@latest'), {
+      target: { value: 'hang-mcp' },
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Select a project/i }))
+    })
+    await act(async () => {
+      fireEvent.click(await screen.findByText('org/selected-project'))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    })
+
+    expect(addToast).toHaveBeenCalledWith({
+      type: 'warning',
+      message: expect.stringContaining('Control timeout'),
+    })
+    expect(addToast).toHaveBeenCalledWith({
+      type: 'warning',
+      message: expect.stringContaining('Created MCP server'),
+    })
   })
 
   it('updates project MCP servers using the explicitly selected target project', async () => {
@@ -746,6 +875,7 @@ describe('McpSettings', () => {
       }],
     })
     const updateServer = vi.fn().mockResolvedValue({
+      server: {
       name: 'shared-tools',
       scope: 'project',
       transport: 'stdio',
@@ -760,6 +890,7 @@ describe('McpSettings', () => {
       canToggle: true,
       projectPath: '/workspace/moved-project',
       config: { type: 'stdio' as const, command: 'npx', args: ['shared-tools'], env: {} },
+      },
     })
     const server = {
       name: 'shared-tools',
@@ -819,7 +950,7 @@ describe('McpSettings', () => {
   })
 
   it('shows reconnecting status immediately in the detail view', async () => {
-    let resolveReconnect: ((value: typeof server) => void) | null = null
+    let resolveReconnect: ((value: { server: typeof server }) => void) | null = null
     const server = {
       name: 'plugin:telegram:telegram',
       scope: 'dynamic',
@@ -836,7 +967,7 @@ describe('McpSettings', () => {
       canToggle: true,
       config: { type: 'stdio' as const, command: 'bun', args: ['run', 'start'], env: {} },
     }
-    const reconnectServer = vi.fn().mockImplementation(() => new Promise<typeof server>((resolve) => {
+    const reconnectServer = vi.fn().mockImplementation(() => new Promise<{ server: typeof server }>((resolve) => {
       resolveReconnect = resolve
     }))
 
@@ -856,14 +987,16 @@ describe('McpSettings', () => {
     })
 
     expect(screen.getAllByText('Reconnecting...').length).toBeGreaterThan(0)
-    expect(reconnectServer).toHaveBeenCalledWith(server, '/workspace/project')
+    expect(reconnectServer).toHaveBeenCalledWith(server, '/workspace/project', 'session-1')
 
     await act(async () => {
       resolveReconnect?.({
-        ...server,
-        status: 'connected',
-        statusLabel: 'Connected',
-        statusDetail: undefined,
+        server: {
+          ...server,
+          status: 'connected',
+          statusLabel: 'Connected',
+          statusDetail: undefined,
+        },
       })
     })
   })

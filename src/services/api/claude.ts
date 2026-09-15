@@ -2299,12 +2299,27 @@ async function* queryModel(
         process.env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS || "",
         10,
       ) || 0;
+    // Fast-fail for the stalled reasoning loop: a relay that emits thinking
+    // deltas forever and never reaches text, a tool call, or message_stop.
+    // Observed in the wild at 256k+ deltas with no finish_reason — every chunk
+    // resets the idle watchdog, so only the overall max-duration cap (#766)
+    // ends it, and the user waits the full 600s to see an error. This budget is
+    // armed once and only aborts when the stream has produced thinking and
+    // nothing else (see isThinkingOnlyStall), so a legitimate long think that
+    // goes on to answer is never cut short. 0 disables it (terminal CLI
+    // default); the desktop injects a value.
+    const STREAM_MAX_THINKING_DURATION_MS =
+      parseInt(
+        process.env.CLAUDE_STREAM_MAX_THINKING_DURATION_MS || "",
+        10,
+      ) || 0;
     let streamIdleAborted = false;
     // Which watchdog tripped, so the thrown error message is accurate.
     let streamAbortReason:
       | "idle"
       | "max_duration"
       | "tool_input_duration"
+      | "thinking_duration"
       | null = null;
     const streamWatchdogState = createStreamWatchdogState();
     let streamWatchdogTimeoutError: StreamWatchdogTimeoutError | null = null;
@@ -2313,6 +2328,8 @@ async function* queryModel(
     let streamIdleWarningTimer: ReturnType<typeof setTimeout> | null = null;
     let streamIdleTimer: ReturnType<typeof setTimeout> | null = null;
     let streamMaxDurationTimer: ReturnType<typeof setTimeout> | null = null;
+    let streamMaxThinkingDurationTimer: ReturnType<typeof setTimeout> | null =
+      null;
     const toolInputDurationGuard = new StreamToolInputDurationGuard({
       enabled: streamWatchdogEnabled,
       timeoutMs: STREAM_TOOL_INPUT_MAX_DURATION_MS,
@@ -2335,6 +2352,20 @@ async function* queryModel(
       if (streamIdleTimer !== null) {
         clearTimeout(streamIdleTimer);
         streamIdleTimer = null;
+      }
+    }
+    // The duration caps are armed once and never re-armed, so every exit path
+    // must disarm them — a survivor would fire releaseStreamResources() and
+    // abort a later request's socket. Kept separate from clearStreamIdleTimers
+    // because the idle timer is re-armed per chunk while these are not.
+    function clearStreamDurationTimers(): void {
+      if (streamMaxDurationTimer !== null) {
+        clearTimeout(streamMaxDurationTimer);
+        streamMaxDurationTimer = null;
+      }
+      if (streamMaxThinkingDurationTimer !== null) {
+        clearTimeout(streamMaxThinkingDurationTimer);
+        streamMaxThinkingDurationTimer = null;
       }
     }
     function resetStreamIdleTimer(): void {
@@ -2433,6 +2464,51 @@ async function* queryModel(
         });
         releaseStreamResources();
       }, STREAM_MAX_DURATION_MS);
+    }
+    // Arm the thinking-only fast-fail. Like the max-duration cap it is armed
+    // once and never reset by chunks — that is the whole point, since the
+    // thinking deltas are exactly what keeps the idle watchdog alive. The
+    // isThinkingOnlyStall() check at fire time makes it a no-op for any stream
+    // that produced text or started a tool call, so slow-but-healthy reasoning
+    // is unaffected.
+    if (streamWatchdogEnabled && STREAM_MAX_THINKING_DURATION_MS > 0) {
+      streamMaxThinkingDurationTimer = setTimeout(() => {
+        if (!streamWatchdogState.isThinkingOnlyStall()) {
+          return;
+        }
+        streamIdleAborted = true;
+        streamAbortReason = "thinking_duration";
+        streamWatchdogFiredAt = performance.now();
+        streamWatchdogTimeoutError = streamWatchdogState.createTimeoutError(
+          "thinking_duration",
+          STREAM_MAX_THINKING_DURATION_MS,
+        );
+        logForDebugging(
+          `Streaming thinking-only duration exceeded: ${streamWatchdogTimeoutError.message}, aborting stream`,
+          { level: "error" },
+        );
+        logForDiagnosticsNoPII(
+          "error",
+          "cli_streaming_thinking_duration_exceeded",
+          {
+            ...streamWatchdogTimeoutError.toDiagnosticData(),
+          },
+        );
+        logEvent("tengu_streaming_thinking_duration_timeout", {
+          model:
+            options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          request_id: (streamRequestId ??
+            "unknown") as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          timeout_ms: STREAM_MAX_THINKING_DURATION_MS,
+          reason:
+            streamWatchdogTimeoutError.reason as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          phase:
+            streamWatchdogTimeoutError.phase as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          thinking_delta_count:
+            streamWatchdogTimeoutError.streamSnapshot.thinkingDeltaCount,
+        });
+        releaseStreamResources();
+      }, STREAM_MAX_THINKING_DURATION_MS);
     }
 
     startSessionActivity("api_call");
@@ -2848,11 +2924,8 @@ async function* queryModel(
       }
       // Clear the idle timeout watchdog now that the stream loop has exited
       clearStreamIdleTimers();
+      clearStreamDurationTimers();
       toolInputDurationGuard.clear();
-      if (streamMaxDurationTimer !== null) {
-        clearTimeout(streamMaxDurationTimer);
-        streamMaxDurationTimer = null;
-      }
 
       // If the stream was aborted by our idle timeout watchdog, fall back to
       // non-streaming retry rather than treating it as a completed stream.
@@ -2880,6 +2953,9 @@ async function* queryModel(
         // Prevent double-emit: this throw lands in the catch block below,
         // whose exit_path='error' probe guards on streamWatchdogFiredAt.
         streamWatchdogFiredAt = null;
+        // Every path that sets streamIdleAborted also sets
+        // streamWatchdogTimeoutError, so the right-hand side is only a
+        // type-level fallback.
         throw streamWatchdogTimeoutError ??
           streamWatchdogState.createTimeoutError(
             streamAbortReason ?? "idle",
@@ -2979,11 +3055,8 @@ async function* queryModel(
     } catch (streamingError) {
       // Clear the idle timeout watchdog on error path too
       clearStreamIdleTimers();
+      clearStreamDurationTimers();
       toolInputDurationGuard.clear();
-      if (streamMaxDurationTimer !== null) {
-        clearTimeout(streamMaxDurationTimer);
-        streamMaxDurationTimer = null;
-      }
 
       // A safety rejection is terminal, including for non-streaming fallback.
       if (isOpenAIPolicyError(streamingError)) throw streamingError
@@ -3298,6 +3371,10 @@ async function* queryModel(
       yield m;
     } finally {
       clearStreamIdleTimers();
+      // Defensive: the normal and error paths above already disarm these, but
+      // a future early return inside the try would bypass both and leave a
+      // timer that fires releaseStreamResources() against a later request.
+      clearStreamDurationTimers();
     }
   } catch (errorFromRetry) {
     // FallbackTriggeredError must propagate to query.ts, which performs the

@@ -195,6 +195,56 @@ function truncatedToolResponse(model: string): string {
   ].join('')
 }
 
+// A relay that stalls in a reasoning loop: thinking deltas forever, never any
+// text, never a tool call, never message_stop. Every delta resets the idle
+// watchdog, so without the thinking-only cap this stream is only freed by the
+// overall max-duration cap (600s in the desktop).
+function endlessThinkingResponse(model: string): Response {
+  const initialEvents = [
+    sseEvent('message_start', {
+      type: 'message_start',
+      message: {
+        id: 'msg_endless_thinking',
+        type: 'message',
+        role: 'assistant',
+        model,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    }),
+    sseEvent('content_block_start', {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'thinking', thinking: '' },
+    }),
+  ].join('')
+  const thinkingEvent = sseEvent('content_block_delta', {
+    type: 'content_block_delta',
+    index: 0,
+    delta: { type: 'thinking_delta', thinking: 'Let me write the commands. ' },
+  })
+  let sentInitialEvents = false
+  let cancelled = false
+
+  return new Response(new ReadableStream({
+    async pull(controller) {
+      if (sentInitialEvents) await Bun.sleep(10)
+      if (cancelled) return
+      controller.enqueue(new TextEncoder().encode(
+        sentInitialEvents ? thinkingEvent : initialEvents,
+      ))
+      sentInitialEvents = true
+    },
+    cancel() {
+      cancelled = true
+    },
+  }), {
+    headers: { 'content-type': 'text/event-stream' },
+  })
+}
+
 function hangingToolResponse(model: string): Response {
   const initialEvents = [
     sseEvent('message_start', {
@@ -391,6 +441,7 @@ const ENV_KEYS = [
   'CLAUDE_ENABLE_STREAM_WATCHDOG',
   'CLAUDE_STREAM_IDLE_TIMEOUT_MS',
   'CLAUDE_STREAM_MAX_DURATION_MS',
+  'CLAUDE_STREAM_MAX_THINKING_DURATION_MS',
   'CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS',
 ] as const
 
@@ -1094,6 +1145,102 @@ test('bounds a tool input that keeps progressing but never completes', async () 
   ])
   expect(error).toBe('server_error')
 }, 10_000)
+
+test('fast-fails a thinking-only stall well before the overall stream cap', async () => {
+  const { content, error, requests } = await captureQueryRequest({
+    model: 'deepseek-v4-flash',
+    configureCapabilityOverrides: false,
+    responseFactory: endlessThinkingResponse,
+    env: {
+      CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: '1',
+      CLAUDE_ENABLE_STREAM_WATCHDOG: '1',
+      CLAUDE_STREAM_IDLE_TIMEOUT_MS: '1000',
+      // Far beyond the test's lifetime: proves the thinking cap, not this one,
+      // is what frees the stream.
+      CLAUDE_STREAM_MAX_DURATION_MS: '600000',
+      CLAUDE_STREAM_MAX_THINKING_DURATION_MS: '300',
+    },
+  })
+
+  expect(requests).toHaveLength(1)
+  expect(content).toEqual([
+    expect.objectContaining({
+      type: 'text',
+      text: expect.stringContaining('Thinking stream exceeded'),
+    }),
+  ])
+  expect(error).toBe('server_error')
+}, 10_000)
+
+test('lets a thinking stream through once it produces text', async () => {
+  const { content, error } = await captureQueryRequest({
+    model: 'deepseek-v4-flash',
+    configureCapabilityOverrides: false,
+    responseFactory: model => new Response(thinkingThenTextResponse(model), {
+      headers: { 'content-type': 'text/event-stream' },
+    }),
+    env: {
+      CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: '1',
+      CLAUDE_ENABLE_STREAM_WATCHDOG: '1',
+      CLAUDE_STREAM_IDLE_TIMEOUT_MS: '1000',
+      // The thinking phase outlives this budget; the cap must not fire because
+      // the stream goes on to emit text (textDeltaCount > 0).
+      CLAUDE_STREAM_MAX_THINKING_DURATION_MS: '50',
+    },
+  })
+
+  expect(error).toBeUndefined()
+  expect(content).toEqual([
+    expect.objectContaining({ type: 'thinking' }),
+    expect.objectContaining({ type: 'text', text: 'All done.' }),
+  ])
+}, 10_000)
+
+function thinkingThenTextResponse(model: string): string {
+  return [
+    sseEvent('message_start', {
+      type: 'message_start',
+      message: {
+        id: 'msg_thinking_then_text',
+        type: 'message',
+        role: 'assistant',
+        model,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    }),
+    sseEvent('content_block_start', {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'thinking', thinking: '' },
+    }),
+    sseEvent('content_block_delta', {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'thinking_delta', thinking: 'reasoning for a while. ' },
+    }),
+    sseEvent('content_block_stop', { type: 'content_block_stop', index: 0 }),
+    sseEvent('content_block_start', {
+      type: 'content_block_start',
+      index: 1,
+      content_block: { type: 'text', text: '' },
+    }),
+    sseEvent('content_block_delta', {
+      type: 'content_block_delta',
+      index: 1,
+      delta: { type: 'text_delta', text: 'All done.' },
+    }),
+    sseEvent('content_block_stop', { type: 'content_block_stop', index: 1 }),
+    sseEvent('message_delta', {
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: { output_tokens: 12 },
+    }),
+    sseEvent('message_stop', { type: 'message_stop' }),
+  ].join('')
+}
 
 function clearCapabilityCache() {
   ;(get3PModelCapabilityOverride as typeof get3PModelCapabilityOverride & {

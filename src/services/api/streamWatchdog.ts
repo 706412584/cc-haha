@@ -2,10 +2,12 @@ export type StreamWatchdogAbortReason =
   | 'idle'
   | 'max_duration'
   | 'tool_input_duration'
+  | 'thinking_duration'
 export type StreamWatchdogErrorCode =
   | 'STREAM_IDLE_TIMEOUT'
   | 'STREAM_MAX_DURATION'
   | 'STREAM_TOOL_INPUT_DURATION'
+  | 'STREAM_THINKING_DURATION'
 export type StreamWatchdogPhase =
   | 'before_first_event'
   | 'before_content'
@@ -130,6 +132,9 @@ function buildMessage(
   if (reason === 'tool_input_duration') {
     return `Tool input generation exceeded ${seconds} - aborting incomplete tool call (${formatDetails(snapshot)})`
   }
+  if (reason === 'thinking_duration') {
+    return `Thinking stream exceeded ${seconds} without producing text or a tool call - aborting stalled reasoning loop (${formatDetails(snapshot)})`
+  }
 
   switch (snapshot.phase) {
     case 'before_first_event':
@@ -156,7 +161,9 @@ export class StreamWatchdogTimeoutError extends Error {
       ? 'STREAM_MAX_DURATION'
       : reason === 'tool_input_duration'
         ? 'STREAM_TOOL_INPUT_DURATION'
-        : 'STREAM_IDLE_TIMEOUT'
+        : reason === 'thinking_duration'
+          ? 'STREAM_THINKING_DURATION'
+          : 'STREAM_IDLE_TIMEOUT'
     this.phase = streamSnapshot.phase
   }
 
@@ -290,6 +297,38 @@ class StreamWatchdogState {
 
   hasContentDelta(): boolean {
     return this.snapshotValue.contentDeltaCount > 0
+  }
+
+  /**
+   * True when the stream has entered reasoning but produced not a single byte
+   * of user-visible text or tool input, and never reached message_stop.
+   *
+   * This is the shape of a stalled reasoning loop: some OpenAI-compatible
+   * relays keep emitting thinking chunks forever (256k+ deltas observed) and
+   * never send finish_reason, so the idle watchdog is reset on every chunk and
+   * can never fire. Requiring zero text AND zero tool input keeps the guard
+   * from ever touching a legitimate long think that goes on to answer.
+   *
+   * "Entered reasoning" must accept both delta and non-delta shapes: an
+   * OpenAI-compatible gateway may open a `thinking` block and then only send
+   * `signature_delta` events, or open a `redacted_thinking` block outright
+   * (openaiResponsesStreamToAnthropic.ts), neither of which increments
+   * thinkingDeltaCount. Keying only on the delta count would leave those
+   * streams protected by the 600s cap alone — the exact stall this fixes.
+   */
+  isThinkingOnlyStall(): boolean {
+    const snapshot = this.snapshotValue
+    const enteredReasoning =
+      snapshot.thinkingDeltaCount > 0 ||
+      snapshot.lastBlockType === 'thinking' ||
+      snapshot.lastBlockType === 'redacted_thinking'
+    return (
+      enteredReasoning &&
+      snapshot.textDeltaCount === 0 &&
+      snapshot.toolInputDeltaCount === 0 &&
+      !snapshot.toolUseStarted &&
+      !snapshot.messageStopReceived
+    )
   }
 
   snapshot(): StreamWatchdogSnapshot {

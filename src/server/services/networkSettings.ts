@@ -42,6 +42,16 @@ export function resolveStreamMaxDurationMs(
 ): number {
   return Math.max(MIN_STREAM_MAX_DURATION_MS, Number(apiTimeoutMs) || 0)
 }
+// Fast-fail budget for a stream that only ever emits thinking deltas and never
+// reaches text, a tool call, or message_stop. Some OpenAI-compatible relays
+// stall in exactly this shape (256k+ thinking deltas observed, no
+// finish_reason); every chunk resets the idle watchdog, so without this the
+// user waits out the full 600s overall cap to learn the turn failed.
+// Deliberately NOT scaled by "请求超时": that is the knob users raise for slow
+// models, and scaling would hand back the very wait this cap removes. A preset
+// or user who genuinely needs >5min of pure thinking sets
+// CLAUDE_STREAM_MAX_THINKING_DURATION_MS explicitly (cleanEnv wins).
+export const DEFAULT_STREAM_MAX_THINKING_DURATION_MS = 300_000
 export const SYSTEM_PROXY_URL_ENV = 'CC_HAHA_SYSTEM_PROXY_URL'
 export const SYSTEM_PROXY_ERROR_ENV = 'CC_HAHA_SYSTEM_PROXY_ERROR'
 

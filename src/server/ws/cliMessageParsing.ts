@@ -106,6 +106,9 @@ export function classifyRuntimeErrorCode(message: string, fallbackCode: string):
   if (/Tool input generation exceeded/i.test(message)) {
     return 'STREAM_TOOL_INPUT_DURATION'
   }
+  if (/Thinking stream exceeded/i.test(message)) {
+    return 'STREAM_THINKING_DURATION'
+  }
   if (/Stream max duration exceeded/i.test(message)) {
     return 'STREAM_MAX_DURATION'
   }

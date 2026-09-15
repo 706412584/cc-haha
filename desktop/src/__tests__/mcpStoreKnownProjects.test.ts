@@ -237,11 +237,11 @@ describe('fetchServersForKnownProjects', () => {
     vi.mocked(mcpApi.status).mockResolvedValue(response)
     useMcpStore.setState({ servers: [inactive], selectedServer: inactive })
 
-    const updated = await useMcpStore.getState().updateServer(inactive, {
+    const updated = (await useMcpStore.getState().updateServer(inactive, {
       scope: 'project',
       config: inactive.config,
-    }, inactive.projectPath)
-    const reconnected = await useMcpStore.getState().reconnectServer(updated, inactive.projectPath)
+    }, inactive.projectPath)).server
+    const reconnected = (await useMcpStore.getState().reconnectServer(updated, inactive.projectPath)).server
     const refreshed = await useMcpStore.getState().refreshServerStatus(reconnected, inactive.projectPath)
 
     expect(updated.activeInCurrentContext).toBe(false)

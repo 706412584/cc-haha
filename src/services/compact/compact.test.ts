@@ -237,4 +237,104 @@ describe('compactConversation hard timeout', () => {
     if (ORIGINAL === undefined) delete process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS
     else process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS = ORIGINAL
   }, 15_000)
+
+  test('ends the compaction at the wall clock even when the summarize request ignores the abort signal', async () => {
+    process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS = '50'
+    const parentAbort = new AbortController()
+    // A trickling relay never observes compactAbort: the request keeps its
+    // socket open well past the 5-minute budget, so the abort signal alone
+    // cannot unstick the compaction. Only the raced deadline can.
+    const streamingMock = mock(async function* () {
+      await new Promise(resolve => setTimeout(resolve, 5_000))
+      yield { type: 'assistant' } as never
+    }) as unknown as any
+    mock.module('../api/claude.js', () => ({
+      queryModelWithStreaming: streamingMock,
+      getMaxOutputTokensForModel: () => 20_000,
+    }))
+
+    const { compactConversation, ERROR_MESSAGE_COMPACT_TIMEOUT } = await import(
+      './compact.js'
+    )
+
+    const startedAt = Date.now()
+    let surfacedError: unknown
+    try {
+      await compactConversation(
+        makeMessages(),
+        makeToolUseContext(parentAbort),
+        {
+          systemPrompt: [],
+          userContext: {},
+          systemContext: {},
+          toolUseContext: makeToolUseContext(parentAbort),
+          forkContextMessages: makeMessages(),
+        },
+        true,
+        undefined,
+        true, // isAutoCompact
+      )
+    } catch (error) {
+      surfacedError = error
+    }
+    const elapsedMs = Date.now() - startedAt
+
+    expect(surfacedError).toBeInstanceOf(Error)
+    expect((surfacedError as Error).message).toBe(ERROR_MESSAGE_COMPACT_TIMEOUT)
+    // Without the race this resolves only when the mock finishes (~5s), which
+    // is what left the desktop stuck on "thinking" until the 600s stream cap.
+    expect(elapsedMs).toBeLessThan(2_500)
+
+    if (ORIGINAL === undefined) delete process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS
+    else process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS = ORIGINAL
+  }, 15_000)
+
+  test('bounds partial compaction by the same wall clock when the summarize request hangs', async () => {
+    process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS = '50'
+    const parentAbort = new AbortController()
+    const streamingMock = mock(async function* () {
+      await new Promise(resolve => setTimeout(resolve, 5_000))
+      yield { type: 'assistant' } as never
+    }) as unknown as any
+    mock.module('../api/claude.js', () => ({
+      queryModelWithStreaming: streamingMock,
+      getMaxOutputTokensForModel: () => 20_000,
+    }))
+
+    const { partialCompactConversation, ERROR_MESSAGE_COMPACT_TIMEOUT } = await import(
+      './compact.js'
+    )
+
+    const messages = makeMessages()
+    const startedAt = Date.now()
+    let surfacedError: unknown
+    try {
+      await partialCompactConversation(
+        messages,
+        0,
+        makeToolUseContext(parentAbort),
+        {
+          systemPrompt: [],
+          userContext: {},
+          systemContext: {},
+          toolUseContext: makeToolUseContext(parentAbort),
+          forkContextMessages: messages,
+        },
+        undefined,
+        'from',
+      )
+    } catch (error) {
+      surfacedError = error
+    }
+    const elapsedMs = Date.now() - startedAt
+
+    // Partial compaction shares armCompactTimeout, so it must be bounded by the
+    // same race rather than waiting out the abandoned request.
+    expect(elapsedMs).toBeLessThan(2_500)
+    expect(surfacedError).toBeInstanceOf(Error)
+    expect((surfacedError as Error).message).toBe(ERROR_MESSAGE_COMPACT_TIMEOUT)
+
+    if (ORIGINAL === undefined) delete process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS
+    else process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS = ORIGINAL
+  }, 15_000)
 })

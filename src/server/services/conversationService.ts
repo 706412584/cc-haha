@@ -54,6 +54,7 @@ import { getProcessEnvWithTerminalShellEnvironment } from '../../utils/terminalS
 import { attributionHeaderEnvForModel } from './attributionHeaderPolicy.js'
 import {
   buildNetworkEnvironment,
+  DEFAULT_STREAM_MAX_THINKING_DURATION_MS,
   loadNetworkSettings,
   resolveStreamMaxDurationMs,
   SYSTEM_PROXY_URL_ENV,
@@ -1780,6 +1781,15 @@ export class ConversationService {
       // response cap above still bounds a stream that trickles forever.
       CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS:
         cleanEnv.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS || '120000',
+      // Fast-fail a stalled reasoning loop: a relay that streams thinking deltas
+      // forever and never reaches text, a tool call, or message_stop. The idle
+      // watchdog cannot catch this (every delta resets it) and the overall cap
+      // above only fires at 600s, so the user otherwise waits the full 10
+      // minutes. The CLI guard additionally requires zero text AND zero tool
+      // input, so a legitimate long think that goes on to answer is untouched.
+      CLAUDE_STREAM_MAX_THINKING_DURATION_MS:
+        cleanEnv.CLAUDE_STREAM_MAX_THINKING_DURATION_MS ||
+        String(DEFAULT_STREAM_MAX_THINKING_DURATION_MS),
       // Time-to-first-token budget: how long to wait for the FIRST streamed
       // chunk after response headers arrive. The idle timer above is the wrong
       // knob for slow prefill — it kills healthy local/3P models that take
