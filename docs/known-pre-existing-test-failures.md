@@ -159,6 +159,15 @@ CI 上不需要，且会把「清理失败」从可见的红变成静默重试�
 （很大一部分来自 xterm / shiki / katex / cytoscape 等按需加载的第三方 chunk）应由维护者决定，
 不应由合并顺手改掉。若决定接受，应连同「为什么这些 chunk 该留在预算内」一起更新注释再提交。
 
+## adapters（`bun test`，Windows 本地）
+
+- `common/__tests__/chat-runtime.test.ts > ImChatRuntime server stream > uploads an image referenced in the stream and skips one outside the work dir`
+  — 断言 `images` 恰好为 `[{ mime: 'image/png', alt: 'inside' }]`，实际多出一项（`/etc/hosts` 的越界路径未被跳过）。
+  该用例最后一次改动是 `59c7857b`（2026-09-08，fork v0.6.4 之前），**是合并基线的祖先**；且本次合并对 `adapters/` 的改动为空
+  （`git diff 8f526396 HEAD -- adapters/` 无输出）。属预存失败，稳定复现（单跑 34 pass / 1 fail，两次一致），非 flaky。
+
+  其余 749 pass / 1 skip。CI 的 `check:adapters` 若红，先对照此项。
+
 ## quarantine 已登记项
 
 见 `scripts/quality-gate/quarantine.json`。仅对**整文件基本全红且属确定性架构分歧**的登记（避免连带停掉大量通过的测试而丢覆盖）：
