@@ -168,6 +168,25 @@ CI 上不需要，且会把「清理失败」从可见的红变成静默重试�
 
   其余 749 pass / 1 skip。CI 的 `check:adapters` 若红，先对照此项。
 
+## 未接线的功能：`workspace.file.saved` → `applyExternalSave`（预存，非测试失败）
+
+不是测试红，但独立审查时发现的一处**功能死代码**，记在这里以免下次又当成新发现。
+
+- 服务端 `src/server/services/workspaceFileService.ts:311` 在保存成功后 `emitWorkspaceFileSaved({ source: 'user' })`，
+  其注释明确写着「so the desktop conflict-banner contract holds」。
+- 但**桌面端没有任何模块订阅这个事件**：`grep -rn "file.saved" desktop/src/` 为空（`8f526396` 基线上同样为空）。
+- 因此 `useWorkspaceEditorStore.applyExternalSave` 与 `WorkspaceEditor` 里那段外部 rebase 效果**只能由测试触达**。
+
+**判定为预存**：合并前的 `workspacePanelStore.applyExternalSave` 同样只有测试调用方
+（`git grep -n applyExternalSave 8f526396 -- desktop/src` 除定义外只命中测试与一处注释）。
+本次合并与重移植都没有删掉过订阅者——它从来就不存在。
+
+**影响**：「另一个窗口保存了同一文件」这一冲突分支（`source: 'user'`）永远不会触发。
+Agent 写入的分支（`source: 'agent'`）走的是 chatStore 的工具流，与这条无关，已修复可用。
+
+**处置**：不属本次合并范围，未改动。若要做，正确做法是在桌面端的 WS 消息分发里接上
+`workspace.file.saved`，按 `sessionId` + 路径调用 `applyExternalSave`（缓冲键为 `sessionId::path`，
+服务端事件里的路径需要先归一化到工作区相对路径）。同时应给服务端那行注释与实现二选一地对齐。
 ## quarantine 已登记项
 
 见 `scripts/quality-gate/quarantine.json`。仅对**整文件基本全红且属确定性架构分歧**的登记（避免连带停掉大量通过的测试而丢覆盖）：
