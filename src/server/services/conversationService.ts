@@ -11,6 +11,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { ProviderService } from './providerService.js'
+import { SettingsService } from './settingsService.js'
 import {
   applyProviderRuntimeModel,
   isManagedProviderEnvKey,
@@ -1735,6 +1736,7 @@ export class ConversationService {
     // earlier); the per-turn hot update below mirrors this for live turns.
     const streamMaxDurationMs = resolveStreamMaxDurationMs(networkEnv.API_TIMEOUT_MS)
     const traceCaptureEnabled = (await readTraceCaptureSettings()).enabled
+    const agentTeamsEnabled = await new SettingsService().getAgentTeamsEnabled()
     if (explicitProviderEnv && options?.model?.trim()) {
       applyProviderRuntimeModel(explicitProviderEnv, options.model)
     }
@@ -1756,6 +1758,8 @@ export class ConversationService {
     return {
       ...cleanEnv,
       CLAUDE_CODE_ENABLE_TASKS: '1',
+      // Resolve the same preference shown in General before launching the CLI.
+      CC_HAHA_AGENT_TEAMS_ENABLED: agentTeamsEnabled ? '1' : '0',
       CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
       // Desktop must fail stuck provider streams instead of leaving the UI running forever.
       CLAUDE_ENABLE_STREAM_WATCHDOG: cleanEnv.CLAUDE_ENABLE_STREAM_WATCHDOG || '1',

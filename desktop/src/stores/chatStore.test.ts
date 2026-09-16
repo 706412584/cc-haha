@@ -3096,6 +3096,46 @@ describe('chatStore history mapping', () => {
     ]))
   })
 
+  it('counts a multi-block reply once when restoring token usage from history', async () => {
+    // Three lines sharing a `usageKey` are one reply's content blocks. Summing per line would
+    // report 3x; this is the same inflation the server-side transcript readers dedupe away.
+    const blockLine = (usageKey: string) => ({
+      id: `line-${usageKey}`,
+      type: 'assistant' as const,
+      timestamp: '2026-08-31T00:00:00.000Z',
+      content: [{ type: 'text', text: 'block' }],
+      usage: { input_tokens: 100, output_tokens: 250, cache_read_input_tokens: 1_000 },
+      usageKey,
+    })
+    const distinctReply = {
+      id: 'line-second-reply',
+      type: 'assistant' as const,
+      timestamp: '2026-08-31T00:01:00.000Z',
+      content: [{ type: 'text', text: 'second' }],
+      usage: { input_tokens: 10, output_tokens: 70 },
+      usageKey: 'msg_second\0req_second',
+    }
+    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
+      messages: [
+        blockLine('msg_first\0req_first'),
+        blockLine('msg_first\0req_first'),
+        blockLine('msg_first\0req_first'),
+        distinctReply,
+      ] as never,
+    })
+    useChatStore.setState({
+      sessions: { [TEST_SESSION_ID]: makeSession({ messages: [] }) },
+    })
+
+    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.tokenUsage).toEqual({
+      input_tokens: 110,
+      output_tokens: 320,
+      cache_read_tokens: 1_000,
+    })
+  })
+
   it('does not replace newer live token usage with a stale cold snapshot', async () => {
     let resolveHistory!: (value: { messages: MessageEntry[] }) => void
     vi.mocked(sessionsApi.getMessages).mockReturnValueOnce(new Promise((resolve) => {

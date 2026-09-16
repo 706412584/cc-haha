@@ -65,6 +65,7 @@ type SettingsStore = {
   thinkingEnabled: boolean
   thinkingAutoCollapse: boolean
   workflowKeywordTriggerEnabled: boolean
+  agentTeamsEnabled: boolean
   autoDreamEnabled: boolean
   unifiedActivityPanelEnabled: boolean
   agentOfficeSurface: AgentOfficeSurface
@@ -114,6 +115,7 @@ type SettingsStore = {
   setThinkingEnabled: (enabled: boolean) => Promise<void>
   setThinkingAutoCollapse: (enabled: boolean) => Promise<void>
   setWorkflowKeywordTriggerEnabled: (enabled: boolean) => Promise<void>
+  setAgentTeamsEnabled: (enabled: boolean) => Promise<void>
   setAutoDreamEnabled: (enabled: boolean) => Promise<void>
   setUnifiedActivityPanelEnabled: (enabled: boolean) => Promise<void>
   setAgentOfficeSurface: (surface: AgentOfficeSurface) => Promise<void>
@@ -179,8 +181,11 @@ const DEFAULT_UPDATE_PROXY_SETTINGS: UpdateProxySettings = {
   url: '',
 }
 
+// Keep milliseconds within the signed 32-bit timer limit, matching the server.
+export const NETWORK_TIMEOUT_MAX_SECONDS = Math.floor(2_147_483_647 / 1000)
+
 const DEFAULT_NETWORK_SETTINGS: NetworkSettings = {
-  aiRequestTimeoutMs: 600_000,
+  aiRequestTimeoutMs: 1_800_000,
   proxy: {
     mode: 'system',
     url: '',
@@ -212,6 +217,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   thinkingEnabled: true,
   thinkingAutoCollapse: true,
   workflowKeywordTriggerEnabled: true,
+  agentTeamsEnabled: true,
   autoDreamEnabled: false,
   unifiedActivityPanelEnabled: false,
   agentOfficeSurface: 'modal',
@@ -294,6 +300,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         thinkingEnabled: userSettings.alwaysThinkingEnabled !== false,
         thinkingAutoCollapse: userSettings.thinkingAutoCollapse !== false,
         workflowKeywordTriggerEnabled: userSettings.workflowKeywordTriggerEnabled !== false,
+        agentTeamsEnabled: userSettings.agentTeamsEnabled !== false,
         autoDreamEnabled: userSettings.autoDreamEnabled === true,
         unifiedActivityPanelEnabled: userSettings.unifiedActivityPanelEnabled === true,
         agentOfficeSurface: userSettings.agentOfficeSurface === 'tab' ? 'tab' : 'modal',
@@ -387,6 +394,17 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       await settingsApi.updateUser({ workflowKeywordTriggerEnabled: enabled })
     } catch (error) {
       set({ workflowKeywordTriggerEnabled: prev })
+      throw error
+    }
+  },
+
+  setAgentTeamsEnabled: async (enabled) => {
+    const prev = get().agentTeamsEnabled
+    set({ agentTeamsEnabled: enabled })
+    try {
+      await settingsApi.updateUser({ agentTeamsEnabled: enabled })
+    } catch (error) {
+      set({ agentTeamsEnabled: prev })
       throw error
     }
   },
@@ -862,7 +880,7 @@ function normalizeNetworkSettings(
   settings: NetworkSettingsInput | undefined,
 ): NetworkSettings {
   const timeout = typeof settings?.aiRequestTimeoutMs === 'number' && Number.isFinite(settings.aiRequestTimeoutMs)
-    ? Math.min(Math.max(Math.round(settings.aiRequestTimeoutMs), 30_000), 1_800_000)
+    ? Math.min(Math.max(Math.round(settings.aiRequestTimeoutMs), 30_000), NETWORK_TIMEOUT_MAX_SECONDS * 1000)
     : DEFAULT_NETWORK_SETTINGS.aiRequestTimeoutMs
   const proxyMode = settings?.proxy?.mode === 'manual'
     ? 'manual'

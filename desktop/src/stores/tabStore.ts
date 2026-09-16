@@ -11,6 +11,7 @@ const TAB_STORAGE_KEY = 'cc-haha-open-tabs'
 
 export const SETTINGS_TAB_ID = '__settings__'
 export const SCHEDULED_TAB_ID = '__scheduled__'
+export const CONNECTORS_TAB_ID = '__connectors__'
 export const MARKET_TAB_ID = '__market__'
 export const TRACE_LIST_TAB_ID = '__traces__'
 export const TERMINAL_TAB_PREFIX = '__terminal__'
@@ -21,8 +22,9 @@ export const OFFICE_TAB_PREFIX = '__office__'
 export const TEAM_TAB_PREFIX = '__team__'
 export const TEAM_MEMBER_TAB_PREFIX = 'team-member:'
 
-export type TabType = 'session' | 'settings' | 'scheduled' | 'market' | 'terminal' | 'trace' | 'traces' | 'workbench' | 'subagent' | 'office' | 'team' | 'team-member'
-type PersistentSpecialTabType = 'settings' | 'scheduled' | 'market' | 'traces'
+export type TabType = 'session' | 'settings' | 'scheduled' | 'connectors' | 'market' | 'terminal' | 'trace' | 'traces' | 'workbench' | 'subagent' | 'office' | 'team' | 'team-member'
+type PersistentSpecialTabType = 'settings' | 'scheduled' | 'connectors' | 'market' | 'traces'
+
 
 export type Tab = {
   sessionId: string
@@ -44,12 +46,6 @@ export type Tab = {
   returnTabId?: string
 }
 
-export type WorkbenchTabOrigin = {
-  sourceSessionId?: string
-  sourceTurnKey?: string
-  sourceElementId?: string
-}
-
 type TabPersistence = {
   openTabs: Array<{ sessionId: string; title: string; type?: TabType; traceSessionId?: string }>
   activeTabId: string | null
@@ -63,10 +59,9 @@ type TabStore = {
   openTracesTab: (title?: string) => string
   openTraceTab: (sessionId: string, title?: string) => string
   openTerminalTab: (cwd?: string, terminalRuntimeId?: string) => string
-  openWorkbenchTab: (sessionId: string, title?: string, origin?: WorkbenchTabOrigin) => string
-  returnFromWorkbench: (tabId: string) => void
   openOfficeTab: (sourceSessionId: string, title?: string) => string
   returnFromOffice: (tabId: string) => void
+
   openSubagentTab: (
     sourceSessionId: string,
     toolUseId: string,
@@ -100,16 +95,18 @@ const PERSISTENT_SPECIAL_TAB_IDS: Record<PersistentSpecialTabType, string> = {
   settings: SETTINGS_TAB_ID,
   scheduled: SCHEDULED_TAB_ID,
   market: MARKET_TAB_ID,
+  connectors: CONNECTORS_TAB_ID,
   traces: TRACE_LIST_TAB_ID,
 }
 
 function getPersistentSpecialTabType(tab: Pick<Tab, 'sessionId'> & { type?: TabType }): PersistentSpecialTabType | null {
   if (tab.sessionId === SETTINGS_TAB_ID) return 'settings'
   if (tab.sessionId === SCHEDULED_TAB_ID) return 'scheduled'
+  if (tab.sessionId === CONNECTORS_TAB_ID) return 'market'
   if (tab.sessionId === MARKET_TAB_ID) return 'market'
   if (tab.sessionId === TRACE_LIST_TAB_ID) return 'traces'
-  if (tab.type === 'settings' || tab.type === 'scheduled' || tab.type === 'market' || tab.type === 'traces') {
-    return tab.type
+  if (tab.type === 'connectors' || tab.type === 'settings' || tab.type === 'scheduled' || tab.type === 'market' || tab.type === 'traces') {
+    return tab.type === 'connectors' ? 'market' : tab.type
   }
   return null
 }
@@ -129,6 +126,7 @@ export const useTabStore = create<TabStore>((set, get) => ({
   activeTabId: null,
 
   openTab: (sessionId, title, type) => {
+    if (sessionId === CONNECTORS_TAB_ID || type === 'connectors') { sessionId = MARKET_TAB_ID; type = 'market' }
     const { tabs } = get()
     const existing = tabs.find((t) => t.sessionId === sessionId)
     if (existing) {
@@ -218,46 +216,6 @@ export const useTabStore = create<TabStore>((set, get) => ({
     return sessionId
   },
 
-  openWorkbenchTab: (sessionId, title = 'Workbench', origin) => {
-    const tabId = `${WORKBENCH_TAB_PREFIX}${sessionId}`
-    const { tabs } = get()
-    const existing = tabs.find((tab) => tab.sessionId === tabId)
-    const tab: Tab = {
-      sessionId: tabId,
-      title,
-      type: 'workbench',
-      status: 'idle',
-      workbenchSessionId: sessionId,
-      sourceSessionId: origin?.sourceSessionId ?? sessionId,
-      ...(origin?.sourceTurnKey ? { sourceTurnKey: origin.sourceTurnKey } : {}),
-      ...(origin?.sourceElementId ? { sourceElementId: origin.sourceElementId } : {}),
-    }
-
-    if (existing) {
-      set({
-        tabs: tabs.map((current) => current.sessionId === tabId ? tab : current),
-        activeTabId: tabId,
-      })
-    } else {
-      set({
-        tabs: [...tabs, tab],
-        activeTabId: tabId,
-      })
-    }
-    get().saveTabs()
-    return tabId
-  },
-
-  returnFromWorkbench: (tabId) => {
-    const tab = get().tabs.find((current) => current.sessionId === tabId)
-    if (tab?.type !== 'workbench') return
-
-    if (tab.sourceSessionId && get().tabs.some((current) => current.sessionId === tab.sourceSessionId)) {
-      get().setActiveTab(tab.sourceSessionId)
-    }
-    get().closeTab(tabId)
-  },
-
   openOfficeTab: (sourceSessionId, title = 'Agent Office') => {
     const tabId = `${OFFICE_TAB_PREFIX}${sourceSessionId}`
     const { tabs } = get()
@@ -288,6 +246,7 @@ export const useTabStore = create<TabStore>((set, get) => ({
     }
     get().closeTab(tabId)
   },
+
 
   openSubagentTab: (sourceSessionId, toolUseId, title = 'SubAgent', taskId, returnTabId) => {
     const tabId = `${SUBAGENT_TAB_PREFIX}${sourceSessionId}__${toolUseId}`
@@ -596,17 +555,19 @@ export const useTabStore = create<TabStore>((set, get) => ({
           }
         })
 
-      if (validTabs.length === 0) {
+      const uniqueTabs = validTabs.filter((tab, index) => validTabs.findIndex(other => other.sessionId === tab.sessionId) === index)
+      if (uniqueTabs.length === 0) {
         set({ tabs: [], activeTabId: null })
         localStorage.removeItem(TAB_STORAGE_KEY)
         return
       }
 
-      const activeId = data.activeTabId && validTabs.some((t) => t.sessionId === data.activeTabId)
-        ? data.activeTabId
-        : validTabs[0]!.sessionId
+      const legacyActive = data.openTabs.find(tab => tab.sessionId === data.activeTabId)
+      const activeType = legacyActive && getPersistentSpecialTabType(legacyActive)
+      const normalizedActive = activeType ? PERSISTENT_SPECIAL_TAB_IDS[activeType] : data.activeTabId
+      const activeId = normalizedActive && uniqueTabs.some(tab => tab.sessionId === normalizedActive) ? normalizedActive : uniqueTabs[0]!.sessionId
 
-      set({ tabs: validTabs, activeTabId: activeId })
+      set({ tabs: uniqueTabs, activeTabId: activeId })
     } catch { /* noop */ }
   },
 }))

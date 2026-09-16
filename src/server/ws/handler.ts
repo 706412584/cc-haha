@@ -14,6 +14,7 @@ import type {
   RuntimeConfigResult,
   ServerMessage,
   TokenUsage,
+  TurnTiming,
 } from './events.js'
 import { RUNTIME_CONFIG_APPLIED_EVENT } from './events.js'
 import * as os from 'node:os'
@@ -619,6 +620,31 @@ export function getSlashCommands(sessionId: string): SessionSlashCommand[] {
 
 function usageNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+/**
+ * Generation timings the CLI reports on its `result` message.
+ *
+ * These used to be dropped here, which is why nothing downstream could say how fast tokens were
+ * being produced. `decode_ms` is the one that matters: it spans only the time the model spent
+ * emitting tokens, so `output_tokens / decode_ms` is a rate rather than a number diluted by
+ * prefill and tool execution. All four are 0/absent together when the turn produced no timed
+ * stream (non-streaming fallback, or a CLI too old to report them).
+ */
+function translateCliTiming(cliMsg: Record<string, unknown>): TurnTiming | undefined {
+  const durationMs = usageNumber(cliMsg.duration_ms)
+  const durationApiMs = usageNumber(cliMsg.duration_api_ms)
+  const decodeMs = usageNumber(cliMsg.decode_ms)
+  const ttftMs = usageNumber(cliMsg.ttft_ms)
+  if (durationMs === 0 && durationApiMs === 0 && decodeMs === 0 && ttftMs === 0) {
+    return undefined
+  }
+  return {
+    duration_ms: durationMs,
+    duration_api_ms: durationApiMs,
+    ttft_ms: ttftMs,
+    decode_ms: decodeMs,
+  }
 }
 
 function translateCliUsage(usage: unknown): TokenUsage {
@@ -3989,15 +4015,22 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
     case 'result': {
       // 对话结果（成功或错误）
       const usage = translateCliUsage(cliMsg.usage)
+      const timing = translateCliTiming(cliMsg)
+      // Buffered assistant blocks can arrive as a batch after all raw events
+      // for one provider message. Keep deduplication active across the entire
+      // batch, then clear it only at the terminal result boundary.
+      resetCurrentStreamAttempt(streamState)
 
       if (cliMsg.is_error) {
         // If the user requested stop, this "error" is just the interrupt
         // result — don't show it as an error in the chat UI.
+        // Timing survives an interrupt: the tokens really were generated and paid for,
+        // and a cancelled turn is exactly when a client wants to know what it cost.
         if (
           interruptedTurnResultMessages.get(cliMsg) === sessionId ||
           sessionStopRequested.has(sessionId)
         ) {
-          return [{ type: 'message_complete', usage }]
+          return [{ type: 'message_complete', usage, ...(timing ? { timing } : {}) }]
         }
 
         const resultMessage =
@@ -4012,7 +4045,7 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
           : []
         if (isDuplicateOfLastApiError(streamState.lastApiError, resultMessage)) {
           streamState.lastApiError = undefined
-          return [...stoppedTasks, { type: 'message_complete', usage }]
+          return [...stoppedTasks, { type: 'message_complete', usage, ...(timing ? { timing } : {}) }]
         }
         return [
           ...stoppedTasks,
@@ -4021,12 +4054,12 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
             message: resultMessage,
             code: 'CLI_ERROR',
           },
-          { type: 'message_complete', usage },
+          { type: 'message_complete', usage, ...(timing ? { timing } : {}) },
         ]
       }
 
       streamState.lastApiError = undefined
-      return [{ type: 'message_complete', usage }]
+      return [{ type: 'message_complete', usage, ...(timing ? { timing } : {}) }]
     }
 
     case 'system': {

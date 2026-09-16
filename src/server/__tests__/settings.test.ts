@@ -35,6 +35,7 @@ import {
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
 import { clearAllOutputStylesCache } from '../../constants/outputStyles.js'
 import { clearOutputStyleCaches } from '../../outputStyles/loadOutputStylesDir.js'
+import * as terminalShellEnvironment from '../../utils/terminalShellEnvironment.js'
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 
@@ -211,6 +212,19 @@ describe('SettingsService', () => {
     const svc = new SettingsService()
     const settings = await svc.getUserSettings()
     expect(settings).toEqual({})
+  })
+
+  it('reads the same legacy shell opt-out used when spawning desktop sessions', async () => {
+    const shellEnv = spyOn(terminalShellEnvironment, 'getProcessEnvWithTerminalShellEnvironment')
+      .mockResolvedValue({ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '0' })
+    try {
+      const service = new SettingsService()
+      expect(await service.getAgentTeamsEnabled()).toBe(false)
+      await service.updateUserSettings({ agentTeamsEnabled: true })
+      expect(await service.getAgentTeamsEnabled()).toBe(true)
+    } finally {
+      shellEnv.mockRestore()
+    }
   })
 
   it('should recover from malformed user settings after an upgrade', async () => {
@@ -461,7 +475,31 @@ describe('Settings API', () => {
 
     expect(res.status).toBe(200)
     const body = await res.json()
-    expect(body).toEqual({})
+    expect(body).toEqual({ agentTeamsEnabled: true })
+  })
+
+  it('persists the General team preference across reads and overrides legacy env', async () => {
+    await fs.writeFile(path.join(tmpDir, 'settings.json'), JSON.stringify({
+      env: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '0', KEEP_ME: 'unchanged' },
+      futureSetting: { keep: true },
+    }))
+    for (const enabled of [true, false]) {
+      const put = makeRequest('PUT', '/api/settings/user', { agentTeamsEnabled: enabled })
+      expect((await handleSettingsApi(put.req, put.url, put.segments)).status).toBe(200)
+      const get = makeRequest('GET', '/api/settings/user')
+      const response = await handleSettingsApi(get.req, get.url, get.segments)
+      expect(await response.json()).toMatchObject({ agentTeamsEnabled: enabled, futureSetting: { keep: true } })
+      const persisted = JSON.parse(await fs.readFile(path.join(tmpDir, 'settings.json'), 'utf-8'))
+      expect(persisted.agentTeamsEnabled).toBe(enabled)
+      expect(persisted.env.KEEP_ME).toBe('unchanged')
+      expect(persisted.schemaVersion).toBeUndefined()
+    }
+  })
+
+  it.each(['false', null, 1])('rejects invalid team preference %j without changing settings', async value => {
+    const put = makeRequest('PUT', '/api/settings/user', { agentTeamsEnabled: value })
+    expect((await handleSettingsApi(put.req, put.url, put.segments)).status).toBe(400)
+    expect(await new SettingsService().getUserSettings()).toEqual({})
   })
 
   it('PUT /api/settings/user should update user settings', async () => {

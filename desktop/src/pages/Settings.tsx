@@ -1,3 +1,5 @@
+import { H5Settings } from './settings/H5Settings'
+import { getDesktopHost } from '@/lib/desktopHost'
 import { useEffect, useRef } from 'react'
 import { useTranslation } from '../i18n'
 import { SettingsPageHeader } from '@/components/settings/SettingsSection'
@@ -27,6 +29,10 @@ import { H5AccessSettings } from './settings/H5AccessSettings'
 import { AboutSettings } from './settings/AboutSettings'
 
 export function Settings() {
+  return getDesktopHost().isDesktop ? <DesktopSettings /> : <H5Settings />
+}
+
+export function DesktopSettings() {
   const activeTab = useUIStore((s) => s.activeSettingsTab)
   const setActiveTab = useUIStore((s) => s.setActiveSettingsTab)
   const pendingSettingsTab = useUIStore((s) => s.pendingSettingsTab)

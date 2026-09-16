@@ -462,6 +462,10 @@ export const SettingsSchema = lazySchema(() =>
           'Explicitly enable dynamic workflows. Only consulted when they are not ' +
             'disabled; `disableWorkflows` and CLAUDE_CODE_DISABLE_WORKFLOWS win.',
         ),
+      agentTeamsEnabled: z
+        .boolean()
+        .optional()
+        .describe('Enable Agent Teams for new cc-haha managed sessions. Overrides the legacy team environment setting.'),
       workflowKeywordTriggerEnabled: z
         .boolean()
         .optional()

@@ -2,6 +2,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom'
 
+const originalRangeGetClientRects = Object.getOwnPropertyDescriptor(Range.prototype, 'getClientRects')
+const originalRangeGetBoundingClientRect = Object.getOwnPropertyDescriptor(Range.prototype, 'getBoundingClientRect')
+
 const mocks = vi.hoisted(() => ({
   createSession: vi.fn(),
   listSessions: vi.fn(),
@@ -10,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   getSlashCommands: vi.fn(),
   listSkills: vi.fn(),
   listAgents: vi.fn(),
+  listReferences: vi.fn(),
   search: vi.fn(),
   browse: vi.fn(),
   getTasksForList: vi.fn(),
@@ -41,6 +45,10 @@ vi.mock('../api/skills', () => ({
   skillsApi: {
     list: mocks.listSkills,
   },
+}))
+
+vi.mock('../api/composerReferences', () => ({
+  composerReferencesApi: { list: mocks.listReferences },
 }))
 
 vi.mock('../api/agents', () => ({
@@ -272,6 +280,14 @@ describe('EmptySession', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    // ProseMirror selection scrolling needs geometry APIs absent in jsdom.
+    Object.defineProperties(Range.prototype, {
+      getClientRects: { configurable: true, value: () => [] },
+      getBoundingClientRect: { configurable: true, value: () => ({
+        x: 0, y: 0, top: 0, right: 0, bottom: 0, left: 0, width: 0, height: 0,
+        toJSON: () => ({}),
+      }) },
+    })
     mocks.webviewDragHandlers.length = 0
     mocks.isMobile = false
     mocks.isTauriRuntime = false
@@ -304,12 +320,14 @@ describe('EmptySession', () => {
     mocks.getSlashCommands.mockResolvedValue({ commands: [] })
     mocks.listSkills.mockResolvedValue({ skills: [] })
     mocks.listAgents.mockResolvedValue({ activeAgents: [], allAgents: [] })
+    mocks.listReferences.mockResolvedValue({ plugins: [], skills: [] })
     mocks.search.mockResolvedValue({
       currentPath: '/workspace/project',
       parentPath: null,
       query: '',
       entries: [],
     })
+    mocks.browse.mockResolvedValue({ currentPath: '/workspace/project', parentPath: null, entries: [] })
     mocks.getTasksForList.mockResolvedValue({ tasks: [] })
     mocks.resetTaskList.mockResolvedValue(undefined)
     mocks.getProviderAuthStatus.mockResolvedValue({
@@ -320,6 +338,13 @@ describe('EmptySession', () => {
 
   afterEach(() => {
     cleanup()
+    for (const [name, descriptor] of [
+      ['getClientRects', originalRangeGetClientRects],
+      ['getBoundingClientRect', originalRangeGetBoundingClientRect],
+    ] as const) {
+      if (descriptor) Object.defineProperty(Range.prototype, name, descriptor)
+      else Reflect.deleteProperty(Range.prototype, name)
+    }
     Reflect.deleteProperty(window, 'desktopHost')
     useSessionStore.setState(initialSessionState, true)
     useChatStore.setState(initialChatState, true)
@@ -343,6 +368,53 @@ describe('EmptySession', () => {
     expect(screen.getByRole('button', { name: 'Run' })).toHaveClass('h-11', 'w-11')
     expect(screen.getByTestId('empty-session-composer-shell')).toHaveClass('px-3')
     expect(screen.getByTestId('empty-session-composer-panel')).toHaveClass('rounded-[var(--radius-2xl)]')
+  })
+
+  it('keeps user-only skills as slash text when no mention capability is available', async () => {
+    mocks.listSkills.mockResolvedValue({ skills: [{ name: 'manual-only', description: 'User invocation only', userInvocable: true, disableModelInvocation: true }] })
+    render(<EmptySession />)
+    setComposerText('/manual', 7)
+    fireEvent.click(await screen.findByText('manual-only'))
+    await waitFor(() => expect(getComposerText()).toBe('/manual-only '))
+    expect(document.querySelector('.composer-mention')).not.toBeInTheDocument()
+    expect(mocks.createSession).not.toHaveBeenCalled()
+  })
+
+  it('hides previous directory skills while the new directory is loading', async () => {
+    let resolveProject!: (result: { skills: { name: string, description: string, userInvocable: boolean }[] }) => void
+    mocks.listSkills.mockImplementation((cwd?: string) => cwd
+      ? new Promise(resolve => { resolveProject = resolve })
+      : Promise.resolve({ skills: [{ name: 'old-directory-skill', description: 'Old scope', userInvocable: true }] }))
+    render(<EmptySession />)
+    setComposerText('/', 1)
+    expect(await screen.findByText('old-directory-skill')).toBeInTheDocument()
+    await pickProject()
+    setComposerText('/', 1)
+    expect(screen.queryByText('old-directory-skill')).not.toBeInTheDocument()
+    await act(async () => resolveProject({ skills: [{ name: 'new-directory-skill', description: 'New scope', userInvocable: true }] }))
+    expect(await screen.findByText('new-directory-skill')).toBeInTheDocument()
+    expect(screen.queryByText('old-directory-skill')).not.toBeInTheDocument()
+  })
+
+  it('ignores late mention candidates from a previous directory', async () => {
+    const staleResolvers: ((result: { plugins: unknown[], skills: unknown[] }) => void)[] = []
+    const candidate = (id: string) => ({
+      kind: 'plugin', id, name: id, displayName: id, description: 'Plugin',
+      source: 'plugin', modelText: `Use ${id}`,
+    })
+    mocks.listReferences.mockImplementation((cwd?: string) => cwd
+      ? Promise.resolve({ plugins: [candidate('current-plugin')], skills: [] })
+      : new Promise(resolve => { staleResolvers.push(resolve) }))
+    render(<EmptySession />)
+    await waitFor(() => expect(staleResolvers.length).toBeGreaterThan(0))
+    await pickProject()
+    setComposerText('@', 1)
+    expect(await screen.findByText('current-plugin')).toBeInTheDocument()
+    await act(async () => {
+      staleResolvers.forEach(resolve => resolve({ plugins: [candidate('stale-plugin')], skills: [] }))
+    })
+    expect(screen.queryByText('stale-plugin')).not.toBeInTheDocument()
+    expect(screen.getByText('current-plugin')).toBeInTheDocument()
   })
 
   it('refreshes empty-session slash commands after plugin reloads', async () => {
@@ -1172,6 +1244,26 @@ describe('EmptySession', () => {
         }),
       ],
     })
+  })
+
+  it('selects a plugin on the landing composer and sends its runtime request only after Run', async () => {
+    const modelText = 'Use plugin "hyperframes@curated" for this request.'
+    mocks.listReferences.mockResolvedValue({ skills: [], plugins: [{
+      kind: 'plugin', id: 'hyperframes@curated', name: 'hyperframes', displayName: 'HyperFrames',
+      description: 'Create HTML videos', source: 'curated', modelText,
+    }] })
+    render(<EmptySession />)
+    setComposerText('@hyper', 6)
+    fireEvent.click(await screen.findByRole('option', { name: 'HyperFrames' }))
+    await waitFor(() => expect(document.querySelector('[data-mention-kind="plugin"]')).toBeInTheDocument())
+    expect(mocks.createSession).not.toHaveBeenCalled()
+    fireEvent.keyDown(document.querySelector('[data-mention-kind="plugin"]')!, { key: 'Enter' })
+    expect(await screen.findByRole('dialog', { name: 'HyperFrames' })).toHaveTextContent('Create HTML videos')
+    fireEvent.click(screen.getByRole('button', { name: 'Close dialog' }))
+    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
+    await waitFor(() => expect(mocks.wsSend).toHaveBeenCalledWith('draft-session', {
+      type: 'user_message', content: modelText, attachments: [],
+    }))
   })
 
   it('sends a selected @ directory as an inline @"path" in the first draft message', async () => {

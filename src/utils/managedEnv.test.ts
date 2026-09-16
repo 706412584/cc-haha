@@ -3,10 +3,13 @@ import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
 
-import { applySafeConfigEnvironmentVariables } from './managedEnv.js'
+import { applyConfigEnvironmentVariables, applySafeConfigEnvironmentVariables } from './managedEnv.js'
 
 let tmpDir: string
 const originalEnv = {
+  CC_HAHA_AGENT_TEAMS_ENABLED: process.env.CC_HAHA_AGENT_TEAMS_ENABLED,
+  CC_HAHA_AGENT_TEAMS_DEFAULT: process.env.CC_HAHA_AGENT_TEAMS_DEFAULT,
+  CLAUDE_CODE_ENTRYPOINT: process.env.CLAUDE_CODE_ENTRYPOINT,
   CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
   CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST,
   CC_HAHA_LOCAL_ACCESS_TOKEN: process.env.CC_HAHA_LOCAL_ACCESS_TOKEN,
@@ -39,6 +42,9 @@ describe('managedEnv', () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'managed-env-'))
     process.env.CLAUDE_CONFIG_DIR = tmpDir
     delete process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
+    delete process.env.CC_HAHA_AGENT_TEAMS_ENABLED
+    delete process.env.CC_HAHA_AGENT_TEAMS_DEFAULT
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'sdk-cli'
     delete process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
     delete process.env.ANTHROPIC_BASE_URL
     delete process.env.ANTHROPIC_API_KEY
@@ -58,6 +64,9 @@ describe('managedEnv', () => {
     restoreEnv('CLAUDE_CONFIG_DIR')
     restoreEnv('CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST')
     restoreEnv('CC_HAHA_LOCAL_ACCESS_TOKEN')
+    restoreEnv('CC_HAHA_AGENT_TEAMS_ENABLED')
+    restoreEnv('CC_HAHA_AGENT_TEAMS_DEFAULT')
+    restoreEnv('CLAUDE_CODE_ENTRYPOINT')
     restoreEnv('ANTHROPIC_BASE_URL')
     restoreEnv('ANTHROPIC_API_KEY')
     restoreEnv('ANTHROPIC_AUTH_TOKEN')
@@ -66,6 +75,26 @@ describe('managedEnv', () => {
     restoreEnv('CC_HAHA_IMAGE_PROVIDER_ID')
     restoreEnv('CC_HAHA_IMAGE_MODEL')
     restoreEnv('CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS')
+  })
+
+  test.each(['0', '1', undefined])('protects the General team preference %j through settings application', async (enabled) => {
+    await writeJson(path.join(tmpDir, 'cc-haha', 'settings.json'), {
+      env: {
+        CC_HAHA_AGENT_TEAMS_ENABLED: enabled === '1' ? '0' : '1',
+        CC_HAHA_AGENT_TEAMS_DEFAULT: '0',
+      },
+    })
+    if (enabled !== undefined) process.env.CC_HAHA_AGENT_TEAMS_ENABLED = enabled
+    process.env.CC_HAHA_AGENT_TEAMS_DEFAULT = '1'
+
+    // OAuth and cron sessions can use sdk-cli without host-owned provider routing.
+    // Both the pre-trust and post-trust settings paths must preserve the choice.
+    applySafeConfigEnvironmentVariables()
+    expect(process.env.CC_HAHA_AGENT_TEAMS_ENABLED).toBe(enabled)
+    expect(process.env.CC_HAHA_AGENT_TEAMS_DEFAULT).toBe('1')
+    applyConfigEnvironmentVariables()
+    expect(process.env.CC_HAHA_AGENT_TEAMS_ENABLED).toBe(enabled)
+    expect(process.env.CC_HAHA_AGENT_TEAMS_DEFAULT).toBe('1')
   })
 
   test('starts a standalone provider proxy for CLI-only OpenAI-compatible providers', async () => {

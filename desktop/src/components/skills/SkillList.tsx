@@ -24,6 +24,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { ErrorState } from '@/components/ui/ErrorState'
 import { IconButton } from '@/components/ui/IconButton'
 import { LoadingState } from '@/components/ui/LoadingState'
+import { SearchField } from '@/components/ui/SearchField'
 import type { SkillMeta, SkillSource } from '../../types/skill'
 
 const SOURCE_ORDER: SkillSource[] = ['user', 'project', 'plugin', 'mcp', 'bundled']
@@ -78,7 +79,7 @@ const CATEGORY_LABEL_KEY: Record<string, TranslationKey> = {
   Engineering: 'settings.skills.category.engineering',
 }
 
-export function SkillList() {
+export function SkillList({ compact = false }: { compact?: boolean }) {
   const {
     skills,
     isLoading,
@@ -172,6 +173,16 @@ export function SkillList() {
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
+      {compact ? (
+        <SearchField
+          label={t('settings.skills.searchLabel')}
+          placeholder={t('settings.skills.searchPlaceholder')}
+          value={searchQuery}
+          onChange={setSearchQuery}
+          onClear={() => setSearchQuery('')}
+          clearLabel={t('settings.skills.clearSearch')}
+        />
+      ) : (
       <Card radius="xl" surface="low" padding="none" className="overflow-hidden">
         <div className="grid min-w-0 gap-5 px-5 py-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(400px,1fr)] xl:items-end">
           <div className="min-w-0">
@@ -249,6 +260,7 @@ export function SkillList() {
           </div>
         </div>
       </Card>
+      )}
 
       {filteredCatalog.length > 0 && (
         <Card as="section" radius="xl" surface="base" padding="none" className="min-w-0 overflow-hidden">

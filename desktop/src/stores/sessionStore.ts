@@ -15,6 +15,7 @@ import type { LocalIndexStatus, SessionListItem } from '../types/session'
 import type { PermissionMode } from '../types/settings'
 import { isPlaceholderSessionTitle } from '../lib/sessionTitle'
 import { invalidateRecentProjectsCache } from '../lib/recentProjectsCache'
+import { releaseWorkspaceSession } from '../lib/workspace/releaseSession'
 
 const SESSION_LIST_LIMIT = 400
 const PROJECT_HISTORY_PAGE_SIZE = 50
@@ -371,6 +372,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   deleteSession: async (id: string) => {
     await sessionsApi.delete(id)
+    releaseWorkspaceSession(id)
     pendingCreatedSessionIds.delete(id)
     invalidateRecentProjectsCache()
     useSessionRuntimeStore.getState().clearSelection(id)
@@ -394,6 +396,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       invalidateRecentProjectsCache()
     }
     for (const id of result.successes) {
+      releaseWorkspaceSession(id)
       pendingCreatedSessionIds.delete(id)
       useSessionRuntimeStore.getState().clearSelection(id)
     }

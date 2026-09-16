@@ -27,6 +27,7 @@ import {
 } from '../../stores/projectDisplayNameStore'
 import { openDesktopNotificationTarget } from '../../lib/desktopNotificationNavigation'
 import { TabBar } from './TabBar'
+import { WorkspaceHeaderProvider } from './WorkspaceHeaderContext'
 import { StartupErrorView } from './StartupErrorView'
 import { useTabStore, SETTINGS_TAB_ID } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
@@ -397,6 +398,7 @@ export function AppShell() {
                 {mobilePageTitle}
               </h1>
               {isActiveChatTab ? (
+
                 <div className="mt-0.5 flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[10px] font-medium text-[var(--color-text-tertiary)]">
                   {activeTab?.status === 'running' ? (
                     <span className="flex shrink-0 items-center gap-1 text-[var(--color-text-secondary)]">
@@ -434,8 +436,10 @@ export function AppShell() {
             </button>
           </div>
         ) : null}
-        {!isMobileShell ? <TabBar /> : null}
-        <ContentRouter />
+        <WorkspaceHeaderProvider>
+          {!isMobileShell ? <TabBar /> : null}
+          <ContentRouter />
+        </WorkspaceHeaderProvider>
       </main>
       {desktopRuntime && officeModalSessionId ? (
         <AgentOfficeModal

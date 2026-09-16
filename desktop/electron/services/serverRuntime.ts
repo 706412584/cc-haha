@@ -56,6 +56,8 @@ const TUNNEL_HEALTH_TIMEOUT_MS = 10_000
 const TUNNEL_HEALTH_FAILURE_THRESHOLD = 3
 
 type ServerRuntimeOptions = {
+  onServerUnavailable?: () => void
+  onServerReady?: () => void
   desktopRoot: string
   appRoot?: string
   h5DistDir?: string
@@ -164,6 +166,8 @@ function createServerStartState(child: SidecarChild): ServerStartState {
 }
 
 export class ElectronServerRuntime {
+  private readonly onServerUnavailable?: () => void
+  private readonly onServerReady?: () => void
   private readonly desktopRoot: string
   private readonly appRoot: string
   private readonly h5DistDir: string
@@ -198,6 +202,8 @@ export class ElectronServerRuntime {
   private adapterGeneration = 0
 
   constructor(options: ServerRuntimeOptions) {
+    this.onServerUnavailable = options.onServerUnavailable
+    this.onServerReady = options.onServerReady
     this.desktopRoot = options.desktopRoot
     this.appRoot = options.appRoot ?? options.desktopRoot
     this.h5DistDir = options.h5DistDir ?? path.join(options.desktopRoot, 'dist')
@@ -267,6 +273,7 @@ export class ElectronServerRuntime {
 
   stopAll(sync = false) {
     this.stopTunnelProcess(sync)
+    this.onServerUnavailable?.()
     ++this.lifecycleGeneration
     this.restartNotBefore = 0
     const starting = this.startingServer
@@ -585,6 +592,7 @@ export class ElectronServerRuntime {
         startState.failurePromise,
       ])
       if (startState.failure) throw startState.failure
+      this.onServerReady?.()
       return url
     } catch (error) {
       if (startState) {
@@ -830,6 +838,7 @@ export class ElectronServerRuntime {
     const active = this.server?.child === child
     const starting = this.startingServer?.child === child
     if (!active && !starting) return
+    this.onServerUnavailable?.()
     const failedServer = active ? this.server : null
     if (active) {
       const adapterChildren = this.server!.adapterChildren

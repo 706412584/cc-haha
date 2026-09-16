@@ -55,7 +55,7 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
     <Modal open={open} onClose={onClose} title={activeImage.name} variant="media">
       <div className="flex h-full min-h-0 flex-col">
         <div className="flex h-12 shrink-0 items-center justify-between px-3">
-          <span className="font-mono text-xs tabular-nums text-[var(--color-terminal-muted)]">
+          <span className="font-mono text-xs tabular-nums text-[var(--color-media-muted)]">
             {activeIndex + 1} / {images.length}
           </span>
           <div className="flex items-center gap-2">
@@ -97,8 +97,8 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
                   size="xl"
                   tone="secondary"
                   shape="circle"
-                  surface="terminal"
-                  className="bg-[var(--color-terminal-header)] shadow-[var(--shadow-card)]"
+                  surface="media"
+                  className="bg-[var(--color-media-header)] shadow-[var(--shadow-card)]"
                   onClick={() => onSelect((activeIndex - 1 + images.length) % images.length)}
                 />
               </div>
@@ -109,8 +109,8 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
                   size="xl"
                   tone="secondary"
                   shape="circle"
-                  surface="terminal"
-                  className="bg-[var(--color-terminal-header)] shadow-[var(--shadow-card)]"
+                  surface="media"
+                  className="bg-[var(--color-media-header)] shadow-[var(--shadow-card)]"
                   onClick={() => onSelect((activeIndex + 1) % images.length)}
                 />
               </div>
@@ -127,8 +127,8 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
                 onClick={() => onSelect(index)}
                 className={`overflow-hidden rounded-[var(--radius-md)] border transition-[border-color,opacity,transform] duration-200 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${
                   index === activeIndex
-                    ? 'border-[var(--color-terminal-fg)] opacity-100'
-                    : 'border-[var(--color-terminal-border)] opacity-55 hover:opacity-90'
+                    ? 'border-[var(--color-media-fg)] opacity-100'
+                    : 'border-[var(--color-media-border)] opacity-55 hover:opacity-90'
                 }`}
               >
                 <img src={image.src} alt={image.name} className="h-12 w-12 object-cover" />

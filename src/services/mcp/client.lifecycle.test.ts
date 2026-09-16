@@ -1,5 +1,8 @@
 import '../../../preload.ts'
-import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import {
   clearServerCache,
@@ -12,6 +15,14 @@ import {
 
 const config = { type: 'sse' as const, url: 'http://127.0.0.1:1/mcp' }
 const name = 'lifecycle-test'
+let root: string
+let previousConfigDir: string | undefined
+
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), 'mcp-lifecycle-'))
+  previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+  process.env.CLAUDE_CONFIG_DIR = root
+})
 
 function deferred() {
   let resolve!: () => void
@@ -29,6 +40,9 @@ afterEach(async () => {
   setMcpConnectionClosedHandler(undefined)
   await clearServerCache(name, config)
   mock.restore()
+  if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
+  else process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+  await rm(root, { recursive: true, force: true })
 })
 
 describe('MCP connection ownership', () => {

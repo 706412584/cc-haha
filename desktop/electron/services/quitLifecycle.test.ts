@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 // Execute the production registration without booting Electron or user sidecars.
 // Dependencies are fixtures; the before-quit handler and its state are real.
-function quitFixture(failingStep?: string, rejectServer = false) {
+function quitFixture(failingStep?: string, rejectServer = false, rejectPublicAccess = false) {
   const desktopDir = path.basename(process.cwd()) === 'desktop'
     ? process.cwd()
     : path.join(process.cwd(), 'desktop')
@@ -39,6 +39,13 @@ function quitFixture(failingStep?: string, rejectServer = false) {
     terminalService: { killAll: cleanup('terminal') },
     previewService: { close: cleanup('preview') },
     petWindowController: { dispose: cleanup('pet') },
+    workspaceBrowserService: null,
+    publicAccessManager: {
+      dispose: () => {
+        cleanup('publicAccess')()
+        return rejectPublicAccess ? Promise.reject(error) : Promise.resolve()
+      },
+    },
     getServerRuntime: () => {
       cleanup('server')()
       return { stopAllAndWait: () => serverDone }
@@ -59,7 +66,8 @@ describe('Electron quit lifecycle', () => {
     expect(fixture.context.isQuitting).toBe(true)
     expect(fixture.requestQuit().preventDefault).toHaveBeenCalledOnce()
     expect(fixture.exit).not.toHaveBeenCalled()
-    expect(fixture.calls).toEqual(['window', 'tray', 'terminal', 'preview', 'pet', 'server'])
+    await settle()
+    expect(fixture.calls).toEqual(['window', 'tray', 'terminal', 'preview', 'pet', 'publicAccess', 'server'])
 
     fixture.finishServer()
     await settle()
@@ -67,12 +75,13 @@ describe('Electron quit lifecycle', () => {
     expect(fixture.exit).toHaveBeenCalledOnce()
   })
 
-  it.each(['window', 'tray', 'terminal', 'preview', 'pet'])(
+  it.each(['window', 'tray', 'terminal', 'preview', 'pet', 'publicAccess'])(
     'still stops the server and quits when %s cleanup throws', async step => {
       const fixture = quitFixture(step)
       expect(() => fixture.requestQuit()).not.toThrow()
       fixture.requestQuit()
-      expect(fixture.calls).toEqual(['window', 'tray', 'terminal', 'preview', 'pet', 'server'])
+      await settle()
+      expect(fixture.calls).toEqual(['window', 'tray', 'terminal', 'preview', 'pet', 'publicAccess', 'server'])
       expect(fixture.exit).not.toHaveBeenCalled()
 
       fixture.finishServer()
@@ -82,6 +91,18 @@ describe('Electron quit lifecycle', () => {
       expect(fixture.exit).toHaveBeenCalledOnce()
     },
   )
+
+  it('still waits for the server if ngrok cleanup rejects asynchronously', async () => {
+    const fixture = quitFixture(undefined, false, true)
+    fixture.requestQuit()
+    await settle()
+    expect(fixture.calls).toContain('server')
+    expect(fixture.exit).not.toHaveBeenCalled()
+    expect(fixture.context.console.error).toHaveBeenCalledWith('[desktop] public access cleanup failed during quit')
+    fixture.finishServer()
+    await settle()
+    expect(fixture.exit).toHaveBeenCalledOnce()
+  })
 
   it('quits if obtaining the server runtime throws synchronously', async () => {
     const fixture = quitFixture('server')
@@ -93,6 +114,7 @@ describe('Electron quit lifecycle', () => {
   it('quits if graceful server shutdown rejects', async () => {
     const fixture = quitFixture(undefined, true)
     fixture.requestQuit()
+    await settle()
     fixture.finishServer()
     await settle()
     expect(fixture.context.console.error).toHaveBeenCalled()

@@ -12,8 +12,7 @@ import { isAbsoluteLocalPath, localFileUrl } from '../../lib/handlePreviewLink'
 import { shouldOfferStaticHtmlPreview } from '../../lib/htmlPreviewPolicy'
 import { getServerBaseUrl } from '../../lib/desktopRuntime'
 import { useOpenTargetStore } from '../../stores/openTargetStore'
-import { useBrowserPanelStore } from '../../stores/browserPanelStore'
-import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
+import { workspaceOpen } from '../../lib/workspace/openTarget'
 import { isWorkspacePreviewableFile } from '../../lib/fileCapabilities'
 import { openLocalFileWithSystem, reportOpenFailure } from '../../lib/systemFileOpen'
 
@@ -89,17 +88,22 @@ export function CurrentTurnChangeCard({
     // absolute path). In-workdir files keep the diff view.
     if (isAbsoluteLocalPath(fileEntry.displayPath)) {
       if (shouldOfferStaticHtmlPreview(fileEntry.displayPath, { siblingFiles: files.map((entry) => entry.displayPath) })) {
-        useBrowserPanelStore.getState().open(sessionId, localFileUrl(getServerBaseUrl(), fileEntry.apiPath))
+        workspaceOpen.browser(sessionId, localFileUrl(getServerBaseUrl(), fileEntry.apiPath), { origin })
         return
       }
-      void useWorkspacePanelStore.getState().openPreview(sessionId, fileEntry.displayPath, 'file', origin)
+      workspaceOpen.file(sessionId, fileEntry.displayPath, { origin })
       return
     }
-    // Jump to the right-side workspace and open a diff tab. We pass the workDir-relative
-    // path (same format the workspace file tree passes to openPreview), so the diff tab
-    // is keyed/fetched identically to the tree-driven one.
-    void useWorkspacePanelStore.getState().openPreview(sessionId, fileEntry.displayPath, 'diff', origin)
-  }, [checkpoint.target.targetUserMessageId, sessionId, files])
+    // Jump to the right-side workspace and show this turn's own recorded change
+    // for that file. The `turn` source deliberately does not become a current-Git
+    // comparison: the card is about what this turn did, not about what the
+    // working tree happens to hold now.
+    workspaceOpen.review(sessionId, {
+      source: { kind: 'turn', turnKey: checkpoint.target.targetUserMessageId ?? '', userMessageIndex: checkpoint.target.userMessageIndex },
+      path: fileEntry.displayPath,
+      origin,
+    })
+  }, [checkpoint.target.targetUserMessageId, checkpoint.target.userMessageIndex, sessionId, files])
 
   const handleOpenWith = useCallback((event: ReactMouseEvent<HTMLButtonElement>, fileEntry: ChangedFileEntry) => {
     event.stopPropagation()
@@ -130,6 +134,8 @@ export function CurrentTurnChangeCard({
     })()
   }, [openWith, sessionId, t, files])
 
+  if (files.length === 0) return null
+
   const cardLabel = isLatest
     ? t('chat.turnChangesLatestCardLabel')
     : t('chat.turnChangesHistoricalCardLabel')
@@ -158,32 +164,26 @@ export function CurrentTurnChangeCard({
       aria-label={cardLabel}
     >
       <div className="flex flex-wrap items-center justify-between gap-2 bg-[var(--color-surface-container-low)] px-3 py-2">
-        {files.length > 0 ? (
-          <button
-            type="button"
-            data-chat-disclosure="true"
-            data-turn-change-disclosure="true"
-            aria-expanded={expanded}
-            aria-controls={filesId}
-            aria-label={t(expanded ? 'chat.turnChangesCollapse' : 'chat.turnChangesExpand', { count: files.length })}
-            onClick={() => {
-              setOpenWith(null)
-              onExpandedChange(!expanded)
-            }}
-            className="flex min-h-8 min-w-0 flex-1 basis-40 flex-wrap items-center gap-2 rounded-[var(--radius-md)] text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
-          >
-            {expanded ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
-            <span className="font-semibold text-[var(--color-text-primary)]">
-              {t('chat.turnChangesTitle', { count: files.length })}
-            </span>
-            <span className="font-mono text-xs font-semibold text-[var(--color-diff-added-text)]">+{checkpoint.code.insertions}</span>
-            <span className="font-mono text-xs font-semibold text-[var(--color-diff-removed-text)]">-{checkpoint.code.deletions}</span>
-          </button>
-        ) : (
-          <span className="text-sm font-semibold text-[var(--color-text-primary)]">
+        <button
+          type="button"
+          data-chat-disclosure="true"
+          data-turn-change-disclosure="true"
+          aria-expanded={expanded}
+          aria-controls={filesId}
+          aria-label={t(expanded ? 'chat.turnChangesCollapse' : 'chat.turnChangesExpand', { count: files.length })}
+          onClick={() => {
+            setOpenWith(null)
+            onExpandedChange(!expanded)
+          }}
+          className="flex min-h-8 min-w-0 flex-1 basis-40 flex-wrap items-center gap-2 rounded-[var(--radius-md)] text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+        >
+          {expanded ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
+          <span className="font-semibold text-[var(--color-text-primary)]">
             {t('chat.turnChangesTitle', { count: files.length })}
           </span>
-        )}
+          <span className="font-mono text-xs font-semibold text-[var(--color-diff-added-text)]">+{checkpoint.code.insertions}</span>
+          <span className="font-mono text-xs font-semibold text-[var(--color-diff-removed-text)]">-{checkpoint.code.deletions}</span>
+        </button>
 
         {/* Never disabled: rolling the conversation back is always possible, even
             when the files are not restorable. The dialog picks what to touch. */}

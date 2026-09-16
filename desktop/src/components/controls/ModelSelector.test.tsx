@@ -63,6 +63,14 @@ beforeEach(() => {
 })
 
 describe('ModelSelector', () => {
+  it('keeps a long model label shrinkable in a fluid desktop toolbar', () => {
+    useSettingsStore.setState({ locale: 'en', availableModels: MODELS, currentModel: MODELS[0] })
+    render(<ModelSelector value="alpha" onChange={vi.fn()} fluid />)
+    const button = screen.getByRole('button', { name: /alpha/i })
+    expect(button).toHaveClass('min-w-0', 'flex-1')
+    expect(button.querySelector('span')).toHaveClass('truncate')
+  })
+
   it.each([true, false])('sends each provider slot with 1M=%s and preserves reasoning controls', async (enabled) => {
     useSettingsStore.setState({ locale: 'en', effortLevel: 'high' })
     useProviderStore.setState({

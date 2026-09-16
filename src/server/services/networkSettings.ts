@@ -23,10 +23,13 @@ export type NetworkSettings = {
 // ollama, llama.cpp, ...) often send nothing — not headers, not an SSE ping —
 // for minutes while prefilling a large context (#766, #826). Once tokens start
 // flowing the CLI hands off to the shorter mid-stream idle watchdog. The
-// default matches the SDK's own 600s.
-export const DEFAULT_AI_REQUEST_TIMEOUT_MS = 600_000
+// default allows 30 minutes for slow local-model reasoning.
+export const DEFAULT_AI_REQUEST_TIMEOUT_MS = 1_800_000
 export const MIN_AI_REQUEST_TIMEOUT_MS = 30_000
-export const MAX_AI_REQUEST_TIMEOUT_MS = 1_800_000
+// Keep only the JavaScript timer safety boundary, not a product-duration cap.
+// Larger delays overflow signed 32-bit timers and can fire almost immediately.
+// Use whole seconds to match the desktop input without rounding past the limit.
+export const MAX_AI_REQUEST_TIMEOUT_MS = Math.floor(2_147_483_647 / 1000) * 1000
 // Floor for the CLI's overall stream-duration cap (CLAUDE_STREAM_MAX_DURATION_MS).
 // That cap is what frees an endlessly-trickling provider stream (#766), but it is
 // a wall-clock budget that no incoming chunk resets. It must therefore never be

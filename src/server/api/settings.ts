@@ -103,7 +103,10 @@ export async function handleSettingsApi(
 
 async function handleUserSettings(req: Request): Promise<Response> {
   if (req.method === 'GET') {
-    return Response.json(await settingsService.getUserSettings())
+    return Response.json({
+      ...await settingsService.getUserSettings(),
+      agentTeamsEnabled: await settingsService.getAgentTeamsEnabled(),
+    })
   }
 
   if (req.method === 'PUT') {

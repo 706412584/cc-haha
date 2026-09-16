@@ -25,7 +25,10 @@ import { ImageAnnotationModal } from './ImageAnnotationModal'
 import { ComposerDropOverlay } from './ComposerDropOverlay'
 import { ProjectContextChip } from '@/components/chat/ProjectContextChip'
 import { RepositoryLaunchControls } from '@/components/chat/RepositoryLaunchControls'
-import { FileSearchMenu, type FileSearchMenuHandle } from './FileSearchMenu'
+import { ComposerReferenceMenu, type ComposerReferenceMenuHandle } from './ComposerReferenceMenu'
+import { ComposerReferenceDetail } from './ComposerReferenceDetail'
+import { composerReferencesApi } from '@/api/composerReferences'
+import type { ComposerReferenceCandidate } from '@/types/composerReference'
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from './LocalSlashCommandPanel'
 import { SkillPickerMenu, type SkillPickerHandle } from './SkillPickerMenu'
 import { getSlashCommandOptionId, SlashCommandMenu } from './SlashCommandMenu'
@@ -58,6 +61,7 @@ import {
 } from '../welcome/WelcomeTaskCards'
 import { MentionComposer, type MentionComposerHandle } from './MentionComposer'
 import {
+  composerReferenceToMention,
   findMentionRanges,
   insertMentionIntoText,
   type ComposerMention,
@@ -75,6 +79,8 @@ type ChatInputProps = {
   variant?: 'default' | 'hero'
   compact?: boolean
 }
+
+const EMPTY_COMPOSER_REFERENCES: ComposerReferenceCandidate[] = []
 
 const EMPTY_WORKSPACE_REFERENCES: WorkspaceChatReference[] = []
 
@@ -138,6 +144,9 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const [shellRef, shellWidth] = useElementWidth<HTMLDivElement>()
   const [input, setInput] = useState('')
   const [mentions, setMentions] = useState<ComposerMention[]>([])
+  const [referenceDetail, setReferenceDetail] = useState<ComposerMention | null>(null)
+  const [referenceOptionId, setReferenceOptionId] = useState<string | undefined>()
+  const [referenceState, setReferenceState] = useState<{ context: string, items: ComposerReferenceCandidate[], loading: boolean, error: boolean } | null>(null)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [annotationTarget, setAnnotationTarget] = useState<Attachment | null>(null)
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
@@ -166,10 +175,11 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const modelSelectorRef = useRef<ModelSelectorHandle>(null)
   const plusMenuRef = useRef<HTMLDivElement>(null)
   const slashMenuRef = useRef<HTMLDivElement>(null)
-  const fileSearchRef = useRef<FileSearchMenuHandle>(null)
+  const fileSearchRef = useRef<ComposerReferenceMenuHandle>(null)
   const skillPickerRef = useRef<SkillPickerHandle>(null)
   const slashItemRefs = useRef<(HTMLElement | null)[]>([])
   const slashMenuId = useId()
+  const referenceMenuId = useId()
   const previousActiveTabIdRef = useRef<string | null>(null)
   const inputRef = useRef(input)
   const mentionsRef = useRef(mentions)
@@ -307,6 +317,28 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const fitsAtLeast = (minWidth: number) => shellWidth === null ? !compact : shellWidth >= minWidth
   const useCompactControls = isMobileComposer || !fitsAtLeast(TOOLBAR_LOCATION_MIN_WIDTH)
   const activeLaunchWorkDir = showLaunchControls ? (launchWorkDir || resolvedWorkDir || '') : (resolvedWorkDir || '')
+  const referenceCwd = activeLaunchWorkDir || resolvedWorkDir || ''
+  const referenceContext = `${activeTabId ?? ''}\0${referenceCwd}`
+  const referenceCurrent = referenceState?.context === referenceContext ? referenceState : null
+  const composerReferences = referenceCurrent?.items ?? EMPTY_COMPOSER_REFERENCES
+  useEffect(() => {
+    let active = true
+    if (isMemberSession) return
+    setReferenceState(previous => ({ context: referenceContext, items: previous?.context === referenceContext ? previous.items : [], loading: true, error: false }))
+    void composerReferencesApi.list(referenceCwd || undefined).then(data => {
+      if (active) setReferenceState({ context: referenceContext, items: [...data.plugins, ...data.skills], loading: false, error: false })
+    }).catch(() => {
+      if (active) setReferenceState({ context: referenceContext, items: [], loading: false, error: true })
+    })
+    return () => { active = false }
+  }, [referenceContext, referenceCwd, isMemberSession, slashMenuOpen, fileSearchOpen])
+  useEffect(() => {
+    setReferenceDetail(null)
+    setReferenceOptionId(undefined)
+    setFileSearchOpen(false)
+    setSlashMenuOpen(false)
+  }, [referenceContext])
+
   // The run location lives in the toolbar on the wide desktop composer, and it
   // stays there for the whole session: editable while the session is still a
   // draft, read-only once the first message lands. It used to jump from inside
@@ -582,19 +614,23 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     // when it is absent preserves the original behavior: with no menu in the
     // DOM, an outside press was ignored.
     isExempt: (target) => {
-      const menu = document.getElementById('file-search-menu')
+      const menu = document.getElementById(referenceMenuId)
       if (!menu) return true
       return target instanceof Node && menu.contains(target)
     },
   })
 
-  const allSlashCommands = useMemo(
-    () => appendAgentSlashCommands(
-      mergeSlashCommands(slashCommands, getLocalizedFallbackCommands(t)),
-      agentSlashCommands,
-    ),
-    [agentSlashCommands, slashCommands, t],
-  )
+  const allSlashCommands = useMemo(() => {
+    const commands = appendAgentSlashCommands(mergeSlashCommands(slashCommands, getLocalizedFallbackCommands(t)), agentSlashCommands)
+    const names = new Set(commands.map(command => command.name.toLowerCase()))
+    for (const reference of composerReferences) {
+      const name = reference.kind === 'plugin' ? reference.id : reference.name
+      if (names.has(name.toLowerCase())) continue
+      names.add(name.toLowerCase())
+      commands.push({ name, description: reference.description, kind: reference.kind })
+    }
+    return commands
+  }, [agentSlashCommands, slashCommands, composerReferences, t])
 
   const filteredCommandGroups = useMemo(() => {
     return groupSlashCommands(filterSlashCommands(allSlashCommands, slashFilter))
@@ -602,6 +638,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
   const filteredCommands = filteredCommandGroups.ordered
   const isSlashMenuVisible = !isMemberSession && slashMenuOpen && filteredCommands.length > 0
+  const isReferenceMenuVisible = !isMemberSession && fileSearchOpen
 
   const exactSlashCommand = useMemo(() => {
     const normalized = slashFilter.trim().toLowerCase()
@@ -683,14 +720,28 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
   const selectSlashCommand = useCallback((command: string) => {
     const cursorPos = composerRef.current?.getSelectionOffsets().start ?? input.length
-    const replacement = replaceSlashToken(input, cursorPos, command)
-    setComposerInput(replacement.value)
+    const option = allSlashCommands.find(item => item.name === command)
+    let nextCursor: number
+    const reference = (option?.kind === 'skill' || option?.kind === 'plugin')
+      ? composerReferences.find(item => item.kind === option.kind && (item.id === command || item.name === command))
+      : undefined
+    if (reference) {
+      const mention = composerReferenceToMention(reference)
+      const trigger = findSlashTrigger(input, cursorPos)
+      const inserted = insertMentionIntoText(input, mentions, trigger?.slashPos ?? cursorPos, cursorPos, mention)
+      setComposerInput(inserted.text, inserted.mentions)
+      nextCursor = inserted.cursorPos
+    } else {
+      const replacement = replaceSlashToken(input, cursorPos, command)
+      setComposerInput(replacement.value)
+      nextCursor = replacement.cursorPos
+    }
     setSlashMenuOpen(false)
     requestAnimationFrame(() => {
       composerRef.current?.focus()
-      composerRef.current?.setSelectionOffsets(replacement.cursorPos)
+      composerRef.current?.setSelectionOffsets(nextCursor)
     })
-  }, [input])
+  }, [input, mentions, allSlashCommands, composerReferences, setComposerInput])
 
   const replaceEmptySession = useCallback(async (
     workDir: string,
@@ -935,7 +986,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     // Ignore key events during IME composition (e.g. Chinese input method)
     if (composingRef.current || event.isComposing || event.keyCode === 229) return false
 
-    // Route file search navigation keys to FileSearchMenu
+    // Route reference selection and directory navigation to the unified menu
     if (fileSearchOpen) {
       const key = event.key
       if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'ArrowRight' || key === 'Enter' || key === 'Tab' || key === 'Escape') {
@@ -993,6 +1044,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         const selected = filteredCommands[slashSelectedIndex]
         if (
           exactSlashCommand &&
+          !composerReferences.some(item => item.kind === selected?.kind && (item.id === selected?.name || item.name === selected?.name)) &&
           selected?.name.toLowerCase() === exactSlashCommand.name.toLowerCase() &&
           slashFilter.trim().toLowerCase() === exactSlashCommand.name.toLowerCase() &&
           shouldSubmitOnEnter(event, chatSendBehavior)
@@ -1364,8 +1416,13 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
           )}
 
           {!isMemberSession && fileSearchOpen && (
-            <FileSearchMenu
+            <ComposerReferenceMenu
               ref={fileSearchRef}
+              id={referenceMenuId}
+              references={composerReferences}
+              referencesLoading={referenceCurrent?.loading ?? true}
+              referencesError={referenceCurrent?.error}
+              onActiveChange={setReferenceOptionId}
               cwd={activeLaunchWorkDir || resolvedWorkDir || ''}
               filter={atFilter}
               compact={isMobileComposer}
@@ -1382,15 +1439,10 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                   composerRef.current?.setSelectionOffsets(newCursorPos)
                 })
               }}
-              onSelect={(path, name, isDirectory) => {
+              onSelect={(mention) => {
                 if (atCursorPos < 0) return
-                const referenceName = name.split('/').filter(Boolean).pop() ?? name
                 const tokenEnd = atCursorPos + 1 + atFilter.length
-                const inserted = insertMentionIntoText(input, mentions, atCursorPos, tokenEnd, {
-                  label: isDirectory ? `${referenceName}/` : referenceName,
-                  path,
-                  isDirectory,
-                })
+                const inserted = insertMentionIntoText(input, mentions, atCursorPos, tokenEnd, mention)
                 setComposerInput(inserted.text, inserted.mentions)
                 setFileSearchOpen(false)
                 setAtFilter('')
@@ -1439,6 +1491,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
               ref={slashMenuRef}
               id={slashMenuId}
               groups={filteredCommandGroups}
+              references={composerReferences}
               selectedIndex={slashSelectedIndex}
               itemRefs={slashItemRefs}
               onSelect={selectSlashCommand}
@@ -1570,6 +1623,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                 rootRef={composerContainerRef}
                 value={input}
                 mentions={mentions}
+                onMentionClick={setReferenceDetail}
                 onChange={handleComposerChange}
                 onKeyDown={handleComposerKeyDown}
                 onPaste={handleComposerPaste}
@@ -1580,11 +1634,11 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                 className="flex-1"
                 editorClassName="max-h-[200px] overflow-y-auto py-2 leading-relaxed text-[var(--color-text-primary)]"
                 aria={{
-                  role: isSlashMenuVisible ? 'combobox' : 'textbox',
-                  'aria-autocomplete': isSlashMenuVisible ? 'list' : undefined,
-                  'aria-expanded': isSlashMenuVisible ? 'true' : undefined,
-                  'aria-controls': isSlashMenuVisible ? slashMenuId : undefined,
-                  'aria-activedescendant': isSlashMenuVisible
+                  role: isSlashMenuVisible || isReferenceMenuVisible ? 'combobox' : 'textbox',
+                  'aria-autocomplete': isSlashMenuVisible || isReferenceMenuVisible ? 'list' : undefined,
+                  'aria-expanded': isSlashMenuVisible || isReferenceMenuVisible ? 'true' : undefined,
+                  'aria-controls': isReferenceMenuVisible ? referenceMenuId : isSlashMenuVisible ? slashMenuId : undefined,
+                  'aria-activedescendant': isReferenceMenuVisible ? referenceOptionId : isSlashMenuVisible
                     ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
                     : undefined,
                 }}
@@ -1596,6 +1650,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
               rootRef={composerContainerRef}
               value={input}
               mentions={mentions}
+              onMentionClick={setReferenceDetail}
               onChange={handleComposerChange}
               onKeyDown={handleComposerKeyDown}
               onPaste={handleComposerPaste}
@@ -1611,11 +1666,11 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                     : 'py-2'
               }`}
               aria={{
-                role: isSlashMenuVisible ? 'combobox' : 'textbox',
-                'aria-autocomplete': isSlashMenuVisible ? 'list' : undefined,
-                'aria-expanded': isSlashMenuVisible ? 'true' : undefined,
-                'aria-controls': isSlashMenuVisible ? slashMenuId : undefined,
-                'aria-activedescendant': isSlashMenuVisible
+                role: isSlashMenuVisible || isReferenceMenuVisible ? 'combobox' : 'textbox',
+                'aria-autocomplete': isSlashMenuVisible || isReferenceMenuVisible ? 'list' : undefined,
+                'aria-expanded': isSlashMenuVisible || isReferenceMenuVisible ? 'true' : undefined,
+                'aria-controls': isReferenceMenuVisible ? referenceMenuId : isSlashMenuVisible ? slashMenuId : undefined,
+                'aria-activedescendant': isReferenceMenuVisible ? referenceOptionId : isSlashMenuVisible
                   ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
                   : undefined,
               }}
@@ -1637,7 +1692,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
             `-mx-3` has to cancel the panel's `p-3` exactly, and the panel is
             padded by the same chrome rule.
           */}
-          <div data-testid="chat-input-toolbar" className={`flex items-center justify-between ${
+          <div data-testid="chat-input-toolbar" className={`flex min-w-0 items-center justify-between gap-2 ${
             isHeroComposer
               ? 'pt-3'
               : useCompactChrome
@@ -1646,11 +1701,11 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
           }`}>
             <div
               data-testid="chat-input-toolbar-leading"
-              className={`flex min-w-0 items-center ${isMobileComposer ? 'mobile-composer-toolbar__tools shrink-0 gap-1' : 'gap-2'}`}
+              className={`flex min-w-0 shrink-0 items-center ${showLocationInToolbar ? 'max-w-[55%]' : ''} ${isMobileComposer ? 'mobile-composer-toolbar__tools gap-1' : 'gap-2'}`}
             >
               {!isMemberSession && (
                 <>
-                  <div ref={plusMenuRef} className="relative">
+                  <div ref={plusMenuRef} className="relative shrink-0">
                     {/*
                       Not `IconButton`: the mobile composer pins 44px touch
                       targets (`h-11 w-11`), and the component's largest size is
@@ -1755,34 +1810,38 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                     )}
                   </div>
 
-                  <PermissionModeSelector compact={useCompactControls} />
+                  <div className="shrink-0">
+                    <PermissionModeSelector compact={useCompactControls} />
+                  </div>
 
                   {showLocationInToolbar && (
-                    embedLaunchControlsInToolbar ? (
-                      <RepositoryLaunchControls
-                        workDir={activeLaunchWorkDir}
-                        onWorkDirChange={handleLaunchWorkDirChange}
-                        branch={launchBranch}
-                        onBranchChange={setLaunchBranch}
-                        useWorktree={launchUseWorktree}
-                        onUseWorktreeChange={setLaunchUseWorktree}
-                        onLaunchReadyChange={setLaunchReady}
-                        disabled={isActive || launchTransitioning}
-                        placement="toolbar"
-                      />
-                    ) : (
-                      <ProjectContextChip
-                        workDir={resolvedWorkDir}
-                        projectRoot={activeSession?.projectRoot}
-                        repoName={gitInfo?.repoName || null}
-                        branch={gitInfo?.branch || null}
-                        sourceWorkDir={gitInfo?.worktree?.sourceWorkDir || null}
-                        isWorktree={!!gitInfo?.worktree?.enabled}
-                        worktreeSlug={gitInfo?.worktree?.slug || null}
-                        worktreePath={gitInfo?.worktree?.path || gitInfo?.worktree?.plannedPath || null}
-                        variant="toolbar"
-                      />
-                    )
+                    <div data-testid="chat-input-toolbar-location" className="min-w-0 flex-1">
+                      {embedLaunchControlsInToolbar ? (
+                        <RepositoryLaunchControls
+                          workDir={activeLaunchWorkDir}
+                          onWorkDirChange={handleLaunchWorkDirChange}
+                          branch={launchBranch}
+                          onBranchChange={setLaunchBranch}
+                          useWorktree={launchUseWorktree}
+                          onUseWorktreeChange={setLaunchUseWorktree}
+                          onLaunchReadyChange={setLaunchReady}
+                          disabled={isActive || launchTransitioning}
+                          placement="toolbar"
+                        />
+                      ) : (
+                        <ProjectContextChip
+                          workDir={resolvedWorkDir}
+                          projectRoot={activeSession?.projectRoot}
+                          repoName={gitInfo?.repoName || null}
+                          branch={gitInfo?.branch || null}
+                          sourceWorkDir={gitInfo?.worktree?.sourceWorkDir || null}
+                          isWorktree={!!gitInfo?.worktree?.enabled}
+                          worktreeSlug={gitInfo?.worktree?.slug || null}
+                          worktreePath={gitInfo?.worktree?.path || gitInfo?.worktree?.plannedPath || null}
+                          variant="toolbar"
+                        />
+                      )}
+                    </div>
                   )}
                 </>
               )}
@@ -1790,7 +1849,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
             <div
               data-testid="chat-input-toolbar-trailing"
-              className={`flex min-w-0 items-center ${isMobileComposer ? 'mobile-composer-toolbar__actions flex-1 justify-end gap-1' : 'gap-2'}`}            >
+              className={`flex min-w-0 flex-1 items-center justify-end ${isMobileComposer ? 'mobile-composer-toolbar__actions gap-1' : 'gap-2'}`}
               {!isMemberSession && activeTabId && (
                 <ContextUsageIndicator
                   sessionId={activeTabId}
@@ -1811,7 +1870,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                   runtimeKey={activeTabId}
                   disabled={isActive}
                   compact={useCompactControls}
-                  fluid={isMobileComposer}
+                  fluid
                 />
               )}
               {!isMemberSession && !isActive && hasRunningSubagents ? (
@@ -1909,6 +1968,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
           </div>
         )}
       </div>
+      <ComposerReferenceDetail mention={referenceDetail} onClose={() => setReferenceDetail(null)} />
     </div>
   )
 }

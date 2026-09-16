@@ -19,9 +19,11 @@
         "@dnd-kit/utilities": "^3.2.2",
         "@esotericsoftware/spine-pixi-v8": "4.2.119",
         "@lezer/highlight": "^1.2.3",
+        "@ngrok/ngrok": "^1.7.0",
         "@tailwindcss/typography": "^0.5.19",
         "@types/dompurify": "^3.2.0",
         "@xterm/addon-fit": "^0.11.0",
+        "@xterm/addon-web-links": "^0.12.0",
         "@xterm/xterm": "^6.0.0",
         "dompurify": "^3.3.3",
         "electron-updater": "^6.8.3",
@@ -121,7 +123,7 @@
 
     "@codemirror/autocomplete": ["@codemirror/autocomplete@6.20.3", "", { "dependencies": { "@codemirror/language": "^6.0.0", "@codemirror/state": "^6.0.0", "@codemirror/view": "^6.17.0", "@lezer/common": "^1.0.0" } }, "sha512-tlosUqb+3BbxCxZdu4tKeRghPFC+QM7q4X5YhKV2eCmPG+1r2F3f4AaSz5sCrFqUtX4Jh20VFTKecl16MgiV9g=="],
 
-    "@codemirror/commands": ["@codemirror/commands@6.11.0", "", { "dependencies": { "@codemirror/language": "^6.0.0", "@codemirror/state": "^6.7.0", "@codemirror/view": "^6.27.0", "@lezer/common": "^1.1.0" } }, "sha512-/K4Rl5BN0OtTiPWmJCdqODu38XnDMsDxKY5rgrPnCkutPTJf2wVbkoixLfealF5Kwse/s8P8M5jAiURiwSwnFA=="],
+    "@codemirror/commands": ["@codemirror/commands@6.11.1", "", { "dependencies": { "@codemirror/language": "^6.0.0", "@codemirror/state": "^6.7.0", "@codemirror/view": "^6.27.0", "@lezer/common": "^1.1.0" } }, "sha512-O/4hG3SC1YwcmQ0d2UVNDs+AsaNWd1iHVxbTeEBuqH+6bExAiPK3iS/BvpY6rZGURALv4ZD3sIgcCmRvw3ehBg=="],
 
     "@codemirror/lang-css": ["@codemirror/lang-css@6.3.1", "", { "dependencies": { "@codemirror/autocomplete": "^6.0.0", "@codemirror/language": "^6.0.0", "@codemirror/state": "^6.0.0", "@lezer/common": "^1.0.2", "@lezer/css": "^1.1.7" } }, "sha512-kr5fwBGiGtmz6l0LSJIbno9QrifNMUusivHbnA1H6Dmqy4HZFte3UAICix1VuKo0lMPKQr2rqB+0BkKi/S3Ejg=="],
 
@@ -139,9 +141,9 @@
 
     "@codemirror/search": ["@codemirror/search@6.7.2", "", { "dependencies": { "@codemirror/state": "^6.0.0", "@codemirror/view": "^6.37.0", "crelt": "^1.0.5" } }, "sha512-gUYkYhT2+n/+VGZ+8EzE5WFkYZUZYm1VOKDudIsNqh42uRVQJ0a6Yss9sdKT3MeOYfuL1N6AZA57oza0Oyr0LA=="],
 
-    "@codemirror/state": ["@codemirror/state@6.7.4", "", { "dependencies": { "@marijn/find-cluster-break": "^1.0.0" } }, "sha512-QhQIVRY+xHZDxwOSFrJ1eUMapJBUID3IdeAjf7dHO7zBUzSkyooHiodnalz5MG3iHzwixKMlAAyn7244y537EA=="],
+    "@codemirror/state": ["@codemirror/state@6.7.5", "", { "dependencies": { "@marijn/find-cluster-break": "^1.0.0" } }, "sha512-QjLbZmY1Au3JiRrDVYFLRD0BZ3SOKS9pR3yjIkd7u27YY8TFD9/Q9fhPnLV5l1mHFSo3hHU/N31vpwEJOx4owQ=="],
 
-    "@codemirror/view": ["@codemirror/view@6.43.11", "", { "dependencies": { "@codemirror/state": "^6.7.0", "crelt": "^1.0.6", "style-mod": "^4.1.0", "w3c-keyname": "^2.2.4" } }, "sha512-2+esucbQX6wB2JYi1eDvdCPFTA31BN8oSy6xCmk3G6CloV11yOvEjYk+gH7kLrP0MuHG94E8WDhjs5oMiu3+Wg=="],
+    "@codemirror/view": ["@codemirror/view@6.43.12", "", { "dependencies": { "@codemirror/state": "^6.7.0", "crelt": "^1.0.6", "style-mod": "^4.1.0", "w3c-keyname": "^2.2.4" } }, "sha512-Nv0vxQ19NAqvB/c2pFzjIzFlzzJl7jmdtNkwOwGbn0Ks9mFAzibvumz7cQem5cRsFA2cEw2fg+uHZGbcHupLQQ=="],
 
     "@csstools/color-helpers": ["@csstools/color-helpers@5.1.0", "https://registry.npmmirror.com/@csstools/color-helpers/-/color-helpers-5.1.0.tgz", {}, "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA=="],
 
@@ -392,6 +394,34 @@
     "@mermaid-js/parser": ["@mermaid-js/parser@1.1.0", "https://registry.npmmirror.com/@mermaid-js/parser/-/parser-1.1.0.tgz", { "dependencies": { "langium": "^4.0.0" } }, "sha512-gxK9ZX2+Fex5zu8LhRQoMeMPEHbc73UKZ0FQ54YrQtUxE1VVhMwzeNtKRPAu5aXks4FasbMe4xB4bWrmq6Jlxw=="],
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.1.4", "https://registry.npmmirror.com/@napi-rs/wasm-runtime/-/wasm-runtime-1.1.4.tgz", { "dependencies": { "@tybys/wasm-util": "^0.10.1" }, "peerDependencies": { "@emnapi/core": "^1.7.1", "@emnapi/runtime": "^1.7.1" } }, "sha512-3NQNNgA1YSlJb/kMH1ildASP9HW7/7kYnRI2szWJaofaS1hWmbGI4H+d3+22aGzXXN9IJ+n+GiFVcGipJP18ow=="],
+
+    "@ngrok/ngrok": ["@ngrok/ngrok@1.7.0", "https://registry.npmmirror.com/@ngrok/ngrok/-/ngrok-1.7.0.tgz", { "optionalDependencies": { "@ngrok/ngrok-android-arm64": "1.7.0", "@ngrok/ngrok-darwin-arm64": "1.7.0", "@ngrok/ngrok-darwin-universal": "1.7.0", "@ngrok/ngrok-darwin-x64": "1.7.0", "@ngrok/ngrok-freebsd-x64": "1.7.0", "@ngrok/ngrok-linux-arm-gnueabihf": "1.7.0", "@ngrok/ngrok-linux-arm64-gnu": "1.7.0", "@ngrok/ngrok-linux-arm64-musl": "1.7.0", "@ngrok/ngrok-linux-x64-gnu": "1.7.0", "@ngrok/ngrok-linux-x64-musl": "1.7.0", "@ngrok/ngrok-win32-arm64-msvc": "1.7.0", "@ngrok/ngrok-win32-ia32-msvc": "1.7.0", "@ngrok/ngrok-win32-x64-msvc": "1.7.0" } }, "sha512-P06o9TpxrJbiRbHQkiwy/rUrlXRupc+Z8KT4MiJfmcdWxvIdzjCaJOdnNkcOTs6DMyzIOefG5tvk/HLdtjqr0g=="],
+
+    "@ngrok/ngrok-android-arm64": ["@ngrok/ngrok-android-arm64@1.7.0", "https://registry.npmmirror.com/@ngrok/ngrok-android-arm64/-/ngrok-android-arm64-1.7.0.tgz", { "os": "android", "cpu": "arm64" }, "sha512-8tco3ID6noSaNy+CMS7ewqPoIkIM6XO5COCzsUp3Wv3XEbMSyn65RN6cflX2JdqLfUCHcMyD0ahr9IEiHwqmbQ=="],
+
+    "@ngrok/ngrok-darwin-arm64": ["@ngrok/ngrok-darwin-arm64@1.7.0", "https://registry.npmmirror.com/@ngrok/ngrok-darwin-arm64/-/ngrok-darwin-arm64-1.7.0.tgz", { "os": "darwin", "cpu": "arm64" }, "sha512-+dmJSOzSO+MNDVrPOca2yYDP1W3KfP4qOlAkarIeFRIfqonQwq3QCBmcR7HAlZocLsSqEwyG6KP4RRvAuT0WGQ=="],
+
+    "@ngrok/ngrok-darwin-universal": ["@ngrok/ngrok-darwin-universal@1.7.0", "https://registry.npmmirror.com/@ngrok/ngrok-darwin-universal/-/ngrok-darwin-universal-1.7.0.tgz", { "os": "darwin" }, "sha512-fDEfewyE2pWGFBhOSwQZObeHUkc65U1l+3HIgSOe094TMHsqmyJD0KTCgW9KSn0VP4OvDZbAISi1T3nvqgZYhQ=="],
+
+    "@ngrok/ngrok-darwin-x64": ["@ngrok/ngrok-darwin-x64@1.7.0", "https://registry.npmmirror.com/@ngrok/ngrok-darwin-x64/-/ngrok-darwin-x64-1.7.0.tgz", { "os": "darwin", "cpu": "x64" }, "sha512-+fwMi5uHd9G8BS42MMa9ye6exI5lwTcjUO6Ut497Vu0qgLONdVRenRqnEePV+Q3KtQR7NjqkMnomVfkr9MBjtw=="],
+
+    "@ngrok/ngrok-freebsd-x64": ["@ngrok/ngrok-freebsd-x64@1.7.0", "https://registry.npmmirror.com/@ngrok/ngrok-freebsd-x64/-/ngrok-freebsd-x64-1.7.0.tgz", { "os": "freebsd", "cpu": "x64" }, "sha512-2OGgbrjy3yLRrqAz5N6hlUKIWIXSpR5RjQa2chtZMsSbszQ6c9dI+uVQfOKAeo05tHMUgrYAZ7FocC+ig0dzdQ=="],
+
+    "@ngrok/ngrok-linux-arm-gnueabihf": ["@ngrok/ngrok-linux-arm-gnueabihf@1.7.0", "https://registry.npmmirror.com/@ngrok/ngrok-linux-arm-gnueabihf/-/ngrok-linux-arm-gnueabihf-1.7.0.tgz", { "os": "linux", "cpu": "arm" }, "sha512-SN9YIfEQiR9xN90QVNvdgvAemqMLoFVSeTWZs779145hQMhvF9Qd9rnWi6J+2uNNK10OczdV1oc/nq1es7u/3g=="],
+
+    "@ngrok/ngrok-linux-arm64-gnu": ["@ngrok/ngrok-linux-arm64-gnu@1.7.0", "https://registry.npmmirror.com/@ngrok/ngrok-linux-arm64-gnu/-/ngrok-linux-arm64-gnu-1.7.0.tgz", { "os": "linux", "cpu": "arm64" }, "sha512-KDMgzPKFU2kbpVSaA2RZBBia5IPdJEe063YlyVFnSMJmPYWCUnMwdybBsucXfV9u1Lw/ZjKTKotIlbTWGn3HGw=="],
+
+    "@ngrok/ngrok-linux-arm64-musl": ["@ngrok/ngrok-linux-arm64-musl@1.7.0", "https://registry.npmmirror.com/@ngrok/ngrok-linux-arm64-musl/-/ngrok-linux-arm64-musl-1.7.0.tgz", { "os": "linux", "cpu": "arm64" }, "sha512-e66vUdVrBlQ0lT9ZdamB4U604zt5Gualt8/WVcUGzbu8s5LajWd6g/mzZCUjK4UepjvMpfgmCp1/+rX7Rk8d5A=="],
+
+    "@ngrok/ngrok-linux-x64-gnu": ["@ngrok/ngrok-linux-x64-gnu@1.7.0", "https://registry.npmmirror.com/@ngrok/ngrok-linux-x64-gnu/-/ngrok-linux-x64-gnu-1.7.0.tgz", { "os": "linux", "cpu": "x64" }, "sha512-M6gF0DyOEFqXLfWxObfL3bxYZ4+PnKBHuyLVaqNfFN9Y5utY2mdPOn5422Ppbk4XoIK5/YkuhRqPJl/9FivKEw=="],
+
+    "@ngrok/ngrok-linux-x64-musl": ["@ngrok/ngrok-linux-x64-musl@1.7.0", "https://registry.npmmirror.com/@ngrok/ngrok-linux-x64-musl/-/ngrok-linux-x64-musl-1.7.0.tgz", { "os": "linux", "cpu": "x64" }, "sha512-4Ijm0dKeoyzZTMaYxR2EiNjtlK81ebflg/WYIO1XtleFrVy4UJEGnxtxEidYoT4BfCqi4uvXiK2Mx216xXKvog=="],
+
+    "@ngrok/ngrok-win32-arm64-msvc": ["@ngrok/ngrok-win32-arm64-msvc@1.7.0", "https://registry.npmmirror.com/@ngrok/ngrok-win32-arm64-msvc/-/ngrok-win32-arm64-msvc-1.7.0.tgz", { "os": "win32", "cpu": "arm64" }, "sha512-u7qyWIJI2/YG1HTBnHwUR1+Z2tyGfAsUAItJK/+N1G0FeWJhIWQvSIFJHlaPy4oW1Dc8mSDBX9qvVsiQgLaRFg=="],
+
+    "@ngrok/ngrok-win32-ia32-msvc": ["@ngrok/ngrok-win32-ia32-msvc@1.7.0", "https://registry.npmmirror.com/@ngrok/ngrok-win32-ia32-msvc/-/ngrok-win32-ia32-msvc-1.7.0.tgz", { "os": "win32", "cpu": "ia32" }, "sha512-/UdYUsLNv/Q8j9YJsyIfq/jLCoD8WP+NidouucTUzSoDtmOsXBBT3itLrmPiZTEdEgKiFYLuC1Zon8XQQvbVLA=="],
+
+    "@ngrok/ngrok-win32-x64-msvc": ["@ngrok/ngrok-win32-x64-msvc@1.7.0", "https://registry.npmmirror.com/@ngrok/ngrok-win32-x64-msvc/-/ngrok-win32-x64-msvc-1.7.0.tgz", { "os": "win32", "cpu": "x64" }, "sha512-UFJg/duEWzZlLkEs61Gz6/5nYhGaKI62I8dvUGdBR3NCtIMagehnFaFxmnXZldyHmCM8U0aCIFNpWRaKcrQkoA=="],
 
     "@oxc-project/types": ["@oxc-project/types@0.127.0", "https://registry.npmmirror.com/@oxc-project/types/-/types-0.127.0.tgz", {}, "sha512-aIYXQBo4lCbO4z0R3FHeucQHpF46l2LbMdxRvqvuRuW2OxdnSkcng5B8+K12spgLDj93rtN3+J2Vac/TIO+ciQ=="],
 
@@ -700,6 +730,8 @@
     "@xmldom/xmldom": ["@xmldom/xmldom@0.8.13", "https://registry.npmmirror.com/@xmldom/xmldom/-/xmldom-0.8.13.tgz", {}, "sha512-KRYzxepc14G/CEpEGc3Yn+JKaAeT63smlDr+vjB8jRfgTBBI9wRj/nkQEO+ucV8p8I9bfKLWp37uHgFrbntPvw=="],
 
     "@xterm/addon-fit": ["@xterm/addon-fit@0.11.0", "https://registry.npmmirror.com/@xterm/addon-fit/-/addon-fit-0.11.0.tgz", {}, "sha512-jYcgT6xtVYhnhgxh3QgYDnnNMYTcf8ElbxxFzX0IZo+vabQqSPAjC3c1wJrKB5E19VwQei89QCiZZP86DCPF7g=="],
+
+    "@xterm/addon-web-links": ["@xterm/addon-web-links@0.12.0", "https://registry.npmmirror.com/@xterm/addon-web-links/-/addon-web-links-0.12.0.tgz", {}, "sha512-4Smom3RPyVp7ZMYOYDoC/9eGJJJqYhnPLGGqJ6wOBfB8VxPViJNSKdgRYb8NpaM6YSelEKbA2SStD7lGyqaobw=="],
 
     "@xterm/xterm": ["@xterm/xterm@6.0.0", "https://registry.npmmirror.com/@xterm/xterm/-/xterm-6.0.0.tgz", {}, "sha512-TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg=="],
 

@@ -11,7 +11,6 @@ import { useProviderStore } from './providerStore'
 import { resolveActiveProviderRuntimeSelection, resolveProviderRuntimeModelId } from '../lib/runtimeSelection'
 import { useTabStore } from './tabStore'
 import { useProviderCompatStore } from './providerCompatStore'
-import { useWorkspacePanelStore } from './workspacePanelStore'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import { notifyDesktop } from '../lib/desktopNotifications'
 import { t } from '../i18n'
@@ -450,10 +449,8 @@ type ChatStore = {
 
 const TASK_TOOL_NAMES = new Set(['TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList', 'TodoWrite'])
 const TASK_STOP_TOOL_NAMES = new Set(['TaskStop', 'KillShell'])
-const FILE_EDIT_TOOL_NAMES = new Set(['Edit', 'Write', 'NotebookEdit', 'MultiEdit'])
 const pendingTaskToolUseIdsBySession = new Map<string, Set<string>>()
 const pendingToolParentUseIdsBySession = new Map<string, Map<string, string>>()
-const pendingFileEditPathsBySession = new Map<string, Map<string, string>>()
 type OwnedTaskRouteRegistration = {
   count: number
   eventIdPrefix?: string
@@ -874,38 +871,6 @@ function consumePendingToolParentUseId(sessionId: string, toolUseId: string): st
  * Extract the absolute file path from a file-mutating tool's input.
  * Edit / Write / MultiEdit use `file_path`; NotebookEdit uses `notebook_path`.
  */
-function extractEditedFilePath(input: unknown): string | null {
-  if (!input || typeof input !== 'object') return null
-  const obj = input as { file_path?: unknown; notebook_path?: unknown }
-  const candidate =
-    typeof obj.file_path === 'string' && obj.file_path.length > 0
-      ? obj.file_path
-      : typeof obj.notebook_path === 'string' && obj.notebook_path.length > 0
-        ? obj.notebook_path
-        : null
-  return candidate
-}
-
-function rememberPendingFileEdit(sessionId: string, toolUseId: string, filePath: string): void {
-  if (!toolUseId) return
-  const paths = pendingFileEditPathsBySession.get(sessionId) ?? new Map<string, string>()
-  paths.set(toolUseId, filePath)
-  pendingFileEditPathsBySession.set(sessionId, paths)
-}
-
-function consumePendingFileEdit(sessionId: string, toolUseId: string): string | null {
-  const paths = pendingFileEditPathsBySession.get(sessionId)
-  const filePath = paths?.get(toolUseId)
-  if (!filePath) return null
-  paths!.delete(toolUseId)
-  if (paths!.size === 0) pendingFileEditPathsBySession.delete(sessionId)
-  return filePath
-}
-
-function clearPendingFileEdits(sessionId: string): void {
-  pendingFileEditPathsBySession.delete(sessionId)
-}
-
 function clearPendingToolParentUseIds(sessionId: string): void {
   pendingToolParentUseIdsBySession.delete(sessionId)
 }
@@ -2466,10 +2431,19 @@ function summarizeTokenUsageFromHistory(messages: MessageEntry[]): TokenUsage | 
   let outputTokens = 0
   let cacheReadTokens = 0
   let cacheCreationTokens = 0
+  // A reply with thinking + text + a dozen tool_use blocks arrives as fourteen lines that each
+  // repeat the whole `usage` object. Summing per line is the 2.2x inflation the transcript
+  // readers carry; the server stamps `usageKey` so this only has to dedupe on it. Lines with
+  // no key are always counted, matching the transcript readers.
+  const countedUsageKeys = new Set<string>()
 
   for (const message of messages) {
     const usage = message.usage
     if (!usage) continue
+    if (message.usageKey) {
+      if (countedUsageKeys.has(message.usageKey)) continue
+      countedUsageKeys.add(message.usageKey)
+    }
     inputTokens += readUsageToken(usage.input_tokens)
     outputTokens += readUsageToken(usage.output_tokens)
     cacheReadTokens += readUsageToken(usage.cache_read_input_tokens)
@@ -3283,7 +3257,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     clearPendingToolInputDelta(sessionId)
     clearPendingTaskToolUseIds(sessionId)
     clearPendingToolParentUseIds(sessionId)
-    clearPendingFileEdits(sessionId)
     queueDrainPaused.delete(sessionId)
     stoppedTurns.delete(sessionId)
     advanceHistoryLifecycle(sessionId)
@@ -4785,7 +4758,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     advanceHistoryLifecycle(sessionId)
     clearPendingTaskToolUseIds(sessionId)
     clearPendingToolParentUseIds(sessionId)
-    clearPendingFileEdits(sessionId)
     clearPendingToolInputDelta(sessionId)
     clearPendingThinkingDelta(sessionId)
     resetCompactionThrash(sessionId)
@@ -5549,10 +5521,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         } else if (!parentToolUseId && TASK_TOOL_NAMES.has(toolName)) {
           const useId = msg.toolUseId || session?.activeToolUseId
           if (useId) addPendingTaskToolUseId(sessionId, useId)
-        } else if (FILE_EDIT_TOOL_NAMES.has(toolName)) {
-          const useId = msg.toolUseId || session?.activeToolUseId
-          const editedPath = extractEditedFilePath(msg.input)
-          if (useId && editedPath) rememberPendingFileEdit(sessionId, useId, editedPath)
         }
         break
       }
@@ -5595,10 +5563,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         })
         if (consumePendingTaskToolUseId(sessionId, msg.toolUseId)) {
           useCLITaskStore.getState().refreshTasks(sessionId)
-        }
-        const editedPath = consumePendingFileEdit(sessionId, msg.toolUseId)
-        if (editedPath && !msg.isError) {
-          useWorkspacePanelStore.getState().notifyAgentFileEdit(sessionId, editedPath)
         }
         break
       }
@@ -6144,8 +6108,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           clearPendingThinkingDelta(sessionId)
           clearPendingTaskToolUseIds(sessionId)
           clearPendingToolParentUseIds(sessionId)
-          clearPendingFileEdits(sessionId)
-          useCLITaskStore.getState().clearTasks(sessionId)
+                useCLITaskStore.getState().clearTasks(sessionId)
           useWorkflowStore.getState().clearSession(sessionId)
           useSessionStore.getState().updateSessionTitle(sessionId, 'New Session')
           useSessionStore.getState().updateSessionMessageCount(sessionId, 0)

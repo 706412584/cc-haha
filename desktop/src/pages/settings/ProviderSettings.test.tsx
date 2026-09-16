@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import '@testing-library/jest-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { providersApi } from '../../api/providers'
+import { ApiError } from '../../api/client'
 import { getDesktopHost } from '../../lib/desktopHost'
 import { useProviderStore } from '../../stores/providerStore'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -46,7 +47,7 @@ describe('ApiSmart sponsor provider', () => {
       provider: { ...input, id: 'saved-apismart', apiFormat: input.apiFormat ?? 'anthropic' },
     }))
     render(<ProviderSettings />)
-    fireEvent.click(await screen.findByRole('button', { name: /Add Provider/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Add Model/ }))
     const dialog = within(screen.getByRole('dialog'))
     const sponsor = dialog.getByRole('button', { name: 'ApiSmart' })
     expect(sponsor.parentElement).toBe(dialog.getByRole('button', { name: 'Atlas Cloud' }).parentElement)
@@ -83,7 +84,7 @@ describe('ApiSmart sponsor provider', () => {
 
   it('resets image credentials and defaults when switching presets', async () => {
     render(<ProviderSettings />)
-    fireEvent.click(await screen.findByRole('button', { name: /Add Provider/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Add Model/ }))
     const dialog = within(screen.getByRole('dialog'))
     fireEvent.click(dialog.getByRole('button', { name: 'ApiSmart' }))
     fireEvent.change(dialog.getAllByPlaceholderText('sk-...')[1]!, { target: { value: 'fake-image-only-key' } })
@@ -121,6 +122,25 @@ describe('retired sponsor providers', () => {
     vi.restoreAllMocks()
   })
 
+  it('explains why a remote endpoint change needs an explicit key and allows retry', async () => {
+    const provider = { ...savedProviders[0]!, apiKey: '' }
+    vi.mocked(providersApi.list).mockResolvedValue({ providers: [provider], activeId: null })
+    const update = vi.spyOn(providersApi, 'update')
+      .mockRejectedValueOnce(new ApiError(400, { code: 'REMOTE_PROVIDER_CREDENTIAL_REQUIRED' }))
+      .mockResolvedValue({ provider })
+    render(<ProviderSettings browserMode />)
+    fireEvent.click(within(await screen.findByTestId(`provider-${provider.id}`)).getByRole('button', { name: 'Edit' }))
+    const dialog = within(screen.getByRole('dialog'))
+    fireEvent.change(dialog.getByDisplayValue(provider.baseUrl), { target: { value: 'https://replacement.invalid' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Save' }))
+    expect(await dialog.findByRole('alert')).toHaveTextContent('enter the model or image API key again')
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    fireEvent.change(dialog.getAllByPlaceholderText('sk-...')[0]!, { target: { value: 'fake-explicit-new-key' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(update).toHaveBeenLastCalledWith(provider.id, expect.objectContaining({ apiKey: 'fake-explicit-new-key', baseUrl: 'https://replacement.invalid' })))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
   it('loads saved providers while hiding their add-provider chips', async () => {
     render(<ProviderSettings />)
     for (const provider of savedProviders) {
@@ -128,7 +148,7 @@ describe('retired sponsor providers', () => {
     }
     expect(useProviderStore.getState().providers).toEqual(savedProviders)
 
-    fireEvent.click(screen.getByRole('button', { name: /Add Provider/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Add Model/ }))
     const dialog = within(screen.getByRole('dialog'))
     for (const provider of savedProviders) {
       expect(dialog.queryByRole('button', { name: provider.name })).not.toBeInTheDocument()
