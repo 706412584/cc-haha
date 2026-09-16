@@ -115,6 +115,18 @@ function isLatestRequest(store: Map<string, number>, key: string, requestId: num
   return store.get(key) === requestId
 }
 
+/**
+ * Drop every counter under a session prefix. Removing the key is what makes an
+ * in-flight response fail its `isLatestRequest` check, so it cannot repopulate
+ * what `clearSession` just cleared; it also keeps these maps from growing.
+ */
+function invalidateSessionScopedRequests(store: Map<string, number>, sessionId: string) {
+  const prefix = `${sessionId}::`
+  for (const key of [...store.keys()]) {
+    if (key === sessionId || key.startsWith(prefix)) store.delete(key)
+  }
+}
+
 export function workspaceBufferKey(sessionId: string, path: string) {
   return `${sessionId}::${path}`
 }
@@ -272,13 +284,20 @@ export const useWorkspaceEditorStore = create<WorkspaceEditorStore>()((set, get)
       return { buffersByKey }
     }),
 
-  clearSession: (sessionId) =>
+  clearSession: (sessionId) => {
+    // The two LSP maps are keyed differently on purpose: `lspStateBySession` by
+    // the bare session id (one server per session), `lspDiagnosticsBySessionPath`
+    // by `id::path` (one document per file). The request counters follow the
+    // same shapes.
+    invalidateSessionScopedRequests(lspStateRequests, sessionId)
+    invalidateSessionScopedRequests(lspDiagnosticRequests, sessionId)
     set((state) => ({
       buffersByKey: withoutPrefix(state.buffersByKey, `${sessionId}::`),
       unsupportedKeys: withoutPrefix(state.unsupportedKeys, `${sessionId}::`),
-      lspStateBySession: withoutPrefix(state.lspStateBySession, `${sessionId}::`),
+      lspStateBySession: withoutPrefix(state.lspStateBySession, sessionId),
       lspDiagnosticsBySessionPath: withoutPrefix(state.lspDiagnosticsBySessionPath, `${sessionId}::`),
-    })),
+    }))
+  },
 
   notifyAgentFileEdit: (sessionId, absolutePath) => {
     const normalizedAbs = normalizeAgentEditPath(absolutePath)

@@ -271,9 +271,9 @@ export function WorkspaceEditor(props: WorkspaceEditorProps) {
   }, [buffer?.key, unsupported])
 
   // -- External rebase: when the buffer's currentContent changes from outside
-  // the editor (e.g. applyExternalSave on a clean buffer), push it back into
-  // the EditorView. We compare against the view's current doc to avoid
-  // feedback loops with the updateListener.
+  // the editor (a conflict reload, or applyExternalSave once a save-event
+  // subscription exists), push it back into the EditorView. We compare against
+  // the view's current doc to avoid feedback loops with the updateListener.
   useEffect(() => {
     if (!buffer || !viewRef.current) return
     const current = viewRef.current.state.doc.toString()
