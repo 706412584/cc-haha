@@ -817,6 +817,8 @@ export const kr: Record<TranslationKey, string> = {
   'workspace.lspRetry': '다시 시도',
   'workspace.lspNoDiagnostics': '진단 없음',
   'workspace.lspDiagnosticsLabel': 'LSP 진단',
+  'workspace.editUnsupported': '이 파일은 편집기에서 열 수 없는 인코딩을 사용합니다. 읽기 전용 미리보기를 사용하세요.',
+  'workspace.lspRestartFailed': '언어 서버를 다시 시작하지 못했습니다',
   'chat.providerTransitionTitle': '새 세션을 시작할까요?',
   'chat.providerTransitionBody': '이 세션에는 메시지가 {count}개 있습니다. 현재 기록과 연결을 유지하려면 Provider 변경 시 새 세션이 필요합니다.',
   'chat.providerTransitionCancel': '취소',

@@ -15,6 +15,10 @@ vi.mock('@/api/market', () => ({ marketApi: { uninstall: vi.fn().mockResolvedVal
 
 const originalClearSelection = useSkillStore.getState().clearSelection
 const fetchSkills = vi.fn()
+// The fork's list also loads the built-in catalog. Leaving it real would fire a
+// network request from jsdom, and its failure lands in the same `error` slot
+// the list renders — blanking the view this suite is asserting on.
+const fetchCatalog = vi.fn()
 const detail: SkillDetail = {
   meta: { name: 'example', displayName: 'Example skill', description: 'Reusable workflow', source: 'user', userInvocable: true, hasDirectory: true, contentLength: 24 },
   tree: [], files: [], skillRoot: '/fixture/example',
@@ -25,7 +29,7 @@ beforeEach(() => {
   useSettingsStore.setState({ locale: 'en' })
   useSessionStore.setState({ sessions: [], activeSessionId: null })
   useUIStore.setState({ pendingSettingsTab: null })
-  useSkillStore.setState({ skills: [detail.meta], selectedSkill: null, selectedSkillContext: null, selectedSkillReturnTab: 'skills', isLoading: false, isDetailLoading: false, error: null, clearSelection: originalClearSelection, fetchSkills })
+  useSkillStore.setState({ skills: [detail.meta], catalog: [], selectedSkill: null, selectedSkillContext: null, selectedSkillReturnTab: 'skills', isLoading: false, isDetailLoading: false, isCatalogLoading: false, error: null, clearSelection: originalClearSelection, fetchSkills, fetchCatalog })
 })
 
 function selectSkill(selected = detail, context = '') {

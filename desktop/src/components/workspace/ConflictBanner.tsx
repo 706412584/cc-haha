@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { WorkspaceBufferConflict } from '../../stores/workspacePanelStore'
+import type { WorkspaceBufferConflict } from '../../stores/workspaceEditorStore'
 
 /**
  * Banner shown over the editor when the file's on-disk content has changed

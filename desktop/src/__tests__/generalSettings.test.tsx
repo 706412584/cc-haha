@@ -3020,7 +3020,7 @@ describe('Settings > Providers tab', () => {
 
     render(<Settings />)
 
-    fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Add Model/i }))
     const dialog = screen.getByRole('dialog')
 
     // Enabling opens a confirmation dialog before the toggle flips on.
@@ -3214,7 +3214,7 @@ describe('Settings > Providers tab', () => {
 
     render(<Settings />)
 
-    fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Add Model/i }))
     const dialog = screen.getByRole('dialog')
 
     expect(within(dialog).getByRole('button', { name: /Get API Key/ })).toBeInTheDocument()

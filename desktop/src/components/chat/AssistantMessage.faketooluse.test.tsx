@@ -7,26 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // path; everything else (markdown, link routing, output cards) is left at
 // real implementation so the assertions exercise the real DOM.
 
-const openBrowser = vi.hoisted(() => vi.fn())
-vi.mock('../../stores/browserPanelStore', () => ({
-  useBrowserPanelStore: { getState: () => ({ open: openBrowser }) },
-}))
-
 vi.mock('../../lib/desktopRuntime', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   getServerBaseUrl: () => 'http://127.0.0.1:4321',
 }))
-
-// No active workdir; output-target cards stay quiet.
-const openPreviewFn = vi.hoisted(() => vi.fn().mockResolvedValue(undefined))
-vi.mock('../../stores/workspacePanelStore', () => {
-  const state = { statusBySession: {} as Record<string, { workDir?: string } | undefined>, openPreview: openPreviewFn }
-  const useWorkspacePanelStore = Object.assign(
-    (selector: (s: typeof state) => unknown) => selector(state),
-    { getState: () => state },
-  )
-  return { useWorkspacePanelStore }
-})
 
 const ensureTargets = vi.hoisted(() => vi.fn().mockResolvedValue(undefined))
 const openTargetFn = vi.hoisted(() => vi.fn())

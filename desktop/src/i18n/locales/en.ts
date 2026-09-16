@@ -814,6 +814,8 @@ export const en = {
   'workspace.lspRetry': 'Retry',
   'workspace.lspNoDiagnostics': 'No diagnostics',
   'workspace.lspDiagnosticsLabel': 'LSP diagnostics',
+  'workspace.editUnsupported': 'This file uses an encoding the editor cannot open. Read-only preview is available.',
+  'workspace.lspRestartFailed': 'Failed to restart language server',
   'chat.providerTransitionTitle': 'Start a new session?',
   'chat.providerTransitionBody': 'This session has {count} messages. Changing providers requires a new session so the current history and connection stay intact.',
   'chat.providerTransitionCancel': 'Cancel',

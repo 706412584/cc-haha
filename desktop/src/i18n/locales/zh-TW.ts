@@ -817,6 +817,8 @@ export const zh: Record<TranslationKey, string> = {
   'workspace.lspRetry': '重試',
   'workspace.lspNoDiagnostics': '無診斷資訊',
   'workspace.lspDiagnosticsLabel': 'LSP 診斷',
+  'workspace.editUnsupported': '此檔案使用了編輯器無法開啟的編碼，可使用唯讀預覽。',
+  'workspace.lspRestartFailed': '重新啟動語言伺服器失敗',
   'chat.providerTransitionTitle': '建立新會話？',
   'chat.providerTransitionBody': '此會話已有 {count} 則訊息。切換 Provider 需要建立新會話，以保留目前歷史與連線。',
   'chat.providerTransitionCancel': '取消',

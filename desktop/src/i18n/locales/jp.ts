@@ -817,6 +817,8 @@ export const jp: Record<TranslationKey, string> = {
   'workspace.lspRetry': '再試行',
   'workspace.lspNoDiagnostics': '診断はありません',
   'workspace.lspDiagnosticsLabel': 'LSP 診断',
+  'workspace.editUnsupported': 'このファイルはエディタで開けない文字コードを使用しています。読み取り専用プレビューをご利用ください。',
+  'workspace.lspRestartFailed': '言語サーバーの再起動に失敗しました',
   'chat.providerTransitionTitle': '新しいセッションを開始しますか？',
   'chat.providerTransitionBody': 'このセッションには {count} 件のメッセージがあります。現在の履歴と接続を保持するため、Provider の変更には新しいセッションが必要です。',
   'chat.providerTransitionCancel': 'キャンセル',

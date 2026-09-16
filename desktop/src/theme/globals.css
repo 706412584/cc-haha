@@ -630,6 +630,28 @@
   --color-terminal-ansi-bright-white: #FFFFFF;
 }
 
+/* classic-dark is a fork theme. It paints a dark workspace, so it has to
+   share the dark ANSI ramp — without this it falls back to the light ramp
+   and red/green/blue lose most of their contrast against #0E0E0E. */
+[data-theme="classic-dark"] {
+  --color-terminal-ansi-black: #1F1F1F;
+  --color-terminal-ansi-red: #FF6D67;
+  --color-terminal-ansi-green: #7EF18A;
+  --color-terminal-ansi-yellow: #F8C55F;
+  --color-terminal-ansi-blue: #77A8FF;
+  --color-terminal-ansi-magenta: #D699FF;
+  --color-terminal-ansi-cyan: #61D6D6;
+  --color-terminal-ansi-white: #D7D2D0;
+  --color-terminal-ansi-bright-black: #8F8683;
+  --color-terminal-ansi-bright-red: #FF8A85;
+  --color-terminal-ansi-bright-green: #9FF7A7;
+  --color-terminal-ansi-bright-yellow: #FFDD7A;
+  --color-terminal-ansi-bright-blue: #A6C5FF;
+  --color-terminal-ansi-bright-magenta: #E3B8FF;
+  --color-terminal-ansi-bright-cyan: #8CEEEE;
+  --color-terminal-ansi-bright-white: #FFFFFF;
+}
+
 /* ─── Layering scale ──────────────────────────────────────────────
    One ordered stack for every overlay. Theme-independent, so it lives
    outside the theme blocks.

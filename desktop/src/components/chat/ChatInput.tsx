@@ -1850,6 +1850,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
             <div
               data-testid="chat-input-toolbar-trailing"
               className={`flex min-w-0 flex-1 items-center justify-end ${isMobileComposer ? 'mobile-composer-toolbar__actions gap-1' : 'gap-2'}`}
+            >
               {!isMemberSession && activeTabId && (
                 <ContextUsageIndicator
                   sessionId={activeTabId}

@@ -1622,10 +1622,18 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
       onClose()
       void fetchSettings()
     } catch (error) {
+      // A missing remote credential is a distinct, actionable failure: the H5
+      // client cannot hold the key, so the form asks for it instead of showing
+      // a generic error.
       setCredentialRequired(browserMode && error instanceof ApiError &&
         !!error.body && typeof error.body === 'object' && 'code' in error.body &&
         error.body.code === 'REMOTE_PROVIDER_CREDENTIAL_REQUIRED')
       setSaveFailed(true)
+      console.error('Failed to save provider:', error)
+      addToast({
+        type: 'error',
+        message: t('settings.providers.saveFailed'),
+      })
     } finally {
       setIsSubmitting(false)
     }

@@ -5,7 +5,7 @@ import { TargetIcon } from '@/components/composite/TargetIcon'
 import { useWorkspaceFileOpenTargets } from '@/components/workspace/workspaceFileOpenTargets'
 import { useDismissable } from '@/hooks/useDismissable'
 import { useTranslation } from '../../i18n'
-import { CodeSurface } from '../workspace/surfaces/CodeSurface'
+import { WorkspaceEditableFile } from './WorkspaceEditableFile'
 import { ImagePreview } from '../workspace/surfaces/ImagePreview'
 import { MarkdownSurface } from '../workspace/surfaces/MarkdownSurface'
 import { PanelMessage } from '../workspace/surfaces/PanelMessage'
@@ -124,23 +124,6 @@ export function WorkspaceFileTab({ sessionId, tab }: WorkspaceFileTabProps) {
       lineStart: selection.startLine,
       lineEnd: selection.endLine,
       quote: selection.text,
-    })
-  }, [path, sessionId])
-
-  const addLineComment = useCallback((
-    lineStart: number,
-    lineEnd: number,
-    note: string,
-    quote: string,
-  ) => {
-    useWorkspaceChatContextStore.getState().addReference(sessionId, {
-      kind: 'code-comment',
-      path,
-      name: basenameOf(path),
-      lineStart,
-      lineEnd,
-      quote,
-      note,
     })
   }, [path, sessionId])
 
@@ -305,13 +288,13 @@ export function WorkspaceFileTab({ sessionId, tab }: WorkspaceFileTabProps) {
               onAddSelection={addSelectionToChat}
             />
           ) : (
-            <CodeSurface
+            <WorkspaceEditableFile
+              sessionId={sessionId}
+              path={path}
               value={entry.content ?? ''}
               language={entry.language ?? 'text'}
               reveal={tab.reveal}
               revealScroll={revealScroll}
-              onAddLineComment={addLineComment}
-              onAddSelection={addSelectionToChat}
             />
           )}
           {entry?.refreshError ? (

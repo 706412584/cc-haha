@@ -9,18 +9,25 @@ import globalsCss from '../../theme/globals.css?raw'
 const mocks = vi.hoisted(() => ({
   saveWorkspaceFileMock: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
   syncLspMock: vi.fn(),
+  lspStateMock: vi.fn(),
+  lspDiagnosticsMock: vi.fn(),
+  restartLspMock: vi.fn(),
 }))
 
 vi.mock('../../api/sessions', () => ({
   sessionsApi: {
     saveWorkspaceFile: mocks.saveWorkspaceFileMock,
+    getWorkspaceLspState: mocks.lspStateMock,
+    getWorkspaceLspDiagnostics: mocks.lspDiagnosticsMock,
+    syncWorkspaceLsp: mocks.syncLspMock,
+    restartWorkspaceLsp: mocks.restartLspMock,
   },
 }))
 
 import {
-  useWorkspacePanelStore,
-  type WorkspacePreviewTab,
-} from '../../stores/workspacePanelStore'
+  useWorkspaceEditorStore,
+  workspaceBufferKey,
+} from '../../stores/workspaceEditorStore'
 import { WorkspaceEditor } from './WorkspaceEditor'
 
 /**
@@ -35,22 +42,27 @@ import { WorkspaceEditor } from './WorkspaceEditor'
  * _Requirements: 1.1-1.8, 4.1-4.6_
  */
 
-function makeTab(overrides: Partial<WorkspacePreviewTab> = {}): WorkspacePreviewTab {
+type EditorFixture = { path: string; content: string }
+
+function makeTab(overrides: Partial<EditorFixture> = {}): EditorFixture {
   return {
-    id: 'file:src/app.ts',
     path: 'src/app.ts',
-    kind: 'file',
-    title: 'app.ts',
     content: 'export const x = 1\n',
-    state: 'ok',
-    language: 'typescript',
-    size: 19,
     ...overrides,
   }
 }
 
+/** The buffer key the editor store uses for a fixture. */
+function keyOf(fixture: EditorFixture) {
+  return workspaceBufferKey('s1', fixture.path)
+}
+
+function buffers() {
+  return useWorkspaceEditorStore.getState().buffersByKey
+}
+
 describe('WorkspaceEditor', () => {
-  const initialState = useWorkspacePanelStore.getInitialState()
+  const initialState = useWorkspaceEditorStore.getInitialState()
 
   beforeEach(() => {
     mocks.saveWorkspaceFileMock.mockReset()
@@ -61,11 +73,11 @@ describe('WorkspaceEditor', () => {
       bytes: 19,
       timestamp: Date.now(),
     })
-    useWorkspacePanelStore.setState(initialState, true)
+    useWorkspaceEditorStore.setState(initialState, true)
   })
 
   afterEach(() => {
-    useWorkspacePanelStore.setState(initialState, true)
+    useWorkspaceEditorStore.setState(initialState, true)
     document.documentElement.removeAttribute('data-theme')
     vi.restoreAllMocks()
   })
@@ -85,10 +97,7 @@ describe('WorkspaceEditor', () => {
     {
       title: 'JSON',
       tab: makeTab({
-        id: 'file:config.json',
         path: 'config.json',
-        title: 'config.json',
-        language: 'json',
         content: '{ "enabled": true, "retries": 3 }\n',
       }),
       tokens: [
@@ -98,7 +107,7 @@ describe('WorkspaceEditor', () => {
       ],
     },
   ])('renders $title tokens with semantic syntax classes and CSS-variable colors', async ({ tab, tokens }) => {
-    const { container } = render(<WorkspaceEditor sessionId="s1" tab={tab} />)
+    const { container } = render(<WorkspaceEditor sessionId="s1" path={tab.path} content={tab.content} />)
 
     await waitFor(() => {
       expect(container.querySelector('.cm-editor')).toBeTruthy()
@@ -117,7 +126,7 @@ describe('WorkspaceEditor', () => {
   it.each(['light', 'dark', 'eyeCare'])('keeps editor state and history when switching to %s theme', async (theme) => {
     document.documentElement.setAttribute('data-theme', 'white')
     const tab = makeTab()
-    const { container } = render(<WorkspaceEditor sessionId="s1" tab={tab} />)
+    const { container } = render(<WorkspaceEditor sessionId="s1" path={tab.path} content={tab.content} />)
 
     await waitFor(() => {
       expect(container.querySelector('.cm-editor')).toBeTruthy()
@@ -132,7 +141,7 @@ describe('WorkspaceEditor', () => {
         selection: { anchor: 18 },
       })
     })
-    const dirtyBuffer = useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]
+    const dirtyBuffer = buffers()[keyOf(tab)]
     expect(dirtyBuffer?.currentContent).toBe('export const x = 2\n')
     expect(dirtyBuffer?.isDirty).toBe(true)
     expect(undoDepth(view.state)).toBe(1)
@@ -145,7 +154,7 @@ describe('WorkspaceEditor', () => {
     expect(EditorView.findFromDOM(editorElement)).toBe(view)
     expect(view.state.doc.toString()).toBe('export const x = 2\n')
     expect(view.state.selection.main.anchor).toBe(18)
-    expect(useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]).toMatchObject({
+    expect(buffers()[keyOf(tab)]).toMatchObject({
       currentContent: 'export const x = 2\n',
       isDirty: true,
     })
@@ -159,10 +168,10 @@ describe('WorkspaceEditor', () => {
 
   it('initializes the buffer with detected encoding and line ending', async () => {
     const tab = makeTab()
-    render(<WorkspaceEditor sessionId="s1" tab={tab} />)
+    render(<WorkspaceEditor sessionId="s1" path={tab.path} content={tab.content} />)
 
     await waitFor(() => {
-      const buffer = useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]
+      const buffer = buffers()[keyOf(tab)]
       expect(buffer).toBeDefined()
       expect(buffer?.encoding).toBe('utf-8')
       expect(buffer?.lineEnding).toBe('LF')
@@ -193,7 +202,7 @@ describe('WorkspaceEditor', () => {
     // @ts-expect-error — narrow override for the duration of the test
     global.TextEncoder = StubEncoder
 
-    render(<WorkspaceEditor sessionId="s1" tab={tab} />)
+    render(<WorkspaceEditor sessionId="s1" path={tab.path} content={tab.content} />)
 
     await waitFor(() => {
       expect(screen.queryByTestId('workspace-editor-unsupported')).toBeTruthy()
@@ -204,18 +213,18 @@ describe('WorkspaceEditor', () => {
 
   it('shows the dirty marker after a buffer edit', async () => {
     const tab = makeTab()
-    render(<WorkspaceEditor sessionId="s1" tab={tab} />)
+    render(<WorkspaceEditor sessionId="s1" path={tab.path} content={tab.content} />)
 
     await waitFor(() => {
-      expect(useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]).toBeDefined()
+      expect(buffers()[keyOf(tab)]).toBeDefined()
     })
 
     act(() => {
-      useWorkspacePanelStore.getState().setBufferState(tab.id, 'export const x = 2\n')
+      useWorkspaceEditorStore.getState().setBufferState(keyOf(tab), 'export const x = 2\n')
     })
 
     await waitFor(() => {
-      expect(useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]?.isDirty).toBe(true)
+      expect(buffers()[keyOf(tab)]?.isDirty).toBe(true)
     })
 
     await waitFor(() => {
@@ -226,13 +235,13 @@ describe('WorkspaceEditor', () => {
   it('opens the unsaved-changes modal when closing a dirty buffer', async () => {
     const tab = makeTab()
     const onClose = vi.fn()
-    render(<WorkspaceEditor sessionId="s1" tab={tab} onClose={onClose} />)
+    render(<WorkspaceEditor sessionId="s1" path={tab.path} content={tab.content} onClose={onClose} />)
 
     await waitFor(() => {
-      expect(useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]).toBeDefined()
+      expect(buffers()[keyOf(tab)]).toBeDefined()
     })
     act(() => {
-      useWorkspacePanelStore.getState().setBufferState(tab.id, 'edited')
+      useWorkspaceEditorStore.getState().setBufferState(keyOf(tab), 'edited')
     })
 
     fireEvent.click(screen.getByTestId('workspace-editor-close'))
@@ -247,10 +256,10 @@ describe('WorkspaceEditor', () => {
   it('closes immediately for a clean buffer without showing the modal', async () => {
     const tab = makeTab()
     const onClose = vi.fn()
-    render(<WorkspaceEditor sessionId="s1" tab={tab} onClose={onClose} />)
+    render(<WorkspaceEditor sessionId="s1" path={tab.path} content={tab.content} onClose={onClose} />)
 
     await waitFor(() => {
-      expect(useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]).toBeDefined()
+      expect(buffers()[keyOf(tab)]).toBeDefined()
     })
 
     fireEvent.click(screen.getByTestId('workspace-editor-close'))
@@ -261,13 +270,13 @@ describe('WorkspaceEditor', () => {
 
   it('keeps the modal interactive when no save is in flight (Cancel/Discard enabled)', async () => {
     const tab = makeTab()
-    render(<WorkspaceEditor sessionId="s1" tab={tab} onClose={vi.fn()} />)
+    render(<WorkspaceEditor sessionId="s1" path={tab.path} content={tab.content} onClose={vi.fn()} />)
 
     await waitFor(() => {
-      expect(useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]).toBeDefined()
+      expect(buffers()[keyOf(tab)]).toBeDefined()
     })
     act(() => {
-      useWorkspacePanelStore.getState().setBufferState(tab.id, 'edited')
+      useWorkspaceEditorStore.getState().setBufferState(keyOf(tab), 'edited')
     })
 
     fireEvent.click(screen.getByTestId('workspace-editor-close'))
@@ -279,14 +288,14 @@ describe('WorkspaceEditor', () => {
   it('saves dirty buffers, resets dirty state, syncs LSP content, and calls onSaved', async () => {
     const tab = makeTab()
     const onSaved = vi.fn()
-    useWorkspacePanelStore.setState({ syncLsp: mocks.syncLspMock }, false)
-    render(<WorkspaceEditor sessionId="s1" tab={tab} onSaved={onSaved} />)
+    useWorkspaceEditorStore.setState({ syncLsp: mocks.syncLspMock }, false)
+    render(<WorkspaceEditor sessionId="s1" path={tab.path} content={tab.content} onSaved={onSaved} />)
 
     await waitFor(() => {
-      expect(useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]).toBeDefined()
+      expect(buffers()[keyOf(tab)]).toBeDefined()
     })
     act(() => {
-      useWorkspacePanelStore.getState().setBufferState(tab.id, 'export const x = 2\n')
+      useWorkspaceEditorStore.getState().setBufferState(keyOf(tab), 'export const x = 2\n')
     })
 
     fireEvent.click(screen.getByTestId('workspace-editor-save'))
@@ -299,7 +308,7 @@ describe('WorkspaceEditor', () => {
         bom: 'none',
         lineEnding: 'LF',
       }))
-      expect(useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]?.isDirty).toBe(false)
+      expect(buffers()[keyOf(tab)]?.isDirty).toBe(false)
       expect(onSaved).toHaveBeenCalledWith('src/app.ts')
       expect(mocks.syncLspMock).toHaveBeenCalledWith('s1', {
         path: 'src/app.ts',
@@ -313,34 +322,34 @@ describe('WorkspaceEditor', () => {
     mocks.saveWorkspaceFileMock.mockResolvedValueOnce({ ok: false, error: 'stale_base', message: 'File changed on disk' })
     const tab = makeTab()
     const onSaved = vi.fn()
-    render(<WorkspaceEditor sessionId="s1" tab={tab} onSaved={onSaved} />)
+    render(<WorkspaceEditor sessionId="s1" path={tab.path} content={tab.content} onSaved={onSaved} />)
 
     await waitFor(() => {
-      expect(useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]).toBeDefined()
+      expect(buffers()[keyOf(tab)]).toBeDefined()
     })
     act(() => {
-      useWorkspacePanelStore.getState().setBufferState(tab.id, 'edited')
+      useWorkspaceEditorStore.getState().setBufferState(keyOf(tab), 'edited')
     })
 
     fireEvent.click(screen.getByTestId('workspace-editor-save'))
 
     await waitFor(() => {
       expect(screen.getByTestId('workspace-editor-save-error').textContent).toContain('File changed on disk')
-      expect(useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]?.isDirty).toBe(true)
+      expect(buffers()[keyOf(tab)]?.isDirty).toBe(true)
       expect(onSaved).not.toHaveBeenCalled()
     })
   })
 
   it('renders the conflict banner when buffer.conflict is set', async () => {
     const tab = makeTab()
-    render(<WorkspaceEditor sessionId="s1" tab={tab} />)
+    render(<WorkspaceEditor sessionId="s1" path={tab.path} content={tab.content} />)
 
     await waitFor(() => {
-      expect(useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]).toBeDefined()
+      expect(buffers()[keyOf(tab)]).toBeDefined()
     })
 
     act(() => {
-      useWorkspacePanelStore.getState().applyExternalSave(tab.id, {
+      useWorkspaceEditorStore.getState().applyExternalSave(keyOf(tab), {
         source: 'user',
         hash: 'c'.repeat(64),
         timestamp: Date.now(),
@@ -355,15 +364,15 @@ describe('WorkspaceEditor', () => {
 
   it('shows three banner buttons when the buffer is dirty at conflict time', async () => {
     const tab = makeTab()
-    render(<WorkspaceEditor sessionId="s1" tab={tab} />)
+    render(<WorkspaceEditor sessionId="s1" path={tab.path} content={tab.content} />)
 
     await waitFor(() => {
-      expect(useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]).toBeDefined()
+      expect(buffers()[keyOf(tab)]).toBeDefined()
     })
 
     act(() => {
-      useWorkspacePanelStore.getState().setBufferState(tab.id, 'edited')
-      useWorkspacePanelStore.getState().applyExternalSave(tab.id, {
+      useWorkspaceEditorStore.getState().setBufferState(keyOf(tab), 'edited')
+      useWorkspaceEditorStore.getState().applyExternalSave(keyOf(tab), {
         source: 'user',
         hash: 'c'.repeat(64),
         timestamp: Date.now(),
