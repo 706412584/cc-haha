@@ -22,6 +22,7 @@ import {
   type WorkspaceBufferInit,
   type WorkspaceBufferState,
 } from '../../stores/workspaceEditorStore'
+import { useWorkspaceContentStore } from '../../stores/workspaceContentStore'
 import { detectEncoding, detectLineEnding } from './encodingDetect'
 import { ConflictBanner } from './ConflictBanner'
 import { UnsavedChangesModal } from './UnsavedChangesModal'
@@ -338,9 +339,25 @@ export function WorkspaceEditor(props: WorkspaceEditorProps) {
   }, [])
 
   // -- Conflict banner actions. --------------------------------------------
+  // "Reload" has to mean reload: dropping the conflict only restores the
+  // baseline the editor opened with, which is the very content the banner just
+  // told the user is stale. Refetch first, then rebase onto what is on disk.
   const handleConflictReload = useCallback(() => {
     acknowledgeConflict(key, 'reload')
-  }, [key, acknowledgeConflict])
+    void (async () => {
+      await useWorkspaceContentStore.getState().loadFile(sessionId, path, { force: true })
+      const entry = useWorkspaceContentStore.getState().filesByKey[`${sessionId}::${path}`]
+      if (entry?.state !== 'ok' || typeof entry.content !== 'string') return
+      initBuffer({
+        key,
+        path,
+        baseHash: await sha256Hex(entry.content),
+        baseContent: entry.content,
+        encoding: buffer?.encoding ?? 'utf-8',
+        lineEnding: buffer?.lineEnding ?? 'LF',
+      })
+    })()
+  }, [key, path, sessionId, acknowledgeConflict, initBuffer, buffer?.encoding, buffer?.lineEnding])
 
   const handleConflictKeepMine = useCallback(() => {
     acknowledgeConflict(key, 'keepMine')
