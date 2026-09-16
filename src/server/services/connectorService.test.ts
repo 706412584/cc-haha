@@ -260,7 +260,11 @@ test('legacy missing installed version advertises an update; invalid stored vers
   const f = fixture()
   try {
     const record = { installed: true, enabled: false, sharedCredentialsAcknowledged: true, installation: {
-      directory: join(f.deps.root, 'runtime', 'feishu', `0.9.0-${process.platform}-${process.arch}`), command: 'legacy', args: [], env: {},
+      // A legacy directory names a platform the catalog actually publishes.
+      // Using the host's own platform made this pass only where connectors are
+      // installable: on Linux the name matched nothing, the legacy version fell
+      // through to the catalog's, and the assertions below saw '1.0.0'.
+      directory: join(f.deps.root, 'runtime', 'feishu', '0.9.0-win32-x64'), command: 'legacy', args: [], env: {},
     } }
     writeFileSync(join(f.deps.root, 'state.json'), JSON.stringify({ schemaVersion: 1, connectors: { feishu: record } }))
     const legacy = new ConnectorService(f.deps)
