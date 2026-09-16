@@ -4,7 +4,7 @@
 
 > 验证方法：在 pre-merge 基线（合并 commit 的第一父，`git worktree add <tmp> <first-parent> --detach`）上重跑同一批测试。若基线同样红 → 预存。
 
-最后核对日期：2026-09-14（合并上游 v0.6.2）。
+最后核对日期：2026-09-16（合并上游 v0.6.3）。
 
 ---
 
@@ -118,6 +118,24 @@ CI 上不需要，且会把「清理失败」从可见的红变成静默重试�
   — 测试用 `spawnSync('/bin/bash', ...)` 跑 macOS 构建脚本；Windows 无 `/bin/bash`，`spawnSync` 返回 `status: null`（ENOENT）。CI(Linux/macOS) 上应通过。
 - `electron/services/serverRuntime.test.ts > waits for real server shutdown cleanup before the first restart attempt`
   — fixture 子进程依赖 `SIGTERM` handler 延时清理 `active-turn` 文件；Windows 上 `child.kill()` 直接终止进程，handler 不执行，`active-turn` 残留。
+
+## 上游 v0.6.3 新增文件在 Windows 本地的失败（非本次合并引入）
+
+`src/server/services/reviewService.test.ts`（13 fail / 58 pass）与
+`src/server/services/workspaceWatch.test.ts`（2 fail / 8 pass）是 v0.6.3 **新引入**的文件。
+已在上游源码（`3e160f7e` worktree）上原样复现同一组红，且这两个测试文件与其实现文件与本仓库逐字节相同 ——
+即上游自己在这台 Windows 机器上就是红的，与 fork 的合并无关。
+
+- **符号链接类**（reviewService 4 个 + workspaceWatch 1 个）：Windows 创建 symlink 需要管理员权限，报 `EPERM: operation not permitted, symlink`。CI(Linux/macOS) 无此限制。
+- **Git 行为类**（reviewService 9 个）：`core.autocrlf=true` 是本机系统级 git 配置（`D:/360downloads/Git/etc/gitconfig`），
+  会让测试里 `git checkout` / `git apply` 的往返把 LF 换成 CRLF，断言的字节内容因此不匹配；
+  另有以 `:` 开头的 pathspec magic、带空格/反斜杠/换行的文件名，属 Git for Windows 的路径处理差异。
+  **验证**：`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.autocrlf GIT_CONFIG_VALUE_0=false bun test src/server/services/reviewService.test.ts`
+  可把 13 fail 降到 9 fail，剩下的仍是符号链接与 Windows 文件名限制。
+- **fs.watch 时序类**（workspaceWatch 1 个）：`Timed out waiting for filesystem event` —— Windows 的 ReadDirectoryChangesW 与测试的 2s 预算竞争。
+
+结论：这 15 个红在上游同样存在，不是合并回归。若要本地跑绿，只能改测试（加 autocrlf 关闭、symlink 跳过），
+但那会把上游文件改得与上游不一致，故不改。
 
 ## quarantine 已登记项
 
