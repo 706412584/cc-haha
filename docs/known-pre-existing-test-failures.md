@@ -137,6 +137,28 @@ CI 上不需要，且会把「清理失败」从可见的红变成静默重试�
 结论：这 15 个红在上游同样存在，不是合并回归。若要本地跑绿，只能改测试（加 autocrlf 关闭、symlink 跳过），
 但那会把上游文件改得与上游不一致，故不改。
 
+## `check:bundle-budget`（desktop）—— 基线已过期，非本次合并引入
+
+`desktop/scripts/check-bundle-budget.ts` 里的 `BASELINE_GZIP_BYTES`（3_707_686，即 3620.79 KB gz）
+标注为「Captured 2026-07-14 on origin/main @ 2a44f381」，对应 fork v0.5.38 时期。
+
+实测：
+
+| 版本 | dist/assets 总 gzip |
+| --- | --- |
+| pre-merge 基线（`8f526396` = fork v0.6.4） | 4757.37 KB |
+| 本次合并后 | 4854.00 KB |
+
+即**在合并前的基线上该门禁就已经红了**（超出 ceiling 1036.58 KB），本次合并自身只增加
+96.63 KB（+2.0%）。根因是常量长期未随 fork 的功能增长更新，而不是某次改动超预算。
+
+该脚本**未被任何 CI workflow 调用**（`grep -rn "bundle-budget" .github/` 为空），只存在于 `desktop/package.json`
+的 scripts 里，属手动门禁。故它不会挡 CI。
+
+**处置**：不改常量。把阈值调高会把「超预算」从可见的红变成静默通过，而是否接受这 ~1 MB 的增长
+（很大一部分来自 xterm / shiki / katex / cytoscape 等按需加载的第三方 chunk）应由维护者决定，
+不应由合并顺手改掉。若决定接受，应连同「为什么这些 chunk 该留在预算内」一起更新注释再提交。
+
 ## quarantine 已登记项
 
 见 `scripts/quality-gate/quarantine.json`。仅对**整文件基本全红且属确定性架构分歧**的登记（避免连带停掉大量通过的测试而丢覆盖）：
