@@ -187,6 +187,27 @@ Agent 写入的分支（`source: 'agent'`）走的是 chatStore 的工具流，�
 **处置**：不属本次合并范围，未改动。若要做，正确做法是在桌面端的 WS 消息分发里接上
 `workspace.file.saved`，按 `sessionId` + 路径调用 `applyExternalSave`（缓冲键为 `sessionId::path`，
 服务端事件里的路径需要先归一化到工作区相对路径）。同时应给服务端那行注释与实现二选一地对齐。
+## Bun 的 `fs.watch` 不报告 rename 目标（跨平台，非本仓库缺陷）
+
+`src/server/services/workspaceWatch.test.ts > coalesces real writes and renames in subscribed directories and cancels cleanly`
+曾断言 rename 后能收到 `src/b.ts`，在 Linux CI 与 Windows 本地都会超时。
+
+**根因已定位到运行时，不在产品代码**：
+
+| 层面 | 是否报告 rename 目标 `b.ts` |
+| --- | --- |
+| 内核 inotify（`IN_MOVED_TO`） | ✅ 报告（WSL/Ubuntu 24.04 上用 ctypes 直接验证：`[('0x40','a.ts'), ('0x80','b.ts')]`） |
+| Bun 1.3.14 的 `fs.watch` | ❌ 只报源文件（`RAW: ["rename:a.ts"]`） |
+| `WorkspaceService.watchDirectories` | ✅ 逻辑正确——同样路径用普通 create 能正常上报 `src/b.ts` |
+
+Bun 的 `fs.watch` 在 Linux 与 Windows 上都把 rename 的目标事件丢掉了（Windows 侧另经独立排查确认同样如此）。
+
+**处置**：已把断言改为等待 rename **源**（`src/a.ts`），并另断言目标文件确实存在（证明移动发生），同时保留该用例原本验证的合并、去重、取消语义。超时预算也从 2s 放宽到 5s（CI 负载下 inotify 可能延迟，而这用例测的是语义不是延迟）。
+
+**对真实用户的影响**：很小。编辑器保存是「写临时文件 + rename 覆盖」，Bun 会报告被覆盖的那个名字；只有对已打开文件做纯 rename（如 agent 执行 `mv`）时，事件呈删除形状，文件被当作删除而非重命名——表现不精确，但不会漏刷新。
+
+**本机验证**：WSL Ubuntu 24.04 + bun 1.3.14（与 CI 同代）跑 `workspaceWatch.test.ts` 为 10 pass / 0 fail；Windows 本地 9 pass / 1 fail，剩的那个是 symlink `EPERM`（需管理员权限），CI 上通过。
+
 ## quarantine 已登记项
 
 见 `scripts/quality-gate/quarantine.json`。仅对**整文件基本全红且属确定性架构分歧**的登记（避免连带停掉大量通过的测试而丢覆盖）：

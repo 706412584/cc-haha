@@ -607,7 +607,7 @@ describe('ConversationService', () => {
     }
   })
 
-  test('buildChildEnv limits the default first-token watchdog so empty-stream retries advance', async () => {
+  test('buildChildEnv ties the first-token watchdog to the user request timeout so slow prefill is not killed early (#826)', async () => {
     const prev = process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS
     delete process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS
     await fs.writeFile(
@@ -619,8 +619,13 @@ describe('ConversationService', () => {
       const service = new ConversationService() as any
       const env = (await service.buildChildEnv('/tmp')) as Record<string, string>
 
-      expect(env.API_TIMEOUT_MS).toBe('600000')
-      expect(env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS).toBe('120000')
+      // The user's "请求超时" must reach the first-token watchdog, not only the
+      // SDK client timeout (which on a stream is cleared the moment response
+      // headers arrive). Otherwise a local/3P model that needs minutes to emit
+      // its first token gets killed by the 240s idle watchdog no matter how high
+      // the configured timeout is (#826).
+      expect(env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS).toBe('600000')
+      expect(env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS).toBe(env.API_TIMEOUT_MS)
     } finally {
       if (prev === undefined) delete process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS
       else process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS = prev
@@ -629,7 +634,12 @@ describe('ConversationService', () => {
 
   test.each([1_800_000, 14_400_000, 21_600_000])('buildChildEnv raises all request budgets for a long local-model response (%i ms, #1307)', async timeoutMs => {
     const prev = process.env.CLAUDE_STREAM_MAX_DURATION_MS
+    const prevFirstToken = process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS
     delete process.env.CLAUDE_STREAM_MAX_DURATION_MS
+    // Both budgets are inherited from the environment when set, so a value left
+    // behind by another case (or by the developer's own shell) would mask the
+    // setting under test — the run then reads as a product failure.
+    delete process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS
     await fs.writeFile(
       path.join(tmpDir, 'settings.json'),
       JSON.stringify({ network: { aiRequestTimeoutMs: timeoutMs } }),
@@ -649,6 +659,8 @@ describe('ConversationService', () => {
     } finally {
       if (prev === undefined) delete process.env.CLAUDE_STREAM_MAX_DURATION_MS
       else process.env.CLAUDE_STREAM_MAX_DURATION_MS = prev
+      if (prevFirstToken === undefined) delete process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS
+      else process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS = prevFirstToken
     }
   })
 
