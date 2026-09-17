@@ -44,6 +44,40 @@ describe('Swift platform checks', () => {
     expect(existsSync(home)).toBe(false)
   })
 
+  // macOS runners intermittently remount TMPDIR read-only, so the sandbox
+  // removal throws EROFS after the Swift lane already passed. Cleanup failure
+  // must not be reported as a lane failure.
+  test.each([
+    { swiftExit: 0, packagingExit: 0, expected: 0 },
+    { swiftExit: 3, packagingExit: 0, expected: 3 },
+  ])('keeps the test result when sandbox cleanup fails: %j', async scenario => {
+    const run = mock(async (command: string[]) => (
+      command[0] === 'swift' ? scenario.swiftExit : scenario.packagingExit
+    ))
+    const warnings: string[] = []
+    const originalWarn = console.warn
+    console.warn = (message: string) => { warnings.push(message) }
+
+    let attempted = ''
+    try {
+      expect(await runSwiftChecks({
+        platform: 'darwin',
+        run,
+        removeSandbox: directory => {
+          attempted = directory
+          throw new Error('EROFS: read-only file system')
+        },
+      })).toBe(scenario.expected)
+    } finally {
+      console.warn = originalWarn
+    }
+
+    expect(attempted).not.toBe('')
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('could not remove sandbox')
+    expect(warnings[0]).toContain('EROFS')
+  })
+
   test('cleans the sandbox and reports a Swift launch failure', async () => {
     let home = ''
     await expect(runSwiftChecks({

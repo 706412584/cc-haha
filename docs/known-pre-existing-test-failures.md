@@ -82,6 +82,22 @@ fork 之前把后台 agent 的完成通知从「完成即直塞命令队列」�
 - **仍未证实**：该测试在上游开发者的本机环境是否能稳定通过，无从取证（无执行记录）。机制上它依赖「测试进程与 fixture 进程的前台切换时序」，单用户本机窗口更宽，CI 上更窄。
 - **处置**：按已知失败放行，合并后单独处理。候选方向：(a) 改测试，使 `verifyVisibleClicks` 不同时要求两个进程前台（如用 `orderFrontRegardless` 替代 `activate`）；(b) 按上游语义补 skip 条件。**不要**放宽 `confirm()` 的 generation 判定——那是真实的焦点竞态防护。
 
+## `macos-swift-checks`：清理临时沙箱失败会掩盖全绿的测试结果（已修）
+
+> 与上面那条 GUI 焦点竞态**不是同一个问题**。这里留档，因为它曾三次连续把 PR #161 判红，容易被误读成合并回归。
+
+- **现象**：Swift 编译 + XCTest + 打包回归**全部通过**（`17 pass / 0 fail`），随后 job 仍以 exit 1 结束：
+  ```
+  EROFS: read-only file system, rm '/var/folders/36/.../T/cc-haha-swift-checks-EGND0L'
+      at runSwiftChecks (scripts/pr/run-swift-checks.ts:45:5)
+  ```
+- **机制**：`runSwiftChecks` 的 `finally` 里裸调 `rmSync(sandboxHome, { recursive: true, force: true })`。macOS runner 会在 job 中途把 `TMPDIR` 重挂为只读，于是**清理动作**抛 EROFS，把「清理失败」升级成「整个 lane 失败」——测试结果被丢弃。
+- **取证**：
+  - 2026-09-14 `b7bf1db4` 那次 `macos-swift-checks` 失败，日志与 2026-09-17 的三次（`35186996472`，以及 `35188879734` 两轮）逐字相同，**同一 runner host**（`tjdph2t965j8snz9_vkdnw0r0000gn`）、同一镜像 `macos-26-arm64 / 20260907.0351`。
+  - 同期 `58280fcc` 那次该 job **success** —— 同一镜像、同一 commit 内容，说明是间歇性 runner 环境问题，不是确定性代码缺陷。
+  - `scripts/pr/run-swift-checks.ts` 在 base / ours / theirs 三方哈希一致（`79c43189`，纯上游文件）；本次合并未改动 `native/` 或该脚本。
+- **处置**：清理改为尽力而为 —— 捕获异常并 `console.warn`，让 Swift / 打包的退出码保持权威（`scripts/pr/run-swift-checks.ts`）。新增 `removeSandbox` 注入点，测试 `keeps the test result when sandbox cleanup fails` 锁定该行为（旧实现下这两个用例会红）。**不要**回退成裸 `rmSync`。
+
 ## desktop（vitest，`desktop-checks`）——quarantine 覆盖不到
 
 `quarantine.json` 只作用于 `check:server`，**不覆盖 desktop vitest**。下列 desktop 测试在 pre-merge 基线同样全红，属预存：

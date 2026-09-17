@@ -13,6 +13,7 @@ type SwiftCheckRunner = (
 export async function runSwiftChecks(options: {
   platform?: NodeJS.Platform
   run?: SwiftCheckRunner
+  removeSandbox?: (sandboxHome: string) => void
 } = {}): Promise<number> {
   const platform = options.platform ?? process.platform
   if (platform !== 'darwin') {
@@ -25,6 +26,9 @@ export async function runSwiftChecks(options: {
   const run = options.run ?? (async (command, spawnOptions) => {
     const child = Bun.spawn(command, { ...spawnOptions, stdout: 'inherit', stderr: 'inherit' })
     return await child.exited
+  })
+  const removeSandbox = options.removeSandbox ?? ((directory: string) => {
+    rmSync(directory, { recursive: true, force: true })
   })
   try {
     const env = createSandboxedTestEnvironment(sandboxHome, { CFFIXED_USER_HOME: sandboxHome })
@@ -42,7 +46,17 @@ export async function runSwiftChecks(options: {
       'bun', 'test', join(root, 'native/cu-helper/build.test.ts'),
     ], { cwd: root, env })
   } finally {
-    rmSync(sandboxHome, { recursive: true, force: true })
+    // A macOS runner occasionally remounts its TMPDIR read-only mid-job, so
+    // removal throws EROFS *after* every Swift test has already passed
+    // (observed on 2026-09-14 and 2026-09-17). Cleanup is not the signal this
+    // lane reports: a failed removal must not turn a green run red. Warn and
+    // let the Swift/packaging exit codes above stay authoritative.
+    try {
+      removeSandbox(sandboxHome)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      console.warn(`[swift-checks] could not remove sandbox ${sandboxHome}: ${reason}`)
+    }
   }
 }
 
