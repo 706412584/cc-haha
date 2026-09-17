@@ -65,8 +65,19 @@ type SettingsStore = {
   thinkingEnabled: boolean
   thinkingAutoCollapse: boolean
   workflowKeywordTriggerEnabled: boolean
+  agentTeamsEnabled: boolean
   autoDreamEnabled: boolean
   unifiedActivityPanelEnabled: boolean
+  /**
+   * Keep the renderer running while its window is hidden.
+   *
+   * Off by default: a backgrounded renderer normally stops running timers,
+   * which is what makes an idle app cheap. But the session WebSocket's
+   * heartbeat is a `setInterval`, so with the screen off the pings stop and
+   * the socket drops — and the server, rightly refusing to kill a turn that
+   * is still running, then holds the CLI for a session nobody is attached to.
+   */
+  keepActiveInBackground: boolean
   agentOfficeSurface: AgentOfficeSurface
   autoModeOptInAccepted: boolean
   availableModels: ModelInfo[]
@@ -114,8 +125,10 @@ type SettingsStore = {
   setThinkingEnabled: (enabled: boolean) => Promise<void>
   setThinkingAutoCollapse: (enabled: boolean) => Promise<void>
   setWorkflowKeywordTriggerEnabled: (enabled: boolean) => Promise<void>
+  setAgentTeamsEnabled: (enabled: boolean) => Promise<void>
   setAutoDreamEnabled: (enabled: boolean) => Promise<void>
   setUnifiedActivityPanelEnabled: (enabled: boolean) => Promise<void>
+  setKeepActiveInBackground: (keepActive: boolean) => Promise<void>
   setAgentOfficeSurface: (surface: AgentOfficeSurface) => Promise<void>
   acceptAutoModeOptIn: () => Promise<void>
   setLocale: (locale: Locale) => void
@@ -179,8 +192,11 @@ const DEFAULT_UPDATE_PROXY_SETTINGS: UpdateProxySettings = {
   url: '',
 }
 
+// Keep milliseconds within the signed 32-bit timer limit, matching the server.
+export const NETWORK_TIMEOUT_MAX_SECONDS = Math.floor(2_147_483_647 / 1000)
+
 const DEFAULT_NETWORK_SETTINGS: NetworkSettings = {
-  aiRequestTimeoutMs: 600_000,
+  aiRequestTimeoutMs: 1_800_000,
   proxy: {
     mode: 'system',
     url: '',
@@ -212,8 +228,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   thinkingEnabled: true,
   thinkingAutoCollapse: true,
   workflowKeywordTriggerEnabled: true,
+  agentTeamsEnabled: true,
   autoDreamEnabled: false,
   unifiedActivityPanelEnabled: false,
+  keepActiveInBackground: false,
   agentOfficeSurface: 'modal',
   autoModeOptInAccepted: false,
   availableModels: [],
@@ -270,6 +288,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         userSettings,
         h5AccessResult,
         traceCapture,
+        keepActiveInBackground,
       ] = await Promise.all([
         settingsApi.getPermissionMode(),
         modelsApi.list(),
@@ -278,6 +297,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         settingsApi.getUser(),
         loadH5AccessSettings(previousH5Access),
         loadTraceCaptureSettings(),
+        // Main-process owned, so it is read from the host rather than user
+        // settings. A host without the capability reports false, which is the
+        // default anyway.
+        getDesktopHost().app.getKeepActiveInBackground().catch(() => false),
       ])
       const desktopTerminal = normalizeDesktopTerminalSettings(userSettings.desktopTerminal)
       lastPersistedDesktopTerminal = desktopTerminal
@@ -294,8 +317,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         thinkingEnabled: userSettings.alwaysThinkingEnabled !== false,
         thinkingAutoCollapse: userSettings.thinkingAutoCollapse !== false,
         workflowKeywordTriggerEnabled: userSettings.workflowKeywordTriggerEnabled !== false,
+        agentTeamsEnabled: userSettings.agentTeamsEnabled !== false,
         autoDreamEnabled: userSettings.autoDreamEnabled === true,
         unifiedActivityPanelEnabled: userSettings.unifiedActivityPanelEnabled === true,
+        keepActiveInBackground,
         agentOfficeSurface: userSettings.agentOfficeSurface === 'tab' ? 'tab' : 'modal',
         autoModeOptInAccepted: userSettings.skipAutoPermissionPrompt === true,
         chatSendBehavior: normalizeChatSendBehavior(userSettings.chatSendBehavior),
@@ -391,6 +416,17 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
   },
 
+  setAgentTeamsEnabled: async (enabled) => {
+    const prev = get().agentTeamsEnabled
+    set({ agentTeamsEnabled: enabled })
+    try {
+      await settingsApi.updateUser({ agentTeamsEnabled: enabled })
+    } catch (error) {
+      set({ agentTeamsEnabled: prev })
+      throw error
+    }
+  },
+
   setAutoDreamEnabled: async (enabled) => {
     const prev = get().autoDreamEnabled
     set({ autoDreamEnabled: enabled })
@@ -398,6 +434,19 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       await settingsApi.updateUser({ autoDreamEnabled: enabled })
     } catch (error) {
       set({ autoDreamEnabled: prev })
+      throw error
+    }
+  },
+
+  setKeepActiveInBackground: async (keepActive) => {
+    const previous = get().keepActiveInBackground
+    set({ keepActiveInBackground: keepActive })
+    try {
+      // The main process owns this preference: it has to be applied at window
+      // creation, before any renderer exists to hold the setting.
+      await getDesktopHost().app.setKeepActiveInBackground(keepActive)
+    } catch (error) {
+      set({ keepActiveInBackground: previous })
       throw error
     }
   },
@@ -862,7 +911,7 @@ function normalizeNetworkSettings(
   settings: NetworkSettingsInput | undefined,
 ): NetworkSettings {
   const timeout = typeof settings?.aiRequestTimeoutMs === 'number' && Number.isFinite(settings.aiRequestTimeoutMs)
-    ? Math.min(Math.max(Math.round(settings.aiRequestTimeoutMs), 30_000), 1_800_000)
+    ? Math.min(Math.max(Math.round(settings.aiRequestTimeoutMs), 30_000), NETWORK_TIMEOUT_MAX_SECONDS * 1000)
     : DEFAULT_NETWORK_SETTINGS.aiRequestTimeoutMs
   const proxyMode = settings?.proxy?.mode === 'manual'
     ? 'manual'

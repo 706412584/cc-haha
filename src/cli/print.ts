@@ -5741,8 +5741,8 @@ export async function reconcileMcpServers(
       await clearServerCache(name, config)
     }
 
-    // Remove tools from this server
-    const prefix = `mcp__${name}__`
+    // Plugin identities contain colons; tools use the normalized MCP prefix.
+    const prefix = getMcpPrefix(name)
     newTools = newTools.filter(t => !t.name.startsWith(prefix))
 
     // Remove from clients list
@@ -5812,7 +5812,7 @@ export async function reconcileMcpServers(
     // Remove old dynamic tools
     const nonDynamicTools = prev.mcp.tools.filter(t => {
       for (const serverName of allDynamicServerNames) {
-        if (t.name.startsWith(`mcp__${serverName}__`)) {
+        if (t.name.startsWith(getMcpPrefix(serverName))) {
           return false
         }
       }

@@ -51,6 +51,7 @@ import {
   isPetSessionInProjection,
   PET_SESSION_LIMIT,
 } from './petAccessPolicy.js'
+import { PublicAccessServer, isPublicAccessControlPath } from './publicAccess.js'
 import { settleResponseOnRequestAbort } from './requestLifecycle.js'
 
 function readArgValue(flag: string): string | undefined {
@@ -82,6 +83,8 @@ const SERVER_OPTIONS = resolveServerOptions()
 const PORT = SERVER_OPTIONS.port
 const HOST = SERVER_OPTIONS.host
 export const HTTP_CONNECTION_IDLE_TIMEOUT_SECONDS = 0
+
+const publicAccessServers = new Set<PublicAccessServer>()
 
 function withCors(response: Response, cors: CorsResolution): Response {
   const headers = new Headers(response.headers)
@@ -203,6 +206,13 @@ export function startServer(port = PORT, host = HOST) {
     console.error('[Server] Failed to register seed marketplaces:', err)
   })
 
+  const publicAccess = new PublicAccessServer({
+    handleApiRequest,
+    handleStatic: handleStaticH5Request,
+    websocket: handleWebSocket,
+    serverPort: () => serverPort,
+  })
+  publicAccessServers.add(publicAccess)
   let server: ReturnType<typeof Bun.serve<WebSocketData>>
 
   try {
@@ -213,6 +223,7 @@ export function startServer(port = PORT, host = HOST) {
 
       async fetch(req, server) {
         const url = new URL(req.url)
+        if (isPublicAccessControlPath(url.pathname)) return publicAccess.control(req)
 
         // Startup probes must not wait on migrations, config reads, or auth.
         // Electron deliberately uses this endpoint to decide when the sidecar
@@ -475,7 +486,7 @@ export function startServer(port = PORT, host = HOST) {
           try {
             const response = await settleResponseOnRequestAbort(
               req,
-              handleApiRequest(req, url),
+              handleApiRequest(req, url, { remoteBrowser: classifyH5Request(req, url, h5RequestContext) === 'h5-browser' }),
             )
             return withCors(response, cors)
           } catch (error) {
@@ -540,9 +551,17 @@ export function startServer(port = PORT, host = HOST) {
 
       websocket: handleWebSocket,
     })
+    const stop = server.stop.bind(server)
+    server.stop = (closeActiveConnections?: boolean) => {
+      publicAccess.disable()
+      publicAccessServers.delete(publicAccess)
+      return stop(closeActiveConnections)
+    }
     serverPort = server.port
     ProviderService.setServerPort(serverPort)
   } catch (error) {
+    publicAccess.disable()
+    publicAccessServers.delete(publicAccess)
     const message = error instanceof Error && error.message
       ? error.message
       : `Failed to start server. Is port ${port} in use?`
@@ -578,6 +597,8 @@ let shutdownInProgress: Promise<void> | null = null
 export async function stopServerRuntimeForShutdown(
   options: { waitForCli?: boolean } = {},
 ): Promise<void> {
+  for (const remote of publicAccessServers) remote.disable()
+  publicAccessServers.clear()
   teamWatcher.stop()
   cronScheduler.stop()
   await Promise.all([

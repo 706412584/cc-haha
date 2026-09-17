@@ -15,8 +15,8 @@ import { api } from '../../api/client'
 import { useSessionStore } from '../../stores/sessionStore'
 import { MultiSelectDropdown } from '@/components/ui/MultiSelectDropdown'
 
-export function SkillDetail() {
-  const { selectedSkill, selectedSkillReturnTab, isDetailLoading, clearSelection, fetchSkills } = useSkillStore()
+export function SkillDetail({ embedded = false }: { embedded?: boolean }) {
+  const { selectedSkill, selectedSkillReturnTab, selectedSkillContext, isDetailLoading, clearSelection, fetchSkills } = useSkillStore()
   const t = useTranslation()
   const [confirmUninstall, setConfirmUninstall] = useState(false)
   const [uninstalling, setUninstalling] = useState(false)
@@ -24,10 +24,10 @@ export function SkillDetail() {
   const handleBack = useCallback(() => {
     const returnTab = selectedSkillReturnTab
     clearSelection()
-    if (returnTab === 'plugins') {
+    if (!embedded && returnTab === 'plugins') {
       useUIStore.getState().setPendingSettingsTab('plugins')
     }
-  }, [selectedSkillReturnTab, clearSelection])
+  }, [selectedSkillReturnTab, clearSelection, embedded])
 
   const files = selectedSkill?.files ?? []
 
@@ -96,7 +96,7 @@ export function SkillDetail() {
       })
       setConfirmUninstall(false)
       clearSelection()
-      void fetchSkills()
+      void fetchSkills(selectedSkillContext || undefined)
       // Keep the market list in sync when it has this skill loaded.
       const market = useMarketStore.getState()
       const detailCache = new Map(market.detailCache)
@@ -134,6 +134,11 @@ export function SkillDetail() {
 
   return (
     <>
+      {embedded && !marketMeta && (
+        <p className="mb-4 text-sm leading-6 text-[var(--color-text-secondary)]">
+          {t('extensions.managedSkillHint')}
+        </p>
+      )}
       <SkillDetailView
         name={skillMeta.displayName || skillMeta.name}
         version={skillMeta.version}

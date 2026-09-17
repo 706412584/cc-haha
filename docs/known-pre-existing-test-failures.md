@@ -4,7 +4,7 @@
 
 > 验证方法：在 pre-merge 基线（合并 commit 的第一父，`git worktree add <tmp> <first-parent> --detach`）上重跑同一批测试。若基线同样红 → 预存。
 
-最后核对日期：2026-09-14（合并上游 v0.6.2）。
+最后核对日期：2026-09-16（合并上游 v0.6.3）。
 
 ---
 
@@ -82,6 +82,22 @@ fork 之前把后台 agent 的完成通知从「完成即直塞命令队列」�
 - **仍未证实**：该测试在上游开发者的本机环境是否能稳定通过，无从取证（无执行记录）。机制上它依赖「测试进程与 fixture 进程的前台切换时序」，单用户本机窗口更宽，CI 上更窄。
 - **处置**：按已知失败放行，合并后单独处理。候选方向：(a) 改测试，使 `verifyVisibleClicks` 不同时要求两个进程前台（如用 `orderFrontRegardless` 替代 `activate`）；(b) 按上游语义补 skip 条件。**不要**放宽 `confirm()` 的 generation 判定——那是真实的焦点竞态防护。
 
+## `macos-swift-checks`：清理临时沙箱失败会掩盖全绿的测试结果（已修）
+
+> 与上面那条 GUI 焦点竞态**不是同一个问题**。这里留档，因为它曾三次连续把 PR #161 判红，容易被误读成合并回归。
+
+- **现象**：Swift 编译 + XCTest + 打包回归**全部通过**（`17 pass / 0 fail`），随后 job 仍以 exit 1 结束：
+  ```
+  EROFS: read-only file system, rm '/var/folders/36/.../T/cc-haha-swift-checks-EGND0L'
+      at runSwiftChecks (scripts/pr/run-swift-checks.ts:45:5)
+  ```
+- **机制**：`runSwiftChecks` 的 `finally` 里裸调 `rmSync(sandboxHome, { recursive: true, force: true })`。macOS runner 会在 job 中途把 `TMPDIR` 重挂为只读，于是**清理动作**抛 EROFS，把「清理失败」升级成「整个 lane 失败」——测试结果被丢弃。
+- **取证**：
+  - 2026-09-14 `b7bf1db4` 那次 `macos-swift-checks` 失败，日志与 2026-09-17 的三次（`35186996472`，以及 `35188879734` 两轮）逐字相同，**同一 runner host**（`tjdph2t965j8snz9_vkdnw0r0000gn`）、同一镜像 `macos-26-arm64 / 20260907.0351`。
+  - 同期 `58280fcc` 那次该 job **success** —— 同一镜像、同一 commit 内容，说明是间歇性 runner 环境问题，不是确定性代码缺陷。
+  - `scripts/pr/run-swift-checks.ts` 在 base / ours / theirs 三方哈希一致（`79c43189`，纯上游文件）；本次合并未改动 `native/` 或该脚本。
+- **处置**：清理改为尽力而为 —— 捕获异常并 `console.warn`，让 Swift / 打包的退出码保持权威（`scripts/pr/run-swift-checks.ts`）。新增 `removeSandbox` 注入点，测试 `keeps the test result when sandbox cleanup fails` 锁定该行为（旧实现下这两个用例会红）。**不要**回退成裸 `rmSync`。
+
 ## desktop（vitest，`desktop-checks`）——quarantine 覆盖不到
 
 `quarantine.json` 只作用于 `check:server`，**不覆盖 desktop vitest**。下列 desktop 测试在 pre-merge 基线同样全红，属预存：
@@ -118,6 +134,95 @@ CI 上不需要，且会把「清理失败」从可见的红变成静默重试�
   — 测试用 `spawnSync('/bin/bash', ...)` 跑 macOS 构建脚本；Windows 无 `/bin/bash`，`spawnSync` 返回 `status: null`（ENOENT）。CI(Linux/macOS) 上应通过。
 - `electron/services/serverRuntime.test.ts > waits for real server shutdown cleanup before the first restart attempt`
   — fixture 子进程依赖 `SIGTERM` handler 延时清理 `active-turn` 文件；Windows 上 `child.kill()` 直接终止进程，handler 不执行，`active-turn` 残留。
+
+## 上游 v0.6.3 新增文件在 Windows 本地的失败（非本次合并引入）
+
+`src/server/services/reviewService.test.ts`（13 fail / 58 pass）与
+`src/server/services/workspaceWatch.test.ts`（2 fail / 8 pass）是 v0.6.3 **新引入**的文件。
+已在上游源码（`3e160f7e` worktree）上原样复现同一组红，且这两个测试文件与其实现文件与本仓库逐字节相同 ——
+即上游自己在这台 Windows 机器上就是红的，与 fork 的合并无关。
+
+- **符号链接类**（reviewService 4 个 + workspaceWatch 1 个）：Windows 创建 symlink 需要管理员权限，报 `EPERM: operation not permitted, symlink`。CI(Linux/macOS) 无此限制。
+- **Git 行为类**（reviewService 9 个）：`core.autocrlf=true` 是本机系统级 git 配置（`D:/360downloads/Git/etc/gitconfig`），
+  会让测试里 `git checkout` / `git apply` 的往返把 LF 换成 CRLF，断言的字节内容因此不匹配；
+  另有以 `:` 开头的 pathspec magic、带空格/反斜杠/换行的文件名，属 Git for Windows 的路径处理差异。
+  **验证**：`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.autocrlf GIT_CONFIG_VALUE_0=false bun test src/server/services/reviewService.test.ts`
+  可把 13 fail 降到 9 fail，剩下的仍是符号链接与 Windows 文件名限制。
+- **fs.watch 时序类**（workspaceWatch 1 个）：`Timed out waiting for filesystem event` —— Windows 的 ReadDirectoryChangesW 与测试的 2s 预算竞争。
+
+结论：这 15 个红在上游同样存在，不是合并回归。若要本地跑绿，只能改测试（加 autocrlf 关闭、symlink 跳过），
+但那会把上游文件改得与上游不一致，故不改。
+
+## `check:bundle-budget`（desktop）—— 基线已过期，非本次合并引入
+
+`desktop/scripts/check-bundle-budget.ts` 里的 `BASELINE_GZIP_BYTES`（3_707_686，即 3620.79 KB gz）
+标注为「Captured 2026-07-14 on origin/main @ 2a44f381」，对应 fork v0.5.38 时期。
+
+实测：
+
+| 版本 | dist/assets 总 gzip |
+| --- | --- |
+| pre-merge 基线（`8f526396` = fork v0.6.4） | 4757.37 KB |
+| 本次合并后 | 4854.00 KB |
+
+即**在合并前的基线上该门禁就已经红了**（超出 ceiling 1036.58 KB），本次合并自身只增加
+96.63 KB（+2.0%）。根因是常量长期未随 fork 的功能增长更新，而不是某次改动超预算。
+
+该脚本**未被任何 CI workflow 调用**（`grep -rn "bundle-budget" .github/` 为空），只存在于 `desktop/package.json`
+的 scripts 里，属手动门禁。故它不会挡 CI。
+
+**处置**：不改常量。把阈值调高会把「超预算」从可见的红变成静默通过，而是否接受这 ~1 MB 的增长
+（很大一部分来自 xterm / shiki / katex / cytoscape 等按需加载的第三方 chunk）应由维护者决定，
+不应由合并顺手改掉。若决定接受，应连同「为什么这些 chunk 该留在预算内」一起更新注释再提交。
+
+## adapters（`bun test`，Windows 本地）
+
+- `common/__tests__/chat-runtime.test.ts > ImChatRuntime server stream > uploads an image referenced in the stream and skips one outside the work dir`
+  — 断言 `images` 恰好为 `[{ mime: 'image/png', alt: 'inside' }]`，实际多出一项（`/etc/hosts` 的越界路径未被跳过）。
+  该用例最后一次改动是 `59c7857b`（2026-09-08，fork v0.6.4 之前），**是合并基线的祖先**；且本次合并对 `adapters/` 的改动为空
+  （`git diff 8f526396 HEAD -- adapters/` 无输出）。属预存失败，稳定复现（单跑 34 pass / 1 fail，两次一致），非 flaky。
+
+  其余 749 pass / 1 skip。CI 的 `check:adapters` 若红，先对照此项。
+
+## 未接线的功能：`workspace.file.saved` → `applyExternalSave`（预存，非测试失败）
+
+不是测试红，但独立审查时发现的一处**功能死代码**，记在这里以免下次又当成新发现。
+
+- 服务端 `src/server/services/workspaceFileService.ts:311` 在保存成功后 `emitWorkspaceFileSaved({ source: 'user' })`，
+  其注释明确写着「so the desktop conflict-banner contract holds」。
+- 但**桌面端没有任何模块订阅这个事件**：`grep -rn "file.saved" desktop/src/` 为空（`8f526396` 基线上同样为空）。
+- 因此 `useWorkspaceEditorStore.applyExternalSave` 与 `WorkspaceEditor` 里那段外部 rebase 效果**只能由测试触达**。
+
+**判定为预存**：合并前的 `workspacePanelStore.applyExternalSave` 同样只有测试调用方
+（`git grep -n applyExternalSave 8f526396 -- desktop/src` 除定义外只命中测试与一处注释）。
+本次合并与重移植都没有删掉过订阅者——它从来就不存在。
+
+**影响**：「另一个窗口保存了同一文件」这一冲突分支（`source: 'user'`）永远不会触发。
+Agent 写入的分支（`source: 'agent'`）走的是 chatStore 的工具流，与这条无关，已修复可用。
+
+**处置**：不属本次合并范围，未改动。若要做，正确做法是在桌面端的 WS 消息分发里接上
+`workspace.file.saved`，按 `sessionId` + 路径调用 `applyExternalSave`（缓冲键为 `sessionId::path`，
+服务端事件里的路径需要先归一化到工作区相对路径）。同时应给服务端那行注释与实现二选一地对齐。
+## Bun 的 `fs.watch` 不报告 rename 目标（跨平台，非本仓库缺陷）
+
+`src/server/services/workspaceWatch.test.ts > coalesces real writes and renames in subscribed directories and cancels cleanly`
+曾断言 rename 后能收到 `src/b.ts`，在 Linux CI 与 Windows 本地都会超时。
+
+**根因已定位到运行时，不在产品代码**：
+
+| 层面 | 是否报告 rename 目标 `b.ts` |
+| --- | --- |
+| 内核 inotify（`IN_MOVED_TO`） | ✅ 报告（WSL/Ubuntu 24.04 上用 ctypes 直接验证：`[('0x40','a.ts'), ('0x80','b.ts')]`） |
+| Bun 1.3.14 的 `fs.watch` | ❌ 只报源文件（`RAW: ["rename:a.ts"]`） |
+| `WorkspaceService.watchDirectories` | ✅ 逻辑正确——同样路径用普通 create 能正常上报 `src/b.ts` |
+
+Bun 的 `fs.watch` 在 Linux 与 Windows 上都把 rename 的目标事件丢掉了（Windows 侧另经独立排查确认同样如此）。
+
+**处置**：已把断言改为等待 rename **源**（`src/a.ts`），并另断言目标文件确实存在（证明移动发生），同时保留该用例原本验证的合并、去重、取消语义。超时预算也从 2s 放宽到 5s（CI 负载下 inotify 可能延迟，而这用例测的是语义不是延迟）。
+
+**对真实用户的影响**：很小。编辑器保存是「写临时文件 + rename 覆盖」，Bun 会报告被覆盖的那个名字；只有对已打开文件做纯 rename（如 agent 执行 `mv`）时，事件呈删除形状，文件被当作删除而非重命名——表现不精确，但不会漏刷新。
+
+**本机验证**：WSL Ubuntu 24.04 + bun 1.3.14（与 CI 同代）跑 `workspaceWatch.test.ts` 为 10 pass / 0 fail；Windows 本地 9 pass / 1 fail，剩的那个是 symlink `EPERM`（需管理员权限），CI 上通过。
 
 ## quarantine 已登记项
 

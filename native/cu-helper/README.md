@@ -116,12 +116,12 @@ deadline; an in-flight native command must settle before the runner returns.
 Standalone semantic tools retain direct-call compatibility, but they and
 `sequence` are not advertised by default. Windows retains its pixel tool face.
 
-`AXTreePublicationIntegrationTests` exercises twelve consecutive zero/one-pixel
-drags against a disposable native app with a receiver-side gesture counter,
-without observations between gestures. Its AX/Screen Recording prerequisites
-are explicit skips when unavailable. Factory tests prove the exact event list;
-the receiving-app test proves delivery of complete gestures even if AppKit
-coalesces intermediate motion.
+The ordinary Swift test suite uses event factories and injected receivers to
+check input construction and routing without launching fixture apps, opening
+windows, or driving the macOS desktop. The former native receiver integration
+suite was removed because it interacted with the developer's desktop whenever
+Accessibility and Screen Recording permissions were already available.
+These tests do not prove delivery to a real receiving app.
 
 The identity diagnostic added to `Injection.validateAuthorizedTarget` is
 DEBUG-only and records the exact target/current values used by strict comparison.
@@ -144,8 +144,9 @@ Matching these contracts does not establish complete Codex compatibility or
 Townscaper/Blender task success. The persistent JS native App facade is present,
 but browser-tab/DOM providers and the official runtime's general Node facilities
 are not. Tests that run the actual sandboxed worker with simulated native tools
-establish persistence, isolation and output behavior. The native receiver test
-establishes gesture delivery. Neither proves parity across real model tasks.
+establish persistence, isolation and output behavior. Real receiving-app gesture
+delivery requires a separate manual check. These tests do not prove parity
+across real model tasks.
 
 Focus acquisition, AX fallbacks, key synthesis, coordinate transforms, capture,
 and gesture delivery must each be verified at their actual boundary. Do not

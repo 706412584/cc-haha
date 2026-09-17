@@ -33,7 +33,7 @@ import { compatibilityForm, invalidCompatibilityNumber, parseCompatibilityForm, 
 import { ProviderImageGenerationFields, type ImageGenerationFormValue } from '../../components/settings/ProviderImageGenerationFields'
 import { BUILT_IN_PROVIDER_IDS, CLAUDE_OFFICIAL_PROVIDER_ID, OPENAI_OFFICIAL_PROVIDER_ID } from '../../constants/openaiOfficialProvider'
 import { GROK_OFFICIAL_PROVIDER_ID } from '../../constants/grokOfficialProvider'
-import { getBaseUrl } from '../../api/client'
+import { ApiError, getBaseUrl } from '../../api/client'
 import { getDesktopHost } from '../../lib/desktopHost'
 import { API_KEY_JSON_PLACEHOLDER, maskSettingsJsonSecrets, restoreSettingsJsonSecrets, stripProviderSettingsJsonEnv } from '../../lib/providerSettingsJson'
 import { SETTINGS_CHECKBOX_INPUT_CLASS, SettingsCheckboxMark } from './shared'
@@ -124,7 +124,7 @@ function providerItemTestId(item: ProviderListItem): string {
   }
 }
 
-export function ProviderSettings() {
+export function ProviderSettings({ browserMode = false }: { browserMode?: boolean }) {
   const {
     providers,
     providerOrder,
@@ -132,6 +132,7 @@ export function ProviderSettings() {
     hasLoadedProviders,
     presets,
     isLoading,
+    error: providerLoadError,
     fetchProviders,
     deleteProvider,
     reorderProviders,
@@ -153,6 +154,7 @@ export function ProviderSettings() {
   const [showCcSwitchImport, setShowCcSwitchImport] = useState(false)
   const [pendingDeleteProvider, setPendingDeleteProvider] = useState<SavedProvider | null>(null)
   const [isDeletingProvider, setIsDeletingProvider] = useState(false)
+  const [actionFailed, setActionFailed] = useState(false)
   const [testResults, setTestResults] = useState<Record<string, { loading: boolean; result?: ProviderTestResult }>>({})
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -180,12 +182,13 @@ export function ProviderSettings() {
   const confirmDelete = async () => {
     if (!pendingDeleteProvider) return
     setIsDeletingProvider(true)
+    setActionFailed(false)
     try {
       await deleteProvider(pendingDeleteProvider.id)
       useProviderCompatStore.getState().clearProvider(pendingDeleteProvider.id)
       setPendingDeleteProvider(null)
-    } catch (error) {
-      console.error(error)
+    } catch {
+      setActionFailed(true)
     } finally {
       setIsDeletingProvider(false)
     }
@@ -202,13 +205,15 @@ export function ProviderSettings() {
   }
 
   const handleActivate = async (id: string) => {
-    await activateProvider(id)
-    await fetchSettings()
+    setActionFailed(false)
+    try { await activateProvider(id); await fetchSettings() }
+    catch { setActionFailed(true) }
   }
 
   const handleActivateOfficial = async () => {
-    await activateOfficial()
-    await fetchSettings()
+    setActionFailed(false)
+    try { await activateOfficial(); await fetchSettings() }
+    catch { setActionFailed(true) }
   }
 
   const providerItems = useMemo(
@@ -233,20 +238,21 @@ export function ProviderSettings() {
   const isGrokOfficialActive = hasLoadedProviders && activeId === GROK_OFFICIAL_PROVIDER_ID
 
   return (
-    <div className="max-w-2xl">
+    <div className="min-w-0 max-w-2xl">
       <SettingsPageHeader
+        className={browserMode ? 'flex-col' : undefined}
         title={t('settings.providers.title')}
         description={t('settings.providers.description')}
         action={(
           <>
-            <Button
+            {!browserMode && <Button
               variant="secondary"
               size="base"
               onClick={() => setShowCcSwitchImport(true)}
               icon={<span className="material-symbols-outlined text-[16px]">download</span>}
             >
               {t('settings.providers.ccSwitch.importButton')}
-            </Button>
+            </Button>}
             <Button
               size="base"
               onClick={() => setShowCreateModal(true)}
@@ -258,6 +264,7 @@ export function ProviderSettings() {
         )}
       />
 
+      {(actionFailed || (browserMode && providerLoadError)) && <p role="alert" className="mb-3 text-sm text-[var(--color-error)]">{t('publicAccess.genericError')}</p>}
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
@@ -272,6 +279,7 @@ export function ProviderSettings() {
               if (item.kind === 'claude-official') {
                 return (
                   <SortableProviderCard
+                    browserMode={browserMode}
                     key={item.id}
                     item={item}
                     isActive={isClaudeOfficialActive}
@@ -282,7 +290,7 @@ export function ProviderSettings() {
                     badges={isClaudeOfficialActive ? (
                       <Badge tone="brand" bordered>{t('settings.providers.default')}</Badge>
                     ) : null}
-                    details={isClaudeOfficialActive ? (
+                    details={!browserMode && isClaudeOfficialActive ? (
                       <div className="border-t border-[var(--color-border-separator)] px-4 pb-4 pt-3">
                         <ClaudeOfficialLogin />
                       </div>
@@ -294,6 +302,7 @@ export function ProviderSettings() {
               if (item.kind === 'openai-official') {
                 return (
                   <SortableProviderCard
+                    browserMode={browserMode}
                     key={item.id}
                     item={item}
                     isActive={isOpenAIOfficialActive}
@@ -304,7 +313,7 @@ export function ProviderSettings() {
                     badges={isOpenAIOfficialActive ? (
                       <Badge tone="brand" bordered>{t('settings.providers.default')}</Badge>
                     ) : null}
-                    details={isOpenAIOfficialActive ? (
+                    details={!browserMode && isOpenAIOfficialActive ? (
                       <div className="border-t border-[var(--color-border-separator)] px-4 pb-4 pt-3">
                         <ChatGPTOfficialLogin />
                       </div>
@@ -316,6 +325,7 @@ export function ProviderSettings() {
               if (item.kind === 'grok-official') {
                 return (
                   <SortableProviderCard
+                    browserMode={browserMode}
                     key={item.id}
                     item={item}
                     isActive={isGrokOfficialActive}
@@ -326,7 +336,7 @@ export function ProviderSettings() {
                     badges={isGrokOfficialActive ? (
                       <Badge tone="brand" bordered>{t('settings.providers.default')}</Badge>
                     ) : null}
-                    details={isGrokOfficialActive ? (
+                    details={!browserMode && isGrokOfficialActive ? (
                       <div className="border-t border-[var(--color-border-separator)] px-4 pb-4 pt-3">
                         <GrokOfficialLogin />
                       </div>
@@ -342,6 +352,7 @@ export function ProviderSettings() {
 
               return (
                 <SortableProviderCard
+                    browserMode={browserMode}
                   key={item.id}
                   item={item}
                   isActive={isActive}
@@ -409,7 +420,7 @@ export function ProviderSettings() {
                       {!isActive && (
                         <Button variant="ghost" size="sm" onClick={() => handleActivate(provider.id)}>{t('settings.providers.setDefault')}</Button>
                       )}
-                      <Button variant="ghost" size="sm" onClick={() => handleTest(provider)} loading={test?.loading}>{t('settings.providers.test')}</Button>
+                      {!browserMode && <Button variant="ghost" size="sm" onClick={() => handleTest(provider)} loading={test?.loading}>{t('settings.providers.test')}</Button>}
                       <Button variant="ghost" size="sm" onClick={() => setEditingProvider(provider)}>{t('settings.providers.edit')}</Button>
                       {!isActive && (
                         <Button variant="ghost" size="sm" onClick={() => handleDelete(provider)} className="text-[var(--color-error)] hover:text-[var(--color-error)]">{t('common.delete')}</Button>
@@ -431,12 +442,12 @@ export function ProviderSettings() {
 
       {/* Create Modal — conditionally rendered so state resets on close */}
       {showCreateModal && (
-        <ProviderFormModal open={true} onClose={() => setShowCreateModal(false)} mode="create" presets={presets} />
+        <ProviderFormModal browserMode={browserMode} open={true} onClose={() => setShowCreateModal(false)} mode="create" presets={presets} />
       )}
 
       {/* Edit Modal */}
       {editingProvider && (
-        <ProviderFormModal key={editingProvider.id} open={true} onClose={() => setEditingProvider(null)} mode="edit" provider={editingProvider} presets={presets} />
+        <ProviderFormModal browserMode={browserMode} key={editingProvider.id} open={true} onClose={() => setEditingProvider(null)} mode="edit" provider={editingProvider} presets={presets} />
       )}
 
       {/* cc-switch import — conditionally rendered so the scan reruns each time */}
@@ -463,6 +474,7 @@ export function ProviderSettings() {
 }
 
 type SortableProviderCardProps = {
+  browserMode?: boolean
   item: ProviderListItem
   isActive: boolean
   dragLabel: string
@@ -476,6 +488,7 @@ type SortableProviderCardProps = {
 }
 
 function SortableProviderCard({
+  browserMode = false,
   item,
   isActive,
   dragLabel,
@@ -512,7 +525,7 @@ function SortableProviderCard({
           : 'border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] hover:border-[var(--color-outline)] hover:bg-[var(--color-surface-hover)]'
       } ${isDragging ? 'shadow-[var(--shadow-overlay)] opacity-90' : ''}`}
     >
-      <div className="flex items-center gap-2 px-3.5 py-3">
+      <div className={browserMode ? "flex flex-wrap items-center gap-2 px-3.5 py-3" : "flex items-center gap-2 px-3.5 py-3"}>
         <button
           type="button"
           {...attributes}
@@ -543,7 +556,7 @@ function SortableProviderCard({
           </span>
         </button>
         {actions && (
-          <div className="flex shrink-0 items-center gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-focus-within:opacity-100 sm:group-hover:opacity-100">
+          <div className={browserMode ? "flex w-full flex-wrap items-center justify-end gap-1 [&_button]:min-h-11" : "flex shrink-0 items-center gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-focus-within:opacity-100 sm:group-hover:opacity-100"}>
             {actions}
           </div>
         )}
@@ -556,6 +569,7 @@ function SortableProviderCard({
 // ─── Provider Form Modal ──────────────────────────────────────
 
 type ProviderFormProps = {
+  browserMode?: boolean
   open: boolean
   onClose: () => void
   mode: 'create' | 'edit'
@@ -1007,7 +1021,7 @@ function openExternalUrl(url: string) {
     .catch(() => window.open(url, '_blank', 'noopener,noreferrer'))
 }
 
-function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderFormProps) {
+function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode = false }: ProviderFormProps) {
   const { createProvider, updateProvider, testConfig, fetchModels } = useProviderStore()
   const fetchSettings = useSettingsStore((s) => s.fetchAll)
   const addToast = useUIStore((s) => s.addToast)
@@ -1072,6 +1086,8 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   })
   const [showContextSettings, setShowContextSettings] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [saveFailed, setSaveFailed] = useState(false)
+  const [credentialRequired, setCredentialRequired] = useState(false)
   const [testResult, setTestResult] = useState<ProviderTestResult | null>(null)
   const [isTesting, setIsTesting] = useState(false)
   const [fetchedModels, setFetchedModels] = useState<ProviderModelInfo[] | null>(null)
@@ -1104,6 +1120,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
 
   // Load current settings.json and merge provider env vars
   useEffect(() => {
+    if (browserMode) return
     // Skip if JSON was just populated by user paste
     if (jsonPastedRef.current) {
       jsonPastedRef.current = false
@@ -1169,7 +1186,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
       cancelled = true
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPreset.id, providerProxyBaseUrl])
+  }, [selectedPreset.id, providerProxyBaseUrl, browserMode])
 
   // A fetched list only describes the endpoint and key it came from. cc-switch
   // shipped this without a guard and kept offering the previous provider's
@@ -1537,10 +1554,12 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
         }
       : undefined
     setIsSubmitting(true)
+    setSaveFailed(false)
+    setCredentialRequired(false)
     try {
       // Write the edited cc-haha settings.json first so provider-specific model
       // settings never conflict with the user's global ~/.claude/settings.json.
-      if (settingsJson.trim()) {
+      if (!browserMode && settingsJson.trim()) {
         try {
           const parsed = restoreSettingsJsonSecrets(JSON.parse(settingsJson), settingsJson, apiKey)
           const { providersApi } = await import('../../api/providers')
@@ -1602,8 +1621,15 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
       // form open when the network or store update hangs.
       onClose()
       void fetchSettings()
-    } catch (err) {
-      console.error('Failed to save provider:', err)
+    } catch (error) {
+      // A missing remote credential is a distinct, actionable failure: the H5
+      // client cannot hold the key, so the form asks for it instead of showing
+      // a generic error.
+      setCredentialRequired(browserMode && error instanceof ApiError &&
+        !!error.body && typeof error.body === 'object' && 'code' in error.body &&
+        error.body.code === 'REMOTE_PROVIDER_CREDENTIAL_REQUIRED')
+      setSaveFailed(true)
+      console.error('Failed to save provider:', error)
       addToast({
         type: 'error',
         message: t('settings.providers.saveFailed'),
@@ -1670,7 +1696,9 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
         </>
       }
     >
-      <div className="flex flex-col gap-4">
+      <div className="flex min-w-0 flex-col gap-4">
+        {browserMode && <p className="text-xs leading-5 text-[var(--color-text-secondary)]">{t('h5Settings.providerPrivacy')}</p>}
+        {saveFailed && <p role="alert" className="text-sm text-[var(--color-error)]">{t(credentialRequired ? 'h5Settings.credentialRequired' : 'publicAccess.genericError')}</p>}
         {/* Preset chips */}
         {mode === 'create' && (
           <div>
@@ -1826,7 +1854,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
             <div className="text-sm font-medium text-[var(--color-text-primary)]">
               {t('settings.providers.disableExperimentalBetas')}
             </div>
-            <div className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
+            <div className={`mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]${browserMode ? ' [overflow-wrap:anywhere]' : ''}`}>
               {t('settings.providers.disableExperimentalBetasDesc')}
             </div>
           </div>
@@ -1860,6 +1888,8 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           <div className="relative">
             <input
               id="provider-api-key"
+              autoComplete="off"
+              spellCheck={false}
               type={showApiKey ? 'text' : 'password'}
               value={apiKey}
               onChange={(e) => handleApiKeyChange(e.target.value)}
@@ -1917,7 +1947,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
         <div>
           <div className="mb-2 flex items-center justify-between gap-2">
             <label className="text-sm font-medium text-[var(--color-text-primary)]">{t('settings.providers.modelMapping')}</label>
-            <Button
+            {!browserMode && <Button
               variant="secondary"
               size="base"
               onClick={handleFetchModels}
@@ -1926,9 +1956,9 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
               icon={<span className="material-symbols-outlined text-[15px]">cloud_download</span>}
             >
               {t('settings.providers.fetchModels')}
-            </Button>
+            </Button>}
           </div>
-          {!hasModelsApiKey ? (
+          {browserMode ? null : !hasModelsApiKey ? (
             <p className="mb-2 text-[11px] text-[var(--color-text-tertiary)]">{t('settings.providers.fetchModelsApiKeyHint')}</p>
           ) : !hasModelsBaseUrl ? (
             <p className="mb-2 text-[11px] text-[var(--color-text-tertiary)]">{t('settings.providers.fetchModelsHint')}</p>
@@ -1950,7 +1980,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           ) : (
             <p className="mb-2 text-[11px] text-[var(--color-text-tertiary)]">{t('settings.providers.fetchModelsSupportHint')}</p>
           )}
-          <div className="grid grid-cols-2 gap-2">
+          <div className={browserMode ? "grid grid-cols-1 sm:grid-cols-2 gap-2" : "grid grid-cols-2 gap-2"}>
             {MODEL_SLOTS.map((slot) => {
               const labelKey = slot === 'main'
                 ? 'settings.providers.mainModel'
@@ -2028,7 +2058,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
             <div className="border-t border-[var(--color-border)] px-3 pb-3 pt-3">
               <div>
                 <label className="text-sm font-medium text-[var(--color-text-primary)] mb-2 block">{t('settings.providers.modelContextWindows')}</label>
-                <div className="grid grid-cols-2 gap-2">
+                <div className={browserMode ? "grid grid-cols-1 sm:grid-cols-2 gap-2" : "grid grid-cols-2 gap-2"}>
                   {MODEL_SLOTS.map((slot) => {
                     const errorKey = getModelContextWindowErrorKey(modelContextInputs[slot])
                     const labelKey = slot === 'main'
@@ -2086,7 +2116,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
         </div>
 
         {/* Test connection */}
-        <div className="flex items-center gap-3">
+        {!browserMode && <div className="flex items-center gap-3">
           <Button variant="secondary" size="sm" onClick={handleTest} loading={isTesting} disabled={!baseUrl.trim() || !models.main.trim() || compatibilityInvalid}>
             {t('settings.providers.testConnection')}
           </Button>
@@ -2106,10 +2136,10 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
               )}
             </div>
           )}
-        </div>
+        </div>}
 
-        {/* Settings JSON — editable, shown for all presets including official */}
-        <div>
+        {/* Settings JSON stays on the trusted desktop. */}
+        {!browserMode && <div>
           <label className="text-sm font-medium text-[var(--color-text-primary)] mb-2 block">{t('settings.providers.settingsJson')}</label>
           <textarea
             aria-label={t('settings.providers.settingsJson')}
@@ -2217,7 +2247,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           )}
           <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">{t('settings.providers.settingsJsonDesc')}</p>
           {apiFormat !== 'anthropic' && <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">{t('settings.providers.compatibilityJsonHint')}</p>}
-        </div>
+        </div>}
       </div>
       </Modal>
       <ConfirmDialog

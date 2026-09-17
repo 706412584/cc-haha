@@ -59,7 +59,7 @@ vi.mock('../../i18n', () => ({
     const translations: Record<string, string> = {
       'sidebar.newSession': 'New Session',
       'sidebar.scheduled': 'Scheduled',
-      'sidebar.market': 'Skills Market',
+      'sidebar.extensions': 'Extension Market',
       'sidebar.settings': 'Settings',
       'sidebar.searchPlaceholder': 'Search sessions',
       'sidebar.noSessions': 'No sessions',
@@ -2126,8 +2126,12 @@ describe('Sidebar', () => {
     render(<Sidebar isMobile onRequestClose={onRequestClose} />)
 
     expect(screen.queryByRole('button', { name: 'Scheduled' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Skills Market' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Settings' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Extension Market' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    expect(useTabStore.getState().activeTabId).toBe('__settings__')
+    expect(onRequestClose).toHaveBeenCalledTimes(1)
+    onRequestClose.mockClear()
 
     fireEvent.click(screen.getByRole('button', { name: /Open Session/ }))
     expect(onRequestClose).toHaveBeenCalledTimes(1)
@@ -2142,15 +2146,17 @@ describe('Sidebar', () => {
     expect(onRequestClose).toHaveBeenCalledTimes(2)
   })
 
-  it('keeps the market entry available in desktop navigation', () => {
+  it('keeps one unified extension market entry in desktop navigation', () => {
     render(<Sidebar />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Skills Market' }))
+    expect(screen.queryByRole('button', { name: 'sidebar.connectors' })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Extension Market' })).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Extension Market' }))
 
     expect(useTabStore.getState().activeTabId).toBe('__market__')
     expect(useTabStore.getState().tabs).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ sessionId: '__market__', title: 'Skills Market', type: 'market' }),
+        expect.objectContaining({ sessionId: '__market__', title: 'Extension Market', type: 'market' }),
       ]),
     )
   })

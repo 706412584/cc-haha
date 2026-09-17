@@ -8,6 +8,7 @@ import {
   UI_ZOOM_STEP,
   DEFAULT_CLEANUP_PERIOD_DAYS,
   MAX_CLEANUP_PERIOD_DAYS,
+  NETWORK_TIMEOUT_MAX_SECONDS,
 } from '../../stores/settingsStore'
 import { settingsApi } from '../../api/settings'
 import { useTranslation, type TranslationKey } from '../../i18n'
@@ -46,7 +47,6 @@ import { MODEL_REASONING_EFFORTS } from '../../../../src/shared/modelReasoning'
  */
 
 const NETWORK_TIMEOUT_MIN_SECONDS = 30
-const NETWORK_TIMEOUT_MAX_SECONDS = 1800
 const NETWORK_TIMEOUT_STEP_SECONDS = 30
 
 const BUILT_IN_OUTPUT_STYLE_TRANSLATION_KEYS = {
@@ -75,12 +75,16 @@ export function GeneralSettings() {
     setThinkingAutoCollapse,
     workflowKeywordTriggerEnabled,
     setWorkflowKeywordTriggerEnabled,
+    agentTeamsEnabled,
+    setAgentTeamsEnabled,
     permissionMode,
     setPermissionMode,
     autoDreamEnabled,
     setAutoDreamEnabled,
     unifiedActivityPanelEnabled,
     setUnifiedActivityPanelEnabled,
+    keepActiveInBackground,
+    setKeepActiveInBackground,
     agentOfficeSurface,
     setAgentOfficeSurface,
     locale,
@@ -140,6 +144,7 @@ export function GeneralSettings() {
   const [notificationActionRunning, setNotificationActionRunning] = useState(false)
   const [autoDreamConfirmOpen, setAutoDreamConfirmOpen] = useState(false)
   const [autoDreamActionRunning, setAutoDreamActionRunning] = useState(false)
+  const [agentTeamsSaving, setAgentTeamsSaving] = useState(false)
   const [modeSwitchConfirmOpen, setModeSwitchConfirmOpen] = useState(false)
   const [pendingMode, setPendingMode] = useState<AppMode | null>(null)
   const [pendingPortableDir, setPendingPortableDir] = useState<string | null>(null)
@@ -401,6 +406,17 @@ export function GeneralSettings() {
     }
   }
 
+  const handleKeepActiveInBackgroundToggle = async (keepActive: boolean) => {
+    try {
+      await setKeepActiveInBackground(keepActive)
+    } catch {
+      addToast({
+        type: 'error',
+        message: t('settings.general.keepActiveSaveFailed'),
+      })
+    }
+  }
+
   const handleAgentOfficeSurfaceChange = async (surface: 'modal' | 'tab') => {
     try {
       await setAgentOfficeSurface(surface)
@@ -616,6 +632,18 @@ export function GeneralSettings() {
       setRetentionSaveError(error instanceof Error ? error.message : String(error))
     } finally {
       setRetentionActionRunning(false)
+    }
+  }
+
+  const handleAgentTeamsChange = async (enabled: boolean) => {
+    if (agentTeamsSaving) return
+    setAgentTeamsSaving(true)
+    try {
+      await setAgentTeamsEnabled(enabled)
+    } catch {
+      addToast({ type: 'error', message: t('settings.general.agentTeamsSaveFailed') })
+    } finally {
+      setAgentTeamsSaving(false)
     }
   }
 
@@ -1136,6 +1164,33 @@ export function GeneralSettings() {
 
       {isDesktopRuntime() && (
         <div className="mt-8">
+          <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.keepActiveTitle')}</h2>
+          <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.keepActiveDescription')}</p>
+          <label className="relative flex items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 cursor-pointer hover:border-[var(--color-border-focus)] transition-colors">
+            <input
+              type="checkbox"
+              aria-label={t('settings.general.keepActiveEnabled')}
+              checked={keepActiveInBackground}
+              onChange={(event) => void handleKeepActiveInBackgroundToggle(event.target.checked)}
+              className={SETTINGS_CHECKBOX_INPUT_CLASS}
+            />
+            <SettingsCheckboxMark checked={keepActiveInBackground} />
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-[var(--color-text-primary)]">
+                {t('settings.general.keepActiveEnabled')}
+              </div>
+              <div className="text-xs text-[var(--color-text-tertiary)] mt-1 leading-5">
+                {keepActiveInBackground
+                  ? t('settings.general.keepActiveHintOn')
+                  : t('settings.general.keepActiveHintOff')}
+              </div>
+            </div>
+          </label>
+        </div>
+      )}
+
+      {isDesktopRuntime() && (
+        <div className="mt-8">
           <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.agentOfficeTitle')}</h2>
           <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.agentOfficeDescription')}</p>
           <div className="grid gap-2 sm:grid-cols-2">
@@ -1215,6 +1270,22 @@ export function GeneralSettings() {
             onChange={(enabled) => void setWorkflowKeywordTriggerEnabled(enabled)}
             label={t('settings.general.workflowKeywordEnabled')}
             description={t('settings.general.workflowKeywordHint')}
+          />
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        className="mt-8"
+        title={t('settings.general.agentTeamsTitle')}
+        description={t('settings.general.agentTeamsDescription')}
+      >
+        <div className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3">
+          <Switch
+            checked={agentTeamsEnabled}
+            onChange={(enabled) => void handleAgentTeamsChange(enabled)}
+            disabled={agentTeamsSaving}
+            label={t('settings.general.agentTeamsEnabled')}
+            description={t('settings.general.agentTeamsHint')}
           />
         </div>
       </SettingsSection>

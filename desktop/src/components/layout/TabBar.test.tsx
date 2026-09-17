@@ -143,6 +143,7 @@ vi.mock('../../api/sessions', () => ({
 vi.mock('../../i18n', () => ({
   useTranslation: () => (key: string, params?: Record<string, string | number>) => {
     const translations: Record<string, string> = {
+      'sidebar.extensions': 'Extension Market',
       'tabs.close': 'Close',
       'tabs.closeOthers': 'Close Others',
       'tabs.closeLeft': 'Close Left',
@@ -158,6 +159,9 @@ vi.mock('../../i18n', () => ({
       'tabs.sessionRunning': 'Session running',
       'tabs.openTerminal': 'Open Terminal',
       'agentOffice.title': 'Agent Office',
+      'workspace.controls.toggleBottom': 'Toggle bottom panel',
+      'workspace.controls.toggleSide': 'Show/hide side panel',
+
       'tabs.showWorkspace': 'Show Workspace',
       'tabs.hideWorkspace': 'Hide Workspace',
       'tabs.showBrowser': 'Show Browser',
@@ -274,14 +278,12 @@ describe('TabBar', () => {
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
     const { useSessionStore } = await import('../../stores/sessionStore')
-    const { useWorkspacePanelStore } = await import('../../stores/workspacePanelStore')
-    const { useTerminalPanelStore } = await import('../../stores/terminalPanelStore')
-    const { useBrowserPanelStore } = await import('../../stores/browserPanelStore')
     const { useActivityPanelStore } = await import('../../stores/activityPanelStore')
     const { useCLITaskStore } = await import('../../stores/cliTaskStore')
     const { useTeamStore } = await import('../../stores/teamStore')
     const { useSettingsStore } = await import('../../stores/settingsStore')
     const { useWorkflowStore } = await import('../../stores/workflowStore')
+    const { useWorkspaceStore } = await import('../../stores/workspaceStore')
 
     useTabStore.setState({ tabs: [], activeTabId: null })
     useChatStore.setState({
@@ -295,9 +297,7 @@ describe('TabBar', () => {
       isBatchMode: false,
       selectedSessionIds: new Set(),
     } as Partial<ReturnType<typeof useSessionStore.getState>>)
-    useWorkspacePanelStore.setState(useWorkspacePanelStore.getInitialState(), true)
-    useTerminalPanelStore.setState(useTerminalPanelStore.getInitialState(), true)
-    useBrowserPanelStore.setState(useBrowserPanelStore.getInitialState(), true)
+    useWorkspaceStore.setState(useWorkspaceStore.getInitialState(), true)
     useActivityPanelStore.setState(useActivityPanelStore.getInitialState(), true)
     useCLITaskStore.setState(useCLITaskStore.getInitialState(), true)
     useTeamStore.setState(useTeamStore.getInitialState(), true)
@@ -306,6 +306,55 @@ describe('TabBar', () => {
 
     Reflect.deleteProperty(window, 'desktopHost')
     Reflect.deleteProperty(window, '__TAURI__')
+  })
+
+  it('owns the workspace layout controls in the window header and preserves resources across layout changes', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useWorkspaceStore } = await import('../../stores/workspaceStore')
+    const sessionId = 'layout-session'
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Layout session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    render(<TabBar />)
+
+    const side = screen.getByTestId('workspace-toggle-side')
+    const bottom = screen.getByTestId('workspace-toggle-bottom')
+    expect(screen.getByTestId('tab-bar')).toContainElement(side)
+    expect(screen.getByTestId('tab-bar')).toContainElement(bottom)
+    expect(screen.queryByTestId('workspace-toggle-fullscreen')).not.toBeInTheDocument()
+    expect(document.querySelectorAll('[data-workspace-focus="side-toggle"]')).toHaveLength(1)
+    expect(document.querySelectorAll('[data-workspace-focus="bottom-toggle"]')).toHaveLength(1)
+
+    fireEvent.click(side)
+    act(() => {
+      useWorkspaceStore.getState().openTarget(sessionId, { kind: 'browser', url: 'https://fixture.test' })
+      useWorkspaceStore.getState().openTarget(sessionId, { kind: 'file', path: 'README.md' })
+    })
+    fireEvent.click(bottom)
+    const before = useWorkspaceStore.getState().getSession(sessionId).tabs
+    expect(before).toHaveLength(3)
+    expect(screen.getByTestId('tab-bar')).toContainElement(screen.getByTestId('workspace-toggle-fullscreen'))
+    fireEvent.click(screen.getByTestId('workspace-toggle-fullscreen'))
+    expect(useWorkspaceStore.getState().getSession(sessionId).layout).toBe('full')
+    fireEvent.click(screen.getByTestId('workspace-toggle-fullscreen'))
+    expect(useWorkspaceStore.getState().getSession(sessionId).layout).toBe('split')
+    fireEvent.click(side)
+    expect(useWorkspaceStore.getState().getSession(sessionId).layout).toBe('hidden')
+    fireEvent.click(side)
+    fireEvent.click(bottom)
+    fireEvent.click(bottom)
+    expect(useWorkspaceStore.getState().getSession(sessionId).tabs).toEqual(before)
+
+    act(() => {
+      useTabStore.setState({ activeTabId: 'second-session' })
+    })
+    expect(side).toHaveAttribute('aria-pressed', 'false')
+    expect(bottom).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.click(side)
+    expect(useWorkspaceStore.getState().getSession('second-session').layout).toBe('split')
+    expect(useWorkspaceStore.getState().getSession(sessionId).tabs).toEqual(before)
   })
 
   it('opens Agent Office in the configured surface for the active session', async () => {
@@ -370,6 +419,7 @@ describe('TabBar', () => {
     expect(screen.queryByRole('button', { name: 'Agent Office' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Show Workspace' })).not.toBeInTheDocument()
   })
+
 
   it('hides the activity button for no-activity chat session tabs', async () => {
     const { TabBar } = await import('./TabBar')
@@ -623,11 +673,11 @@ describe('TabBar', () => {
   })
 
   it('shows the activity button for completed TodoWrite history and hides it while the workspace is open', async () => {
+    const { useWorkspaceStore } = await import('../../stores/workspaceStore')
     const { TabBar } = await import('./TabBar')
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
     const { useSessionStore } = await import('../../stores/sessionStore')
-    const { useWorkspacePanelStore } = await import('../../stores/workspacePanelStore')
     const { useSettingsStore } = await import('../../stores/settingsStore')
     const sessionId = 'session-1'
     const chatSession = makeChatSession('idle')
@@ -661,7 +711,7 @@ describe('TabBar', () => {
     expect(screen.queryByTestId('session-activity-badge')).not.toBeInTheDocument()
 
     act(() => {
-      useWorkspacePanelStore.getState().openPanel(sessionId)
+      useWorkspaceStore.getState().openTarget(sessionId, { kind: 'file', path: 'a.ts' })
     })
 
     expect(screen.queryByRole('button', { name: /activity/i })).not.toBeInTheDocument()
@@ -784,12 +834,12 @@ describe('TabBar', () => {
   })
 
   it('opens the workspace panel without mutating the team workbench timeline', async () => {
+    const { useWorkspaceStore } = await import('../../stores/workspaceStore')
     const { TabBar } = await import('./TabBar')
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
     const { useSessionStore } = await import('../../stores/sessionStore')
     const { useTeamStore } = await import('../../stores/teamStore')
-    const { useWorkspacePanelStore } = await import('../../stores/workspacePanelStore')
     const sessionId = 'session-team'
 
     useTabStore.setState({
@@ -813,7 +863,7 @@ describe('TabBar', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Show Workspace' }))
 
-    expect(useWorkspacePanelStore.getState().isPanelOpen(sessionId)).toBe(true)
+    expect(useWorkspaceStore.getState().getSession(sessionId).layout).not.toBe('hidden')
     expect(useTeamStore.getState().workbenchesBySession[sessionId]?.snapshots).toHaveLength(1)
   })
 
@@ -1204,7 +1254,7 @@ describe('TabBar', () => {
     // message: "this tab is not a conversation".
     expect(screen.getByText('Idle Session').previousElementSibling?.textContent).toBe('')
     expect(screen.getByText('Terminal').previousElementSibling?.textContent).toBe('terminal')
-    expect(screen.getByText('Skill Market').previousElementSibling?.textContent).toBe('storefront')
+    expect(screen.getByText('Extension Market').previousElementSibling?.textContent).toBe('storefront')
     expect(screen.queryByText('chat_bubble')).not.toBeInTheDocument()
   })
 
@@ -1794,6 +1844,95 @@ describe('TabBar', () => {
     // region, which carries the attribute, not to the tab, which must not.
     expect(scrollRegion).toHaveAttribute('data-desktop-drag-region')
     expect(tab).not.toHaveAttribute('data-desktop-drag-region')
+  })
+
+  it('renders mixed tab types without stray text consuming the window header', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useWorkspaceStore } = await import('../../stores/workspaceStore')
+    const { WorkspaceHeaderProvider } = await import('./WorkspaceHeaderContext')
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'header-session', title: 'Header session', type: 'session', status: 'idle' },
+        { sessionId: '__settings__', title: 'Settings', type: 'settings', status: 'idle' },
+        { sessionId: '__terminal__1', title: 'Terminal', type: 'terminal', status: 'idle' },
+        { sessionId: '__market__', title: 'Market', type: 'market', status: 'idle' },
+      ],
+      activeTabId: 'header-session',
+    })
+    await act(async () => {
+      render(<WorkspaceHeaderProvider><TabBar /></WorkspaceHeaderProvider>)
+    })
+
+    const expectNoHeaderText = () => {
+      // A bare /* ... */ between JSX elements becomes an anonymous flex item.
+      // jsdom still finds every tab even when that text collapses their width
+      // in a browser, so check the rendered text nodes, not just tab presence.
+      const strayText = [...screen.getByTestId('tab-bar').childNodes]
+        .filter((node) => node.nodeType === Node.TEXT_NODE)
+        .map((node) => node.textContent?.trim())
+        .filter(Boolean)
+      expect(strayText).toEqual([])
+    }
+    expectNoHeaderText()
+    for (const [title, id] of [
+      ['Localized Settings', '__settings__'],
+      ['Terminal', '__terminal__1'],
+      ['Extension Market', '__market__'],
+      ['Header session', 'header-session'],
+    ] as const) {
+      fireEvent.click(screen.getByText(title))
+      expect(useTabStore.getState().activeTabId).toBe(id)
+    }
+    await act(async () => {
+      useWorkspaceStore.getState().toggleWorkspace('header-session')
+    })
+    expectNoHeaderText()
+  })
+
+  it('keeps the window gutter on the panel paper while the workspace is open', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+    const { useWorkspaceStore } = await import('../../stores/workspaceStore')
+    // Imported here, not at the top of the file: `vi.resetModules()` hands the
+    // strip a fresh provider module, and a statically imported one would be a
+    // second React context that the strip can never see.
+    const { WorkspaceHeaderProvider } = await import('./WorkspaceHeaderContext')
+    const sessionId = 'gutter-session'
+
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Gutter session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {},
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    await act(async () => {
+      // The window owns the header slot; without it the strip falls back to
+      // the dock and there is no header frame to paint.
+      render(<WorkspaceHeaderProvider><TabBar /></WorkspaceHeaderProvider>)
+    })
+
+    const frame = screen.getByTestId('workspace-header-frame')
+    const gutter = screen.getByTestId('tab-bar-drag-gutter')
+
+    // Closed, the trough runs to the window edge and the gutter disappears
+    // into it. Painting the frame unconditionally would paste a white block
+    // over the end of the strip instead.
+    expect(frame).not.toHaveClass('bg-[var(--color-surface)]')
+
+    // Open, everything above the panel is one ground. The gutter is a
+    // transparent sibling of the header, so whichever element paints paper has
+    // to contain it — otherwise the trough shows through the strip and the
+    // window's top-right corner carries a grey notch beside the panel.
+    await act(async () => {
+      useWorkspaceStore.getState().toggleWorkspace(sessionId)
+    })
+    expect(frame).toHaveClass('bg-[var(--color-surface)]')
+    expect(frame).toContainElement(gutter)
   })
 
   it('lifts the active tab onto the paper ground without turning it into a pill', async () => {
@@ -2635,7 +2774,7 @@ describe('TabBar', () => {
       render(<TabBar />)
     })
 
-    fireEvent.click(screen.getByLabelText('Close Market'))
+    fireEvent.click(screen.getByLabelText('Close Extension Market'))
 
     expect(disconnectSession).not.toHaveBeenCalled()
     expect(useTabStore.getState().tabs.map((tab) => tab.sessionId)).toEqual(['tab-1'])
@@ -2643,10 +2782,10 @@ describe('TabBar', () => {
   })
 
   it('opens the bottom terminal panel from the toolbar for an active session', async () => {
+    const { useWorkspaceStore } = await import('../../stores/workspaceStore')
     const { TabBar } = await import('./TabBar')
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
-    const { useTerminalPanelStore } = await import('../../stores/terminalPanelStore')
 
     useTabStore.setState({
       tabs: [
@@ -2663,18 +2802,19 @@ describe('TabBar', () => {
       render(<TabBar />)
     })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open Terminal' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Toggle bottom panel' }))
 
     const terminalTabs = useTabStore.getState().tabs.filter((tab) => tab.type === 'terminal')
     expect(terminalTabs).toHaveLength(0)
-    expect(useTerminalPanelStore.getState().isPanelOpen('tab-1')).toBe(true)
+    expect(useWorkspaceStore.getState().getSession('tab-1').bottomOpen).toBe(true)
+    expect(useWorkspaceStore.getState().getTabs('tab-1', 'bottom')).toHaveLength(1)
   })
 
   it('treats legacy session tabs without a type as bottom-panel terminal targets', async () => {
+    const { useWorkspaceStore } = await import('../../stores/workspaceStore')
     const { TabBar } = await import('./TabBar')
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
-    const { useTerminalPanelStore } = await import('../../stores/terminalPanelStore')
 
     useTabStore.setState({
       tabs: [
@@ -2691,17 +2831,17 @@ describe('TabBar', () => {
       render(<TabBar />)
     })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open Terminal' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Toggle bottom panel' }))
 
     expect(useTabStore.getState().tabs.some((tab) => tab.type === 'terminal')).toBe(false)
-    expect(useTerminalPanelStore.getState().isPanelOpen('legacy-session')).toBe(true)
+    expect(useWorkspaceStore.getState().getSession('legacy-session').bottomOpen).toBe(true)
   })
 
   it('toggles the workspace panel for the active session from the toolbar', async () => {
+    const { useWorkspaceStore } = await import('../../stores/workspaceStore')
     const { TabBar } = await import('./TabBar')
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
-    const { useWorkspacePanelStore } = await import('../../stores/workspacePanelStore')
 
     useTabStore.setState({
       tabs: [
@@ -2719,10 +2859,22 @@ describe('TabBar', () => {
     })
 
     fireEvent.click(screen.getByRole('button', { name: 'Show Workspace' }))
-    expect(useWorkspacePanelStore.getState().isPanelOpen('tab-1')).toBe(true)
+    expect(useWorkspaceStore.getState().getSession('tab-1').layout).toBe('split')
 
     fireEvent.click(screen.getByRole('button', { name: 'Hide Workspace' }))
-    expect(useWorkspacePanelStore.getState().isPanelOpen('tab-1')).toBe(false)
+    expect(useWorkspaceStore.getState().getSession('tab-1').layout).toBe('hidden')
+  })
+
+  it('keeps workspace and terminal entry points available on H5', async () => {
+    window.desktopHost = browserHost
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useWorkspaceStore } = await import('../../stores/workspaceStore')
+    useTabStore.setState({ tabs: [{ sessionId: 'h5-task', title: 'H5 Task', type: 'session', status: 'idle' }], activeTabId: 'h5-task' })
+    await act(async () => { render(<TabBar />) })
+    fireEvent.click(screen.getByRole('button', { name: 'Show Workspace' }))
+    expect(useWorkspaceStore.getState().getSession('h5-task').layout).toBe('split')
+    expect(screen.getByRole('button', { name: 'Toggle bottom panel' })).toBeInTheDocument()
   })
 
   it('does not render a browser toolbar button for session tabs', async () => {
@@ -2808,11 +2960,10 @@ describe('TabBar', () => {
   })
 
   it('treats active SubAgent tabs as non-session tabs for toolbar state', async () => {
+    const { useWorkspaceStore } = await import('../../stores/workspaceStore')
     const { TabBar } = await import('./TabBar')
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
-    const { useWorkspacePanelStore } = await import('../../stores/workspacePanelStore')
-    const { useTerminalPanelStore } = await import('../../stores/terminalPanelStore')
     const { useActivityPanelStore } = await import('../../stores/activityPanelStore')
     const tabId = '__subagent__session-1__tool-1'
 
@@ -2843,16 +2994,15 @@ describe('TabBar', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open Terminal' }))
 
     expect(useTabStore.getState().tabs.some((tab) => tab.type === 'terminal')).toBe(true)
-    expect(useWorkspacePanelStore.getState().panelBySession[tabId]).toBeUndefined()
-    expect(useTerminalPanelStore.getState().panelBySession[tabId]).toBeUndefined()
+    expect(useWorkspaceStore.getState().bySession[tabId]).toBeUndefined()
     expect(useActivityPanelStore.getState().isOpen(tabId)).toBe(false)
   })
 
   it('treats the market tab as a non-session toolbar target', async () => {
+    const { useWorkspaceStore } = await import('../../stores/workspaceStore')
     const { TabBar } = await import('./TabBar')
     const { MARKET_TAB_ID, useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
-    const { useTerminalPanelStore } = await import('../../stores/terminalPanelStore')
 
     useTabStore.setState({
       tabs: [
@@ -2877,15 +3027,14 @@ describe('TabBar', () => {
     const terminalTabs = useTabStore.getState().tabs.filter((tab) => tab.type === 'terminal')
     expect(terminalTabs).toHaveLength(1)
     expect(useTabStore.getState().activeTabId).toBe(terminalTabs[0]?.sessionId)
-    expect(useTerminalPanelStore.getState().isPanelOpen(MARKET_TAB_ID)).toBe(false)
+    expect(useWorkspaceStore.getState().getSession(MARKET_TAB_ID).bottomOpen).toBe(false)
   })
 
   it('clears session panel state when closing a session tab', async () => {
     const { TabBar } = await import('./TabBar')
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
-    const { useWorkspacePanelStore } = await import('../../stores/workspacePanelStore')
-    const { useTerminalPanelStore } = await import('../../stores/terminalPanelStore')
+    const { useWorkspaceStore } = await import('../../stores/workspaceStore')
     const { useActivityPanelStore } = await import('../../stores/activityPanelStore')
 
     useTabStore.setState({
@@ -2898,8 +3047,8 @@ describe('TabBar', () => {
       sessions: {},
       disconnectSession: vi.fn(),
     } as Partial<ReturnType<typeof useChatStore.getState>>)
-    useWorkspacePanelStore.getState().openPanel('tab-1')
-    useTerminalPanelStore.getState().openPanel('tab-1')
+    useWorkspaceStore.getState().openTarget('tab-1', { kind: 'file', path: 'a.ts' })
+    useWorkspaceStore.getState().openTarget('tab-1', { kind: 'terminal', cwd: '/repo', dock: 'bottom' })
     useActivityPanelStore.getState().open('tab-1')
 
     await act(async () => {
@@ -2908,8 +3057,7 @@ describe('TabBar', () => {
 
     fireEvent.click(screen.getByLabelText('Close First Session'))
 
-    expect(useWorkspacePanelStore.getState().panelBySession['tab-1']).toBeUndefined()
-    expect(useTerminalPanelStore.getState().panelBySession['tab-1']).toBeUndefined()
+    expect(useWorkspaceStore.getState().bySession['tab-1']).toBeUndefined()
     expect(useActivityPanelStore.getState().isOpen('tab-1')).toBe(false)
   })
 

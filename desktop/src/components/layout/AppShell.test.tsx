@@ -754,5 +754,16 @@ describe('AppShell boot flow', () => {
     expect(screen.queryByText('tabs loaded')).not.toBeInTheDocument()
     expect(screen.getByTestId('mobile-session-header')).toHaveTextContent('Settings')
     expect(mocks.setActiveTab).not.toHaveBeenCalled()
+    expect(mocks.tabState.activeTabId).toBe('__settings__')
+  })
+
+  it('keeps mobile settings active when no chat session exists', async () => {
+    mocks.isMobile = true
+    mocks.tabState.activeTabId = '__settings__'
+    mocks.tabState.tabs = [{ sessionId: '__settings__', title: 'Settings', type: 'settings', status: 'idle' }]
+    render(<AppShell />)
+    await screen.findByText('content loaded')
+    expect(mocks.tabState.activeTabId).toBe('__settings__')
+    expect(mocks.setActiveTab).not.toHaveBeenCalled()
   })
 })

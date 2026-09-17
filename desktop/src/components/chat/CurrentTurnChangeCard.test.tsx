@@ -6,7 +6,8 @@ import { act, useState } from 'react'
 // ──────────────────────────────────────────────────────────────────────────────
 // Hoisted mocks (vi.hoisted runs before module evaluation)
 // ──────────────────────────────────────────────────────────────────────────────
-const { openPreviewSpy, browserOpenSpy, openTargetSpy, ensureTargetsMock, getTargetsForPathMock, openSystemFileSpy, panelState } = vi.hoisted(() => {
+const { reviewOpenSpy, openPreviewSpy, browserOpenSpy, openTargetSpy, ensureTargetsMock, getTargetsForPathMock, openSystemFileSpy, panelState } = vi.hoisted(() => {
+  const reviewOpenSpy = vi.fn()
   const openPreviewSpy = vi.fn().mockResolvedValue(undefined)
   const browserOpenSpy = vi.fn()
   const openTargetSpy = vi.fn().mockResolvedValue(undefined)
@@ -17,7 +18,7 @@ const { openPreviewSpy, browserOpenSpy, openTargetSpy, ensureTargetsMock, getTar
   ])
   const openSystemFileSpy = vi.fn().mockResolvedValue(undefined)
   const panelState = { isOpen: false }
-  return { openPreviewSpy, browserOpenSpy, openTargetSpy, ensureTargetsMock, getTargetsForPathMock, openSystemFileSpy, panelState }
+  return { reviewOpenSpy, openPreviewSpy, browserOpenSpy, openTargetSpy, ensureTargetsMock, getTargetsForPathMock, openSystemFileSpy, panelState }
 })
 
 // Mock openTargetStore
@@ -43,26 +44,20 @@ vi.mock('../../stores/openTargetStore', () => ({
   ),
 }))
 
-// Mock browserPanelStore
-vi.mock('../../stores/browserPanelStore', () => ({
-  useBrowserPanelStore: Object.assign(
-    (selector: (s: { open: () => void }) => unknown) =>
-      selector({ open: browserOpenSpy }),
-    {
-      getState: vi.fn(() => ({ open: browserOpenSpy })),
+// The unified open entry point replaced the per-store `open` / `openPreview`
+// pair: every caller now names a target and the controller decides the tab.
+vi.mock('../../lib/workspace/openTarget', () => ({
+  workspaceOpen: {
+    file: (sessionId: string, path: string, options?: Record<string, unknown>) =>
+      openPreviewSpy(sessionId, path, 'file', options?.origin),
+    browser: (sessionId: string, url?: string) => browserOpenSpy(sessionId, url),
+    review: (sessionId: string, options?: Record<string, unknown>) => {
+      reviewOpenSpy(sessionId, options)
+      return openPreviewSpy(sessionId, options?.path, 'diff', options?.origin)
     },
-  ),
-}))
-
-// Mock workspacePanelStore
-vi.mock('../../stores/workspacePanelStore', () => ({
-  useWorkspacePanelStore: Object.assign(
-    (selector: (s: { openPreview: () => Promise<void>; isPanelOpen: () => boolean }) => unknown) =>
-      selector({ openPreview: openPreviewSpy, isPanelOpen: () => panelState.isOpen }),
-    {
-      getState: vi.fn(() => ({ openPreview: openPreviewSpy, isPanelOpen: () => panelState.isOpen })),
-    },
-  ),
+    terminal: vi.fn(),
+  },
+  openWorkspaceTarget: vi.fn(),
 }))
 
 // Mock @tauri-apps/plugin-shell
@@ -119,7 +114,7 @@ function makeCheckpoint(
     code: {
       available: true,
       filesChanged,
-      insertions: 10,
+      insertions: filesChanged.length > 0 ? 10 : 0,
       deletions: 0,
     },
     target: {
@@ -184,11 +179,14 @@ describe('CurrentTurnChangeCard – disclosure', () => {
     expect(onUndo).toHaveBeenCalledOnce()
   })
 
-  it('offers undo without an empty disclosure for untracked changes', () => {
-    renderCard([], true, true, ['Bash'])
-    expect(screen.queryByRole('button', { name: /chat.turnChangesExpand/ })).not.toBeInTheDocument()
-    expect(screen.getByText('chat.turnChangesPartialCoverageSubtitle')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'chat.turnChangesLatestUndoAria' })).toBeEnabled()
+  it.each([
+    [true, true, []],
+    [true, true, ['Bash']],
+    [false, true, ['Bash']],
+    [true, false, ['Bash']],
+  ] as const)('hides an empty file-change card (latest=%s, restorable=%s, sources=%j)', (isLatest, restoreAvailable, sources) => {
+    const { container } = renderCard([], isLatest, restoreAvailable, [...sources])
+    expect(container).toBeEmptyDOMElement()
   })
 
   it('starts collapsed and preserves undo and change totals', () => {
@@ -203,6 +201,26 @@ describe('CurrentTurnChangeCard – disclosure', () => {
     expect(document.getElementById(toggle.getAttribute('aria-controls')!)).toContainElement(screen.getByText('main.ts'))
     fireEvent.click(toggle)
     expect(screen.queryByText('main.ts')).not.toBeInTheDocument()
+  })
+
+  it('updates visibility when checkpoint files arrive or become empty', () => {
+    const props = {
+      sessionId: 's1',
+      workDir: '/w/proj',
+      error: null,
+      isUndoing: false,
+      isLatest: true,
+      expanded: true,
+      onExpandedChange: vi.fn(),
+      onUndo: vi.fn(),
+    }
+    const view = render(<CurrentTurnChangeCard {...props} checkpoint={makeCheckpoint([])} />)
+    expect(view.container).toBeEmptyDOMElement()
+    view.rerender(<CurrentTurnChangeCard {...props} checkpoint={makeCheckpoint(['/w/proj/src/main.ts'], true, ['Bash'])} />)
+    expect(screen.getByText('main.ts')).toBeInTheDocument()
+    expect(screen.getByText('chat.turnChangesPartialCoverageSubtitle')).toBeInTheDocument()
+    view.rerender(<CurrentTurnChangeCard {...props} checkpoint={makeCheckpoint([], true, ['Bash'])} />)
+    expect(view.container).toBeEmptyDOMElement()
   })
 })
 
@@ -343,6 +361,7 @@ describe('CurrentTurnChangeCard – row opens the workspace diff', () => {
     fireEvent.click(row)
     // displayPath is the workDir-relative path (matches the workspace file tree)
     expect(openPreviewSpy).toHaveBeenCalledWith('s1', 'src/main.ts', 'diff', expect.objectContaining({ sourceTurnKey: 'msg-1' }))
+    expect(reviewOpenSpy).toHaveBeenCalledWith('s1', expect.objectContaining({ source: { kind: 'turn', turnKey: 'msg-1', userMessageIndex: 0 } }))
   })
 
   it('passes the workDir-relative displayPath (not the absolute path) to openPreview', () => {
@@ -467,7 +486,7 @@ describe('CurrentTurnChangeCard – open-with buttons', () => {
       fireEvent.click(previewItem)
     })
 
-    expect(openPreviewSpy).toHaveBeenCalledWith('s1', 'README.md', 'file')
+    expect(openPreviewSpy).toHaveBeenCalledWith('s1', 'README.md', 'file', undefined)
   })
 
   it('clicking a standalone index.html (no manifest in change-set) offers both workspace preview and in-app browser', async () => {

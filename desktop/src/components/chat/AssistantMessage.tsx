@@ -18,7 +18,7 @@ import { FakeToolUseNotice } from './FakeToolUseNotice'
 import { openPreviewLink } from '../../lib/openPreviewLink'
 import { extractAssistantOutputTargets } from '../../lib/assistantOutputTargets'
 import { extractFakeToolUseBlocks } from '../../lib/fakeToolUseDetection'
-import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
+import { useWorkspaceContentStore } from '../../stores/workspaceContentStore'
 import { useProviderStore } from '../../stores/providerStore'
 import { useProviderCompatStore } from '../../stores/providerCompatStore'
 import { useTranslation, type TranslationKey } from '../../i18n'
@@ -49,7 +49,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   turnCompletion,
 }: Props) {
   const t = useTranslation()
-  const workDir = useWorkspacePanelStore((s) => (sessionId ? s.statusBySession[sessionId]?.workDir : undefined))
+  const workDir = useWorkspaceContentStore((s) => (sessionId ? s.statusBySession[sessionId]?.workDir : undefined))
   const activeProviderId = useProviderStore((s) => s.activeId)
 
   // Some providers/gateways relay model output as raw text instead of

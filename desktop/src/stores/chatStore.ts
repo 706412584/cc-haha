@@ -5,13 +5,13 @@ import { subagentsApi } from '../api/subagents'
 import { useTeamStore } from './teamStore'
 import { useSessionStore } from './sessionStore'
 import { useCLITaskStore } from './cliTaskStore'
+import { useWorkspaceEditorStore } from './workspaceEditorStore'
 import { useWorkflowStore } from './workflowStore'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 import { useProviderStore } from './providerStore'
 import { resolveActiveProviderRuntimeSelection, resolveProviderRuntimeModelId } from '../lib/runtimeSelection'
 import { useTabStore } from './tabStore'
 import { useProviderCompatStore } from './providerCompatStore'
-import { useWorkspacePanelStore } from './workspacePanelStore'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import { notifyDesktop } from '../lib/desktopNotifications'
 import { t } from '../i18n'
@@ -2466,10 +2466,19 @@ function summarizeTokenUsageFromHistory(messages: MessageEntry[]): TokenUsage | 
   let outputTokens = 0
   let cacheReadTokens = 0
   let cacheCreationTokens = 0
+  // A reply with thinking + text + a dozen tool_use blocks arrives as fourteen lines that each
+  // repeat the whole `usage` object. Summing per line is the 2.2x inflation the transcript
+  // readers carry; the server stamps `usageKey` so this only has to dedupe on it. Lines with
+  // no key are always counted, matching the transcript readers.
+  const countedUsageKeys = new Set<string>()
 
   for (const message of messages) {
     const usage = message.usage
     if (!usage) continue
+    if (message.usageKey) {
+      if (countedUsageKeys.has(message.usageKey)) continue
+      countedUsageKeys.add(message.usageKey)
+    }
     inputTokens += readUsageToken(usage.input_tokens)
     outputTokens += readUsageToken(usage.output_tokens)
     cacheReadTokens += readUsageToken(usage.cache_read_input_tokens)
@@ -5598,7 +5607,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         const editedPath = consumePendingFileEdit(sessionId, msg.toolUseId)
         if (editedPath && !msg.isError) {
-          useWorkspacePanelStore.getState().notifyAgentFileEdit(sessionId, editedPath)
+          useWorkspaceEditorStore.getState().notifyAgentFileEdit(sessionId, editedPath)
         }
         break
       }
@@ -6145,7 +6154,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           clearPendingTaskToolUseIds(sessionId)
           clearPendingToolParentUseIds(sessionId)
           clearPendingFileEdits(sessionId)
-          useCLITaskStore.getState().clearTasks(sessionId)
+                useCLITaskStore.getState().clearTasks(sessionId)
           useWorkflowStore.getState().clearSession(sessionId)
           useSessionStore.getState().updateSessionTitle(sessionId, 'New Session')
           useSessionStore.getState().updateSessionMessageCount(sessionId, 0)

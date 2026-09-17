@@ -246,6 +246,7 @@ import {
   StreamWatchdogTimeoutError,
   createStreamWatchdogState,
 } from "./streamWatchdog.js";
+import { StreamDecodeSpan } from "./streamDecodeSpan.js";
 import { jsonStringify } from "../../utils/slowOperations.js";
 import {
   isBetaTracingEnabled,
@@ -1583,7 +1584,11 @@ async function* queryModel(
   });
 
   queryCheckpoint("query_message_normalization_start");
-  let messagesForAPI = normalizeMessagesForAPI(messages, filteredTools);
+  let messagesForAPI = normalizeMessagesForAPI(
+    messages,
+    filteredTools,
+    options.model,
+  );
   queryCheckpoint("query_message_normalization_end");
   if (
     hasAnthropicCompatibleThirdPartyConfig() &&
@@ -2141,6 +2146,11 @@ async function* queryModel(
     deferToolUseCommit: true,
   });
   let ttftMs = 0;
+  // Decode span for this request: first generated delta -> message_stop. Deliberately excludes
+  // the prefill/TTFT phase, so output_tokens / decodeMs is real generation speed rather than a
+  // number diluted by prompt processing. Tool execution happens between API requests, so it
+  // never lands inside this span either.
+  const decodeSpan = new StreamDecodeSpan();
   let partialMessage: BetaMessage | undefined = undefined;
   const contentBlocks: (BetaContentBlock | ConnectorTextBlock)[] = [];
   let usage: NonNullableUsage = EMPTY_USAGE;
@@ -2243,6 +2253,7 @@ async function* queryModel(
     // reset state
     newMessages.length = 0;
     ttftMs = 0;
+    decodeSpan.reset();
     partialMessage = undefined;
     contentBlocks.length = 0;
     usage = EMPTY_USAGE;
@@ -2524,6 +2535,8 @@ async function* queryModel(
         const receivedFirstContentDelta = streamWatchdogState.recordEvent(part);
         resetStreamIdleTimer();
         const now = Date.now();
+
+        decodeSpan.record(receivedFirstContentDelta, now);
 
         // Detect and log streaming stalls (only after first event to avoid counting TTFB)
         if (lastEventTime !== null) {
@@ -2920,6 +2933,11 @@ async function* queryModel(
           type: "stream_event",
           event: part,
           ...(part.type === "message_start" ? { ttftMs } : undefined),
+          // message_stop is the last event of the stream, so `now` closes the decode span.
+          // Absent when the span never opened (see StreamDecodeSpan).
+          ...(part.type === "message_stop"
+            ? { decodeMs: decodeSpan.elapsedMs(now) }
+            : undefined),
         };
       }
       // Clear the idle timeout watchdog now that the stream loop has exited

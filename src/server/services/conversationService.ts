@@ -11,6 +11,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { ProviderService } from './providerService.js'
+import { SettingsService } from './settingsService.js'
 import {
   applyProviderRuntimeModel,
   isManagedProviderEnvKey,
@@ -1735,6 +1736,7 @@ export class ConversationService {
     // earlier); the per-turn hot update below mirrors this for live turns.
     const streamMaxDurationMs = resolveStreamMaxDurationMs(networkEnv.API_TIMEOUT_MS)
     const traceCaptureEnabled = (await readTraceCaptureSettings()).enabled
+    const agentTeamsEnabled = await new SettingsService().getAgentTeamsEnabled()
     if (explicitProviderEnv && options?.model?.trim()) {
       applyProviderRuntimeModel(explicitProviderEnv, options.model)
     }
@@ -1756,6 +1758,8 @@ export class ConversationService {
     return {
       ...cleanEnv,
       CLAUDE_CODE_ENABLE_TASKS: '1',
+      // Resolve the same preference shown in General before launching the CLI.
+      CC_HAHA_AGENT_TEAMS_ENABLED: agentTeamsEnabled ? '1' : '0',
       CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
       // Desktop must fail stuck provider streams instead of leaving the UI running forever.
       CLAUDE_ENABLE_STREAM_WATCHDOG: cleanEnv.CLAUDE_ENABLE_STREAM_WATCHDOG || '1',
@@ -1797,8 +1801,14 @@ export class ConversationService {
       // request-timeout setting (API_TIMEOUT_MS, from networkEnv) so raising
       // "请求超时" actually extends how long we wait for the first token. The
       // CLI switches to the shorter idle budget once tokens start flowing.
+      //
+      // A stream that returns headers but never produces an event is still
+      // bounded: CLAUDE_STREAM_IDLE_TIMEOUT_MS (240s) fires on the absence of
+      // events, and a reasoning-only stall is caught by the thinking budget
+      // above. Capping this at a fixed two minutes was the older approach and
+      // killed slow-but-healthy prefill.
       CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS:
-        cleanEnv.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS || '120000',
+        cleanEnv.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS || networkEnv.API_TIMEOUT_MS,
       // When a stream does get aborted, retry as streaming instead of falling
       // back to non-streaming: a non-streaming request must wait for the FULL
       // generation before the first response byte, so slow providers can never

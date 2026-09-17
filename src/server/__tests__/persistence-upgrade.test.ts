@@ -3,6 +3,7 @@ import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
 import { ProviderService } from '../services/providerService.js'
+import { SettingsService } from '../services/settingsService.js'
 import {
   CURRENT_PROVIDER_INDEX_SCHEMA_VERSION,
   ensurePersistentStorageUpgraded,
@@ -30,6 +31,29 @@ describe('persistent storage upgrade migrations', () => {
     resetPersistentStorageMigrationsForTests()
     delete process.env.CLAUDE_CONFIG_DIR
     await fs.rm(tempDir, { recursive: true, force: true })
+  })
+
+  test('upgrades legacy team preferences on read and preserves the original settings on save', async () => {
+    const userPath = path.join(tempDir, 'settings.json')
+    const managedDir = path.join(tempDir, 'cc-haha')
+    await fs.mkdir(managedDir, { recursive: true })
+    const legacy = {
+      env: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1', LEGACY_OTHER_ENV: 'preserved' },
+      unknownFuturePreference: { keep: true },
+    }
+    const original = JSON.stringify(legacy)
+    await fs.writeFile(userPath, original)
+    await fs.writeFile(path.join(managedDir, 'settings.json'), JSON.stringify({
+      env: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '0' },
+    }))
+    const service = new SettingsService()
+    expect(await service.getAgentTeamsEnabled()).toBe(false)
+    expect(await fs.readFile(userPath, 'utf-8')).toBe(original)
+    await service.updateUserSettings({ agentTeamsEnabled: true })
+    expect(await new SettingsService().getAgentTeamsEnabled()).toBe(true)
+    expect(JSON.parse(await fs.readFile(userPath, 'utf-8'))).toEqual({ ...legacy, agentTeamsEnabled: true })
+    await service.updateUserSettings({ agentTeamsEnabled: false })
+    expect(await new SettingsService().getAgentTeamsEnabled()).toBe(false)
   })
 
   test('migrates legacy providers index and writes a backup before changing it', async () => {

@@ -60,6 +60,14 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
   })
 
   return {
+    publicAccess: {
+      getStatus: () => invoke(ELECTRON_IPC_CHANNELS.publicAccessGetStatus),
+      saveCredential: token => invoke(ELECTRON_IPC_CHANNELS.publicAccessSaveCredential, token),
+      deleteCredential: () => invoke(ELECTRON_IPC_CHANNELS.publicAccessDeleteCredential),
+      start: consentVersion => invoke(ELECTRON_IPC_CHANNELS.publicAccessStart, consentVersion),
+      stop: () => invoke(ELECTRON_IPC_CHANNELS.publicAccessStop),
+      setAutoStart: enabled => invoke(ELECTRON_IPC_CHANNELS.publicAccessSetAutoStart, enabled),
+    },
     kind: 'electron',
     isDesktop: true,
     capabilities: {
@@ -68,6 +76,7 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
       dialogs: true,
       notifications: true,
       previewWebview: true,
+      workspaceBrowser: true,
       shell: true,
       terminal: true,
       updates: true,
@@ -87,6 +96,9 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
       getVersion: () => invoke(ELECTRON_IPC_CHANNELS.appGetVersion),
       getLocalePreference: () => invoke(ELECTRON_IPC_CHANNELS.appGetLocalePreference),
       setLocalePreference: locale => invoke(ELECTRON_IPC_CHANNELS.appSetLocalePreference, locale),
+      getKeepActiveInBackground: () => invoke(ELECTRON_IPC_CHANNELS.appGetKeepActiveInBackground),
+      setKeepActiveInBackground: keepActive =>
+        invoke(ELECTRON_IPC_CHANNELS.appSetKeepActiveInBackground, keepActive),
       getPreferredSystemLanguages: () => invoke(ELECTRON_IPC_CHANNELS.appGetPreferredSystemLanguages),
       onLocaleChanged: handler => subscribe(ELECTRON_EVENT_CHANNELS.appLocaleChanged, handler),
     },
@@ -174,6 +186,7 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
       onNativeMenuNavigate: handler => subscribe(ELECTRON_EVENT_CHANNELS.nativeMenuNavigate, handler),
     },
     terminal: {
+      supportsStartupCorrelation: true,
       spawn: options => invoke(ELECTRON_IPC_CHANNELS.terminalSpawn, options),
       write: (sessionId, data) => invoke(ELECTRON_IPC_CHANNELS.terminalWrite, { sessionId, data }),
       resize: (sessionId, cols, rows) => invoke(ELECTRON_IPC_CHANNELS.terminalResize, { sessionId, cols, rows }),
@@ -192,6 +205,39 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
       close: () => invoke(ELECTRON_IPC_CHANNELS.previewClose),
       message: payload => invoke(ELECTRON_IPC_CHANNELS.previewMessage, payload),
       onEvent: handler => subscribe(ELECTRON_EVENT_CHANNELS.previewEvent, handler),
+    },
+    browser: {
+      showMenu: (tabId, options) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserShowMenu, { ...options, tabId }),
+      create: (tabId, options) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserCreate, {
+        tabId,
+        storageId: options.storageId,
+        ...(options.url === undefined ? {} : { url: options.url }),
+        ...(options.bounds === undefined ? {} : { bounds: options.bounds }),
+        ...(options.visible === undefined ? {} : { visible: options.visible }),
+      }),
+      navigate: (tabId, url) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserNavigate, { tabId, url }),
+      goBack: tabId => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserGoBack, { tabId }),
+      goForward: tabId => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserGoForward, { tabId }),
+      reload: (tabId, options) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserReload, {
+        tabId,
+        ...(options?.ignoreCache === undefined ? {} : { ignoreCache: options.ignoreCache }),
+      }),
+      stop: tabId => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserStop, { tabId }),
+      setBounds: (tabId, bounds) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserSetBounds, { tabId, bounds }),
+      setVisible: (tabId, visible) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserSetVisible, { tabId, visible }),
+      setZoom: (tabId, factor) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserSetZoom, { tabId, factor }),
+      find: (tabId, text, options) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserFind, {
+        tabId,
+        text,
+        ...(options === undefined ? {} : { options }),
+      }),
+      stopFind: tabId => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserStopFind, { tabId }),
+      capture: (tabId, kind) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserCapture, { tabId, kind }),
+      snapshot: (tabId) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserSnapshot, { tabId }),
+      message: (tabId, payload) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserMessage, { tabId, payload }),
+      printToPdf: tabId => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserPrintToPdf, { tabId }),
+      close: tabId => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserClose, { tabId }),
+      onEvent: handler => subscribe(ELECTRON_EVENT_CHANNELS.workspaceBrowserEvent, handler),
     },
     appMode: {
       get: () => invoke(ELECTRON_IPC_CHANNELS.appModeGet),

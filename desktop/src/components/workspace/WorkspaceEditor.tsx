@@ -17,31 +17,27 @@ import { tags } from '@lezer/highlight'
 
 import { sessionsApi, type SaveWorkspaceFileInput } from '../../api/sessions'
 import {
-  useWorkspacePanelStore,
+  useWorkspaceEditorStore,
+  workspaceBufferKey,
   type WorkspaceBufferInit,
   type WorkspaceBufferState,
-  type WorkspacePreviewTab,
-} from '../../stores/workspacePanelStore'
+} from '../../stores/workspaceEditorStore'
+import { useWorkspaceContentStore } from '../../stores/workspaceContentStore'
 import { detectEncoding, detectLineEnding } from './encodingDetect'
 import { ConflictBanner } from './ConflictBanner'
 import { UnsavedChangesModal } from './UnsavedChangesModal'
 
 /**
- * In-app code editor for the workspace panel — Phase 2 of editor-lsp-foundation.
+ * In-app code editor for the workspace panel.
  *
- * Wraps a CodeMirror 6 EditorView, hands its dirty state through the
- * shared `useWorkspacePanelStore.bufferStateByTabId`, and saves through the
- * R2 atomic-write endpoint via `sessionsApi.saveWorkspaceFile`.
+ * Wraps a CodeMirror 6 EditorView, hands its dirty state through
+ * `useWorkspaceEditorStore.buffersByKey`, and saves through the atomic-write
+ * endpoint via `sessionsApi.saveWorkspaceFile`.
  *
  * Encoding detection runs on the loaded buffer; an `'unsupported'` result
- * blocks editor mounting and falls back to the existing read-only preview
- * surface (the parent panel decides what to render once `unsupportedEncoding`
- * fires through `onUnsupportedEncoding`).
- *
- * Conflict-banner and unsaved-changes-modal handling live here too — agent
- * source events stay dormant until PR-4 wires them through the store.
- *
- * _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8 (Phase 2 task 8)_
+ * blocks editor mounting and falls back to the read-only preview surface (the
+ * parent decides what to render once `unsupportedEncoding` fires through
+ * `onUnsupportedEncoding`).
  */
 
 const SAVE_TIMEOUT_MS = 30_000
@@ -137,7 +133,7 @@ export async function saveWorkspaceBuffer(
     }
 
     initBuffer({
-      tabId: buffer.tabId,
+      key: buffer.key,
       path: buffer.path,
       baseHash: result.hash,
       baseContent: buffer.currentContent,
@@ -152,7 +148,9 @@ export async function saveWorkspaceBuffer(
 
 export type WorkspaceEditorProps = {
   sessionId: string
-  tab: WorkspacePreviewTab
+  path: string
+  /** Content the tab was loaded with; the baseline the buffer initializes from. */
+  content: string
   /** Called when the file's encoding is unsupported so the parent can fall
    *  back to the read-only preview surface. */
   onUnsupportedEncoding?: (path: string) => void
@@ -163,45 +161,48 @@ export type WorkspaceEditorProps = {
 }
 
 export function WorkspaceEditor(props: WorkspaceEditorProps) {
-  const { sessionId, tab, onUnsupportedEncoding, onSaved, onClose } = props
+  const { sessionId, path, content, onUnsupportedEncoding, onSaved, onClose } = props
 
   const containerRef = useRef<HTMLDivElement | null>(null)
   const viewRef = useRef<EditorView | null>(null)
   const lspDebounceRef = useRef<number | undefined>(undefined)
 
-  const buffer = useWorkspacePanelStore((s) => s.bufferStateByTabId[tab.id])
-  const initBuffer = useWorkspacePanelStore((s) => s.initBuffer)
-  const setBufferState = useWorkspacePanelStore((s) => s.setBufferState)
-  const acknowledgeConflict = useWorkspacePanelStore((s) => s.acknowledgeConflict)
-  const syncLsp = useWorkspacePanelStore((s) => s.syncLsp)
+  const key = workspaceBufferKey(sessionId, path)
+  const buffer = useWorkspaceEditorStore((s) => s.buffersByKey[key])
+  const unsupported = useWorkspaceEditorStore((s) => Boolean(s.unsupportedKeys[key]))
+  const initBuffer = useWorkspaceEditorStore((s) => s.initBuffer)
+  const setBufferState = useWorkspaceEditorStore((s) => s.setBufferState)
+  const acknowledgeConflict = useWorkspaceEditorStore((s) => s.acknowledgeConflict)
+  const markUnsupported = useWorkspaceEditorStore((s) => s.markUnsupported)
+  const syncLsp = useWorkspaceEditorStore((s) => s.syncLsp)
+  const loadLspState = useWorkspaceEditorStore((s) => s.loadLspState)
 
-  const [unsupported, setUnsupported] = useState(false)
   const [saving, setSaving] = useState(false)
   const [closeRequested, setCloseRequested] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
-  // -- Initialize the buffer state from the loaded preview tab content. ----
+  // -- Initialize the buffer state from the loaded tab content. ------------
   useEffect(() => {
     if (buffer) return // already initialized
-    if (typeof tab.content !== 'string') return
+    if (typeof content !== 'string') return
     let cancelled = false
     ;(async () => {
-      const bytes = new TextEncoder().encode(tab.content!)
+      const bytes = new TextEncoder().encode(content)
       const encoding = detectEncoding(bytes)
       if (encoding === 'unsupported') {
         if (cancelled) return
-        setUnsupported(true)
-        onUnsupportedEncoding?.(tab.path)
+        markUnsupported(sessionId, path)
+        onUnsupportedEncoding?.(path)
         return
       }
-      const lineEnding = detectLineEnding(tab.content!)
-      const baseHash = await sha256Hex(tab.content!)
+      const lineEnding = detectLineEnding(content)
+      const baseHash = await sha256Hex(content)
       if (cancelled) return
       initBuffer({
-        tabId: tab.id,
-        path: tab.path,
+        key,
+        path,
         baseHash,
-        baseContent: tab.content!,
+        baseContent: content,
         encoding,
         lineEnding,
       })
@@ -209,12 +210,13 @@ export function WorkspaceEditor(props: WorkspaceEditorProps) {
     return () => {
       cancelled = true
     }
-  }, [buffer, tab.id, tab.path, tab.content, initBuffer, onUnsupportedEncoding])
+  }, [buffer, key, path, content, sessionId, initBuffer, markUnsupported, onUnsupportedEncoding])
 
   useEffect(() => {
     if (!buffer || unsupported) return
+    void loadLspState(sessionId, buffer.path)
     void syncLsp(sessionId, { path: buffer.path, content: buffer.currentContent, event: 'open' })
-  }, [buffer?.tabId, sessionId, syncLsp, unsupported])
+  }, [buffer?.path, sessionId, syncLsp, loadLspState, unsupported])
 
   // -- Mount the CodeMirror view once we have an initialized buffer. -------
   useEffect(() => {
@@ -236,11 +238,11 @@ export function WorkspaceEditor(props: WorkspaceEditorProps) {
       workspaceEditorTheme,
       EditorView.updateListener.of((update) => {
         if (!update.docChanged) return
-        const content = update.state.doc.toString()
-        setBufferState(buffer.tabId, content)
+        const next = update.state.doc.toString()
+        setBufferState(key, next)
         window.clearTimeout(lspDebounceRef.current)
         lspDebounceRef.current = window.setTimeout(() => {
-          void syncLsp(sessionId, { path: buffer.path, content, event: 'change' })
+          void syncLsp(sessionId, { path: buffer.path, content: next, event: 'change' })
         }, 350)
       }),
     ]
@@ -260,15 +262,18 @@ export function WorkspaceEditor(props: WorkspaceEditorProps) {
       view.destroy()
       viewRef.current = null
     }
-    // We deliberately depend on tab.id (stable per tab) rather than `buffer`
-    // to avoid re-mounting on every keystroke.
+    // We deliberately depend on the buffer's key rather than on `buffer`
+    // itself: the key is stable per file, so this mounts once when the buffer
+    // is first initialized and never re-mounts on a keystroke. Depending on
+    // the local `key` alone would never fire, because it is already set on the
+    // first render — before the buffer exists.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [buffer?.tabId, unsupported])
+  }, [buffer?.key, unsupported])
 
-  // -- External rebase: when the buffer's currentContent changes from
-  // outside the editor (e.g. applyExternalSave on a clean buffer), push it
-  // back into the EditorView. We compare against the view's current doc to
-  // avoid feedback loops with the updateListener.
+  // -- External rebase: when the buffer's currentContent changes from outside
+  // the editor (a conflict reload, or applyExternalSave once a save-event
+  // subscription exists), push it back into the EditorView. We compare against
+  // the view's current doc to avoid feedback loops with the updateListener.
   useEffect(() => {
     if (!buffer || !viewRef.current) return
     const current = viewRef.current.state.doc.toString()
@@ -334,20 +339,33 @@ export function WorkspaceEditor(props: WorkspaceEditorProps) {
   }, [])
 
   // -- Conflict banner actions. --------------------------------------------
+  // "Reload" has to mean reload: dropping the conflict only restores the
+  // baseline the editor opened with, which is the very content the banner just
+  // told the user is stale. Refetch first, then rebase onto what is on disk.
   const handleConflictReload = useCallback(() => {
-    if (!buffer) return
-    acknowledgeConflict(buffer.tabId, 'reload')
-  }, [buffer, acknowledgeConflict])
+    acknowledgeConflict(key, 'reload')
+    void (async () => {
+      await useWorkspaceContentStore.getState().loadFile(sessionId, path, { force: true })
+      const entry = useWorkspaceContentStore.getState().filesByKey[`${sessionId}::${path}`]
+      if (entry?.state !== 'ok' || typeof entry.content !== 'string') return
+      initBuffer({
+        key,
+        path,
+        baseHash: await sha256Hex(entry.content),
+        baseContent: entry.content,
+        encoding: buffer?.encoding ?? 'utf-8',
+        lineEnding: buffer?.lineEnding ?? 'LF',
+      })
+    })()
+  }, [key, path, sessionId, acknowledgeConflict, initBuffer, buffer?.encoding, buffer?.lineEnding])
 
   const handleConflictKeepMine = useCallback(() => {
-    if (!buffer) return
-    acknowledgeConflict(buffer.tabId, 'keepMine')
-  }, [buffer, acknowledgeConflict])
+    acknowledgeConflict(key, 'keepMine')
+  }, [key, acknowledgeConflict])
 
   const handleConflictOpenView = useCallback(() => {
-    if (!buffer) return
-    acknowledgeConflict(buffer.tabId, 'openConflict')
-  }, [buffer, acknowledgeConflict])
+    acknowledgeConflict(key, 'openConflict')
+  }, [key, acknowledgeConflict])
 
   // -- Render. -------------------------------------------------------------
   const dirtyMarker = useMemo(() => (buffer?.isDirty ? '●' : ''), [buffer?.isDirty])

@@ -2958,12 +2958,12 @@ describe('ProviderService', () => {
       }
     })
 
-    test('should use configured network timeout for provider tests', async () => {
+    test.each([180_000, 14_400_000, 21_600_000])('should use the configured network timeout for provider tests (%i ms)', async timeoutMs => {
       await fs.writeFile(
         path.join(tmpDir, 'settings.json'),
         JSON.stringify({
           network: {
-            aiRequestTimeoutMs: 180_000,
+            aiRequestTimeoutMs: timeoutMs,
             proxy: { mode: 'system', url: '' },
           },
         }),
@@ -2997,7 +2997,7 @@ describe('ProviderService', () => {
           apiFormat: 'anthropic',
         })
 
-        expect(timeoutCalls).toEqual([180_000])
+        expect(timeoutCalls).toEqual([timeoutMs])
       } finally {
         AbortSignal.timeout = originalTimeout
         globalThis.fetch = originalFetch

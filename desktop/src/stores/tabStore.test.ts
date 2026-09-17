@@ -3,7 +3,7 @@ import { sessionsApi } from '../api/sessions'
 import { ApiError } from '../api/client'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 import { useSessionStore } from './sessionStore'
-import { SETTINGS_TAB_ID, MARKET_TAB_ID, useTabStore } from './tabStore'
+import { SETTINGS_TAB_ID, MARKET_TAB_ID, CONNECTORS_TAB_ID, useTabStore } from './tabStore'
 
 vi.mock('../api/sessions', () => ({
   sessionsApi: {
@@ -34,6 +34,14 @@ function historicalSummary(id = 'historical-session') {
 }
 
 describe('tabStore', () => {
+  it('migrates an untyped connector tab identity and restores it without a server session', async () => {
+    localStorage.setItem('cc-haha-open-tabs', JSON.stringify({ openTabs: [{ sessionId: CONNECTORS_TAB_ID, title: 'Connectors' }], activeTabId: CONNECTORS_TAB_ID }))
+    await useTabStore.getState().restoreTabs()
+    expect(useTabStore.getState().tabs[0]).toMatchObject({ sessionId: MARKET_TAB_ID, type: 'market' })
+    useTabStore.getState().saveTabs()
+    expect(JSON.parse(localStorage.getItem('cc-haha-open-tabs')!).openTabs[0].type).toBe('market')
+  })
+
   beforeEach(() => {
     useTabStore.setState({ tabs: [], activeTabId: null })
     useSessionStore.setState({ ...initialSessionState, sessions: [], historicalSessionIds: new Set() })
@@ -91,43 +99,7 @@ describe('tabStore', () => {
     expect(useTabStore.getState().activeTabId).toBe(tabId)
   })
 
-  it('opens one ephemeral workbench tab per source session', () => {
-    const firstTabId = useTabStore.getState().openWorkbenchTab('session-1', 'Workbench')
-    const secondTabId = useTabStore.getState().openWorkbenchTab('session-1', 'Workbench')
 
-    expect(firstTabId).toBe('__workbench__session-1')
-    expect(secondTabId).toBe(firstTabId)
-    expect(useTabStore.getState().tabs).toEqual([
-      {
-        sessionId: '__workbench__session-1',
-        title: 'Workbench',
-        type: 'workbench',
-        status: 'idle',
-        workbenchSessionId: 'session-1',
-        sourceSessionId: 'session-1',
-      },
-    ])
-    expect(useTabStore.getState().activeTabId).toBe('__workbench__session-1')
-    expect(localStorage.getItem('cc-haha-open-tabs')).toBe(JSON.stringify({
-      openTabs: [],
-      activeTabId: null,
-    }))
-  })
-
-  it('returns an ephemeral workbench tab to its source session before closing it', () => {
-    useTabStore.getState().openTab('session-a', 'Session A')
-    useTabStore.getState().openTab('session-b', 'Session B')
-    const tabId = useTabStore.getState().openWorkbenchTab('session-b', 'Workbench', {
-      sourceSessionId: 'session-b',
-      sourceTurnKey: 'assistant:turn-2',
-      sourceElementId: 'turn-change-session-b-main-ts',
-    })
-
-    useTabStore.getState().returnFromWorkbench(tabId)
-
-    expect(useTabStore.getState().activeTabId).toBe('session-b')
-    expect(useTabStore.getState().tabs.map((tab) => tab.sessionId)).toEqual(['session-a', 'session-b'])
-  })
 
   it('returns a subagent tab to its source session before closing it', () => {
     useTabStore.getState().openTab('session-a', 'Session A')
@@ -183,31 +155,20 @@ describe('tabStore', () => {
     expect(useTabStore.getState().activeTabId).toBe('session-a')
   })
 
-  it('defaults a workbench origin to its source session and keeps it ephemeral', () => {
-    useTabStore.getState().openTab('session-a', 'Session A')
-    const tabId = useTabStore.getState().openWorkbenchTab('session-a', 'Workbench')
 
-    expect(useTabStore.getState().tabs.find((tab) => tab.sessionId === tabId)).toMatchObject({
-      sourceSessionId: 'session-a',
-    })
-    expect(localStorage.getItem('cc-haha-open-tabs')).toBe(JSON.stringify({
-      openTabs: [{ sessionId: 'session-a', title: 'Session A', type: 'session' }],
-      activeTabId: 'session-a',
-    }))
-  })
 
-  it('persists the source session as active while its ephemeral workbench is active', () => {
-    useTabStore.getState().openTab('session-a', 'Session A')
-    useTabStore.getState().openTab('session-b', 'Session B')
-    useTabStore.getState().openWorkbenchTab('session-b', 'Workbench')
-
-    expect(localStorage.getItem('cc-haha-open-tabs')).toBe(JSON.stringify({
-      openTabs: [
-        { sessionId: 'session-a', title: 'Session A', type: 'session' },
-        { sessionId: 'session-b', title: 'Session B', type: 'session' },
+  it('keeps legacy workbench descriptors ephemeral and restores their active source', () => {
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'session-a', title: 'Task A', type: 'session', status: 'idle' },
+        { sessionId: '__workbench__session-a', title: 'Workbench', type: 'workbench', status: 'idle', workbenchSessionId: 'session-a', sourceSessionId: 'session-a' },
       ],
-      activeTabId: 'session-b',
-    }))
+      activeTabId: '__workbench__session-a',
+    })
+    useTabStore.getState().saveTabs()
+    expect(JSON.parse(localStorage.getItem('cc-haha-open-tabs')!)).toEqual({
+      openTabs: [{ sessionId: 'session-a', title: 'Task A', type: 'session' }], activeTabId: 'session-a',
+    })
   })
 
   it('opens one ephemeral Office tab per source session', () => {
@@ -623,4 +584,26 @@ describe('tabStore', () => {
     ])
     expect(useTabStore.getState().activeTabId).toBe(SETTINGS_TAB_ID)
   })
+})
+
+it('maps both legacy market entry points to one canonical tab', () => {
+  useTabStore.setState({ tabs: [], activeTabId: null })
+  useTabStore.getState().openTab(MARKET_TAB_ID, 'Skills', 'market')
+  useTabStore.getState().openTab(CONNECTORS_TAB_ID, 'Extensions', 'connectors')
+  expect(useTabStore.getState().tabs).toHaveLength(1)
+  expect(useTabStore.getState().tabs[0]).toMatchObject({ sessionId: MARKET_TAB_ID, type: 'market' })
+  expect(useTabStore.getState().activeTabId).toBe(MARKET_TAB_ID)
+})
+
+it('restores duplicate legacy markets as one tab and retains their active selection', async () => {
+  useTabStore.setState({ tabs: [], activeTabId: null })
+  vi.mocked(sessionsApi.list).mockResolvedValue({ sessions: [] } as never)
+  localStorage.setItem('cc-haha-open-tabs', JSON.stringify({ openTabs: [
+    { sessionId: SETTINGS_TAB_ID, title: 'Settings', type: 'settings' },
+    { sessionId: MARKET_TAB_ID, title: 'Skills', type: 'market' },
+    { sessionId: CONNECTORS_TAB_ID, title: 'Connectors', type: 'connectors' },
+  ], activeTabId: CONNECTORS_TAB_ID }))
+  await useTabStore.getState().restoreTabs()
+  expect(useTabStore.getState().tabs.map(tab => tab.sessionId)).toEqual([SETTINGS_TAB_ID, MARKET_TAB_ID])
+  expect(useTabStore.getState().activeTabId).toBe(MARKET_TAB_ID)
 })

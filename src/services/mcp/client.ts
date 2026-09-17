@@ -129,6 +129,7 @@ import { clearKeychainCache } from '../../utils/secureStorage/macOsKeychainHelpe
 import { sleep } from '../../utils/sleep.js'
 import {
   ClaudeAuthProvider,
+  clearMcpDiscoveryWithoutTokens,
   hasMcpDiscoveryButNoToken,
   wrapFetchWithStepUpDetection,
 } from './auth.js'
@@ -290,11 +291,15 @@ async function isMcpAuthCached(serverId: string): Promise<boolean> {
 let writeChain = Promise.resolve()
 
 function setMcpAuthCacheEntry(serverId: string): void {
+  const cachePath = getMcpAuthCachePath()
   writeChain = writeChain
     .then(async () => {
-      const cache = await getMcpAuthCache()
+      // Re-read before a write: another process may have completed OAuth and
+      // removed an entry since this process's last discovery batch.
+      const cache = await readFile(cachePath, 'utf-8')
+        .then(data => jsonParse(data) as McpAuthCacheData)
+        .catch(() => ({} as McpAuthCacheData))
       cache[serverId] = { timestamp: Date.now() }
-      const cachePath = getMcpAuthCachePath()
       await mkdir(dirname(cachePath), { recursive: true })
       await writeFile(cachePath, jsonStringify(cache))
       // Invalidate the read cache so subsequent reads see the new entry.
@@ -307,11 +312,27 @@ function setMcpAuthCacheEntry(serverId: string): void {
     })
 }
 
-export function clearMcpAuthCache(): void {
+export function clearMcpAuthCache(serverId?: string): Promise<void> {
+  const cachePath = getMcpAuthCachePath()
   authCachePromise = null
-  void unlink(getMcpAuthCachePath()).catch(() => {
-    // Cache file may not exist
-  })
+  // Join pending 401 writes so an older failure cannot recreate an entry
+  // after successful authorization. Keep other servers' retry backoff intact.
+  writeChain = writeChain.then(async () => {
+    if (serverId === undefined) {
+      await unlink(cachePath).catch(() => {})
+    } else {
+      const cache = await readFile(cachePath, 'utf-8')
+        .then(data => jsonParse(data) as McpAuthCacheData)
+        .catch(() => ({} as McpAuthCacheData))
+      if (Object.hasOwn(cache, serverId)) {
+        delete cache[serverId]
+        await writeFile(cachePath, jsonStringify(cache))
+      }
+    }
+  }).catch(() => {
+    // This is a best-effort optimization, not credential storage.
+  }).finally(() => { authCachePromise = null })
+  return writeChain
 }
 
 /**
@@ -1637,6 +1658,10 @@ const connectToServerMemoized = memoize(
       }
 
       attempt.cleanup = wrappedCleanup
+      if (serverRef.type === 'http' || serverRef.type === 'sse') {
+        clearMcpDiscoveryWithoutTokens(name, serverRef)
+        await clearMcpAuthCache(name)
+      }
       const connectionDurationMs = Date.now() - connectStartTime
       logEvent('tengu_mcp_server_connection_succeeded', {
         connectionDurationMs,
@@ -2428,6 +2453,10 @@ export async function getMcpToolsCommandsAndResources(
   mcpConfigs?: Record<string, ScopedMcpServerConfig>,
 ): Promise<void> {
   let resourceToolsAdded = false
+  // OAuth may complete in the desktop server while this CLI stays alive.
+  // Share reads within a batch, but never freeze another process's old 401.
+  await writeChain
+  authCachePromise = null
 
   const allConfigEntries = Object.entries(
     mcpConfigs ?? (await getAllMcpConfigs()).servers,

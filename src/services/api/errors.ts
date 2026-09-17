@@ -533,6 +533,25 @@ function isOpenAIImageUrlTextOnlySchemaError(raw: string): boolean {
   )
 }
 
+// Deep-walk a request payload looking for image blocks. Images can sit at the
+// top level of a user message or nested inside a tool_result's content, and
+// the payloads here are { type, message: { content } } wrappers, so walk all
+// object values rather than only `content`.
+function messagesContainImageBlock(messages: readonly unknown[]): boolean {
+  const walk = (value: unknown): boolean => {
+    if (Array.isArray(value)) {
+      return value.some(walk)
+    }
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>
+      if (record.type === 'image') return true
+      return Object.values(record).some(walk)
+    }
+    return false
+  }
+  return walk(messages)
+}
+
 function buildAssistantMessageFromError(
   error: unknown,
   model: string,
@@ -592,6 +611,7 @@ function buildAssistantMessageFromError(
       error: 'invalid_request',
       errorDetails: error.message,
       businessErrorCode: BUSINESS_ERROR_CODES.IMAGE_UNSUPPORTED,
+      sourceModel: model,
     })
   }
 
@@ -1093,6 +1113,30 @@ function buildAssistantMessageFromError(
       content: `${API_ERROR_MESSAGE_PREFIX}: ${error.message}`,
       error: 'server_error',
       errorDetails: JSON.stringify(error.toDiagnosticData()),
+    })
+  }
+
+  // Fallback for image rejections with unrecognized wording. The wording
+  // classifier above can't enumerate every provider/gateway phrasing, and a
+  // miss used to poison the session: the rejected image stayed in history and
+  // every later turn re-failed with the same 400. When a 400/422 lands on a
+  // request that actually carried image blocks and no more specific classifier
+  // matched (context overflow, PDF, image size, auth, 404 all handled above),
+  // treat it as an image rejection so the image is stripped from later turns.
+  // The strip is gated to sourceModel, so a false positive only affects the
+  // exact model that failed — switching models replays the image.
+  if (
+    error instanceof APIError &&
+    (error.status === 400 || error.status === 422) &&
+    options?.messagesForAPI &&
+    messagesContainImageBlock(options.messagesForAPI)
+  ) {
+    return createAssistantAPIErrorMessage({
+      content: getImageUnsupportedErrorMessage(),
+      error: 'invalid_request',
+      errorDetails: error.message,
+      businessErrorCode: BUSINESS_ERROR_CODES.IMAGE_UNSUPPORTED,
+      sourceModel: model,
     })
   }
 

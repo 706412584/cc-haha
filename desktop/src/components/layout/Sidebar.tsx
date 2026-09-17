@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { Bell, Check, ChevronDown, Clock, Download, Folder, FolderOpen, FolderPlus, GitBranch, MoreHorizontal, Pin, PinOff, RefreshCw, RotateCcw, SquarePen, Trash2, Upload, X } from 'lucide-react'
+import { releaseWorkspaceSession } from '../../lib/workspace/releaseSession'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -27,7 +28,7 @@ import {
 } from './sidebarTaskGroups'
 import { sessionsApi } from '../../api/sessions'
 import type { SessionListItem } from '../../types/session'
-import { useTabStore, SETTINGS_TAB_ID, SCHEDULED_TAB_ID, MARKET_TAB_ID } from '../../stores/tabStore'
+import { useTabStore, SETTINGS_TAB_ID, SCHEDULED_TAB_ID, MARKET_TAB_ID, CONNECTORS_TAB_ID } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useOpenTargetStore } from '../../stores/openTargetStore'
 import {
@@ -939,6 +940,7 @@ export function Sidebar({
     if (!pendingDeleteSessionId) return
     await deleteSession(pendingDeleteSessionId)
     disconnectSession(pendingDeleteSessionId)
+    releaseWorkspaceSession(pendingDeleteSessionId)
     closeTab(pendingDeleteSessionId)
     setPendingDeleteSessionId(null)
   }, [closeTab, deleteSession, disconnectSession, pendingDeleteSessionId])
@@ -1051,6 +1053,7 @@ export function Sidebar({
       const result = await deleteSessions(ids)
       for (const sessionId of result.successes) {
         disconnectSession(sessionId)
+        releaseWorkspaceSession(sessionId)
         closeTab(sessionId)
       }
 
@@ -1281,19 +1284,20 @@ export function Sidebar({
         )}
         {!isMobile && (
           <NavItem
-            active={activeTabId === MARKET_TAB_ID}
+            active={activeTabId === MARKET_TAB_ID || activeTabId === CONNECTORS_TAB_ID}
             collapsed={!expanded}
-            label={t('sidebar.market')}
+            label={t('sidebar.extensions')}
             touchFriendly={isMobile}
             onClick={() => {
-              useTabStore.getState().openTab(MARKET_TAB_ID, t('sidebar.market'), 'market')
+              useTabStore.getState().openTab(MARKET_TAB_ID, t('sidebar.extensions'), 'market')
               closeMobileDrawer()
             }}
             icon={<StorefrontIcon />}
           >
-            {t('sidebar.market')}
+            {t('sidebar.extensions')}
           </NavItem>
         )}
+
       </div>
 
       {expanded ? (
@@ -1727,7 +1731,7 @@ export function Sidebar({
         <div className="flex-1" aria-hidden="true" />
       )}
 
-      {!isMobile && (
+      {(
         <div
           data-testid="sidebar-settings-dock"
           className={`sidebar-settings-dock absolute bottom-0 left-0 right-0 border-t border-[var(--color-border)] p-3 ${expanded ? '' : 'flex justify-center'}`}
