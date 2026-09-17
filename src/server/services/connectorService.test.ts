@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { ConnectorService, type ConnectorServiceDependencies } from './connectorService.js'
 import type { ConnectorAdapter } from '../../services/connectors/types.js'
 
-const definition = { id: 'feishu' as const, pluginId: 'feishu@test', packageName: 'fake', version: '1.0.0', homepage: 'https://example.test', credentialMode: 'shared' as const, platforms: ['darwin-arm64', 'darwin-x64', 'win32-x64', 'win32-arm64'] }
+const definition = { id: 'feishu' as const, pluginId: 'feishu@test', packageName: 'fake', version: '1.0.0', homepage: 'https://example.test', credentialMode: 'shared' as const, platforms: [`${process.platform}-${process.arch}`] }
 async function settled(service: ConnectorService) {
   for (let index = 0; index < 100 && service.get('feishu').operation; index++) await new Promise(resolve => setTimeout(resolve, 1))
   expect(service.get('feishu').operation).toBeUndefined()

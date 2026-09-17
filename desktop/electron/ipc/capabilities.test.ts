@@ -70,6 +70,8 @@ describe('Electron IPC capabilities', () => {
     expect(isElectronIpcChannel(ELECTRON_IPC_CHANNELS.appGetLocalePreference)).toBe(true)
     expect(isElectronIpcChannel(ELECTRON_IPC_CHANNELS.appSetLocalePreference)).toBe(true)
     expect(isElectronIpcChannel(ELECTRON_IPC_CHANNELS.appGetPreferredSystemLanguages)).toBe(true)
+    expect(isElectronIpcChannel(ELECTRON_IPC_CHANNELS.appGetKeepActiveInBackground)).toBe(true)
+    expect(isElectronIpcChannel(ELECTRON_IPC_CHANNELS.appSetKeepActiveInBackground)).toBe(true)
     expect(isElectronIpcChannel('ipcRenderer:send-anything')).toBe(false)
   })
 
@@ -135,6 +137,10 @@ describe('Electron IPC capabilities', () => {
     expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.updateCheck, { proxy: 'http://127.0.0.1:7890', extra: true })).toBe(false)
     expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.appSetLocalePreference, 'zh-TW')).toBe(true)
     expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.appSetLocalePreference, 'fr')).toBe(false)
+    expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.appSetKeepActiveInBackground, true)).toBe(true)
+    expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.appSetKeepActiveInBackground, false)).toBe(true)
+    expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.appSetKeepActiveInBackground, 'yes')).toBe(false)
+    expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.appGetKeepActiveInBackground, undefined)).toBe(true)
     expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.petsList, undefined)).toBe(true)
     expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.petsList, {})).toBe(false)
     expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.petsCreateFromImage, {

@@ -158,7 +158,20 @@ const sessionSlashCommands = new Map<string, SessionSlashCommand[]>()
  * Timers for delayed session cleanup after client disconnect.
  * If a client reconnects before the timer fires, the timer is cancelled.
  */
-const PENDING_PERMISSION_DISCONNECT_CLEANUP_MS = 30 * 60_000
+/**
+ * Ceiling on how long an abandoned permission prompt may pin a disconnected
+ * session's CLI.
+ *
+ * A turn blocked on permission cannot finish on its own, so the disconnect path
+ * deliberately waits longer than the ordinary grace period — the user may only
+ * have lost the socket for a moment and still wants to answer. But once the
+ * client is gone nobody *can* answer, and the previous 30-minute wait kept a
+ * full CLI process resident for half an hour after every screen-off (the
+ * renderer's heartbeat is throttled while the display is asleep, so the socket
+ * drops every time). Five minutes still covers a reconnect or a quick Wi-Fi
+ * flap while bounding what an abandoned prompt can hold.
+ */
+const PENDING_PERMISSION_DISCONNECT_CLEANUP_MS = 5 * 60_000
 let disableDisconnectCleanupForTests = false
 const sessionCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>()
 /**

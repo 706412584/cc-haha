@@ -1794,13 +1794,16 @@ export class ConversationService {
       CLAUDE_STREAM_MAX_THINKING_DURATION_MS:
         cleanEnv.CLAUDE_STREAM_MAX_THINKING_DURATION_MS ||
         String(DEFAULT_STREAM_MAX_THINKING_DURATION_MS),
-      // Time-to-first-token budget: how long to wait for the FIRST streamed
-      // chunk after response headers arrive. The idle timer above is the wrong
-      // knob for slow prefill — it kills healthy local/3P models that take
-      // minutes to emit their first token (#826). Tie this to the user's
-      // request-timeout setting (API_TIMEOUT_MS, from networkEnv) so raising
-      // "请求超时" actually extends how long we wait for the first token. The
-      // CLI switches to the shorter idle budget once tokens start flowing.
+      // A retry that receives response headers but no SSE events must not sit on
+      // the full request timeout before the next attempt. Keep explicit
+      // overrides, but cap the Desktop default first-event wait at two minutes.
+      //
+      // Deliberately NOT tied to the user's "请求超时": upstream ties the two so
+      // a slow prefill is not killed early (#826), but an empty stream that
+      // never produces a first event then waits the whole configured budget
+      // before the retry runs, which reads as a stuck turn. The overall cap
+      // (CLAUDE_STREAM_MAX_DURATION_MS) still follows the user's setting, so a
+      // legitimate long response is not cut short.
       CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS:
         cleanEnv.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS || '120000',
       // When a stream does get aborted, retry as streaming instead of falling

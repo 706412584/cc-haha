@@ -68,6 +68,16 @@ type SettingsStore = {
   agentTeamsEnabled: boolean
   autoDreamEnabled: boolean
   unifiedActivityPanelEnabled: boolean
+  /**
+   * Keep the renderer running while its window is hidden.
+   *
+   * Off by default: a backgrounded renderer normally stops running timers,
+   * which is what makes an idle app cheap. But the session WebSocket's
+   * heartbeat is a `setInterval`, so with the screen off the pings stop and
+   * the socket drops — and the server, rightly refusing to kill a turn that
+   * is still running, then holds the CLI for a session nobody is attached to.
+   */
+  keepActiveInBackground: boolean
   agentOfficeSurface: AgentOfficeSurface
   autoModeOptInAccepted: boolean
   availableModels: ModelInfo[]
@@ -118,6 +128,7 @@ type SettingsStore = {
   setAgentTeamsEnabled: (enabled: boolean) => Promise<void>
   setAutoDreamEnabled: (enabled: boolean) => Promise<void>
   setUnifiedActivityPanelEnabled: (enabled: boolean) => Promise<void>
+  setKeepActiveInBackground: (keepActive: boolean) => Promise<void>
   setAgentOfficeSurface: (surface: AgentOfficeSurface) => Promise<void>
   acceptAutoModeOptIn: () => Promise<void>
   setLocale: (locale: Locale) => void
@@ -220,6 +231,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   agentTeamsEnabled: true,
   autoDreamEnabled: false,
   unifiedActivityPanelEnabled: false,
+  keepActiveInBackground: false,
   agentOfficeSurface: 'modal',
   autoModeOptInAccepted: false,
   availableModels: [],
@@ -276,6 +288,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         userSettings,
         h5AccessResult,
         traceCapture,
+        keepActiveInBackground,
       ] = await Promise.all([
         settingsApi.getPermissionMode(),
         modelsApi.list(),
@@ -284,6 +297,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         settingsApi.getUser(),
         loadH5AccessSettings(previousH5Access),
         loadTraceCaptureSettings(),
+        // Main-process owned, so it is read from the host rather than user
+        // settings. A host without the capability reports false, which is the
+        // default anyway.
+        getDesktopHost().app.getKeepActiveInBackground().catch(() => false),
       ])
       const desktopTerminal = normalizeDesktopTerminalSettings(userSettings.desktopTerminal)
       lastPersistedDesktopTerminal = desktopTerminal
@@ -303,6 +320,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         agentTeamsEnabled: userSettings.agentTeamsEnabled !== false,
         autoDreamEnabled: userSettings.autoDreamEnabled === true,
         unifiedActivityPanelEnabled: userSettings.unifiedActivityPanelEnabled === true,
+        keepActiveInBackground,
         agentOfficeSurface: userSettings.agentOfficeSurface === 'tab' ? 'tab' : 'modal',
         autoModeOptInAccepted: userSettings.skipAutoPermissionPrompt === true,
         chatSendBehavior: normalizeChatSendBehavior(userSettings.chatSendBehavior),
@@ -416,6 +434,19 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       await settingsApi.updateUser({ autoDreamEnabled: enabled })
     } catch (error) {
       set({ autoDreamEnabled: prev })
+      throw error
+    }
+  },
+
+  setKeepActiveInBackground: async (keepActive) => {
+    const previous = get().keepActiveInBackground
+    set({ keepActiveInBackground: keepActive })
+    try {
+      // The main process owns this preference: it has to be applied at window
+      // creation, before any renderer exists to hold the setting.
+      await getDesktopHost().app.setKeepActiveInBackground(keepActive)
+    } catch (error) {
+      set({ keepActiveInBackground: previous })
       throw error
     }
   },

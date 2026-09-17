@@ -424,6 +424,9 @@ export type DesktopHost = {
     getVersion(): Promise<string>
     getLocalePreference(): Promise<Locale | null>
     setLocalePreference(locale: Locale): Promise<void>
+    /** Whether the renderer keeps running while its window is hidden. */
+    getKeepActiveInBackground(): Promise<boolean>
+    setKeepActiveInBackground(keepActive: boolean): Promise<void>
     getPreferredSystemLanguages(): Promise<string[]>
     onLocaleChanged(handler: (locale: Locale) => void): Promise<DesktopHostUnlisten>
   }

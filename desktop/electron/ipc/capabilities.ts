@@ -322,6 +322,8 @@ export const ELECTRON_IPC_VALIDATORS = {
   [ELECTRON_IPC_CHANNELS.appGetLocalePreference]: noPayload,
   [ELECTRON_IPC_CHANNELS.appSetLocalePreference]: localePreference,
   [ELECTRON_IPC_CHANNELS.appGetPreferredSystemLanguages]: noPayload,
+  [ELECTRON_IPC_CHANNELS.appGetKeepActiveInBackground]: noPayload,
+  [ELECTRON_IPC_CHANNELS.appSetKeepActiveInBackground]: booleanPayload,
   [ELECTRON_IPC_CHANNELS.publicAccessGetStatus]: noPayload,
   [ELECTRON_IPC_CHANNELS.publicAccessSaveCredential]: value => typeof value === 'string' && value.trim().length > 0 && value.length <= 4096 && !/\s/.test(value.trim()),
   [ELECTRON_IPC_CHANNELS.publicAccessDeleteCredential]: noPayload,

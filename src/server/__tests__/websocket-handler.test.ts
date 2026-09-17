@@ -4703,7 +4703,7 @@ describe('WebSocket handler session isolation', () => {
     handleWebSocket.close(ws, 1006, 'permission prompt abandoned')
 
     expect(setTimeoutSpy).toHaveBeenCalledTimes(1)
-    expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(30 * 60_000)
+    expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(5 * 60_000)
     expect(turnCompleteCallback).not.toBeNull()
 
     const expirePermissionWait = setTimeoutSpy.mock.calls[0]?.[0] as (() => void) | undefined
@@ -4754,7 +4754,7 @@ describe('WebSocket handler session isolation', () => {
     })
 
     expect(setTimeoutSpy).toHaveBeenCalledTimes(1)
-    expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(30 * 60_000)
+    expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(5 * 60_000)
   })
 
   it('does not forward prewarm startup status to a reconnecting client', async () => {
@@ -5124,7 +5124,7 @@ describe('WebSocket handler session isolation', () => {
     handleWebSocket.close(ws, 1000, 'pet closed while awaiting permission')
 
     expect(setTimeoutSpy).toHaveBeenCalledTimes(1)
-    expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(30 * 60_000)
+    expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(5 * 60_000)
     expect(outputCallbacks).toHaveLength(2)
 
     outputCallbacks[1]?.({

@@ -122,6 +122,9 @@ describe('desktop host contract', () => {
     await expect(browserHost.app.getLocalePreference()).resolves.toBeNull()
     await expect(browserHost.app.setLocalePreference('jp')).resolves.toBeUndefined()
     await expect(browserHost.app.onLocaleChanged(vi.fn())).resolves.toEqual(expect.any(Function))
+    // A browser tab cannot be backgrounded, so the setting has no meaning there.
+    await expect(browserHost.app.getKeepActiveInBackground()).resolves.toBe(false)
+    await expect(browserHost.app.setKeepActiveInBackground(true)).resolves.toBeUndefined()
 
     languages.mockRestore()
   })

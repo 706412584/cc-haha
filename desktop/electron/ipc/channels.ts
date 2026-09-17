@@ -9,6 +9,8 @@ export const ELECTRON_IPC_CHANNELS = {
   appGetLocalePreference: 'desktop:app:get-locale-preference',
   appSetLocalePreference: 'desktop:app:set-locale-preference',
   appGetPreferredSystemLanguages: 'desktop:app:get-preferred-system-languages',
+  appGetKeepActiveInBackground: 'desktop:app:get-keep-active-in-background',
+  appSetKeepActiveInBackground: 'desktop:app:set-keep-active-in-background',
   runtimeGetServerUrl: 'desktop:runtime:get-server-url',
   runtimeGetLocalAccessToken: 'desktop:runtime:get-local-access-token',
   runtimeGetPetAccessToken: 'desktop:runtime:get-pet-access-token',

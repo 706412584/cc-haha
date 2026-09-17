@@ -18,6 +18,10 @@ import {
   sendDesktopNotification,
 } from './services/notifications'
 import { installApplicationMenu, installRendererContextMenu } from './services/menu'
+import {
+  readKeepActiveInBackground,
+  writeKeepActiveInBackground,
+} from './services/backgroundActivityPreference'
 import { saveWorkspaceBrowserPdf } from './services/workspaceBrowserPdf'
 import { workspaceBrowserMenuPosition } from './services/workspaceBrowserMenu'
 import type { WorkspaceBrowserMenuOptions } from '../src/lib/desktopHost/types'
@@ -557,6 +561,22 @@ function registerIpcHandlers() {
     ELECTRON_IPC_CHANNELS.appGetPreferredSystemLanguages,
     () => app.getPreferredSystemLanguages(),
   )
+  registerHandler(
+    ELECTRON_IPC_CHANNELS.appGetKeepActiveInBackground,
+    () => readKeepActiveInBackground(app),
+  )
+  registerHandler(ELECTRON_IPC_CHANNELS.appSetKeepActiveInBackground, (event, payload) => {
+    if (currentWindow(event) !== mainWindow) {
+      throw new Error('Only the main window can change the background activity preference')
+    }
+    const keepActive = payload as boolean
+    writeKeepActiveInBackground(app, keepActive)
+    // Applies immediately: the setting exists to keep an in-flight turn alive,
+    // so making the user restart the app to benefit from it defeats the point.
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.setBackgroundThrottling(!keepActive)
+    }
+  })
   registerHandler(ELECTRON_IPC_CHANNELS.runtimeGetServerUrl, () => getServerRuntime().getServerUrl())
   registerHandler(
     ELECTRON_IPC_CHANNELS.runtimeGetLocalAccessToken,
@@ -895,6 +915,9 @@ async function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // A backgrounded renderer stops running its timers, which drops the
+      // session WebSocket's heartbeat while the display is asleep. Opt-in.
+      backgroundThrottling: !readKeepActiveInBackground(app),
     },
   })
   configureLocalServerRequestAuth(

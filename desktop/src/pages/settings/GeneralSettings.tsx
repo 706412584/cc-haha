@@ -83,6 +83,8 @@ export function GeneralSettings() {
     setAutoDreamEnabled,
     unifiedActivityPanelEnabled,
     setUnifiedActivityPanelEnabled,
+    keepActiveInBackground,
+    setKeepActiveInBackground,
     agentOfficeSurface,
     setAgentOfficeSurface,
     locale,
@@ -400,6 +402,17 @@ export function GeneralSettings() {
       addToast({
         type: 'error',
         message: t('settings.general.activityPanelSaveFailed'),
+      })
+    }
+  }
+
+  const handleKeepActiveInBackgroundToggle = async (keepActive: boolean) => {
+    try {
+      await setKeepActiveInBackground(keepActive)
+    } catch {
+      addToast({
+        type: 'error',
+        message: t('settings.general.keepActiveSaveFailed'),
       })
     }
   }
@@ -1148,6 +1161,33 @@ export function GeneralSettings() {
           </div>
         </label>
       </div>
+
+      {isDesktopRuntime() && (
+        <div className="mt-8">
+          <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.keepActiveTitle')}</h2>
+          <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.keepActiveDescription')}</p>
+          <label className="relative flex items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 cursor-pointer hover:border-[var(--color-border-focus)] transition-colors">
+            <input
+              type="checkbox"
+              aria-label={t('settings.general.keepActiveEnabled')}
+              checked={keepActiveInBackground}
+              onChange={(event) => void handleKeepActiveInBackgroundToggle(event.target.checked)}
+              className={SETTINGS_CHECKBOX_INPUT_CLASS}
+            />
+            <SettingsCheckboxMark checked={keepActiveInBackground} />
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-[var(--color-text-primary)]">
+                {t('settings.general.keepActiveEnabled')}
+              </div>
+              <div className="text-xs text-[var(--color-text-tertiary)] mt-1 leading-5">
+                {keepActiveInBackground
+                  ? t('settings.general.keepActiveHintOn')
+                  : t('settings.general.keepActiveHintOff')}
+              </div>
+            </div>
+          </label>
+        </div>
+      )}
 
       {isDesktopRuntime() && (
         <div className="mt-8">

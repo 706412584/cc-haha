@@ -67,6 +67,14 @@ export const browserHost: DesktopHost = {
     async setLocalePreference() {
       // Browser/H5 preferences stay in renderer localStorage.
     },
+    // A browser tab has no window to background: the host keeps the page alive
+    // and the WebSocket heartbeat runs as long as the tab exists.
+    async getKeepActiveInBackground() {
+      return false
+    },
+    async setKeepActiveInBackground() {
+      // No-op outside Electron; there is nothing to un-throttle.
+    },
     async getPreferredSystemLanguages() {
       return readBrowserLanguages()
     },
