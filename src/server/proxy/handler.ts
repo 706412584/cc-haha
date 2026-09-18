@@ -109,13 +109,18 @@ function createTimeoutController(timeoutMs: number): {
  */
 function readErrno(error: unknown): number | undefined {
   let current: unknown = error
-  for (let depth = 0; current && typeof current === 'object' && depth < 5; depth += 1) {
-    const candidate = current as { errno?: unknown; cause?: unknown }
-    if (Object.hasOwn(candidate, 'errno')) {
-      const errno = candidate.errno
-      if (typeof errno === 'number' && Number.isFinite(errno) && errno !== 0) return errno
+  for (let depth = 0; current instanceof Error && depth < 5; depth += 1) {
+    // A getter that throws here would turn the clean 502 this runs inside into
+    // an uncaught exception, so each read is guarded rather than assumed.
+    try {
+      if (Object.hasOwn(current, 'errno')) {
+        const errno = (current as { errno?: unknown }).errno
+        if (typeof errno === 'number' && Number.isFinite(errno) && errno !== 0) return errno
+      }
+    } catch {
+      return undefined
     }
-    const cause = candidate.cause
+    const cause = (current as { cause?: unknown }).cause
     if (cause === current) break
     current = cause
   }
@@ -131,15 +136,23 @@ const MAX_REPORTED_URL_PATH = 120
  *
  * This string ends up in an error message written to the session transcript,
  * the diagnostics log, and the UI, so credentials must not survive it. A
- * provider `baseUrl` is user-supplied: it may embed `user:pass@`, a query
- * string carrying an API key, or a relay token as a path segment. Only the
- * endpoint helps diagnose a dropped connection, so userinfo and the query are
- * dropped, and the path is truncated to keep a pathological baseUrl from
- * inflating the message.
+ * provider `baseUrl` is user-supplied and reaches here unvalidated, which rules
+ * out trusting the parse: `new URL('alice:s3cr3t@relay/v1')` succeeds with
+ * scheme `alice:` and `s3cr3t@relay/v1` as the path, so a baseUrl missing its
+ * scheme would print the password as if it were a scheme and host. Only http(s)
+ * with a real authority is reported; anything else cannot be redacted reliably
+ * and is not echoed at all.
+ *
+ * Only the endpoint helps diagnose a dropped connection, so userinfo and the
+ * query are dropped. The path is kept because the failing route (`/v1/messages`
+ * vs a relay's own prefix) is diagnostic, but it is truncated so a pathological
+ * baseUrl cannot inflate the message.
  */
 function describeUpstreamUrl(url: string): string {
   try {
     const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '[unparsable-url]'
+    if (!parsed.host) return '[unparsable-url]'
     const path = parsed.pathname.length > MAX_REPORTED_URL_PATH
       ? `${parsed.pathname.slice(0, MAX_REPORTED_URL_PATH)}…`
       : parsed.pathname
@@ -160,10 +173,17 @@ function describeUpstreamUrl(url: string): string {
  * appending a redacted URL after an unredacted message would leak exactly what
  * the redaction is for.
  *
- * Each URL collapses to its host. A URL whose host is empty (`file://`, or any
- * scheme that does not use an authority) collapses to a placeholder instead, so
- * a path that may embed a credential cannot survive as the remainder of the
- * match.
+ * Each URL collapses to its host, and to a placeholder when it has none
+ * (`file://`, or any scheme without an authority), so a path that may embed a
+ * credential cannot survive as the remainder of the match.
+ *
+ * The match deliberately stops at whitespace, which bounds the damage rather
+ * than eliminating it: a URL containing a space (`file:///My Documents/token`)
+ * leaves everything after the space in place. Transport errors from Bun
+ * percent-encode the request URL, so the path this exists for is covered; the
+ * residual case is a locally-constructed path with a space, where only the
+ * trailing segment can leak. Widening the character class instead would swallow
+ * the surrounding sentence for every ordinary message.
  */
 function redactUrlsInMessage(message: string): string {
   return message.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"']+/gi, candidate => {
@@ -204,6 +224,34 @@ function describeUpstreamFailure(err: unknown, url: string): string {
   ].filter((part): part is string => part !== null)
 
   return `${message} (${diagnostics.join(', ')})`
+}
+
+/** The endpoint a rethrown failure was aimed at, when the thrower knew it. */
+const ATTEMPTED_URL = Symbol('cc-haha-attempted-url')
+
+/**
+ * Tag an error with the URL that produced it.
+ *
+ * The OpenAI-shaped handlers rethrow into one shared catch, which otherwise only
+ * has the provider's baseUrl — enough to name the provider, not the endpoint.
+ * Marking is best-effort: a frozen or primitive throw keeps its original shape
+ * and the caller falls back to the baseUrl.
+ */
+function withAttemptedUrl(err: unknown, url: string): unknown {
+  if (err && typeof err === 'object') {
+    try {
+      Object.defineProperty(err, ATTEMPTED_URL, { value: url, enumerable: false })
+    } catch {
+      // Best effort only; diagnostics must not depend on mutating the error.
+    }
+  }
+  return err
+}
+
+function attemptedUrlOf(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object') return undefined
+  const url = (err as Record<symbol, unknown>)[ATTEMPTED_URL]
+  return typeof url === 'string' ? url : undefined
 }
 
 async function fetchUpstreamWithTimeout(
@@ -395,7 +443,7 @@ export async function handleProxyRequest(req: Request, url: URL): Promise<Respon
           type: err instanceof RequestCompatibilityError ? 'invalid_request_error' : 'api_error',
           message: err instanceof RequestCompatibilityError
             ? (err instanceof Error ? err.message : String(err))
-            : describeUpstreamFailure(err, baseUrl),
+            : describeUpstreamFailure(err, attemptedUrlOf(err) ?? baseUrl),
         },
       },
       { status: policyError ? 403 : err instanceof RequestCompatibilityError ? 400 : 502 },
@@ -839,7 +887,10 @@ async function handleOpenaiChat(
       })
       markTraceErrorRecorded(err)
     }
-    throw err
+    // The caller's unified handler only knows the provider's baseUrl, which
+    // cannot say whether `chat/completions` or `responses` was the endpoint that
+    // failed. Carry the real one across the rethrow.
+    throw withAttemptedUrl(err, url)
   }
 
   if (!upstream.ok) {
@@ -1040,7 +1091,10 @@ async function handleOpenaiResponses(
       })
       markTraceErrorRecorded(err)
     }
-    throw err
+    // The caller's unified handler only knows the provider's baseUrl, which
+    // cannot say whether `chat/completions` or `responses` was the endpoint that
+    // failed. Carry the real one across the rethrow.
+    throw withAttemptedUrl(err, url)
   }
 
   if (!upstream.ok) {

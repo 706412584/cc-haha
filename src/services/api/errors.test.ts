@@ -5,6 +5,7 @@ import {
   getAssistantMessageFromError,
   getImageUnsupportedErrorMessage,
   isContextOverflowErrorText,
+  isSerializedSizeOverflowText,
   isUnsupportedImageInputErrorMessage,
   PROMPT_TOO_LONG_ERROR_MESSAGE,
 } from './errors.js'
@@ -177,19 +178,33 @@ describe('context overflow errors', () => {
       'Input token exceed the limit (request id: 2026091012232219399237c955d568bTYJlzPo)',
       // Zhipu standard API 400001 (multi-channel relay roulette)
       'The request is invalid: Prompt exceeds max length. Please check the request body, required fields, and request format. (request id: 2026091013121410808462c955d568YOqobsug)',
-      // Serialized-size rejection from an Anthropic-compatible gateway
-      // (observed 2026-09-18). The token count was ~90K against a declared 1M
-      // window, so no token-based wording matched and the error fell through
-      // to the image-rejection fallback, reporting "This model does not
-      // support images" for a request that was merely too large.
-      '400 {"error":{"type":"<nil>","message":"{\\"message\\":\\"Input content length exceeds threshold.\\",\\"reason\\":\\"CONTENT_LENGTH_EXCEEDS_THRESHOLD\\"} (request id: 202609181612512662043798268d9d64lkDAC4q)"}}',
-      'Input content length exceeds threshold.',
-      'CONTENT_LENGTH_EXCEEDS_THRESHOLD',
     ]
 
     for (const message of overflowMessages) {
       expect(isContextOverflowErrorText(message)).toBe(true)
     }
+  })
+
+  // Serialized-size rejections are a separate family: same symptom (a request
+  // too large to send) but a different fix, chosen by status. The wording was
+  // observed on a relay that reported ~90K tokens against a declared 1M window,
+  // so no token-based pattern matched and the error fell through to the
+  // image-rejection fallback — reporting "This model does not support images"
+  // for a request that was merely too large.
+  test('recognises the serialized-size wording the token patterns miss', () => {
+    const serializedSizeMessages = [
+      '400 {"error":{"type":"<nil>","message":"{\\"message\\":\\"Input content length exceeds threshold.\\",\\"reason\\":\\"CONTENT_LENGTH_EXCEEDS_THRESHOLD\\"} (request id: 202609181612512662043798268d9d64lkDAC4q)"}}',
+      'Input content length exceeds threshold.',
+      'CONTENT_LENGTH_EXCEEDS_THRESHOLD',
+    ]
+
+    for (const message of serializedSizeMessages) {
+      expect(isSerializedSizeOverflowText(message)).toBe(true)
+    }
+
+    // Attachment limits are not request overflow: the file itself is too big, so
+    // there is nothing to compact.
+    expect(isSerializedSizeOverflowText('The uploaded file content length exceeds the 10MB limit')).toBe(false)
   })
 
   test('does not match unrelated or separately-handled errors', () => {
@@ -306,5 +321,39 @@ describe('context overflow errors', () => {
       type: 'text',
       text: PROMPT_TOO_LONG_ERROR_MESSAGE,
     })
+  })
+
+  // A 413 says the payload itself is unacceptable, which the media-stripping
+  // path fixes. Compacting instead would shrink the transcript around a document
+  // that is itself too large, and the next turn would resend it — the exact
+  // unrecoverable loop the overflow classifier exists to avoid.
+  test('routes a 413 with the serialized-size wording to the media path, not to compact', () => {
+    const message = '{"message":"Input content length exceeds threshold.","reason":"CONTENT_LENGTH_EXCEEDS_THRESHOLD"}'
+    const error = new APIError(
+      413,
+      { type: 'error', error: { type: 'api_error', message } },
+      message,
+      undefined,
+    )
+
+    const msg = getAssistantMessageFromError(error, 'claude-opus-4-8')
+
+    expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.REQUEST_TOO_LARGE)
+  })
+
+  // The same wording without a 413 status is a transcript overflow: there is no
+  // attachment to strip, so compacting is the only recovery.
+  test('routes the serialized-size wording without a 413 to compact', () => {
+    const message = '{"message":"Input content length exceeds threshold.","reason":"CONTENT_LENGTH_EXCEEDS_THRESHOLD"}'
+    const error = new APIError(
+      400,
+      { type: 'error', error: { type: 'api_error', message } },
+      message,
+      undefined,
+    )
+
+    const msg = getAssistantMessageFromError(error, 'claude-opus-4-8')
+
+    expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.PROMPT_TOO_LONG)
   })
 })

@@ -79,12 +79,27 @@ describe('proxy upstream connection failures keep their diagnostics', () => {
       expect(body.error?.type).toBe('api_error')
       expect(body.error?.message).toContain('The socket connection was closed unexpectedly.')
       expect(body.error?.message).toContain('code=ECONNRESET')
+      // The anthropic path reports its endpoint inline; the OpenAI paths rethrow
+      // into the shared handler, which must still name the endpoint rather than
+      // the provider root.
       expect(body.error?.message).toContain('url=https://fixture.invalid')
       // Bun reports errno 0 for every transport failure; it is a placeholder,
       // not a POSIX value, and would read as "success".
       expect(body.error?.message).not.toContain('errno=')
     })
   }
+
+  // The OpenAI handlers rethrow into one shared catch, which previously only had
+  // the provider baseUrl — so a failure could not be attributed to
+  // `chat/completions` versus `responses`, which is the whole diagnostic point.
+  test('names the endpoint that failed, not just the provider root', async () => {
+    const { body } = await proxyWithFailingFetch(
+      'openai_chat',
+      Object.assign(new Error('The socket connection was closed unexpectedly.'), { code: 'ECONNRESET' }),
+    )
+
+    expect(body.error?.message).toContain('url=https://fixture.invalid/v1/chat/completions')
+  })
 
   test('finds the transport code through the SDK cause chain', async () => {
     const root = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), {
@@ -133,6 +148,45 @@ describe('proxy upstream connection failures keep their diagnostics', () => {
     expect(message).toContain('[redacted-url]')
     expect(message).not.toContain('token-LEAKED')
     expect(message).not.toContain('alice')
+  })
+
+  // `new URL('alice:s3cr3t@relay/v1')` parses successfully with `alice:` as the
+  // scheme and the password as the path, so a baseUrl that is missing its scheme
+  // would print the credential where the scheme belongs. Only http(s) with a real
+  // authority is reported.
+  test('refuses to report a url it cannot parse into a real authority', async () => {
+    const provider = await new ProviderService().addProvider({
+      presetId: 'custom',
+      name: 'Fixture',
+      baseUrl: 'alice:s3cr3t@fixture.invalid/v1',
+      apiKey: 'fake-key',
+      apiFormat: 'anthropic',
+      models: { main: 'fixture', haiku: 'fixture', sonnet: 'fixture', opus: 'fixture' },
+      supportsNestedToolResultMedia: false,
+    })
+    const callMock = spyOn(traceCaptureService, 'recordCall').mockResolvedValue(null)
+    const eventMock = spyOn(traceCaptureService, 'recordEvent').mockResolvedValue(null)
+    const fetchMock = spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      throw Object.assign(new Error('The socket connection was closed unexpectedly.'), { code: 'ECONNRESET' })
+    })
+    try {
+      const request = new Request(`http://localhost/proxy/providers/${provider.id}/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'fixture', max_tokens: 1024, messages: [{ role: 'user', content: 'x' }] }),
+      })
+      const response = await handleProxyRequest(request, new URL(request.url))
+      const body = await response.json() as { error?: { message?: string } }
+      const message = body.error?.message ?? ''
+
+      expect(message).toContain('url=[unparsable-url]')
+      expect(message).not.toContain('s3cr3t')
+      expect(message).not.toContain('alice')
+    } finally {
+      fetchMock.mockRestore()
+      callMock.mockRestore()
+      eventMock.mockRestore()
+    }
   })
 
   test('omits diagnostics the error does not carry instead of inventing them', async () => {

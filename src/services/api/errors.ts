@@ -75,6 +75,26 @@ export const PROMPT_TOO_LONG_ERROR_MESSAGE = 'Prompt is too long'
  * third-party overflow surfaces as "Please run /login" and the session is
  * unrecoverable (#1162).
  */
+/**
+ * Wordings that mean "the serialized request is too large" rather than "the
+ * token count exceeds the window". Both are size rejections, but they are fixed
+ * differently: an oversized transcript is compacted, while an oversized
+ * attachment is stripped — and compacting cannot shrink a single document, so
+ * routing one to the other loops forever.
+ *
+ * A gateway reports the serialized-size shape without a token count, so there is
+ * nothing to compact toward. It is therefore only treated as overflow when the
+ * status says so; a 413 keeps its own handling, which strips the media.
+ */
+const SERIALIZED_SIZE_OVERFLOW_PATTERNS: RegExp[] = [
+  /\binput content length exceeds\b/i,
+  /content_length_exceeds_threshold/i,
+]
+
+export function isSerializedSizeOverflowText(text: string): boolean {
+  return SERIALIZED_SIZE_OVERFLOW_PATTERNS.some(pattern => pattern.test(text))
+}
+
 const CONTEXT_OVERFLOW_PATTERNS: RegExp[] = [
   /prompt is too long/i,
   /input is too long for requested model/i,
@@ -92,22 +112,6 @@ const CONTEXT_OVERFLOW_PATTERNS: RegExp[] = [
   // the request body...". Some multi-channel relays randomly route here;
   // compacting clears it the same way.
   /prompt exceeds max length/i,
-  // Anthropic-compatible gateways that reject on the serialized request size
-  // rather than the token count: "Input content length exceeds threshold."
-  // with reason "CONTENT_LENGTH_EXCEEDS_THRESHOLD". Observed on a relay that
-  // reported ~90K tokens against a declared 1M window, so the token-based
-  // patterns above never match. Without these entries the error falls through
-  // to the generic 400 image-rejection fallback below (the transcript carried
-  // MCP screenshots), surfacing as "This model does not support images" — a
-  // cause unrelated to the real one, and one that no retry can clear because
-  // the rejected payload is only ever shrunk by compacting.
-  //
-  // Anchored on `input`/`threshold` on purpose: bare "content length exceeds"
-  // also matches attachment limits ("The uploaded file content length exceeds
-  // the 10MB limit"), which compacting cannot fix and which would otherwise be
-  // diverted away from the image-stripping fallback that does handle them.
-  /\binput content length exceeds\b/i,
-  /content_length_exceeds_threshold/i,
 ]
 
 export function isContextOverflowErrorText(text: string): boolean {
@@ -147,11 +151,7 @@ export function isContextWindowExceededMessage(message: string): boolean {
     raw.includes('exceeds the context window') ||
     raw.includes('exceed the context window') ||
     raw.includes('maximum context length') ||
-    raw.includes('context length exceeded') ||
-    // Serialized-size rejection (see CONTEXT_OVERFLOW_PATTERNS): the gateway
-    // words it as "content length", not "context length".
-    raw.includes('input content length exceeds') ||
-    raw.includes('content_length_exceeds_threshold')
+    raw.includes('context length exceeded')
   )
 }
 
@@ -765,9 +765,15 @@ function buildAssistantMessageFromError(
   // common relay wordings; isContextWindowExceededMessage keeps the extra
   // third-party gateway shapes (e.g. type "context_too_large") we handle for
   // #1162 that the shared pattern set doesn't yet include.
+  // A 413 is excluded from the serialized-size wording: the status says the
+  // *payload* is unacceptable, which the 413 branch below fixes by stripping the
+  // offending media. Compacting instead would shrink the transcript around a
+  // document that is itself too large, and the next turn would resend it.
+  const isPayloadTooLarge = error instanceof APIError && error.status === 413
   if (
     error instanceof Error &&
     (isContextOverflowErrorText(error.message) ||
+      (!isPayloadTooLarge && isSerializedSizeOverflowText(error.message)) ||
       isContextWindowExceededMessage(error.message))
   ) {
     // Content stays generic (UI matches on exact string). The raw error with
