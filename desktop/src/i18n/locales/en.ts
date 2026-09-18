@@ -805,6 +805,8 @@ export const en = {
   'workspace.review.statsTruncated': 'Too large to count',
   'workspace.preview': 'Preview',
   'workspace.edit': 'Edit',
+  'workspace.split': 'Split',
+  'workspace.splitUnavailable': 'Widen the panel to edit and preview side by side',
   'workspace.previewEmpty': 'Select a file to preview.',
   'workspace.lspState': 'LSP {state}',
   'workspace.lspDiagnostics': '{count} diagnostics',

@@ -808,6 +808,8 @@ export const jp: Record<TranslationKey, string> = {
   'workspace.review.statsTruncated': '大きすぎて未集計',
   'workspace.preview': 'プレビュー',
   'workspace.edit': '編集',
+  'workspace.split': '分割',
+  'workspace.splitUnavailable': 'パネルを広げると編集とプレビューを並べられます',
   'workspace.previewEmpty': 'プレビューするファイルを選択してください。',
   'workspace.lspState': 'LSP {state}',
   'workspace.lspDiagnostics': '{count} 件の診断',

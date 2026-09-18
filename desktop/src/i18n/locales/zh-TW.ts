@@ -808,6 +808,8 @@ export const zh: Record<TranslationKey, string> = {
   'workspace.review.statsTruncated': '過大，未統計',
   'workspace.preview': '預覽',
   'workspace.edit': '編輯',
+  'workspace.split': '分欄',
+  'workspace.splitUnavailable': '加寬面板後可同時編輯與預覽',
   'workspace.previewEmpty': '選擇一個檔案進行預覽。',
   'workspace.lspState': 'LSP {state}',
   'workspace.lspDiagnostics': '{count} 條診斷',

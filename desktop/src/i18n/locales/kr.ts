@@ -808,6 +808,8 @@ export const kr: Record<TranslationKey, string> = {
   'workspace.review.statsTruncated': '너무 커서 집계하지 않음',
   'workspace.preview': '미리 보기',
   'workspace.edit': '편집',
+  'workspace.split': '분할',
+  'workspace.splitUnavailable': '패널을 넓히면 편집과 미리보기를 나란히 볼 수 있습니다',
   'workspace.previewEmpty': '미리 볼 파일을 선택하세요.',
   'workspace.lspState': 'LSP {state}',
   'workspace.lspDiagnostics': '진단 {count}개',
