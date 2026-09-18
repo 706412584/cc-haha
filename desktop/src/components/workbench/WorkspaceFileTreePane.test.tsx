@@ -75,7 +75,19 @@ beforeEach(() => {
     expandedBySession: {},
     treeViewBySession: {},
     fileViewByKey: {},
-    statusBySession: {},
+    // Seeded rather than cleared: the store guards a repeated probe per session
+    // for the life of the module, so a later case in this file would otherwise
+    // never receive the workspace root the menu's path actions resolve against.
+    statusBySession: {
+      [SESSION]: {
+        state: 'ok',
+        workDir: '/repo',
+        repoName: 'repo',
+        branch: 'main',
+        isGitRepo: true,
+        changedFiles: [],
+      },
+    },
   })
   mocks.getWorkspaceTree.mockReset()
   mocks.getWorkspaceTree.mockImplementation(async (_session: string, path: string) =>
