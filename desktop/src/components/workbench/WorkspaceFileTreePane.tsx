@@ -8,6 +8,7 @@ import { Spinner } from '@/components/ui/Spinner'
 import { useTranslation } from '../../i18n'
 import { EMPTY_WORKSPACE_TREE_VIEW, useWorkspaceContentStore } from '../../stores/workspaceContentStore'
 import { basenameOf } from '../../lib/workspace/types'
+import { WorkspaceFileTreeMenu, type WorkspaceFileTreeMenuTarget } from './WorkspaceFileTreeMenu'
 import { useRovingTree } from './treeKeyboard'
 
 export type WorkspaceFileTreePaneProps = {
@@ -46,6 +47,8 @@ export function WorkspaceFileTreePane({
   const setTreeView = useWorkspaceContentStore((state) => state.setTreeView)
   const { filter } = treeView
   const setFilter = (filter: string) => setTreeView(sessionId, { filter, scrollTop: 0 })
+  const [menuTarget, setMenuTarget] = useState<WorkspaceFileTreeMenuTarget | null>(null)
+  const workDir = useWorkspaceContentStore((state) => state.statusBySession[sessionId]?.workDir) ?? null
   const [search, setSearch] = useState<(WorkspaceSearchResult & { sessionId: string }) | null>(null)
   const [searchError, setSearchError] = useState<string | null>(null)
   const [searching, setSearching] = useState(false)
@@ -96,6 +99,7 @@ export function WorkspaceFileTreePane({
     }
   }, [filter, sessionId])
   const loadTree = useWorkspaceContentStore((state) => state.loadTree)
+  const loadStatus = useWorkspaceContentStore((state) => state.loadStatus)
   const toggleDirectory = useWorkspaceContentStore((state) => state.toggleDirectory)
   const treeByKey = useWorkspaceContentStore((state) => state.treeByKey)
   const treeLoadingByKey = useWorkspaceContentStore((state) => state.treeLoadingByKey)
@@ -105,6 +109,14 @@ export function WorkspaceFileTreePane({
   useEffect(() => {
     void loadTree(sessionId, '')
   }, [loadTree, sessionId])
+
+  // The tree needs the workspace root for its own right-click actions (copying
+  // an absolute path, opening with an external app), and it can be the first
+  // surface a session shows. Only the file tab loaded status before, so a menu
+  // opened before any file did resolved absolute paths against nothing.
+  useEffect(() => {
+    void loadStatus(sessionId)
+  }, [loadStatus, sessionId])
 
   useEffect(() => {
     if (!selectedTreePath || filter.trim()) return
@@ -226,6 +238,10 @@ export function WorkspaceFileTreePane({
     onOpen(row.path)
   }
 
+  const openMenuAt = (row: TreeRow, x: number, y: number, trigger: HTMLElement | null) => {
+    setMenuTarget({ path: row.path, isDirectory: row.isDirectory, x, y, trigger })
+  }
+
   const { activePath, handleKeyDown, registerRow, setFocusedPath } = useRovingTree(rows, {
     selectedPath: selectedTreePath,
     onActivate: handleActivate,
@@ -303,6 +319,7 @@ export function WorkspaceFileTreePane({
                 tabIndex={row.path === activePath ? 0 : -1}
                 aria-selected={isSelected}
                 aria-expanded={row.isDirectory ? row.expanded : undefined}
+                aria-haspopup="menu"
                 // Depth is conveyed by padding for sighted users; without this
                 // it reaches assistive tech as a flat list.
                 aria-level={row.depth + 1}
@@ -312,7 +329,22 @@ export function WorkspaceFileTreePane({
                   handleActivate(row)
                 }}
                 onFocus={() => setFocusedPath(row.path)}
-                onKeyDown={(event) => handleKeyDown(event, row)}
+                onContextMenu={(event) => {
+                  event.preventDefault()
+                  setFocusedPath(row.path)
+                  openMenuAt(row, event.clientX, event.clientY, event.currentTarget)
+                }}
+                onKeyDown={(event) => {
+                  // Keyboard parity with the pointer: Shift+F10 and the dedicated
+                  // ContextMenu key open the same menu anchored to the row.
+                  if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+                    event.preventDefault()
+                    const rect = event.currentTarget.getBoundingClientRect()
+                    openMenuAt(row, rect.left, rect.bottom, event.currentTarget)
+                    return
+                  }
+                  handleKeyDown(event, row)
+                }}
                 style={{ paddingLeft: 6 + row.depth * 16 }}
                 className={[
                   'relative flex h-[34px] cursor-default items-center gap-1.5 rounded-[var(--radius-sm)] pr-2 text-[14px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]',
@@ -339,6 +371,15 @@ export function WorkspaceFileTreePane({
           })
         )}
       </div>
+
+      {menuTarget ? (
+        <WorkspaceFileTreeMenu
+          sessionId={sessionId}
+          target={menuTarget}
+          workDir={workDir}
+          onClose={() => setMenuTarget(null)}
+        />
+      ) : null}
     </div>
   )
 }

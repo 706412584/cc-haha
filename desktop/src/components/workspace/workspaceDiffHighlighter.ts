@@ -288,7 +288,13 @@ const workspaceDiffLanguageLoaders: Record<string, () => Promise<LanguageRegistr
   yaml: () => import('@shikijs/langs/yaml').then((module) => module.default),
 }
 
-const shikiLanguageAliases: Record<string, string> = {
+/**
+ * Extension → language name, shared by every surface that highlights file
+ * content: the diff view, the read-only preview, and the editor's grammar
+ * lookup (`editorLanguage.ts`). Exported so those cannot drift apart — a file
+ * that highlights in preview must be recognised in edit mode too.
+ */
+export const shikiLanguageAliases: Record<string, string> = {
   bash: 'bash',
   c: 'c',
   cc: 'cpp',

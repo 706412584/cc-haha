@@ -106,11 +106,65 @@ describe('WorkspaceEditor', () => {
         { text: '3', className: 'workspace-syntax-number', color: '--color-code-number' },
       ],
     },
+    // The editor used to map ten extensions by hand, so every other file opened
+    // with no grammar and rendered as one flat colour — while the same file
+    // highlighted correctly in the read-only preview. These lock the coverage
+    // that brought the two surfaces back in line.
+    {
+      title: 'Python',
+      tab: makeTab({ path: 'worker.py', content: 'def run(limit):\n    return limit + 1\n' }),
+      tokens: [{ text: 'def', className: 'workspace-syntax-keyword', color: '--color-code-keyword' }],
+    },
+    {
+      title: 'Go',
+      tab: makeTab({ path: 'main.go', content: 'package main\n\nfunc main() { return }\n' }),
+      tokens: [{ text: 'package', className: 'workspace-syntax-keyword', color: '--color-code-keyword' }],
+    },
+    {
+      title: 'Rust',
+      tab: makeTab({ path: 'lib.rs', content: 'pub fn total() -> u32 { 1 }\n' }),
+      tokens: [{ text: 'pub', className: 'workspace-syntax-keyword', color: '--color-code-keyword' }],
+    },
+    {
+      title: 'CSS',
+      tab: makeTab({ path: 'theme.css', content: '.card { color: red; }\n' }),
+      // The selector's class name token excludes the leading dot, which is
+      // punctuation of its own.
+      tokens: [
+        { text: 'card', className: 'workspace-syntax-type', color: '--color-code-type' },
+        { text: 'color', className: 'workspace-syntax-property', color: '--color-code-property' },
+      ],
+    },
+    {
+      title: 'YAML',
+      tab: makeTab({ path: 'ci.yaml', content: 'name: build\njobs: []\n' }),
+      tokens: [{ text: 'name', className: 'workspace-syntax-property', color: '--color-code-property' }],
+    },
+    {
+      title: 'SQL',
+      tab: makeTab({ path: 'schema.sql', content: 'SELECT id FROM users\n' }),
+      tokens: [{ text: 'SELECT', className: 'workspace-syntax-keyword', color: '--color-code-keyword' }],
+    },
+    // Shell has no `lang-*` package; it highlights through a legacy stream mode.
+    {
+      title: 'Shell (legacy mode)',
+      tab: makeTab({ path: 'run.sh', content: 'if [ -f "$1" ]; then echo ok; fi\n' }),
+      tokens: [{ text: 'if', className: 'workspace-syntax-keyword', color: '--color-code-keyword' }],
+    },
+    {
+      title: 'C# (legacy mode)',
+      tab: makeTab({ path: 'Program.cs', content: 'public class Program { }\n' }),
+      tokens: [{ text: 'public', className: 'workspace-syntax-keyword', color: '--color-code-keyword' }],
+    },
   ])('renders $title tokens with semantic syntax classes and CSS-variable colors', async ({ tab, tokens }) => {
     const { container } = render(<WorkspaceEditor sessionId="s1" path={tab.path} content={tab.content} />)
 
+    // The grammar is fetched as a chunk after the view mounts, so the editor
+    // element existing does not mean the tokens are classified yet.
     await waitFor(() => {
       expect(container.querySelector('.cm-editor')).toBeTruthy()
+      const classified = Array.from(container.querySelectorAll('[class*="workspace-syntax-"]'))
+      expect(classified.length).toBeGreaterThan(0)
     })
 
     for (const token of tokens) {
@@ -122,6 +176,23 @@ describe('WorkspaceEditor', () => {
       )
     }
   })
+
+  // An extension with no grammar must still open: the file is readable and
+  // editable as plain text, and nothing throws while the lookup comes up empty.
+  it('opens a file whose extension has no grammar as plain text', async () => {
+    const { container } = render(
+      <WorkspaceEditor sessionId="s1" path="mystery.xyz" content={'some opaque payload\n'} />,
+    )
+
+    await waitFor(() => {
+      expect(container.querySelector('.cm-editor')).toBeTruthy()
+    })
+    await waitFor(() => {
+      expect(container.querySelector('.cm-content')?.textContent).toContain('some opaque payload')
+    })
+    expect(container.querySelector('[class*="workspace-syntax-"]')).toBeNull()
+  })
+
 
   it.each(['light', 'dark', 'eyeCare'])('keeps editor state and history when switching to %s theme', async (theme) => {
     document.documentElement.setAttribute('data-theme', 'white')

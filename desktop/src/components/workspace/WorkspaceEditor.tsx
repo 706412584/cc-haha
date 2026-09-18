@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { EditorState } from '@codemirror/state'
+import { Compartment, EditorState } from '@codemirror/state'
 import { EditorView, keymap, lineNumbers } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { search, searchKeymap } from '@codemirror/search'
@@ -10,10 +10,9 @@ import {
   syntaxHighlighting,
 } from '@codemirror/language'
 import { autocompletion, completionKeymap } from '@codemirror/autocomplete'
-import { javascript } from '@codemirror/lang-javascript'
-import { json } from '@codemirror/lang-json'
-import { markdown } from '@codemirror/lang-markdown'
 import { tags } from '@lezer/highlight'
+
+import { loadEditorLanguage } from './editorLanguage'
 
 import { sessionsApi, type SaveWorkspaceFileInput } from '../../api/sessions'
 import {
@@ -81,25 +80,14 @@ const workspaceEditorTheme = EditorView.theme({
   },
 })
 
-const LANGUAGE_BY_EXTENSION: Record<string, () => unknown> = {
-  ts: javascript,
-  tsx: () => javascript({ jsx: true, typescript: true }),
-  js: javascript,
-  jsx: () => javascript({ jsx: true }),
-  mjs: javascript,
-  cjs: javascript,
-  json: json,
-  jsonc: json,
-  md: markdown,
-  markdown: markdown,
-}
-
-function pickLanguage(path: string) {
-  const ext = path.split('.').pop()?.toLowerCase() ?? ''
-  const factory = LANGUAGE_BY_EXTENSION[ext]
-  if (!factory) return null
-  return factory() as ReturnType<typeof javascript>
-}
+/**
+ * Holds the grammar, which arrives asynchronously so a language chunk is only
+ * fetched when a file of that type is opened. The view is created immediately
+ * and reconfigured once the grammar lands, rather than waiting for it: blocking
+ * the first paint on a network chunk would make every file open feel slower to
+ * fix colour that is not needed to read or edit the text.
+ */
+const languageCompartment = new Compartment()
 
 async function sha256Hex(text: string): Promise<string> {
   const buf = new TextEncoder().encode(text)
@@ -224,7 +212,6 @@ export function WorkspaceEditor(props: WorkspaceEditorProps) {
     if (!containerRef.current) return
     if (viewRef.current) return
 
-    const language = pickLanguage(buffer.path)
     const extensions = [
       lineNumbers(),
       history(),
@@ -234,6 +221,7 @@ export function WorkspaceEditor(props: WorkspaceEditorProps) {
       autocompletion(),
       keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, ...completionKeymap]),
       EditorState.tabSize.of(2),
+      languageCompartment.of([]),
       syntaxHighlighting(workspaceHighlightStyle),
       workspaceEditorTheme,
       EditorView.updateListener.of((update) => {
@@ -246,7 +234,6 @@ export function WorkspaceEditor(props: WorkspaceEditorProps) {
         }, 350)
       }),
     ]
-    if (language) extensions.push(language)
 
     const view = new EditorView({
       state: EditorState.create({
@@ -257,7 +244,17 @@ export function WorkspaceEditor(props: WorkspaceEditorProps) {
     })
     viewRef.current = view
 
+    // Load the grammar in the background and swap it in. A chunk that fails to
+    // load leaves the file readable and editable as plain text, which is the
+    // same outcome as an extension the editor has no grammar for.
+    let cancelled = false
+    void loadEditorLanguage(buffer.path).then((language) => {
+      if (cancelled || !language || viewRef.current !== view) return
+      view.dispatch({ effects: languageCompartment.reconfigure(language) })
+    }).catch(() => {})
+
     return () => {
+      cancelled = true
       window.clearTimeout(lspDebounceRef.current)
       view.destroy()
       viewRef.current = null

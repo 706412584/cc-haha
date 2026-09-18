@@ -2050,6 +2050,13 @@ async function appendTraceEntry(sessionId: string, entry: TraceFileEntry): Promi
       traceReadCache.delete(filePath)
       await projectAppendedTraceEntry(normalizedSessionId, filePath, after, target)
     })
+    // Trace capture is best-effort diagnostics: its callers are
+    // fire-and-forget (`void recordEvent(...)` in dumpPrompts), so a rejection
+    // here has no handler and surfaces as an unhandled error that fails the
+    // whole test process — and, in the app, would crash the server. The write
+    // can lose its scope underneath it (a session torn down, a test fixture
+    // removed), which is not a condition worth propagating.
+    .catch(() => {})
   traceWriteQueues.set(queueKey, next)
   try {
     await next

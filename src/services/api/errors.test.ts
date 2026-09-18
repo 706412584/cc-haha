@@ -5,6 +5,7 @@ import {
   getAssistantMessageFromError,
   getImageUnsupportedErrorMessage,
   isContextOverflowErrorText,
+  isSerializedSizeOverflowText,
   isUnsupportedImageInputErrorMessage,
   PROMPT_TOO_LONG_ERROR_MESSAGE,
 } from './errors.js'
@@ -184,6 +185,28 @@ describe('context overflow errors', () => {
     }
   })
 
+  // Serialized-size rejections are a separate family: same symptom (a request
+  // too large to send) but a different fix, chosen by status. The wording was
+  // observed on a relay that reported ~90K tokens against a declared 1M window,
+  // so no token-based pattern matched and the error fell through to the
+  // image-rejection fallback — reporting "This model does not support images"
+  // for a request that was merely too large.
+  test('recognises the serialized-size wording the token patterns miss', () => {
+    const serializedSizeMessages = [
+      '400 {"error":{"type":"<nil>","message":"{\\"message\\":\\"Input content length exceeds threshold.\\",\\"reason\\":\\"CONTENT_LENGTH_EXCEEDS_THRESHOLD\\"} (request id: 202609181612512662043798268d9d64lkDAC4q)"}}',
+      'Input content length exceeds threshold.',
+      'CONTENT_LENGTH_EXCEEDS_THRESHOLD',
+    ]
+
+    for (const message of serializedSizeMessages) {
+      expect(isSerializedSizeOverflowText(message)).toBe(true)
+    }
+
+    // Attachment limits are not request overflow: the file itself is too big, so
+    // there is nothing to compact.
+    expect(isSerializedSizeOverflowText('The uploaded file content length exceeds the 10MB limit')).toBe(false)
+  })
+
   test('does not match unrelated or separately-handled errors', () => {
     const negatives = [
       'Invalid API key',
@@ -191,6 +214,10 @@ describe('context overflow errors', () => {
       'This model does not support image blocks',
       // Handled by the max_tokens adjustment retry path, not the PTL path.
       'input length and `max_tokens` exceed context limit: 190000 + 20000 > 200000',
+      // Attachment size limits, not request overflow: compacting cannot shrink
+      // them, and the image-stripping fallback does handle them.
+      'The uploaded file content length exceeds the 10MB limit',
+      'Invalid request: maximum content length exceeds the allowed limit for this model',
     ]
 
     for (const message of negatives) {
@@ -246,5 +273,87 @@ describe('context overflow errors', () => {
         text: PROMPT_TOO_LONG_ERROR_MESSAGE,
       })
     }
+  })
+
+  // Regression: a serialized-size rejection that arrives on a request carrying
+  // image blocks used to hit the generic image-rejection fallback, because no
+  // overflow pattern matched "content length". The user saw "This model does
+  // not support images" for an oversized request, and the session could never
+  // recover: image stripping does not shrink the payload that caused it.
+  test('does not report a content-length rejection as unsupported images when the request carried images', () => {
+    const message =
+      '400 {"error":{"type":"<nil>","message":"{\\"message\\":\\"Input content length exceeds threshold.\\",\\"reason\\":\\"CONTENT_LENGTH_EXCEEDS_THRESHOLD\\"}"}}'
+    const error = new APIError(
+      400,
+      { type: 'error', error: { type: 'api_error', message } },
+      message,
+      undefined,
+    )
+    const messagesForAPI = [
+      {
+        role: 'user' as const,
+        content: [
+          {
+            type: 'tool_result' as const,
+            tool_use_id: 'tool-1',
+            content: [
+              { type: 'text' as const, text: 'preview' },
+              {
+                type: 'image' as const,
+                source: {
+                  type: 'base64' as const,
+                  media_type: 'image/png' as const,
+                  data: 'aGVsbG8=',
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ]
+
+    const msg = getAssistantMessageFromError(error, 'claude-opus-4-8', {
+      messagesForAPI,
+    })
+
+    expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.PROMPT_TOO_LONG)
+    expect(msg.message.content[0]).toMatchObject({
+      type: 'text',
+      text: PROMPT_TOO_LONG_ERROR_MESSAGE,
+    })
+  })
+
+  // A 413 says the payload itself is unacceptable, which the media-stripping
+  // path fixes. Compacting instead would shrink the transcript around a document
+  // that is itself too large, and the next turn would resend it — the exact
+  // unrecoverable loop the overflow classifier exists to avoid.
+  test('routes a 413 with the serialized-size wording to the media path, not to compact', () => {
+    const message = '{"message":"Input content length exceeds threshold.","reason":"CONTENT_LENGTH_EXCEEDS_THRESHOLD"}'
+    const error = new APIError(
+      413,
+      { type: 'error', error: { type: 'api_error', message } },
+      message,
+      undefined,
+    )
+
+    const msg = getAssistantMessageFromError(error, 'claude-opus-4-8')
+
+    expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.REQUEST_TOO_LARGE)
+  })
+
+  // The same wording without a 413 status is a transcript overflow: there is no
+  // attachment to strip, so compacting is the only recovery.
+  test('routes the serialized-size wording without a 413 to compact', () => {
+    const message = '{"message":"Input content length exceeds threshold.","reason":"CONTENT_LENGTH_EXCEEDS_THRESHOLD"}'
+    const error = new APIError(
+      400,
+      { type: 'error', error: { type: 'api_error', message } },
+      message,
+      undefined,
+    )
+
+    const msg = getAssistantMessageFromError(error, 'claude-opus-4-8')
+
+    expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.PROMPT_TOO_LONG)
   })
 })

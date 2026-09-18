@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState } from 'react'
-import { FilePen, FileText } from 'lucide-react'
+import { useCallback, useDeferredValue, useMemo, useState } from 'react'
+import { Columns2, FilePen, FileText } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { useTabStore } from '../../stores/tabStore'
@@ -9,7 +9,9 @@ import { useWorkspaceContentStore } from '../../stores/workspaceContentStore'
 import { useWorkspaceReviewStore } from '../../stores/workspaceReviewStore'
 import { useWorkspaceStore } from '../../stores/workspaceStore'
 import { errorCountFromDiagnostics, toLegacyLspState } from '../../lib/lspStateMap'
+import { useElementWidth } from '../../hooks/useElementWidth'
 import { CodeSurface } from '../workspace/surfaces/CodeSurface'
+import { MarkdownSurface } from '../workspace/surfaces/MarkdownSurface'
 import { LspStatusIndicator } from '../workspace/LspStatusIndicator'
 import { WorkspaceEditor } from '../workspace/WorkspaceEditor'
 import { PanelMessage } from '../workspace/surfaces/PanelMessage'
@@ -18,6 +20,14 @@ import { workspaceOpen } from '../../lib/workspace/openTarget'
 import { basenameOf } from '../../lib/workspace/types'
 import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
 
+/**
+ * Below this the two panes are too narrow to read. jsdom reports no width, so
+ * callers keep their fallback and the split stays available under test.
+ */
+const SPLIT_MIN_WIDTH = 720
+
+type ViewMode = 'preview' | 'edit' | 'split'
+
 type Props = {
   sessionId: string
   path: string
@@ -25,6 +35,14 @@ type Props = {
   language: string
   reveal?: { line: number; column?: number; nonce: number }
   revealScroll?: boolean
+  /**
+   * Which read-only surface to pair with the editor. Markdown gets a third
+   * "split" mode because its rendered form is the thing being authored, so
+   * editing it without seeing the result is the whole problem.
+   */
+  variant?: 'code' | 'markdown'
+  /** Workspace root, for resolving relative markdown image paths. */
+  workDir?: string | null
 }
 
 /**
@@ -45,9 +63,22 @@ export function WorkspaceEditableFile({
   language,
   reveal,
   revealScroll = true,
+  variant = 'code',
+  workDir = null,
 }: Props) {
   const t = useTranslation()
-  const [editing, setEditing] = useState(false)
+  const [mode, setMode] = useState<ViewMode>('preview')
+  const editing = mode === 'edit'
+  const [measureRef, measuredWidth] = useElementWidth<HTMLDivElement>()
+  // Only markdown offers split, so only markdown needs the width. Observing on
+  // every text file would add a second ResizeObserver to panels that already
+  // observe their own container for the narrow-overlay decision.
+  const attachMeasure = useCallback((node: HTMLDivElement | null) => {
+    if (variant === 'markdown') measureRef(node)
+  }, [measureRef, variant])
+  // jsdom has no layout, so an unmeasured panel keeps the split available
+  // rather than disabling a control that works in a real window.
+  const splitAvailable = measuredWidth === null || measuredWidth >= SPLIT_MIN_WIDTH
 
   const unsupported = useWorkspaceEditorStore((s) => Boolean(s.unsupportedKeys[`${sessionId}::${path}`]))
   const buffer = useWorkspaceEditorStore((s) => s.buffersByKey[`${sessionId}::${path}`])
@@ -60,6 +91,12 @@ export function WorkspaceEditableFile({
   // The preview mirrors the buffer once the file has been opened for editing,
   // so toggling back does not appear to discard the user's work.
   const shownValue = buffer?.currentContent ?? value
+  // In split the preview re-parses on every keystroke. Deferring it keeps typing
+  // at full priority and lets the render lag a frame instead; the standalone
+  // preview deliberately uses the live value, so switching back to it can never
+  // show stale text.
+  const deferredValue = useDeferredValue(shownValue)
+  const splitPreviewValue = mode === 'split' ? deferredValue : shownValue
 
   const errorCount = useMemo(
     () => errorCountFromDiagnostics(lspDiagnostics?.diagnostics),
@@ -96,7 +133,7 @@ export function WorkspaceEditableFile({
 
   const handleUnsupportedEncoding = useCallback(() => {
     markUnsupported(sessionId, path)
-    setEditing(false)
+    setMode('preview')
     addToast({ type: 'info', message: t('workspace.editUnsupported') })
   }, [addToast, markUnsupported, path, sessionId, t])
 
@@ -128,7 +165,9 @@ export function WorkspaceEditableFile({
     if (tab) useWorkspaceStore.getState().closeTab(sessionId, tab.id)
   }, [path, sessionId])
 
-  const lspPill = path && !unsupported ? (
+  // A markdown file has no language server, so the pill would only ever report
+  // "not available" on every document the user opens.
+  const lspPill = path && !unsupported && variant === 'code' ? (
     <LspStatusIndicator
       state={toLegacyLspState(lspState, errorCount, sessionId)}
       diagnostics={lspDiagnostics?.diagnostics ?? []}
@@ -141,31 +180,70 @@ export function WorkspaceEditableFile({
     />
   ) : null
 
+  const modes: ViewMode[] = variant === 'markdown' ? ['preview', 'edit', 'split'] : ['preview', 'edit']
+
+  const preview = variant === 'markdown' ? (
+    <MarkdownSurface
+      value={splitPreviewValue}
+      path={path}
+      sessionId={sessionId}
+      workDir={workDir}
+      onAddSelection={addSelectionToChat}
+    />
+  ) : (
+    <CodeSurface
+      value={shownValue}
+      language={language}
+      reveal={reveal}
+      revealScroll={revealScroll}
+      onAddLineComment={addLineComment}
+      onAddSelection={addSelectionToChat}
+    />
+  )
+
+  const editor = (
+    <WorkspaceEditor
+      sessionId={sessionId}
+      path={path}
+      content={value}
+      onUnsupportedEncoding={handleUnsupportedEncoding}
+      onSaved={handleSaved}
+      onClose={handleClose}
+    />
+  )
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={attachMeasure} className="flex min-h-0 flex-1 flex-col">
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-3">
         <div className="flex shrink-0 items-center gap-0.5">
-          {(['preview', 'edit'] as const).map((mode) => {
-            const disabled = mode === 'edit' && unsupported
-            const active = (mode === 'edit') === editing
+          {modes.map((candidate) => {
+            const active = mode === candidate
+            const disabled = (candidate === 'edit' && unsupported)
+              || (candidate === 'split' && (!splitAvailable || unsupported))
+            const label = candidate === 'preview'
+              ? t('workspace.preview')
+              : candidate === 'edit' ? t('workspace.edit') : t('workspace.split')
             return (
               <button
-                key={mode}
+                key={candidate}
                 type="button"
-                data-testid={`workspace-file-${mode}-toggle`}
+                data-testid={`workspace-file-${candidate}-toggle`}
                 disabled={disabled}
                 aria-pressed={active}
-                onClick={() => setEditing(mode === 'edit')}
+                title={candidate === 'split' && !splitAvailable ? t('workspace.splitUnavailable') : undefined}
+                onClick={() => setMode(candidate)}
                 className={`inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-[12px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] disabled:cursor-not-allowed disabled:opacity-50 ${
                   active
                     ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
                     : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
                 }`}
               >
-                {mode === 'preview'
+                {candidate === 'preview'
                   ? <FileText size={13} strokeWidth={1.8} aria-hidden="true" />
-                  : <FilePen size={13} strokeWidth={1.8} aria-hidden="true" />}
-                {mode === 'preview' ? t('workspace.preview') : t('workspace.edit')}
+                  : candidate === 'edit'
+                    ? <FilePen size={13} strokeWidth={1.8} aria-hidden="true" />
+                    : <Columns2 size={13} strokeWidth={1.8} aria-hidden="true" />}
+                {label}
               </button>
             )
           })}
@@ -173,26 +251,17 @@ export function WorkspaceEditableFile({
         <div className="ml-auto flex shrink-0 items-center gap-1">{lspPill}</div>
       </div>
 
-      {editing && !unsupported ? (
-        <WorkspaceEditor
-          sessionId={sessionId}
-          path={path}
-          content={value}
-          onUnsupportedEncoding={handleUnsupportedEncoding}
-          onSaved={handleSaved}
-          onClose={handleClose}
-        />
+      {mode === 'split' && !unsupported ? (
+        <div data-testid="workspace-split" className="flex min-h-0 min-w-0 flex-1 flex-row">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col border-r border-[var(--color-border)]">{editor}</div>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">{preview}</div>
+        </div>
+      ) : editing && !unsupported ? (
+        editor
       ) : unsupported ? (
         <PanelMessage icon="code_off" message={t('workspace.editUnsupported')} />
       ) : (
-        <CodeSurface
-          value={shownValue}
-          language={language}
-          reveal={reveal}
-          revealScroll={revealScroll}
-          onAddLineComment={addLineComment}
-          onAddSelection={addSelectionToChat}
-        />
+        preview
       )}
     </div>
   )

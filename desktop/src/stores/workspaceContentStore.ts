@@ -144,6 +144,11 @@ export const useWorkspaceContentStore = create<WorkspaceContentStore>((set, get)
     } catch {
       // The launcher only needs this to explain why review is unavailable; a
       // failed probe leaves the entry enabled rather than blaming the folder.
+      //
+      // The guard above deliberately stays set for this session: a failed probe
+      // caches nothing, so releasing it here would let every remount of the file
+      // tab fire another request against a provider that is already failing.
+      // `refreshAll` passes `force: true` and is the intended retry path.
     }
   },
 

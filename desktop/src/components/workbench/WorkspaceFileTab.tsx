@@ -7,18 +7,15 @@ import { useDismissable } from '@/hooks/useDismissable'
 import { useTranslation } from '../../i18n'
 import { WorkspaceEditableFile } from './WorkspaceEditableFile'
 import { ImagePreview } from '../workspace/surfaces/ImagePreview'
-import { MarkdownSurface } from '../workspace/surfaces/MarkdownSurface'
 import { PanelMessage } from '../workspace/surfaces/PanelMessage'
-import type { WorkspaceTextSelection } from '../workspace/surfaces/textSelection'
 import { WorkspaceFileOpenWith } from '../workspace/WorkspaceFileOpenWith'
 import { WorkspaceTreeSidebar } from '@/components/workbench/WorkspaceTreeSidebar'
 import { WorkspaceFileTreePane } from './WorkspaceFileTreePane'
 import { useMenuKeyboard } from './menuKeyboard'
 import { useWorkspaceContentStore, type WorkspaceFileView } from '../../stores/workspaceContentStore'
-import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
 import { workspaceOpen } from '../../lib/workspace/openTarget'
 import { resolveAbsoluteOpenPath } from '../../lib/systemFileOpen'
-import { basenameOf, type WorkspaceFileTab as WorkspaceFileTabModel } from '../../lib/workspace/types'
+import type { WorkspaceFileTab as WorkspaceFileTabModel } from '../../lib/workspace/types'
 
 const MARKDOWN_EXTENSIONS = ['.md', '.markdown', '.mdx']
 
@@ -115,17 +112,6 @@ export function WorkspaceFileTab({ sessionId, tab }: WorkspaceFileTabProps) {
     if (!path) return
     void loadFile(sessionId, path)
   }, [loadFile, path, sessionId])
-
-  const addSelectionToChat = useCallback((selection: WorkspaceTextSelection) => {
-    useWorkspaceChatContextStore.getState().addReference(sessionId, {
-      kind: 'code-selection',
-      path,
-      name: basenameOf(path),
-      lineStart: selection.startLine,
-      lineEnd: selection.endLine,
-      quote: selection.text,
-    })
-  }, [path, sessionId])
 
   const closeOpenWith = useCallback(() => setOpenWithOpen(false), [])
 
@@ -279,15 +265,14 @@ export function WorkspaceFileTab({ sessionId, tab }: WorkspaceFileTabProps) {
             <PanelMessage icon="error" tone="error" message={entry.error || t('workspace.loadError')} />
           ) : entry.previewType === 'image' ? (
             <ImagePreview dataUrl={entry.dataUrl} path={path} error={entry.error} />
-          ) : isMarkdown(path) ? (
-            <MarkdownSurface
-              value={entry.content ?? ''}
-              path={path}
-              sessionId={sessionId}
-              workDir={workDir}
-              onAddSelection={addSelectionToChat}
-            />
           ) : (
+            /*
+              Markdown goes through the same read/edit switch as any other text
+              file. It used to short-circuit to a read-only preview, so a
+              document could be read here but never edited — and therefore never
+              shown rendered while being written. `variant` picks the read-only
+              surface and adds the split mode that pairs the two.
+            */
             <WorkspaceEditableFile
               sessionId={sessionId}
               path={path}
@@ -295,6 +280,8 @@ export function WorkspaceFileTab({ sessionId, tab }: WorkspaceFileTabProps) {
               language={entry.language ?? 'text'}
               reveal={tab.reveal}
               revealScroll={revealScroll}
+              variant={isMarkdown(path) ? 'markdown' : 'code'}
+              workDir={workDir}
             />
           )}
           {entry?.refreshError ? (

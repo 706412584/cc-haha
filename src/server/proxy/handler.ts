@@ -10,6 +10,7 @@
  */
 
 import { getOpenAIPolicyError } from '../../services/openaiAuth/policyError.js'
+import { extractConnectionErrorDetails } from '../../services/api/errorUtils.js'
 import { buildOpenaiEndpoint } from './openaiEndpoint.js'
 import { normalizeAnthropicBaseUrl } from '../../services/api/anthropicBaseUrl.js'
 import { createGunzip, createInflate } from 'node:zlib'
@@ -95,6 +96,162 @@ function createTimeoutController(timeoutMs: number): {
     signal: controller.signal,
     clear: () => clearTimeout(timer),
   }
+}
+
+/**
+ * Read a non-zero numeric `errno` from an error or its cause chain.
+ *
+ * Bun reports `errno: 0` for every transport failure (ECONNRESET, refused,
+ * DNS), where 0 is a placeholder rather than a POSIX value — surfacing it
+ * invites reading "errno 0" as success. Only a real, finite, non-zero value is
+ * worth reporting. Reads own properties only and stops on a self-referential
+ * `cause`, matching `extractConnectionErrorDetails`.
+ */
+function readErrno(error: unknown): number | undefined {
+  let current: unknown = error
+  for (let depth = 0; current instanceof Error && depth < 5; depth += 1) {
+    // A getter that throws here would turn the clean 502 this runs inside into
+    // an uncaught exception, so each read is guarded rather than assumed.
+    try {
+      if (Object.hasOwn(current, 'errno')) {
+        const errno = (current as { errno?: unknown }).errno
+        if (typeof errno === 'number' && Number.isFinite(errno) && errno !== 0) return errno
+      }
+    } catch {
+      return undefined
+    }
+    const cause = (current as { cause?: unknown }).cause
+    if (cause === current) break
+    current = cause
+  }
+  return undefined
+}
+
+/** Longest pathname reported from an upstream URL. */
+const MAX_REPORTED_URL_PATH = 120
+
+/**
+ * Reduce an upstream URL to the part worth reporting: scheme, host, and a
+ * bounded path.
+ *
+ * This string ends up in an error message written to the session transcript,
+ * the diagnostics log, and the UI, so credentials must not survive it. A
+ * provider `baseUrl` is user-supplied and reaches here unvalidated, which rules
+ * out trusting the parse: `new URL('alice:s3cr3t@relay/v1')` succeeds with
+ * scheme `alice:` and `s3cr3t@relay/v1` as the path, so a baseUrl missing its
+ * scheme would print the password as if it were a scheme and host. Only http(s)
+ * with a real authority is reported; anything else cannot be redacted reliably
+ * and is not echoed at all.
+ *
+ * Only the endpoint helps diagnose a dropped connection, so userinfo and the
+ * query are dropped. The path is kept because the failing route (`/v1/messages`
+ * vs a relay's own prefix) is diagnostic, but it is truncated so a pathological
+ * baseUrl cannot inflate the message.
+ */
+function describeUpstreamUrl(url: string): string {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '[unparsable-url]'
+    if (!parsed.host) return '[unparsable-url]'
+    const path = parsed.pathname.length > MAX_REPORTED_URL_PATH
+      ? `${parsed.pathname.slice(0, MAX_REPORTED_URL_PATH)}…`
+      : parsed.pathname
+    return `${parsed.protocol}//${parsed.host}${path}`
+  } catch {
+    // Unparseable input cannot be safely redacted, so it is not echoed.
+    return '[unparsable-url]'
+  }
+}
+
+/**
+ * Strip URLs out of an upstream error message.
+ *
+ * Bun echoes the full request URL in some transport errors — notably
+ * `UnsupportedProxyProtocol`, which fires whenever `HTTPS_PROXY` holds a
+ * `socks5://` URL, a common local-proxy setup. That echoed URL carries the
+ * userinfo and query that `describeUpstreamUrl` deliberately drops, so
+ * appending a redacted URL after an unredacted message would leak exactly what
+ * the redaction is for.
+ *
+ * Each URL collapses to its host, and to a placeholder when it has none
+ * (`file://`, or any scheme without an authority), so a path that may embed a
+ * credential cannot survive as the remainder of the match.
+ *
+ * The match deliberately stops at whitespace, which bounds the damage rather
+ * than eliminating it: a URL containing a space (`file:///My Documents/token`)
+ * leaves everything after the space in place. Transport errors from Bun
+ * percent-encode the request URL, so the path this exists for is covered; the
+ * residual case is a locally-constructed path with a space, where only the
+ * trailing segment can leak. Widening the character class instead would swallow
+ * the surrounding sentence for every ordinary message.
+ */
+function redactUrlsInMessage(message: string): string {
+  return message.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"']+/gi, candidate => {
+    try {
+      const { host } = new URL(candidate)
+      return host || '[redacted-url]'
+    } catch {
+      return '[redacted-url]'
+    }
+  })
+}
+
+/**
+ * Describe an upstream failure for the client, preserving the diagnostics the
+ * original error already carries.
+ *
+ * A transport error (ECONNRESET, EPIPE, connection refused, DNS failure) carries
+ * no HTTP response at all, so its own `code`/`errno` and the endpoint that
+ * failed are the only diagnostics that exist. Flattening the error to
+ * `err.message` alone left sessions reporting an undiagnosable "socket
+ * connection was closed unexpectedly", with nothing to distinguish a provider
+ * outage from a local network problem or from a request the gateway rejected.
+ *
+ * Non-connection failures (transform errors) pass through with only the URL
+ * appended, which is accurate: the fields are omitted when the error does not
+ * carry them. Callers keep their own type/status — notably `api_error`/502 for
+ * dropped connections, which withRetry treats as retryable and is exactly the
+ * transient case that retry exists for.
+ */
+function describeUpstreamFailure(err: unknown, url: string): string {
+  const message = redactUrlsInMessage(err instanceof Error ? err.message : String(err))
+  const code = extractConnectionErrorDetails(err)?.code
+  const errno = readErrno(err)
+  const diagnostics = [
+    code ? `code=${code}` : null,
+    errno !== undefined ? `errno=${errno}` : null,
+    `url=${describeUpstreamUrl(url)}`,
+  ].filter((part): part is string => part !== null)
+
+  return `${message} (${diagnostics.join(', ')})`
+}
+
+/** The endpoint a rethrown failure was aimed at, when the thrower knew it. */
+const ATTEMPTED_URL = Symbol('cc-haha-attempted-url')
+
+/**
+ * Tag an error with the URL that produced it.
+ *
+ * The OpenAI-shaped handlers rethrow into one shared catch, which otherwise only
+ * has the provider's baseUrl — enough to name the provider, not the endpoint.
+ * Marking is best-effort: a frozen or primitive throw keeps its original shape
+ * and the caller falls back to the baseUrl.
+ */
+function withAttemptedUrl(err: unknown, url: string): unknown {
+  if (err && typeof err === 'object') {
+    try {
+      Object.defineProperty(err, ATTEMPTED_URL, { value: url, enumerable: false })
+    } catch {
+      // Best effort only; diagnostics must not depend on mutating the error.
+    }
+  }
+  return err
+}
+
+function attemptedUrlOf(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object') return undefined
+  const url = (err as Record<symbol, unknown>)[ATTEMPTED_URL]
+  return typeof url === 'string' ? url : undefined
 }
 
 async function fetchUpstreamWithTimeout(
@@ -284,7 +441,9 @@ export async function handleProxyRequest(req: Request, url: URL): Promise<Respon
         type: 'error',
         error: policyError ? { type: 'permission_error', ...policyError } : {
           type: err instanceof RequestCompatibilityError ? 'invalid_request_error' : 'api_error',
-          message: err instanceof Error ? err.message : String(err),
+          message: err instanceof RequestCompatibilityError
+            ? (err instanceof Error ? err.message : String(err))
+            : describeUpstreamFailure(err, attemptedUrlOf(err) ?? baseUrl),
         },
       },
       { status: policyError ? 403 : err instanceof RequestCompatibilityError ? 400 : 502 },
@@ -539,7 +698,7 @@ async function handleAnthropicCompatible(
         type: 'error',
         error: {
           type: 'api_error',
-          message: err instanceof Error ? err.message : String(err),
+          message: describeUpstreamFailure(err, url),
         },
       },
       { status: 502 },
@@ -728,7 +887,10 @@ async function handleOpenaiChat(
       })
       markTraceErrorRecorded(err)
     }
-    throw err
+    // The caller's unified handler only knows the provider's baseUrl, which
+    // cannot say whether `chat/completions` or `responses` was the endpoint that
+    // failed. Carry the real one across the rethrow.
+    throw withAttemptedUrl(err, url)
   }
 
   if (!upstream.ok) {
@@ -929,7 +1091,10 @@ async function handleOpenaiResponses(
       })
       markTraceErrorRecorded(err)
     }
-    throw err
+    // The caller's unified handler only knows the provider's baseUrl, which
+    // cannot say whether `chat/completions` or `responses` was the endpoint that
+    // failed. Carry the real one across the rethrow.
+    throw withAttemptedUrl(err, url)
   }
 
   if (!upstream.ok) {

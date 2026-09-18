@@ -1668,7 +1668,19 @@ describe('proxy anthropic-compatible path', () => {
       })
       const response = await handleProxyRequest(request, new URL(request.url))
       expect(response.status).toBe(502)
-      expect(await response.json()).toEqual({ type: 'error', error: { type: 'api_error', message } })
+      // The client message keeps the upstream wording and appends the transport
+      // diagnostics (code/errno) plus the endpoint that failed, which is what
+      // makes a dropped connection distinguishable from a provider outage. The
+      // recorded trace keeps the raw message — that is the diagnostic record.
+      const body = await response.json() as { type: string; error: { type: string; message: string } }
+      expect(body.type).toBe('error')
+      expect(body.error.type).toBe('api_error')
+      // A transport failure gains the endpoint; a malformed response is reported
+      // where it is detected and carries no URL. Both keep the upstream wording.
+      expect(body.error.message.startsWith(message)).toBe(true)
+      if (message !== 'Upstream returned no body for stream') {
+        expect(body.error.message).toContain('url=https://relay.example.com/v1/messages')
+      }
       expect(upstreamFetch).toHaveBeenCalledTimes(1)
 
       await drainTraceCaptureForTests()

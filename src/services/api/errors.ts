@@ -75,6 +75,26 @@ export const PROMPT_TOO_LONG_ERROR_MESSAGE = 'Prompt is too long'
  * third-party overflow surfaces as "Please run /login" and the session is
  * unrecoverable (#1162).
  */
+/**
+ * Wordings that mean "the serialized request is too large" rather than "the
+ * token count exceeds the window". Both are size rejections, but they are fixed
+ * differently: an oversized transcript is compacted, while an oversized
+ * attachment is stripped — and compacting cannot shrink a single document, so
+ * routing one to the other loops forever.
+ *
+ * A gateway reports the serialized-size shape without a token count, so there is
+ * nothing to compact toward. It is therefore only treated as overflow when the
+ * status says so; a 413 keeps its own handling, which strips the media.
+ */
+const SERIALIZED_SIZE_OVERFLOW_PATTERNS: RegExp[] = [
+  /\binput content length exceeds\b/i,
+  /content_length_exceeds_threshold/i,
+]
+
+export function isSerializedSizeOverflowText(text: string): boolean {
+  return SERIALIZED_SIZE_OVERFLOW_PATTERNS.some(pattern => pattern.test(text))
+}
+
 const CONTEXT_OVERFLOW_PATTERNS: RegExp[] = [
   /prompt is too long/i,
   /input is too long for requested model/i,
@@ -745,9 +765,15 @@ function buildAssistantMessageFromError(
   // common relay wordings; isContextWindowExceededMessage keeps the extra
   // third-party gateway shapes (e.g. type "context_too_large") we handle for
   // #1162 that the shared pattern set doesn't yet include.
+  // A 413 is excluded from the serialized-size wording: the status says the
+  // *payload* is unacceptable, which the 413 branch below fixes by stripping the
+  // offending media. Compacting instead would shrink the transcript around a
+  // document that is itself too large, and the next turn would resend it.
+  const isPayloadTooLarge = error instanceof APIError && error.status === 413
   if (
     error instanceof Error &&
     (isContextOverflowErrorText(error.message) ||
+      (!isPayloadTooLarge && isSerializedSizeOverflowText(error.message)) ||
       isContextWindowExceededMessage(error.message))
   ) {
     // Content stays generic (UI matches on exact string). The raw error with
