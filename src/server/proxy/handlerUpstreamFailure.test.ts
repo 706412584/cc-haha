@@ -196,6 +196,43 @@ describe('proxy upstream connection failures keep their diagnostics', () => {
     expect(body.error?.message).toBe('transform exploded (url=https://fixture.invalid/v1/messages)')
   })
 
+  // The reported URL exists to identify the endpoint, not to carry a
+  // user-supplied baseUrl into the transcript at whatever length it happens to
+  // be. Both components are bounded.
+  test('bounds a pathological host the same way it bounds the path', async () => {
+    const provider = await new ProviderService().addProvider({
+      presetId: 'custom',
+      name: 'Fixture',
+      baseUrl: `https://${'a'.repeat(400)}.invalid/${'b'.repeat(400)}`,
+      apiKey: 'fake-key',
+      apiFormat: 'anthropic',
+      models: { main: 'fixture', haiku: 'fixture', sonnet: 'fixture', opus: 'fixture' },
+      supportsNestedToolResultMedia: false,
+    })
+    const callMock = spyOn(traceCaptureService, 'recordCall').mockResolvedValue(null)
+    const eventMock = spyOn(traceCaptureService, 'recordEvent').mockResolvedValue(null)
+    const fetchMock = spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      throw Object.assign(new Error('The socket connection was closed unexpectedly.'), { code: 'ECONNRESET' })
+    })
+    try {
+      const request = new Request(`http://localhost/proxy/providers/${provider.id}/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'fixture', max_tokens: 1024, messages: [{ role: 'user', content: 'x' }] }),
+      })
+      const response = await handleProxyRequest(request, new URL(request.url))
+      const body = await response.json() as { error?: { message?: string } }
+      const reported = /url=(\S+)\)/.exec(body.error?.message ?? '')?.[1] ?? ''
+
+      expect(reported.length).toBeLessThan(280)
+      expect(reported).toContain('…')
+    } finally {
+      fetchMock.mockRestore()
+      callMock.mockRestore()
+      eventMock.mockRestore()
+    }
+  })
+
   // The message is persisted to the transcript, the diagnostics log, and the UI.
   // A user-supplied baseUrl can carry credentials and query secrets, neither of
   // which helps diagnose a dropped connection.
