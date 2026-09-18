@@ -10,6 +10,7 @@
  */
 
 import { getOpenAIPolicyError } from '../../services/openaiAuth/policyError.js'
+import { extractConnectionErrorDetails } from '../../services/api/errorUtils.js'
 import { buildOpenaiEndpoint } from './openaiEndpoint.js'
 import { normalizeAnthropicBaseUrl } from '../../services/api/anthropicBaseUrl.js'
 import { createGunzip, createInflate } from 'node:zlib'
@@ -95,6 +96,109 @@ function createTimeoutController(timeoutMs: number): {
     signal: controller.signal,
     clear: () => clearTimeout(timer),
   }
+}
+
+/**
+ * Read a non-zero numeric `errno` from an error or its cause chain.
+ *
+ * Bun reports `errno: 0` for every transport failure (ECONNRESET, refused,
+ * DNS), where 0 is a placeholder rather than a POSIX value — surfacing it
+ * invites reading "errno 0" as success. Only a real, finite, non-zero value is
+ * worth reporting. Reads own properties only and stops on a self-referential
+ * `cause`, matching `extractConnectionErrorDetails`.
+ */
+function readErrno(error: unknown): number | undefined {
+  let current: unknown = error
+  for (let depth = 0; current && typeof current === 'object' && depth < 5; depth += 1) {
+    const candidate = current as { errno?: unknown; cause?: unknown }
+    if (Object.hasOwn(candidate, 'errno')) {
+      const errno = candidate.errno
+      if (typeof errno === 'number' && Number.isFinite(errno) && errno !== 0) return errno
+    }
+    const cause = candidate.cause
+    if (cause === current) break
+    current = cause
+  }
+  return undefined
+}
+
+/** Longest pathname reported from an upstream URL. */
+const MAX_REPORTED_URL_PATH = 120
+
+/**
+ * Reduce an upstream URL to the part worth reporting: scheme, host, and a
+ * bounded path.
+ *
+ * This string ends up in an error message written to the session transcript,
+ * the diagnostics log, and the UI, so credentials must not survive it. A
+ * provider `baseUrl` is user-supplied: it may embed `user:pass@`, a query
+ * string carrying an API key, or a relay token as a path segment. Only the
+ * endpoint helps diagnose a dropped connection, so userinfo and the query are
+ * dropped, and the path is truncated to keep a pathological baseUrl from
+ * inflating the message.
+ */
+function describeUpstreamUrl(url: string): string {
+  try {
+    const parsed = new URL(url)
+    const path = parsed.pathname.length > MAX_REPORTED_URL_PATH
+      ? `${parsed.pathname.slice(0, MAX_REPORTED_URL_PATH)}…`
+      : parsed.pathname
+    return `${parsed.protocol}//${parsed.host}${path}`
+  } catch {
+    // Unparseable input cannot be safely redacted, so it is not echoed.
+    return '[unparsable-url]'
+  }
+}
+
+/**
+ * Strip URLs out of an upstream error message.
+ *
+ * Bun echoes the full request URL in some transport errors — notably
+ * `UnsupportedProxyProtocol`, which fires whenever `HTTPS_PROXY` holds a
+ * `socks5://` URL, a common local-proxy setup. That echoed URL carries the
+ * userinfo and query that `describeUpstreamUrl` deliberately drops, so
+ * appending a redacted URL after an unredacted message would leak exactly what
+ * the redaction is for. Each URL is replaced by its host; unparseable
+ * candidates are dropped rather than echoed.
+ */
+function redactUrlsInMessage(message: string): string {
+  return message.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"']+/gi, candidate => {
+    try {
+      return new URL(candidate).host
+    } catch {
+      return '[redacted-url]'
+    }
+  })
+}
+
+/**
+ * Describe an upstream failure for the client, preserving the diagnostics the
+ * original error already carries.
+ *
+ * A transport error (ECONNRESET, EPIPE, connection refused, DNS failure) carries
+ * no HTTP response at all, so its own `code`/`errno` and the endpoint that
+ * failed are the only diagnostics that exist. Flattening the error to
+ * `err.message` alone left sessions reporting an undiagnosable "socket
+ * connection was closed unexpectedly", with nothing to distinguish a provider
+ * outage from a local network problem or from a request the gateway rejected.
+ *
+ * Non-connection failures (transform errors) pass through with only the URL
+ * appended, which is accurate: the fields are omitted when the error does not
+ * carry them. Callers keep their own type/status — notably `api_error`/502 for
+ * dropped connections, which withRetry treats as retryable and is exactly the
+ * transient case that retry exists for.
+ */
+function describeUpstreamFailure(err: unknown, url: string): string {
+  const message = redactUrlsInMessage(err instanceof Error ? err.message : String(err))
+  const code = extractConnectionErrorDetails(err)?.code
+  const errno = readErrno(err)
+  const diagnostics = [
+    code ? `code=${code}` : null,
+    errno !== undefined ? `errno=${errno}` : null,
+    `url=${describeUpstreamUrl(url)}`,
+  ].filter((part): part is string => part !== null)
+
+  return `${message} (${diagnostics.join(', ')})`
 }
 
 async function fetchUpstreamWithTimeout(
@@ -284,7 +388,9 @@ export async function handleProxyRequest(req: Request, url: URL): Promise<Respon
         type: 'error',
         error: policyError ? { type: 'permission_error', ...policyError } : {
           type: err instanceof RequestCompatibilityError ? 'invalid_request_error' : 'api_error',
-          message: err instanceof Error ? err.message : String(err),
+          message: err instanceof RequestCompatibilityError
+            ? (err instanceof Error ? err.message : String(err))
+            : describeUpstreamFailure(err, baseUrl),
         },
       },
       { status: policyError ? 403 : err instanceof RequestCompatibilityError ? 400 : 502 },
@@ -539,7 +645,7 @@ async function handleAnthropicCompatible(
         type: 'error',
         error: {
           type: 'api_error',
-          message: err instanceof Error ? err.message : String(err),
+          message: describeUpstreamFailure(err, url),
         },
       },
       { status: 502 },

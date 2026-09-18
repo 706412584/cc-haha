@@ -177,6 +177,14 @@ describe('context overflow errors', () => {
       'Input token exceed the limit (request id: 2026091012232219399237c955d568bTYJlzPo)',
       // Zhipu standard API 400001 (multi-channel relay roulette)
       'The request is invalid: Prompt exceeds max length. Please check the request body, required fields, and request format. (request id: 2026091013121410808462c955d568YOqobsug)',
+      // Serialized-size rejection from an Anthropic-compatible gateway
+      // (observed 2026-09-18). The token count was ~90K against a declared 1M
+      // window, so no token-based wording matched and the error fell through
+      // to the image-rejection fallback, reporting "This model does not
+      // support images" for a request that was merely too large.
+      '400 {"error":{"type":"<nil>","message":"{\\"message\\":\\"Input content length exceeds threshold.\\",\\"reason\\":\\"CONTENT_LENGTH_EXCEEDS_THRESHOLD\\"} (request id: 202609181612512662043798268d9d64lkDAC4q)"}}',
+      'Input content length exceeds threshold.',
+      'CONTENT_LENGTH_EXCEEDS_THRESHOLD',
     ]
 
     for (const message of overflowMessages) {
@@ -191,6 +199,10 @@ describe('context overflow errors', () => {
       'This model does not support image blocks',
       // Handled by the max_tokens adjustment retry path, not the PTL path.
       'input length and `max_tokens` exceed context limit: 190000 + 20000 > 200000',
+      // Attachment size limits, not request overflow: compacting cannot shrink
+      // them, and the image-stripping fallback does handle them.
+      'The uploaded file content length exceeds the 10MB limit',
+      'Invalid request: maximum content length exceeds the allowed limit for this model',
     ]
 
     for (const message of negatives) {
@@ -246,5 +258,53 @@ describe('context overflow errors', () => {
         text: PROMPT_TOO_LONG_ERROR_MESSAGE,
       })
     }
+  })
+
+  // Regression: a serialized-size rejection that arrives on a request carrying
+  // image blocks used to hit the generic image-rejection fallback, because no
+  // overflow pattern matched "content length". The user saw "This model does
+  // not support images" for an oversized request, and the session could never
+  // recover: image stripping does not shrink the payload that caused it.
+  test('does not report a content-length rejection as unsupported images when the request carried images', () => {
+    const message =
+      '400 {"error":{"type":"<nil>","message":"{\\"message\\":\\"Input content length exceeds threshold.\\",\\"reason\\":\\"CONTENT_LENGTH_EXCEEDS_THRESHOLD\\"}"}}'
+    const error = new APIError(
+      400,
+      { type: 'error', error: { type: 'api_error', message } },
+      message,
+      undefined,
+    )
+    const messagesForAPI = [
+      {
+        role: 'user' as const,
+        content: [
+          {
+            type: 'tool_result' as const,
+            tool_use_id: 'tool-1',
+            content: [
+              { type: 'text' as const, text: 'preview' },
+              {
+                type: 'image' as const,
+                source: {
+                  type: 'base64' as const,
+                  media_type: 'image/png' as const,
+                  data: 'aGVsbG8=',
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ]
+
+    const msg = getAssistantMessageFromError(error, 'claude-opus-4-8', {
+      messagesForAPI,
+    })
+
+    expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.PROMPT_TOO_LONG)
+    expect(msg.message.content[0]).toMatchObject({
+      type: 'text',
+      text: PROMPT_TOO_LONG_ERROR_MESSAGE,
+    })
   })
 })

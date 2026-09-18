@@ -92,6 +92,22 @@ const CONTEXT_OVERFLOW_PATTERNS: RegExp[] = [
   // the request body...". Some multi-channel relays randomly route here;
   // compacting clears it the same way.
   /prompt exceeds max length/i,
+  // Anthropic-compatible gateways that reject on the serialized request size
+  // rather than the token count: "Input content length exceeds threshold."
+  // with reason "CONTENT_LENGTH_EXCEEDS_THRESHOLD". Observed on a relay that
+  // reported ~90K tokens against a declared 1M window, so the token-based
+  // patterns above never match. Without these entries the error falls through
+  // to the generic 400 image-rejection fallback below (the transcript carried
+  // MCP screenshots), surfacing as "This model does not support images" — a
+  // cause unrelated to the real one, and one that no retry can clear because
+  // the rejected payload is only ever shrunk by compacting.
+  //
+  // Anchored on `input`/`threshold` on purpose: bare "content length exceeds"
+  // also matches attachment limits ("The uploaded file content length exceeds
+  // the 10MB limit"), which compacting cannot fix and which would otherwise be
+  // diverted away from the image-stripping fallback that does handle them.
+  /\binput content length exceeds\b/i,
+  /content_length_exceeds_threshold/i,
 ]
 
 export function isContextOverflowErrorText(text: string): boolean {
@@ -131,7 +147,11 @@ export function isContextWindowExceededMessage(message: string): boolean {
     raw.includes('exceeds the context window') ||
     raw.includes('exceed the context window') ||
     raw.includes('maximum context length') ||
-    raw.includes('context length exceeded')
+    raw.includes('context length exceeded') ||
+    // Serialized-size rejection (see CONTEXT_OVERFLOW_PATTERNS): the gateway
+    // words it as "content length", not "context length".
+    raw.includes('input content length exceeds') ||
+    raw.includes('content_length_exceeds_threshold')
   )
 }
 
