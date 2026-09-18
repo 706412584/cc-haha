@@ -144,6 +144,13 @@ export const useWorkspaceContentStore = create<WorkspaceContentStore>((set, get)
     } catch {
       // The launcher only needs this to explain why review is unavailable; a
       // failed probe leaves the entry enabled rather than blaming the folder.
+    } finally {
+      // Release the in-flight guard. Leaving it set made the guard permanent:
+      // a probe that fails caches no result, so every later call returned early
+      // at the check above and the workspace root stayed unknown for the life of
+      // the process — silently degrading everything derived from it (absolute
+      // paths, open-with) to its relative-path fallback.
+      statusRequests.delete(sessionId)
     }
   },
 

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -17,6 +17,18 @@ vi.mock('../../api/sessions', () => ({
   },
 }))
 
+vi.mock('../../lib/clipboard', () => ({
+  copyTextToClipboard: vi.fn(async () => true),
+}))
+
+// The open-with block discovers external applications over the server API; the
+// menu's own actions are what this suite is about.
+vi.mock('../workspace/WorkspaceFileOpenWith', () => ({
+  WorkspaceFileOpenWith: () => <div data-testid="workspace-file-open-with" />,
+}))
+
+import { copyTextToClipboard } from '../../lib/clipboard'
+import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
 import { useWorkspaceContentStore } from '../../stores/workspaceContentStore'
 import { WorkspaceFileTreePane } from './WorkspaceFileTreePane'
 
@@ -54,6 +66,8 @@ beforeEach(() => {
   vi.useRealTimers()
   HTMLElement.prototype.scrollIntoView = scrollIntoView
   scrollIntoView.mockClear()
+  vi.mocked(copyTextToClipboard).mockClear()
+  useWorkspaceChatContextStore.setState({ referencesBySession: {} })
   useWorkspaceContentStore.setState({
     filesByKey: {},
     treeByKey: {},
@@ -66,9 +80,14 @@ beforeEach(() => {
   mocks.getWorkspaceTree.mockReset()
   mocks.getWorkspaceTree.mockImplementation(async (_session: string, path: string) =>
     path === 'src' ? SRC : ROOT)
-  mocks.getWorkspaceStatus.mockResolvedValue({ state: 'ok', workDir: '/repo', changedFiles: [
-    { path: 'src/changed.ts', status: 'modified', additions: 1, deletions: 0 },
-  ] })
+  mocks.getWorkspaceStatus.mockResolvedValue({
+    state: 'ok',
+    workDir: '/repo',
+    repoName: 'repo',
+    branch: 'main',
+    isGitRepo: true,
+    changedFiles: [{ path: 'src/changed.ts', status: 'modified', additions: 1, deletions: 0 }],
+  })
   mocks.searchWorkspace.mockReset()
   mocks.searchWorkspace.mockImplementation(async (_session: string, query: string) => ({
     state: 'ok', query, truncated: false,
@@ -433,6 +452,78 @@ describe('keyboard', () => {
       await Promise.resolve()
     })
     expect(screen.getByTestId('workspace-tree-row-src/adapters.ts')).toHaveAttribute('aria-level', '2')
+  })
+})
+
+describe('file tree context menu', () => {
+  it('offers the actions the rebuilt tree dropped, on files and directories alike', async () => {
+    await renderPane()
+
+    fireEvent.contextMenu(screen.getByTestId('workspace-tree-row-README.md'))
+    const menu = screen.getByTestId('workspace-file-tree-menu')
+    const labels = within(menu).getAllByRole('menuitem').map((item) => item.textContent)
+
+    expect(labels).toContain('Add to chat')
+    expect(labels).toContain('Copy path')
+    expect(labels).toContain('Copy absolute path')
+
+    fireEvent.keyDown(menu, { key: 'Escape' })
+    // A folder is a reference target too: adding one is how the chat receives a
+    // whole subtree, so the menu must not be file-only.
+    fireEvent.contextMenu(screen.getByTestId('workspace-tree-row-src'))
+    expect(screen.getByTestId('workspace-file-tree-menu')).toBeInTheDocument()
+  })
+
+  it('opens from the keyboard and returns focus to the row on Escape', async () => {
+    await renderPane()
+    const row = screen.getByTestId('workspace-tree-row-README.md')
+
+    fireEvent.keyDown(row, { key: 'ContextMenu' })
+    const menu = screen.getByTestId('workspace-file-tree-menu')
+    expect(within(menu).getAllByRole('menuitem').length).toBeGreaterThan(0)
+    expect(document.activeElement).toBe(within(menu).getAllByRole('menuitem')[0])
+
+    fireEvent.keyDown(menu, { key: 'Escape' })
+    expect(screen.queryByTestId('workspace-file-tree-menu')).toBeNull()
+    expect(document.activeElement).toBe(row)
+  })
+
+  it('adds the referenced row to the chat, marking directories as directories', async () => {
+    const addReference = vi.fn()
+    useWorkspaceChatContextStore.setState({ addReference })
+    await renderPane()
+
+    await act(async () => {
+      fireEvent.contextMenu(screen.getByTestId('workspace-tree-row-src'))
+      await Promise.resolve()
+    })
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Add to chat' }))
+
+    expect(addReference).toHaveBeenCalledWith(SESSION, expect.objectContaining({
+      kind: 'file',
+      path: 'src',
+      isDirectory: true,
+      absolutePath: '/repo/src',
+    }))
+    expect(screen.queryByTestId('workspace-file-tree-menu')).toBeNull()
+  })
+
+  it('copies the relative path, and the absolute one from the second action', async () => {
+    await renderPane()
+
+    await act(async () => {
+      fireEvent.contextMenu(screen.getByTestId('workspace-tree-row-README.md'))
+      await Promise.resolve()
+    })
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy path' }))
+    expect(copyTextToClipboard).toHaveBeenCalledWith('README.md')
+
+    await act(async () => {
+      fireEvent.contextMenu(screen.getByTestId('workspace-tree-row-README.md'))
+      await Promise.resolve()
+    })
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy absolute path' }))
+    expect(copyTextToClipboard).toHaveBeenCalledWith('/repo/README.md')
   })
 })
 
