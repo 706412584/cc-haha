@@ -158,13 +158,18 @@ function describeUpstreamUrl(url: string): string {
  * `socks5://` URL, a common local-proxy setup. That echoed URL carries the
  * userinfo and query that `describeUpstreamUrl` deliberately drops, so
  * appending a redacted URL after an unredacted message would leak exactly what
- * the redaction is for. Each URL is replaced by its host; unparseable
- * candidates are dropped rather than echoed.
+ * the redaction is for.
+ *
+ * Each URL collapses to its host. A URL whose host is empty (`file://`, or any
+ * scheme that does not use an authority) collapses to a placeholder instead, so
+ * a path that may embed a credential cannot survive as the remainder of the
+ * match.
  */
 function redactUrlsInMessage(message: string): string {
   return message.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"']+/gi, candidate => {
     try {
-      return new URL(candidate).host
+      const { host } = new URL(candidate)
+      return host || '[redacted-url]'
     } catch {
       return '[redacted-url]'
     }

@@ -118,6 +118,23 @@ describe('proxy upstream connection failures keep their diagnostics', () => {
     expect(message).not.toContain('sk-live-LEAKED')
   })
 
+  // A URL with no authority (`file://`) has an empty host, so collapsing to
+  // the host would leave its path — which may embed a credential — as the
+  // remainder of the match.
+  test('drops the path of a schemeless-authority url instead of leaving it behind', async () => {
+    const error = Object.assign(
+      new Error('failed to read "file:///home/alice/.config/relay/token-LEAKED" while connecting'),
+      { code: 'ECONNRESET' },
+    )
+
+    const { body } = await proxyWithFailingFetch('anthropic', error)
+    const message = body.error?.message ?? ''
+
+    expect(message).toContain('[redacted-url]')
+    expect(message).not.toContain('token-LEAKED')
+    expect(message).not.toContain('alice')
+  })
+
   test('omits diagnostics the error does not carry instead of inventing them', async () => {
     const { status, body } = await proxyWithFailingFetch('anthropic', new Error('transform exploded'))
 
