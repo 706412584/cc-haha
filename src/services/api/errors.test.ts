@@ -323,6 +323,67 @@ describe('context overflow errors', () => {
     })
   })
 
+  // The image-rejection fallback strips images. A request that also carries a
+  // document must be classified so the document is stripped too — otherwise the
+  // oversized document replays on every turn, the same unrecoverable loop the
+  // fallback exists to break.
+  test('strips documents too when the unrecognized rejection carried one', () => {
+    const message = '400 something the classifier does not recognise'
+    const error = new APIError(
+      400,
+      { type: 'error', error: { type: 'api_error', message } },
+      message,
+      undefined,
+    )
+    const messagesForAPI = [
+      {
+        role: 'user' as const,
+        content: [
+          {
+            type: 'tool_result' as const,
+            tool_use_id: 'tool-1',
+            content: [
+              { type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/png' as const, data: 'aGVsbG8=' } },
+              { type: 'document' as const, source: { type: 'base64' as const, media_type: 'application/pdf' as const, data: 'aGVsbG8=' } },
+            ],
+          },
+        ],
+      },
+    ]
+
+    const msg = getAssistantMessageFromError(error, 'claude-opus-4-8', { messagesForAPI })
+
+    expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.REQUEST_TOO_LARGE)
+  })
+
+  test('keeps the image classification when no document is present', () => {
+    const message = '400 something the classifier does not recognise'
+    const error = new APIError(
+      400,
+      { type: 'error', error: { type: 'api_error', message } },
+      message,
+      undefined,
+    )
+    const messagesForAPI = [
+      {
+        role: 'user' as const,
+        content: [
+          {
+            type: 'tool_result' as const,
+            tool_use_id: 'tool-1',
+            content: [
+              { type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/png' as const, data: 'aGVsbG8=' } },
+            ],
+          },
+        ],
+      },
+    ]
+
+    const msg = getAssistantMessageFromError(error, 'claude-opus-4-8', { messagesForAPI })
+
+    expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.IMAGE_UNSUPPORTED)
+  })
+
   // A 413 says the payload itself is unacceptable, which the media-stripping
   // path fixes. Compacting instead would shrink the transcript around a document
   // that is itself too large, and the next turn would resend it — the exact

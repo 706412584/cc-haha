@@ -129,6 +129,8 @@ function readErrno(error: unknown): number | undefined {
 
 /** Longest pathname reported from an upstream URL. */
 const MAX_REPORTED_URL_PATH = 120
+/** A host is normally short; this only bounds a pathological baseUrl. */
+const MAX_REPORTED_URL_HOST = 120
 
 /**
  * Reduce an upstream URL to the part worth reporting: scheme, host, and a
@@ -153,10 +155,13 @@ function describeUpstreamUrl(url: string): string {
     const parsed = new URL(url)
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '[unparsable-url]'
     if (!parsed.host) return '[unparsable-url]'
+    const host = parsed.host.length > MAX_REPORTED_URL_HOST
+      ? `${parsed.host.slice(0, MAX_REPORTED_URL_HOST)}…`
+      : parsed.host
     const path = parsed.pathname.length > MAX_REPORTED_URL_PATH
       ? `${parsed.pathname.slice(0, MAX_REPORTED_URL_PATH)}…`
       : parsed.pathname
-    return `${parsed.protocol}//${parsed.host}${path}`
+    return `${parsed.protocol}//${host}${path}`
   } catch {
     // Unparseable input cannot be safely redacted, so it is not echoed.
     return '[unparsable-url]'

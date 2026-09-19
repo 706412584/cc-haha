@@ -558,13 +558,21 @@ function isOpenAIImageUrlTextOnlySchemaError(raw: string): boolean {
 // the payloads here are { type, message: { content } } wrappers, so walk all
 // object values rather than only `content`.
 function messagesContainImageBlock(messages: readonly unknown[]): boolean {
+  return messagesContainBlockOfType(messages, 'image')
+}
+
+function messagesContainDocumentBlock(messages: readonly unknown[]): boolean {
+  return messagesContainBlockOfType(messages, 'document')
+}
+
+function messagesContainBlockOfType(messages: readonly unknown[], blockType: string): boolean {
   const walk = (value: unknown): boolean => {
     if (Array.isArray(value)) {
       return value.some(walk)
     }
     if (value && typeof value === 'object') {
       const record = value as Record<string, unknown>
-      if (record.type === 'image') return true
+      if (record.type === blockType) return true
       return Object.values(record).some(walk)
     }
     return false
@@ -1142,26 +1150,36 @@ function buildAssistantMessageFromError(
     })
   }
 
-  // Fallback for image rejections with unrecognized wording. The wording
+  // Fallback for media rejections with unrecognized wording. The wording
   // classifier above can't enumerate every provider/gateway phrasing, and a
-  // miss used to poison the session: the rejected image stayed in history and
+  // miss used to poison the session: the rejected media stayed in history and
   // every later turn re-failed with the same 400. When a 400/422 lands on a
-  // request that actually carried image blocks and no more specific classifier
-  // matched (context overflow, PDF, image size, auth, 404 all handled above),
-  // treat it as an image rejection so the image is stripped from later turns.
+  // request that actually carried media and no more specific classifier matched
+  // (context overflow, PDF, media size, auth, 404 all handled above), treat it
+  // as a media rejection so the media is stripped from later turns.
+  //
+  // A request carrying both kinds is classified as REQUEST_TOO_LARGE, which
+  // strips documents as well: reporting IMAGE_UNSUPPORTED would strip only the
+  // images and leave an oversized document replaying on every turn — the same
+  // unrecoverable loop this fallback exists to break, just one block type over.
   // The strip is gated to sourceModel, so a false positive only affects the
-  // exact model that failed — switching models replays the image.
+  // exact model that failed — switching models replays the media.
   if (
     error instanceof APIError &&
     (error.status === 400 || error.status === 422) &&
     options?.messagesForAPI &&
     messagesContainImageBlock(options.messagesForAPI)
   ) {
+    const carriesDocument = messagesContainDocumentBlock(options.messagesForAPI)
     return createAssistantAPIErrorMessage({
-      content: getImageUnsupportedErrorMessage(),
+      content: carriesDocument
+        ? getRequestTooLargeErrorMessage()
+        : getImageUnsupportedErrorMessage(),
       error: 'invalid_request',
       errorDetails: error.message,
-      businessErrorCode: BUSINESS_ERROR_CODES.IMAGE_UNSUPPORTED,
+      businessErrorCode: carriesDocument
+        ? BUSINESS_ERROR_CODES.REQUEST_TOO_LARGE
+        : BUSINESS_ERROR_CODES.IMAGE_UNSUPPORTED,
       sourceModel: model,
     })
   }
