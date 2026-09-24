@@ -393,38 +393,41 @@ export function AppShell() {
               aria-controls="sidebar-shell"
               aria-expanded={effectiveSidebarOpen}
             />
-            <div className="min-w-0 flex-1">
-              <h1 className="truncate text-[15px] font-bold leading-tight text-[var(--color-text-primary)]">
-                {mobilePageTitle}
-              </h1>
-              {isActiveChatTab ? (
-
-                <div className="mt-0.5 flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[10px] font-medium text-[var(--color-text-tertiary)]">
-                  {activeTab?.status === 'running' ? (
-                    <span className="flex shrink-0 items-center gap-1 text-[var(--color-text-secondary)]">
-                      <StatusDot tone="success" pulse />
-                      {t('session.active')}
-                    </span>
-                  ) : null}
-                  {activeSession?.messageCount !== undefined && activeSession.messageCount > 0 ? (
-                    <>
-                      {activeTab?.status === 'running' ? <span aria-hidden="true">·</span> : null}
-                      <span>{t('session.messages', { count: activeSession.messageCount })}</span>
-                    </>
-                  ) : null}
-                  {mobileSessionUpdated ? (
-                    <>
-                      {(activeTab?.status === 'running') || ((activeSession?.messageCount ?? 0) > 0) ? <span aria-hidden="true">·</span> : null}
-                      <span className="truncate">{t('session.lastUpdated', { time: mobileSessionUpdated })}</span>
-                    </>
-                  ) : null}
-                </div>
-              ) : (
-                <div className="mt-0.5 truncate text-[10px] font-medium text-[var(--color-text-tertiary)]">
-                  Code Council
-                </div>
-              )}
-            </div>
+            {activeTab?.type === 'settings' ? (
+              <h1 className="min-w-0 flex-1 truncate text-[15px] font-bold leading-tight text-[var(--color-text-primary)]">{t('sidebar.settings')}</h1>
+            ) : (
+              <div className="min-w-0 flex-1">
+                <h1 className="truncate text-[15px] font-bold leading-tight text-[var(--color-text-primary)]">
+                  {mobilePageTitle}
+                </h1>
+                {isActiveChatTab ? (
+                  <div className="mt-0.5 flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[10px] font-medium text-[var(--color-text-tertiary)]">
+                    {activeTab?.status === 'running' ? (
+                      <span className="flex shrink-0 items-center gap-1 text-[var(--color-text-secondary)]">
+                        <StatusDot tone="success" pulse />
+                        {t('session.active')}
+                      </span>
+                    ) : null}
+                    {activeSession?.messageCount !== undefined && activeSession.messageCount > 0 ? (
+                      <>
+                        {activeTab?.status === 'running' ? <span aria-hidden="true">·</span> : null}
+                        <span>{t('session.messages', { count: activeSession.messageCount })}</span>
+                      </>
+                    ) : null}
+                    {mobileSessionUpdated ? (
+                      <>
+                        {(activeTab?.status === 'running') || ((activeSession?.messageCount ?? 0) > 0) ? <span aria-hidden="true">·</span> : null}
+                        <span className="truncate">{t('session.lastUpdated', { time: mobileSessionUpdated })}</span>
+                      </>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="mt-0.5 truncate text-[10px] font-medium text-[var(--color-text-tertiary)]">
+                    Code Council
+                  </div>
+                )}
+              </div>
+            )}
             <button
               type="button"
               data-testid="mobile-settings-button"

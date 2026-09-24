@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test'
 import type { AppState } from '../../state/AppState.js'
 import type { ToolUseContext } from '../../Tool.js'
+import { parseUserSpecifiedModel } from '../../utils/model/model.js'
 import type {
   CustomAgentDefinition,
   PluginAgentDefinition,
@@ -213,7 +214,7 @@ describe('Agent Teams custom Agent runtime call sites', () => {
       makeContext(pluginAgent),
     )
 
-    expect(result.data.model).toBe('opus')
+    expect(result.data.model).toBe(parseUserSpecifiedModel('opus'))
     const runnerConfig = startInProcessTeammateMock.mock.calls[0]?.[0] as {
       agentDefinition?: PluginAgentDefinition
     }

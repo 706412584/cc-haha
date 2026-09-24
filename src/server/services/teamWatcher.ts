@@ -528,7 +528,11 @@ export class TeamWatcher {
 
   private extractSubagentName(filePath: string): string | null {
     try {
-      const head = fs.readFileSync(filePath, 'utf-8').slice(0, 8192)
+      const fd = fs.openSync(filePath, 'r')
+      const prefix = Buffer.allocUnsafe(8192)
+      let length: number
+      try { length = fs.readSync(fd, prefix, 0, prefix.length, 0) } finally { fs.closeSync(fd) }
+      const head = prefix.toString('utf8', 0, length)
       const lines = head.split('\n').filter((line) => line.trim().length > 0)
 
       for (const line of lines) {

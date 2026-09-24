@@ -1,3 +1,4 @@
+import { readLegacyTranscriptFiles } from './legacyTranscriptBudget.js'
 /**
  * TeamService — 读取 CLI 生成的 Agent Teams 配置
  *
@@ -13,6 +14,7 @@ import * as path from 'path'
 import * as os from 'os'
 import * as crypto from 'node:crypto'
 import { ApiError } from '../middleware/errorHandler.js'
+import { readTeamTranscriptProjection } from './teamTranscriptProjection.js'
 import { writeToMailbox } from '../../utils/teammateMailbox.js'
 import {
   sessionService,
@@ -1413,7 +1415,7 @@ type TeamFileRaw = {
 
 export class TeamService {
   private readonly sessionLocator: Pick<typeof sessionService, 'findSessionFile'>
-  private readonly sessionReader: Pick<typeof sessionService, 'getSessionMessages'>
+  private readonly sessionReader: Pick<typeof sessionService, 'getSessionMessages'> | undefined
   private readonly localIndexGateway: LocalIndexGateway
   private readonly targetedEntryReader: typeof readSessionEntriesByLocator
   private readonly archiveWriteLocks = new Map<string, Promise<unknown>>()
@@ -1425,9 +1427,24 @@ export class TeamService {
     targetedEntryReader?: typeof readSessionEntriesByLocator
   } = {}) {
     this.sessionLocator = options.sessionLocator ?? sessionService
-    this.sessionReader = options.sessionReader ?? sessionService
+    this.sessionReader = options.sessionReader
     this.localIndexGateway = options.localIndexGateway ?? localIndexCoordinator
     this.targetedEntryReader = options.targetedEntryReader ?? readSessionEntriesByLocator
+  }
+
+  private async readTeamHistory(sessionId: string): Promise<SessionMessageEntry[]> {
+    // Injected fixture readers keep the migration/replay seam. Production never
+    // routes periodic workbench polling through the canonical full transcript.
+    if (this.sessionReader) return this.sessionReader.getSessionMessages(sessionId)
+    const found = await this.sessionLocator.findSessionFile(sessionId)
+    if (!found) return []
+    const projection = await readTeamTranscriptProjection(found.filePath).catch(() => {
+      throw new ApiError(503, 'Team history is changing; retry shortly', 'TEAM_HISTORY_INCOMPLETE')
+    })
+    if (!projection.complete) {
+      throw new ApiError(503, 'Team history projection is incomplete; existing workbench state was preserved', 'TEAM_HISTORY_INCOMPLETE')
+    }
+    return projection.messages
   }
 
   private getConfigDir(): string {
@@ -1889,8 +1906,9 @@ export class TeamService {
 
     let messages: SessionMessageEntry[]
     try {
-      messages = await this.sessionReader.getSessionMessages(sessionId)
-    } catch {
+      messages = await this.readTeamHistory(sessionId)
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'TEAM_HISTORY_INCOMPLETE') throw error
       return null
     }
     const projected = projectTeamWorkbenchesFromTranscript(sessionId, messages)
@@ -1996,7 +2014,7 @@ export class TeamService {
     let messages: SessionMessageEntry[] | undefined
     let lifecycle: TaskListLifecycleState | undefined
     try {
-      messages = await this.sessionReader.getSessionMessages(sessionId)
+      messages = await this.readTeamHistory(sessionId)
     } catch {
       // The archive tombstone must still be written when a legacy or partially
       // persisted lead transcript cannot be read.
@@ -3101,8 +3119,8 @@ export class TeamService {
     options: TeamTranscriptPageOptions,
     projection: TranscriptFragmentProjection = {},
   ): Promise<TeamTranscriptPage> {
-    const bytes = await fs.readFile(filePath)
-    const stat = await fs.stat(filePath)
+    const source = (await readLegacyTranscriptFiles([filePath]))[0]!
+    const { bytes, stat } = source
     return this.parseTranscriptBufferPage(
       bytes,
       options,
@@ -3116,12 +3134,11 @@ export class TeamService {
     sources: Array<{ filePath: string; ownerAgentId?: string }>,
     options: TeamTranscriptPageOptions,
   ): Promise<TeamTranscriptPage> {
-    const allFragments = await Promise.all(sources.map(async source => {
-      const [bytes, stat] = await Promise.all([
-        fs.readFile(source.filePath),
-        fs.stat(source.filePath),
-      ])
-      return { ...source, bytes, ctimeMs: stat.ctimeMs }
+    const boundedFiles = await readLegacyTranscriptFiles(sources.map(source => source.filePath))
+    const allFragments = sources.map((source, index) => ({
+      ...source,
+      bytes: boundedFiles[index]!.bytes,
+      ctimeMs: boundedFiles[index]!.stat.ctimeMs,
     }))
     const fragments = dropSupersededTranscriptFragments(allFragments)
     const ownerAgentIdByOrdinal: Array<string | undefined> = []

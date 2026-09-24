@@ -12,6 +12,7 @@ import {
   type SearchContentIndex,
   type SearchContentQueryOptions,
   type SearchContentQueryResult,
+  type SearchContentSuggestions,
 } from './searchContentIndex.js'
 import {
   createSearchContentProjector,
@@ -54,6 +55,7 @@ export interface SearchContentCoordinator {
     query: string,
     options?: SearchContentQueryOptions & { signal?: AbortSignal },
   ): SearchContentQueryResult | null
+  suggestSessions(query: string, options?: { limit?: number; signal?: AbortSignal }): SearchContentSuggestions | null
   getStatus(): SearchContentCoordinatorStatus
 }
 
@@ -874,6 +876,17 @@ export function createSearchContentCoordinator(
       await coordinator.start()
       if (wasStarted) watcher?.queueFullSweep()
       return coordinator.getStatus()
+    },
+    suggestSessions(query, options = {}) {
+      if (!started || !hasCompleteSweep || status.state !== 'ready' || !index || options.signal?.aborted) return null
+      try {
+        const result = index.querySessionSuggestions(query, options.limit)
+        return options.signal?.aborted ? null : result
+      } catch {
+        // Suggestions are a disposable projection; never repair or scan
+        // transcript files on the keystroke path when SQLite is unavailable.
+        return null
+      }
     },
     search(query, options = {}) {
       if (

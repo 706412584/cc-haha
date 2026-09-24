@@ -2,8 +2,9 @@
  * Unit tests for TeamWatcher — real-time team status push via WebSocket
  */
 
-import { describe, it, expect, beforeEach, afterEach, mock } from 'bun:test'
+import { describe, it, expect, beforeEach, afterEach, mock, spyOn } from 'bun:test'
 import * as fs from 'node:fs/promises'
+import * as syncFs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import type { ServerMessage } from '../ws/events.js'
@@ -663,4 +664,21 @@ describe('TeamWatcher broadcast', () => {
     watcher.reset()
     await cleanupTmpDir()
   })
+})
+
+// A sparse fixture catches read-all-then-slice without retaining a large test string.
+it('reads only the subagent name prefix of a large transcript', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'watcher-prefix-'))
+  const file = path.join(directory, 'agent.jsonl')
+  await fs.writeFile(file, JSON.stringify({ agentName: 'bounded-agent' }) + '\n')
+  await fs.truncate(file, 64 * 1024 * 1024)
+  const readAll = spyOn(syncFs, 'readFileSync').mockImplementation(() => { throw new Error('Unbounded transcript read') })
+  try {
+    const watcher = new TeamWatcher()
+    expect((watcher as unknown as { extractSubagentName(path: string): string | null }).extractSubagentName(file)).toBe('bounded-agent')
+    expect(readAll).not.toHaveBeenCalled()
+  } finally {
+    readAll.mockRestore()
+    await fs.rm(directory, { recursive: true, force: true })
+  }
 })

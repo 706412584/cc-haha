@@ -19,7 +19,7 @@ export type PermissionMode =
 export type ClientMessage =
   | { type: 'prewarm_session' }
   | { type: 'sync_state' }
-  | { type: 'user_message'; content: string; attachments?: AttachmentRef[] }
+  | { type: 'user_message'; content: string; attachments?: AttachmentRef[]; sessionReferences?: { sessionId: string }[] }
   | {
       type: 'permission_response'
       requestId: string
@@ -28,6 +28,12 @@ export type ClientMessage =
       updatedInput?: Record<string, unknown>
       denyMessage?: string
       permissionUpdates?: unknown[]
+      // Optional execution-model switch applied together with an approval
+      // (currently honored for ExitPlanMode only): same-provider switches are
+      // applied in-process via the SDK set_model control request before the
+      // allow response; cross-provider switches approve → interrupt → restart
+      // the CLI with the new env → auto-continue execution.
+      runtimeOverride?: { providerId: string | null; modelId: string; effortLevel?: string }
     }
   | {
       type: 'computer_use_permission_response'
@@ -124,6 +130,7 @@ export type ServerMessage =
       toolUseId?: string
       input: unknown
       description?: string
+      displayName?: string
     }
   | {
       type: 'computer_use_permission_request'
@@ -142,7 +149,7 @@ export type ServerMessage =
       computerUseRequestIds: string[]
       turnActive: boolean
     }
-  | { type: 'user_message_replay'; content: string }
+  | { type: 'user_message_replay'; content: string; sessionReferences?: { sessionId: string }[] }
   | { type: 'message_complete'; usage: TokenUsage; timing?: TurnTiming }
   /**
    * `text` is a fragment when the CLI streams `thinking_delta`, and a whole block when

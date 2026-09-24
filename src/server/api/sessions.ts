@@ -92,13 +92,24 @@ const INSPECTION_CONTEXT_TIMEOUT_MS = 5_000
  */
 const USAGE_ONLY_CONTROL_TIMEOUT_MS = 2_500
 
+/**
+ * Budget for the polling `get_session_usage` control. Shorter than the inspection's basic
+ * control timeout because the caller retries on its own cadence: a slow answer is worth less
+ * than a stale one that blocks the next poll.
+ */
+const USAGE_ONLY_CONTROL_TIMEOUT_MS = 2_500
+
 const workspaceService = new WorkspaceService(
   async (sessionId) => (
     conversationService.getSessionWorkDir(sessionId) ||
     await sessionService.getSessionWorkDir(sessionId)
   ),
-  async (sessionId) => sessionService.getSessionMessages(sessionId),
-  async (sessionId) => sessionService.getSessionFileHistorySnapshots(sessionId),
+  async (sessionId) => {
+    const recovery = await sessionService.getSessionHistoryRecovery(sessionId)
+    if (!(recovery.completeness?.workspace ?? recovery.status === 'ready')) throw new ApiError(413, 'Workspace transcript exceeds the viewing budget', 'HISTORY_WORKSPACE_LIMIT')
+    return recovery.messages
+  },
+  async (sessionId) => sessionService.getSessionFileHistorySnapshots(sessionId, { bounded: true }),
 )
 
 const workspaceFileService = new WorkspaceFileService(
@@ -230,7 +241,11 @@ export async function handleSessionsApi(
           { status: 405 }
         )
       }
-      return await getSessionMessages(sessionId)
+      return await getSessionMessages(req, sessionId, url)
+    }
+
+    if (subResource === 'history-recovery' && req.method === 'GET') {
+      return Response.json(await sessionService.getSessionHistoryRecovery(sessionId, { signal: req.signal }))
     }
 
     if (subResource === 'trace') {
@@ -240,9 +255,18 @@ export async function handleSessionsApi(
           { status: 405 }
         )
       }
+      if (segments[4] === 'raw') {
+        const source = await traceCaptureService.getSessionTraceFile(sessionId)
+        if (!source) throw ApiError.notFound(`Trace not found: ${sessionId}`)
+        return new Response(Bun.file(source.path), { headers: {
+          'content-type': 'application/x-ndjson',
+          'content-disposition': 'attachment; filename="trace.jsonl"',
+          'cache-control': 'no-store',
+        } })
+      }
       return segments[4] === 'calls'
         ? await getSessionTraceCall(sessionId, segments[5])
-        : await getSessionTrace(sessionId)
+        : await getSessionTrace(req, sessionId, url)
     }
 
     if (subResource === 'git-info') {
@@ -453,6 +477,11 @@ export async function handleSessionsApi(
         )
     }
   } catch (error) {
+    const code = (error as { code?: string } | null)?.code
+    const status = code === 'TRACE_PAGE_STALE' || code === 'HISTORY_PAGE_STALE' ? 409
+      : code === 'TRACE_RECORD_TOO_LARGE' ? 413
+      : code === 'TRACE_INDEX_BUSY' ? 503 : code === 'HISTORY_QUEUE_FULL' ? 429 : undefined
+    if (status) return errorResponse(new ApiError(status, error instanceof Error ? error.message : code!, code))
     return errorResponse(error)
   }
 }
@@ -473,6 +502,7 @@ async function syncSessionIndexes(): Promise<Response> {
 
 async function listSessions(req: Request, url: URL): Promise<Response> {
   const project = url.searchParams.get('project') || undefined
+  const view = url.searchParams.get('view')
   const requestedLimit = parseInt(url.searchParams.get('limit') || '20', 10)
   const offset = parseInt(url.searchParams.get('offset') || '0', 10)
 
@@ -484,6 +514,19 @@ async function listSessions(req: Request, url: URL): Promise<Response> {
   }
 
   const petAccess = isPetAccessAuthorized(req)
+  if (!petAccess && view !== null) {
+    if (view !== 'sidebar') throw ApiError.badRequest('Invalid session list view')
+    const rawPerProjectLimit = url.searchParams.get('perProjectLimit') ?? '6'
+    if (!/^\d+$/.test(rawPerProjectLimit)) throw ApiError.badRequest('Invalid perProjectLimit parameter')
+    const perProjectLimit = Number(rawPerProjectLimit)
+    if (!Number.isSafeInteger(perProjectLimit) || perProjectLimit <= 0) {
+      throw ApiError.badRequest('Invalid perProjectLimit parameter')
+    }
+    return Response.json({
+      ...await sessionService.listProjectPreviews(perProjectLimit),
+      index: localIndexCoordinator.getPublicStatus(),
+    })
+  }
   const limit = petAccess ? Math.min(requestedLimit, PET_SESSION_LIMIT) : requestedLimit
   const result = await sessionService.listSessions({
     ...(petAccess ? {} : { project }),
@@ -512,11 +555,12 @@ async function listSessions(req: Request, url: URL): Promise<Response> {
 }
 
 async function getSession(sessionId: string): Promise<Response> {
-  const detail = await sessionService.getSession(sessionId)
-  if (!detail) {
-    throw ApiError.notFound(`Session not found: ${sessionId}`)
-  }
-  return Response.json(detail)
+  const [summary, history] = await Promise.all([
+    sessionService.getSessionSummary(sessionId),
+    sessionService.getSessionHistoryPage(sessionId),
+  ])
+  if (!summary) throw ApiError.notFound(`Session not found: ${sessionId}`)
+  return Response.json({ ...summary, ...history })
 }
 
 type ProviderTransitionSelection = {
@@ -624,12 +668,20 @@ async function createProviderTransitionSession(
   }, { status: result.created ? 201 : 200 })
 }
 
-async function getSessionMessages(sessionId: string): Promise<Response> {
-  const [messages, taskNotifications] = await Promise.all([
-    sessionService.getSessionMessages(sessionId),
-    sessionService.getSessionTaskNotifications(sessionId),
-  ])
-  return Response.json({ messages, taskNotifications })
+async function getSessionMessages(req: Request, sessionId: string, url: URL): Promise<Response> {
+  const mode = url.searchParams.get('mode')
+  if (mode !== null && mode !== 'full' && mode !== 'page') throw ApiError.badRequest('Invalid history mode')
+  const cursor = url.searchParams.get('cursor') ?? undefined
+  // A full read always starts from the tail; mixing it with a cursor would
+  // silently turn it back into a paged read with a larger budget.
+  if (mode === 'full' && cursor) throw ApiError.badRequest('mode=full does not take a cursor')
+  return Response.json(await sessionService.getSessionHistoryPage(sessionId, {
+    cursor,
+    // `mode=full` returns the whole transcript up to the reader's byte budget in
+    // one response so the desktop timeline never stitches pages together.
+    full: mode === 'full',
+    signal: req.signal,
+  }))
 }
 
 async function handleSessionSummaryRoute(
@@ -675,9 +727,14 @@ async function handleSessionSummaryRoute(
   )
 }
 
-async function getSessionTrace(sessionId: string): Promise<Response> {
+async function getSessionTrace(req: Request, sessionId: string, url: URL): Promise<Response> {
   const [trace, sessionMeta, messageSignature] = await Promise.all([
-    traceCaptureService.getSessionTrace(sessionId),
+    traceCaptureService.getSessionTraceOverview(sessionId, {
+      offset: parseTracePageOffset(url),
+      revisionToken: url.searchParams.get('revisionToken') ?? undefined,
+      scanCursor: url.searchParams.get('scanCursor') ?? undefined,
+      signal: req.signal,
+    }),
     getSessionTraceMeta(sessionId),
     sessionService.getSessionMessagesSignature(sessionId),
   ])
@@ -694,6 +751,14 @@ async function getSessionTrace(sessionId: string): Promise<Response> {
         }
       : null,
   })
+}
+
+function parseTracePageOffset(url: URL): number {
+  const value = url.searchParams.get('offset') ?? '0'
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw ApiError.badRequest('Invalid trace offset')
+  }
+  return Number(value)
 }
 
 async function getSessionTraceMeta(sessionId: string): Promise<{
@@ -1323,7 +1388,7 @@ async function getSessionInspection(req: Request, sessionId: string, url: URL): 
   let transcriptSnapshot: Awaited<ReturnType<typeof sessionService.getInspectionTranscriptSnapshot>> | undefined
   const getTranscriptSnapshot = async () => {
     if (transcriptSnapshot !== undefined) return transcriptSnapshot
-    transcriptSnapshot = await sessionService.getInspectionTranscriptSnapshot(sessionId).catch(() => null)
+    transcriptSnapshot = await sessionService.getInspectionTranscriptSnapshot(sessionId)
     return transcriptSnapshot
   }
 
@@ -1746,7 +1811,15 @@ async function branchSession(req: Request, sessionId: string): Promise<Response>
   }
 }
 
+async function assertCheckpointPreviewBudget(sessionId: string): Promise<void> {
+  const found = await sessionService.findSessionFile(sessionId)
+  if (found && Bun.file(found.filePath).size > 16 * 1024 * 1024) {
+    throw new ApiError(413, 'This transcript exceeds the full checkpoint preview budget. Chat history remains available in pages.', 'HISTORY_CHECKPOINT_PREVIEW_LIMIT')
+  }
+}
+
 async function getTurnCheckpoints(req: Request, sessionId: string): Promise<Response> {
+  await assertCheckpointPreviewBudget(sessionId)
   const checkpoints = await listSessionTurnCheckpoints(sessionId, req.signal, new URL(req.url).searchParams.get('frozen') === 'true')
   // Make this turn's real changed files previewable even when they live outside
   // the session workdir (e.g. the user told the model to write to an absolute
@@ -1760,6 +1833,7 @@ async function getTurnCheckpoints(req: Request, sessionId: string): Promise<Resp
 }
 
 async function getTurnCheckpointDiff(sessionId: string, url: URL): Promise<Response> {
+  await assertCheckpointPreviewBudget(sessionId)
   const targetUserMessageId = url.searchParams.get('targetUserMessageId') || undefined
   const userMessageIndexParam = url.searchParams.get('userMessageIndex')
   const path = url.searchParams.get('path')
@@ -1820,6 +1894,8 @@ type RecentProjectEntry = {
 // In-memory cache for recent projects (TTL: 30s)
 let recentProjectsCache: {
   scope: string
+  /** How many sessions were scanned to build `projects` — see getRecentProjects. */
+  scanLimit: number
   projects: RecentProjectEntry[]
   timestamp: number
 } | null = null
@@ -1840,12 +1916,18 @@ function isDesktopWorktreeBranchName(branch: string | null): boolean {
 
 async function getRecentProjects(url: URL): Promise<Response> {
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '10', 10) || 10, 1), 500)
-  const sessionScanLimit = Math.min(Math.max(limit * 16, 100), 500)
+  const scanParam = parseInt(url.searchParams.get('scan') || '', 10)
+  const sessionScanLimit = Number.isFinite(scanParam)
+    ? Math.min(Math.max(scanParam, 100), 5000)
+    : Math.min(Math.max(limit * 16, 100), 500)
   const scope = path.resolve(getClaudeConfigHomeDir())
 
-  // Return cached response if fresh
+  // Return cached response if fresh. The cache is only valid for requests whose
+  // scan depth it already covers — a shallow (small-limit) scan must not serve
+  // a deeper one, or older projects would be silently truncated away.
   if (
     recentProjectsCache?.scope === scope &&
+    recentProjectsCache.scanLimit >= sessionScanLimit &&
     Date.now() - recentProjectsCache.timestamp < RECENT_PROJECTS_CACHE_TTL
   ) {
     return Response.json({ projects: recentProjectsCache.projects.slice(0, limit) })
@@ -1954,6 +2036,6 @@ async function getRecentProjects(url: URL): Promise<Response> {
   // Sort by most recent
   projects.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt))
 
-  recentProjectsCache = { scope, projects, timestamp: Date.now() }
+  recentProjectsCache = { scope, scanLimit: sessionScanLimit, projects, timestamp: Date.now() }
   return Response.json({ projects: projects.slice(0, limit) })
 }

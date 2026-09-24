@@ -103,7 +103,7 @@ describe('sessionRuntimeStore — handoffInfo', () => {
 
 const EXPECTED_GROK_SELECTION = {
   providerId: 'grok-official',
-  modelId: 'grok-4.6',
+  modelId: 'grok-4.7',
   effortLevel: 'high',
 }
 
@@ -113,19 +113,23 @@ describe('sessionRuntimeStore runtime cleanup', () => {
     useSessionRuntimeStore.setState({ selections: {} })
   })
 
-  it('discards retired Grok selections before persisting them', () => {
-    useSessionRuntimeStore.getState().setSelection('session-grok', {
-      providerId: 'grok-official',
-      modelId: 'grok-build',
-      effortLevel: 'max',
-    })
+  it('keeps an explicit model choice through stale, matching, then stale metadata refreshes', () => {
+    const store = useSessionRuntimeStore.getState()
+    const oldSession = {
+      id: 'switch-session', runtimeProviderId: 'kimi', runtimeModelId: 'k3[1m]',
+    } as SessionListItem
+    store.syncFromSessions([oldSession])
+    const next = { providerId: 'deepseek', modelId: 'deepseek-v4-flash' }
+    store.setSelection(oldSession.id, next)
+    const startedWith = useSessionRuntimeStore.getState().selections
 
-    expect(useSessionRuntimeStore.getState().selections['session-grok']).toEqual(
-      EXPECTED_GROK_SELECTION,
-    )
-    expect(JSON.parse(localStorage.getItem('cc-haha-session-runtime')!)).toEqual({
-      'session-grok': EXPECTED_GROK_SELECTION,
-    })
+    for (const metadata of [oldSession, {
+      ...oldSession, runtimeProviderId: next.providerId, runtimeModelId: next.modelId,
+    }, oldSession]) {
+      store.syncFromSessions([metadata], startedWith)
+      expect(useSessionRuntimeStore.getState().selections[oldSession.id]).toEqual(next)
+      expect(JSON.parse(localStorage.getItem('cc-haha-session-runtime')!)[oldSession.id]).toEqual(next)
+    }
   })
 
   it('restores an explicit thinking override from session metadata', () => {
@@ -166,6 +170,52 @@ describe('sessionRuntimeStore runtime cleanup', () => {
     }])
     expect(useSessionRuntimeStore.getState().selections['session-thinking-stable']?.thinkingEnabled).toBe(false)
   })
+
+  it('accepts later remote changes after confirmation but ignores pre-confirmation requests', () => {
+    const store = useSessionRuntimeStore.getState()
+    const next = { providerId: 'deepseek', modelId: 'deepseek-v4-flash' }
+    store.setSelection('confirmed', next)
+    const oldRequest = useSessionRuntimeStore.getState().selections
+    store.settleSelection('confirmed')
+    const remote = { id: 'confirmed', runtimeProviderId: 'kimi', runtimeModelId: 'k3' } as SessionListItem
+    store.syncFromSessions([remote], oldRequest)
+    expect(useSessionRuntimeStore.getState().selections.confirmed).toEqual(next)
+    store.syncFromSessions([remote], useSessionRuntimeStore.getState().selections)
+    expect(useSessionRuntimeStore.getState().selections.confirmed).toEqual({ providerId: 'kimi', modelId: 'k3' })
+  })
+
+  it('preserves a moved draft choice and releases local ownership when cleared', () => {
+    const store = useSessionRuntimeStore.getState()
+    const next = { providerId: 'deepseek', modelId: 'deepseek-v4-flash' }
+    const metadata = {
+      id: 'new-session', runtimeProviderId: 'kimi', runtimeModelId: 'k3',
+    } as SessionListItem
+    store.setSelection('__draft__', next)
+    store.moveSelection('__draft__', metadata.id)
+    store.syncFromSessions([metadata])
+    expect(useSessionRuntimeStore.getState().selections[metadata.id]).toEqual(next)
+    store.clearSelection(metadata.id)
+    store.syncFromSessions([metadata])
+    expect(useSessionRuntimeStore.getState().selections[metadata.id]).toEqual({ providerId: 'kimi', modelId: 'k3' })
+  })
+
+  it.each(['grok-build', 'grok-composer-2.5-fast'])(
+    'discards the retired Grok model %s before persisting it',
+    (retiredModelId) => {
+      useSessionRuntimeStore.getState().setSelection('session-grok', {
+        providerId: 'grok-official',
+        modelId: retiredModelId,
+        effortLevel: 'max',
+      })
+
+      expect(useSessionRuntimeStore.getState().selections['session-grok']).toEqual(
+        EXPECTED_GROK_SELECTION,
+      )
+      expect(JSON.parse(localStorage.getItem('cc-haha-session-runtime')!)).toEqual({
+        'session-grok': EXPECTED_GROK_SELECTION,
+      })
+    },
+  )
 
   it('does not let retired Grok session metadata restore the removed model', () => {
     useSessionRuntimeStore.getState().syncFromSessions([{

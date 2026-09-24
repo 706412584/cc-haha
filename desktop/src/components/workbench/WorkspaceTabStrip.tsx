@@ -209,6 +209,7 @@ export function WorkspaceTabStrip({
   return (
     <div
       data-testid={`workspace-tab-strip-${dock}`}
+      data-desktop-drag-region={placement === 'window' ? true : undefined}
       className={`flex min-w-0 shrink-0 items-stretch gap-1 bg-[var(--color-surface)] pl-2 pr-1 ${placement === 'window' ? 'h-[52px] flex-1' : 'h-10 border-b border-[var(--color-border)]'}`}
     >
       <div className="flex min-w-0 flex-1 items-stretch gap-1">
@@ -251,7 +252,7 @@ export function WorkspaceTabStrip({
                 onDoubleClick={() => onPin(tab.id)}
                 onContextMenu={(event) => openMenuAt(event, tab.id)}
                 className={[
-                  `group ${placement === 'window' ? 'my-2.5' : 'my-1'} flex min-w-[112px] max-w-[200px] cursor-default items-center gap-0.5 rounded-[var(--radius-md)] pl-2 pr-1 transition-colors`,
+                  `tab-bar-interactive group ${placement === 'window' ? 'my-2.5' : 'my-1'} flex min-w-[112px] max-w-[200px] cursor-default items-center gap-0.5 rounded-[var(--radius-md)] pl-2 pr-1 transition-colors`,
                   isActive
                     ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
                     : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]',
@@ -346,7 +347,7 @@ export function WorkspaceTabStrip({
           })}
         </div>
 
-        <span className="flex shrink-0 items-center">
+        <span className="tab-bar-interactive flex shrink-0 items-center">
           <IconButton
             icon={<Plus size={15} strokeWidth={2} />}
             label={t('workspace.tabAdd')}
@@ -369,7 +370,7 @@ export function WorkspaceTabStrip({
       </div>
 
       {activeTerminalTab ? (
-        <span className="flex shrink-0 items-center">
+        <span className="tab-bar-interactive flex shrink-0 items-center">
           <IconButton
             icon={<MoreHorizontal size={16} />}
             label={t('workspace.tabMenu')}

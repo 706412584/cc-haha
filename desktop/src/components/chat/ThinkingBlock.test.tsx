@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
 import { ThinkingBlock, thinkingPreview } from './ThinkingBlock'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { clearDisclosureMemory } from '../../lib/disclosureMemory'
 
 // Counting renders is the only honest way to assert a `memo` bailout without
 // reaching into React internals, and the component's one observable per-render
@@ -246,5 +247,20 @@ describe('ThinkingBlock', () => {
     rerender(<ThinkingBlock content="first and second" isActive />)
 
     expect(renderProbe.count).toBeGreaterThan(afterMount)
+  })
+
+  it('keeps the expanded state across a virtualized row unmount and remount', () => {
+    // Virtualization unmounts rows outside the window. Losing the reader's
+    // disclosure choice changes the row height on the way back, which is the
+    // scroll jump this key exists to prevent.
+    clearDisclosureMemory()
+    const content = 'line one\nline two\nline three'
+    const first = render(<ThinkingBlock content={content} disclosureKey="think-1" />)
+    expect(first.container.querySelector('[data-thinking-content]')).toBeNull()
+    fireEvent.click(screen.getByRole('button'))
+    expect(first.container.querySelector('[data-thinking-content="expanded"]')).not.toBeNull()
+    first.unmount()
+    const second = render(<ThinkingBlock content={content} disclosureKey="think-1" />)
+    expect(second.container.querySelector('[data-thinking-content="expanded"]')).not.toBeNull()
   })
 })

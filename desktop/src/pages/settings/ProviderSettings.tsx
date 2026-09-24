@@ -2,7 +2,8 @@ import { useState, useEffect, useMemo, useRef, useId, type CSSProperties, type R
 import { closestCenter, DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { GripVertical } from 'lucide-react'
+import { GripVertical, Star } from 'lucide-react'
+import aruhubLogo from '../../../../docs/images/sponsors/aruhub-logo.png'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useProviderStore } from '../../stores/providerStore'
 import { useUIStore } from '../../stores/uiStore'
@@ -20,6 +21,7 @@ import { Dropdown } from '@/components/ui/Dropdown'
 import { Tooltip } from '@/components/ui/Tooltip'
 import type { SavedProvider, UpdateProviderInput, ProviderTestResult, ModelMapping, Model1mSupport, ApiFormat, ProviderAuthStrategy, ProviderModelInfo, ProviderModelsErrorCode } from '../../types/provider'
 import { groupProviderModels, providerModelsErrorKey } from '../../lib/providerModels'
+import { resolveModelApiFormat } from '../../../../src/shared/modelApiFormats'
 import { apply1mSupportToContextInput, apply1mSupportToContextInputs, getAutoCompactWindowErrorKey, getModelContextWindowErrorKey, MODEL_SLOTS, parseAutoCompactWindowInput, parseModelContextWindowsInput, type ModelContextInputs, type ModelSlot } from '../../lib/providerModelContext'
 import type { ProviderPreset } from '../../types/providerPreset'
 import { normalizeProviderBaseUrl, presetMatchesBaseUrl, selectableProviderPresets } from '../../config/providerPresets'
@@ -365,7 +367,11 @@ export function ProviderSettings({ browserMode = false }: { browserMode?: boolea
                       {preset && preset.id !== 'custom' && (
                         <Badge tone="neutral">{preset.name}</Badge>
                       )}
-                      {provider.apiFormat && provider.apiFormat !== 'anthropic' && (
+                      {preset?.modelApiFormats?.length ? (
+                        // A path-bound gateway declares one format on the record but
+                        // routes per model, so the single-format badge would mislead.
+                        <Badge tone="warning">{t('settings.providers.multiProtocolBadge')}</Badge>
+                      ) : provider.apiFormat && provider.apiFormat !== 'anthropic' && (
                         <Badge tone="warning">
                           {provider.apiFormat === 'openai_chat' ? 'OpenAI Chat' : 'OpenAI Responses'}
                         </Badge>
@@ -1060,7 +1066,15 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
   const [selectedPreset, setSelectedPreset] = useState<ProviderPreset>(initialPreset)
   const [name, setName] = useState(provider?.name ?? initialPreset.name)
   const [baseUrl, setBaseUrl] = useState(provider?.baseUrl ?? initialPreset.baseUrl)
-  const [apiFormat, setApiFormat] = useState<ApiFormat>(provider?.apiFormat ?? initialPreset.apiFormat ?? 'anthropic')
+  // A preset that decides the protocol per model owns this field: the picked value
+  // is only the fallback for models no rule matches, so a record carrying a stale
+  // one (cc-switch import, a paste, an older save) must not override it.
+  const presetDrivesApiFormat = Boolean(selectedPreset.modelApiFormats?.length)
+  const [apiFormat, setApiFormat] = useState<ApiFormat>(
+    presetDrivesApiFormat
+      ? selectedPreset.apiFormat
+      : provider?.apiFormat ?? initialPreset.apiFormat ?? 'anthropic',
+  )
   const [authStrategy, setAuthStrategy] = useState<ProviderAuthStrategy>(provider?.authStrategy ?? getPresetAuthStrategy(initialPreset))
   const [apiKey, setApiKey] = useState(provider?.apiKey ?? '')
   const [showApiKey, setShowApiKey] = useState(false)
@@ -1170,11 +1184,17 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
         }
         applyToolSearchEnv(mergedEnv, apiFormat, toolSearchEnabled)
         applyDisableExperimentalBetasEnv(mergedEnv, disableExperimentalBetas)
-        const merged = {
+        const merged: Record<string, unknown> = {
           ...settings,
           skipWebFetchPreflight: settings.skipWebFetchPreflight ?? true,
           env: mergedEnv,
         }
+        // `model` / `modelContext` are the session's selected default, written by
+        // the model picker. They are not part of the provider being added, so
+        // showing them here makes a new provider look like it inherits Grok 4.7
+        // (or whatever was last selected) and saving would write that back.
+        delete merged.model
+        delete merged.modelContext
         setSettingsJson(JSON.stringify(writeCompatibilityJson(merged, apiFormat === 'anthropic' ? undefined : parseCompatibilityForm(compatibility)), null, 2))
       }).catch(() => {
         if (!cancelled && !settingsJsonUserEditedRef.current) {
@@ -1234,7 +1254,6 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
     setTestResult(null)
   }
 
-  const isCustom = selectedPreset.id === 'custom'
   const requiresApiKey = selectedPreset.needsApiKey !== false
   const autoCompactWindowErrorKey = getAutoCompactWindowErrorKey(autoCompactWindow)
   const modelContextWindowErrorSlots = MODEL_SLOTS.filter((slot) => getModelContextWindowErrorKey(modelContextInputs[slot]))
@@ -1519,21 +1538,45 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
   const modelsErrorUpstream = modelsErrorMessage && modelsErrorMessage !== modelsErrorText
     ? modelsErrorMessage
     : null
-  const modelPickerGroups = useMemo(
-    () => groupProviderModels(
-      fetchedModels ?? [],
-      t('settings.providers.fetchModelsGroupOther'),
-    ),
-    [fetchedModels, t],
-  )
+  // A path-bound gateway reports every model under one owner, so grouping by owner
+  // collapses the whole list into a single bucket. Group by the endpoint each model
+  // actually routes to instead: it is what distinguishes them, and it surfaces the
+  // otherwise invisible per-model routing where the user picks a model.
+  const modelPickerGroups = useMemo(() => {
+    const fallbackGroup = t('settings.providers.fetchModelsGroupOther')
+    const models = fetchedModels ?? []
+    const rules = selectedPreset.modelApiFormats
+    if (!rules?.length) return groupProviderModels(models, fallbackGroup)
+    const endpointByFormat: Record<ApiFormat, string> = {
+      anthropic: '/messages',
+      openai_chat: '/chat/completions',
+      openai_responses: '/responses',
+    }
+    return groupProviderModels(
+      models.map((model) => ({
+        ...model,
+        ownedBy: endpointByFormat[resolveModelApiFormat(rules, model.id) ?? selectedPreset.apiFormat],
+      })),
+      fallbackGroup,
+    )
+  }, [fetchedModels, selectedPreset, t])
   const renderPresetButton = (preset: ProviderPreset) => (
     <SettingsPill
       key={preset.id}
+      aria-label={preset.name}
+      className="relative"
       tone="terracotta"
       selected={selectedPreset.id === preset.id}
       onClick={() => handlePresetChange(preset)}
     >
+      {preset.id === 'aruhub' && <img src={aruhubLogo} alt="" className="size-4 rounded-[var(--radius-sm)] object-contain" />}
       {preset.name}
+      {preset.id === 'aruhub' && <Star size={12} className="fill-[var(--color-warning)] text-[var(--color-warning)]" aria-label={t('settings.providers.sponsor')} />}
+      {preset.isNew && (
+        <Badge tone="warning" size="xs" className="absolute -right-1 -top-2">
+          {t('settings.providers.new')}
+        </Badge>
+      )}
     </SettingsPill>
   )
 
@@ -1565,6 +1608,11 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
           const { providersApi } = await import('../../api/providers')
           const settings = writeCompatibilityJson(parsed, storedCompatibility)
           delete settings.requestCompatibility
+          // The editor never owns the session default model. updateSettings merges
+          // by replacing the whole object, so omitting these keys keeps the
+          // model picker's selection instead of clearing it.
+          delete settings.model
+          delete settings.modelContext
           await providersApi.updateSettings(settings)
         } catch {
           // JSON validation already prevents this
@@ -1669,6 +1717,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
           authStrategy,
           apiFormat,
           supportsNestedToolResultMedia,
+          presetId: selectedPreset.id,
           ...(apiFormat !== 'anthropic' ? { requestCompatibility: parseCompatibilityForm(compatibility) } : {}),
         })
       }
@@ -1718,8 +1767,6 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
 
         <Input label={t('settings.providers.name')} required value={name} onChange={(e) => setName(e.target.value)} placeholder={t('settings.providers.namePlaceholder')} />
 
-        <Input label={t('settings.providers.notes')} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder={t('settings.providers.notesPlaceholder')} />
-
         {regionalEndpointItems.length > 1 && (
           <div>
             <label className="text-sm font-medium text-[var(--color-text-primary)] mb-1 block">{t('settings.providers.endpointRegion')}</label>
@@ -1760,126 +1807,6 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
           <Input id={baseUrlInputId} required value={baseUrl} onChange={(e) => handleBaseUrlChange(e.target.value)} placeholder={t('settings.providers.baseUrlPlaceholder')} className="font-mono text-[13px]" />
         </div>
 
-        {/* API Format */}
-        {(isCustom || mode === 'edit') ? (
-          <div>
-            <label className="text-sm font-medium text-[var(--color-text-primary)] mb-1 block">{t('settings.providers.apiFormat')}</label>
-            <Dropdown<ApiFormat>
-              items={apiFormatItems}
-              value={apiFormat}
-              onChange={handleApiFormatChange}
-              width="100%"
-              className="block w-full"
-              trigger={
-                <Button variant="secondary" size="md" block className="h-10 gap-3">
-                  <span className="min-w-0 flex-1 truncate text-left">{selectedApiFormatLabel}</span>
-                  <span className="material-symbols-outlined flex-shrink-0 text-[18px] text-[var(--color-text-secondary)]">expand_more</span>
-                </Button>
-              }
-            />
-            {apiFormat !== 'anthropic' && (
-              <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">{t('settings.providers.proxyHint')}</p>
-            )}
-          </div>
-        ) : apiFormat !== 'anthropic' ? (
-          <div>
-            <label className="text-sm font-medium text-[var(--color-text-primary)] mb-1 block">{t('settings.providers.apiFormat')}</label>
-            <div className="text-xs text-[var(--color-text-tertiary)] px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)]">
-              {apiFormat === 'openai_chat' ? t('settings.providers.apiFormatOpenaiChat') : t('settings.providers.apiFormatOpenaiResponses')}
-            </div>
-          </div>
-        ) : null}
-
-        <ProviderRequestCompatibilityFields value={compatibility} apiFormat={apiFormat} onChange={handleCompatibilityChange} />
-
-        {apiFormat === 'anthropic' && (
-          <div>
-            <label className="text-sm font-medium text-[var(--color-text-primary)] mb-1 block">{t('settings.providers.authStrategy')}</label>
-            <Dropdown<ProviderAuthStrategy>
-              items={authStrategyItems}
-              value={authStrategy}
-              onChange={handleAuthStrategyChange}
-              width="100%"
-              className="block w-full"
-              trigger={
-                <Button variant="secondary" size="md" block className="h-auto min-h-10 gap-3 py-2">
-                  <span className="min-w-0 flex-1 truncate text-left">{selectedAuthStrategyLabel}</span>
-                  <span className="material-symbols-outlined flex-shrink-0 text-[18px] text-[var(--color-text-secondary)]">expand_more</span>
-                </Button>
-              }
-            />
-          </div>
-        )}
-
-        {/* Tool Search toggle. Off by default. Only usable for Anthropic
-            Messages providers whose final upstream supports tool_reference;
-            incompatible third-party hosts may return HTTP 400, so enabling it
-            requires an explicit confirmation. */}
-        <label
-          className={`relative flex items-start gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-3 transition-colors ${
-            toolSearchUnsupported
-              ? 'cursor-not-allowed opacity-70'
-              : 'cursor-pointer hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)]'
-          }`}
-        >
-          <input
-            type="checkbox"
-            aria-label={t('settings.providers.toolSearchEnabled')}
-            checked={toolSearchEnabled && !toolSearchUnsupported}
-            disabled={toolSearchUnsupported}
-            onChange={(e) => handleToolSearchToggle(e.target.checked)}
-            className={SETTINGS_CHECKBOX_INPUT_CLASS}
-          />
-          <SettingsCheckboxMark checked={toolSearchEnabled && !toolSearchUnsupported} disabled={toolSearchUnsupported} />
-          <div className="min-w-0">
-            <div className="text-sm font-medium text-[var(--color-text-primary)]">
-              {t('settings.providers.toolSearchEnabled')}
-            </div>
-            <div className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
-              {toolSearchDescription}
-            </div>
-          </div>
-        </label>
-
-        <label className="relative flex cursor-pointer items-start gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-3 transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)]">
-          <input
-            type="checkbox"
-            aria-label={t('settings.providers.disableExperimentalBetas')}
-            checked={disableExperimentalBetas}
-            onChange={(e) => handleDisableExperimentalBetasToggle(e.target.checked)}
-            className={SETTINGS_CHECKBOX_INPUT_CLASS}
-          />
-          <SettingsCheckboxMark checked={disableExperimentalBetas} />
-          <div className="min-w-0">
-            <div className="text-sm font-medium text-[var(--color-text-primary)]">
-              {t('settings.providers.disableExperimentalBetas')}
-            </div>
-            <div className={`mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]${browserMode ? ' [overflow-wrap:anywhere]' : ''}`}>
-              {t('settings.providers.disableExperimentalBetasDesc')}
-            </div>
-          </div>
-        </label>
-
-        <label className="relative flex cursor-pointer items-start gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-3 transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)]">
-          <input
-            type="checkbox"
-            aria-label={t('settings.providers.supportsNestedToolResultMedia')}
-            checked={supportsNestedToolResultMedia}
-            disabled={nestedToolResultMediaUnsupported}
-            onChange={(e) => handleNestedToolResultMediaToggle(e.target.checked)}
-            className={SETTINGS_CHECKBOX_INPUT_CLASS}
-          />
-          <SettingsCheckboxMark checked={supportsNestedToolResultMedia} disabled={nestedToolResultMediaUnsupported} />
-          <div className="min-w-0">
-            <div className="text-sm font-medium text-[var(--color-text-primary)]">
-              {t('settings.providers.supportsNestedToolResultMedia')}
-            </div>
-            <div className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
-              {nestedToolResultMediaDescription}
-            </div>
-          </div>
-        </label>
-
         <div className="flex flex-col gap-1">
           <label htmlFor="provider-api-key" className="text-sm font-medium text-[var(--color-text-primary)]">
             {t('settings.providers.apiKey')}
@@ -1909,7 +1836,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
         </div>
 
         {(apiKeyUrl || promoText) && (
-          <div className="-mt-2 flex flex-col gap-1.5">
+          <div className="-mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
             {apiKeyUrl && (
               <button
                 type="button"
@@ -1922,26 +1849,21 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
               </button>
             )}
             {promoText && (
-              <button
-                type="button"
-                onClick={() => apiKeyUrl && openExternalUrl(apiKeyUrl)}
-                disabled={!apiKeyUrl}
-                className="group flex w-full cursor-pointer items-start gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-primary-fixed-dim)] bg-[var(--color-brand-soft)] px-2.5 py-1.5 text-left text-[11px] leading-5 text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-brand)] hover:bg-[var(--color-brand-soft-hover)] focus:outline-none focus:shadow-[var(--shadow-focus-ring)] disabled:cursor-default disabled:hover:border-[var(--color-primary-fixed-dim)] disabled:hover:bg-[var(--color-brand-soft)]"
-              >
-                <span className="material-symbols-outlined mt-0.5 text-[13px] text-[var(--color-brand)]">tips_and_updates</span>
-                <span>{promoText}</span>
-                {apiKeyUrl && (
-                  <span className="material-symbols-outlined ml-auto mt-1 text-[10px] text-[var(--color-brand)] opacity-45 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5">arrow_outward</span>
-                )}
-              </button>
+              apiKeyUrl ? (
+                <button
+                  type="button"
+                  onClick={() => openExternalUrl(apiKeyUrl)}
+                  className="group inline-flex min-w-0 cursor-pointer items-start gap-1 text-left text-[11px] leading-5 text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-brand)] focus:outline-none focus:shadow-[var(--shadow-focus-ring)]"
+                >
+                  <span>{promoText}</span>
+                  <span aria-hidden="true" className="material-symbols-outlined mt-1 shrink-0 text-[10px] opacity-50 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5">arrow_outward</span>
+                </button>
+              ) : (
+                <span className="text-[11px] leading-5 text-[var(--color-text-tertiary)]">{promoText}</span>
+              )
             )}
           </div>
         )}
-
-        <ProviderImageGenerationFields
-          value={imageGeneration}
-          onChange={setImageGeneration}
-        />
 
         {/* Model Mapping */}
         <div>
@@ -2023,6 +1945,92 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
           <p className="mt-2 text-[11px] leading-5 text-[var(--color-text-tertiary)]">
             {t('settings.providers.model1mSupportHint')}
           </p>
+        </div>
+
+        <Input label={t('settings.providers.notes')} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder={t('settings.providers.notesPlaceholder')} />
+
+        {/* API Format — a preset only owns this field when it routes per model;
+            every other preset starts on its own format but stays switchable. */}
+        {!presetDrivesApiFormat ? (
+          <div>
+            <label className="text-sm font-medium text-[var(--color-text-primary)] mb-1 block">{t('settings.providers.apiFormat')}</label>
+            <Dropdown<ApiFormat>
+              items={apiFormatItems}
+              value={apiFormat}
+              onChange={handleApiFormatChange}
+              width="100%"
+              className="block w-full"
+              trigger={
+                <Button variant="secondary" size="md" block className="h-10 gap-3">
+                  <span className="min-w-0 flex-1 truncate text-left">{selectedApiFormatLabel}</span>
+                  <span className="material-symbols-outlined flex-shrink-0 text-[18px] text-[var(--color-text-secondary)]">expand_more</span>
+                </Button>
+              }
+            />
+            {apiFormat !== 'anthropic' && (
+              <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">{t('settings.providers.proxyHint')}</p>
+            )}
+            {/* The preset's own endpoint is still in the field above; a custom
+                preset brings none, so there is nothing to warn about. */}
+            {apiFormat !== selectedPreset.apiFormat && Boolean(selectedPreset.baseUrl) && (
+              <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">{t('settings.providers.apiFormatOverrideHint')}</p>
+            )}
+          </div>
+        ) : (
+          <div>
+            <label className="text-sm font-medium text-[var(--color-text-primary)] mb-1 block">{t('settings.providers.apiFormat')}</label>
+            <div className="text-xs text-[var(--color-text-tertiary)] px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)]">
+              {selectedApiFormatLabel}
+            </div>
+            <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">{t('settings.providers.apiFormatPerModelHint')}</p>
+          </div>
+        )}
+
+        <ProviderRequestCompatibilityFields value={compatibility} apiFormat={apiFormat} onChange={handleCompatibilityChange} />
+
+        {apiFormat === 'anthropic' && (
+          <div>
+            <label className="text-sm font-medium text-[var(--color-text-primary)] mb-1 block">{t('settings.providers.authStrategy')}</label>
+            <Dropdown<ProviderAuthStrategy>
+              items={authStrategyItems}
+              value={authStrategy}
+              onChange={handleAuthStrategyChange}
+              width="100%"
+              className="block w-full"
+              trigger={
+                <Button variant="secondary" size="md" block className="h-auto min-h-10 gap-3 py-2">
+                  <span className="min-w-0 flex-1 truncate text-left">{selectedAuthStrategyLabel}</span>
+                  <span className="material-symbols-outlined flex-shrink-0 text-[18px] text-[var(--color-text-secondary)]">expand_more</span>
+                </Button>
+              }
+            />
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+          {[
+            { key: 'toolSearchEnabled' as const, checked: toolSearchEnabled && !toolSearchUnsupported, disabled: toolSearchUnsupported, onChange: handleToolSearchToggle, description: toolSearchDescription },
+            { key: 'disableExperimentalBetas' as const, checked: disableExperimentalBetas, disabled: false, onChange: handleDisableExperimentalBetasToggle, description: t('settings.providers.disableExperimentalBetasDesc') },
+            { key: 'supportsNestedToolResultMedia' as const, checked: supportsNestedToolResultMedia, disabled: nestedToolResultMediaUnsupported, onChange: handleNestedToolResultMediaToggle, description: nestedToolResultMediaDescription },
+          ].map((option) => (
+            <div key={option.key} className="inline-flex items-center gap-1">
+              <label className={`relative inline-flex items-center gap-2 py-1 text-xs text-[var(--color-text-primary)] ${option.disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>
+                <input
+                  type="checkbox"
+                  aria-label={t(`settings.providers.${option.key}`)}
+                  checked={option.checked}
+                  disabled={option.disabled}
+                  onChange={(e) => option.onChange(e.target.checked)}
+                  className={SETTINGS_CHECKBOX_INPUT_CLASS}
+                />
+                <SettingsCheckboxMark checked={option.checked} disabled={option.disabled} />
+                {t(`settings.providers.${option.key}`)}
+              </label>
+              <Tooltip content={option.description} placement="top-start" className="[overflow-wrap:anywhere]">
+                <IconButton icon="info" label={t(`settings.providers.${option.key}`)} showTooltip={false} size="2xs" tone="muted" />
+              </Tooltip>
+            </div>
+          ))}
         </div>
 
         <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
@@ -2117,11 +2125,11 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
 
         {/* Test connection */}
         {!browserMode && <div className="flex items-center gap-3">
-          <Button variant="secondary" size="sm" onClick={handleTest} loading={isTesting} disabled={!baseUrl.trim() || !models.main.trim() || compatibilityInvalid}>
+          <Button variant="secondary" size="sm" className="shrink-0 whitespace-nowrap" onClick={handleTest} loading={isTesting} disabled={!baseUrl.trim() || !models.main.trim() || compatibilityInvalid}>
             {t('settings.providers.testConnection')}
           </Button>
           {testResult && (
-            <div className="flex flex-col gap-0.5">
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5 break-words">
               <span className={`text-xs ${testResult.connectivity.success ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]'}`}>
                 {testResult.connectivity.success
                   ? t('settings.providers.connectivityOk', { latency: String(testResult.connectivity.latencyMs) })
@@ -2248,6 +2256,11 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
           <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">{t('settings.providers.settingsJsonDesc')}</p>
           {apiFormat !== 'anthropic' && <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">{t('settings.providers.compatibilityJsonHint')}</p>}
         </div>}
+
+        <ProviderImageGenerationFields
+          value={imageGeneration}
+          onChange={setImageGeneration}
+        />
       </div>
       </Modal>
       <ConfirmDialog

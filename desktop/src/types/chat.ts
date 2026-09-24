@@ -8,7 +8,7 @@ import type { RuntimeSelection } from './runtime'
 export type ClientMessage =
   | { type: 'prewarm_session' }
   | { type: 'sync_state' }
-  | { type: 'user_message'; content: string; attachments?: AttachmentRef[] }
+  | { type: 'user_message'; content: string; attachments?: AttachmentRef[]; sessionReferences?: Array<{ sessionId: string }> }
   | {
       type: 'permission_response'
       requestId: string
@@ -17,6 +17,8 @@ export type ClientMessage =
       updatedInput?: Record<string, unknown>
       denyMessage?: string
       permissionUpdates?: PermissionUpdate[]
+      // Execution-model switch applied together with an ExitPlanMode approval.
+      runtimeOverride?: RuntimeSelection
     }
   | {
       type: 'computer_use_permission_response'
@@ -147,6 +149,7 @@ export type ServerMessage =
       toolUseId?: string
       input: unknown
       description?: string
+      displayName?: string
     }
   | {
       type: 'computer_use_permission_request'
@@ -165,7 +168,7 @@ export type ServerMessage =
       computerUseRequestIds: string[]
       turnActive: boolean
     }
-  | { type: 'user_message_replay'; content: string }
+  | { type: 'user_message_replay'; content: string; sessionReferences?: Array<{ sessionId: string }>; collaboration?: { sourceSessionId: string; messageId?: string } }
   | { type: 'message_complete'; usage: TokenUsage; timing?: TurnTiming }
   /** `complete` marks a whole thinking block; without it `text` is a stream fragment. */
   | { type: 'thinking'; text: string; complete?: boolean }
@@ -406,7 +409,7 @@ export type UIMessage =
    * the user's own prompt render identically, which is what flattened the
    * member transcript.
    */
-  | { id: string; type: 'user_text'; content: string; modelContent?: string; transcriptMessageId?: string; timestamp: number; attachments?: UIAttachment[]; pending?: boolean; optimisticQueued?: boolean; teammateFrom?: string }
+  | { id: string; type: 'user_text'; content: string; sessionReferences?: Array<{ sessionId: string }>; collaboration?: { sourceSessionId: string; messageId?: string }; modelContent?: string; transcriptMessageId?: string; timestamp: number; attachments?: UIAttachment[]; pending?: boolean; optimisticQueued?: boolean; teammateFrom?: string }
   | { id: string; type: 'assistant_text'; content: string; transcriptMessageId?: string; timestamp: number; model?: string }
   | { id: string; type: 'thinking'; content: string; timestamp: number }
   | {
@@ -465,6 +468,7 @@ export type UIMessage =
       toolUseId?: string
       input: unknown
       description?: string
+      displayName?: string
       timestamp: number
     }
   | { id: string; type: 'error'; message: string; code: string; businessErrorCode?: string; timestamp: number }

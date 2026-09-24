@@ -58,6 +58,7 @@ export function modelSupports1M(model: string): boolean {
   return (
     canonical.includes('claude-fable-5') ||
     canonical.includes('claude-sonnet-5') ||
+    canonical.includes('claude-opus-5') ||
     canonical.includes('claude-opus-4-8') ||
     canonical.includes('claude-opus-4-7') ||
     canonical.includes('claude-sonnet-4') ||
@@ -270,6 +271,7 @@ export function getModelMaxOutputTokens(model: string): {
 
   if (
     m.includes('fable-5') ||
+    m.includes('opus-5') ||
     m.includes('opus-4-8') ||
     m.includes('opus-4-7') ||
     m.includes('opus-4-6') ||

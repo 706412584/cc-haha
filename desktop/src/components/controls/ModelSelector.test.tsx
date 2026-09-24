@@ -158,14 +158,20 @@ describe('ModelSelector', () => {
       isLoading: false,
     })
 
-    render(<ModelSelector runtimeKey="session-claude-legacy" />)
+    const onRuntimeChange = vi.fn()
+    render(<ModelSelector runtimeKey="session-claude-legacy" onRuntimeSelectionChange={onRuntimeChange} />)
 
     await clickByRole(/Opus 4\.7/i)
 
     expect(screen.getByRole('button', { name: /Fable 5\.1/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Opus 5/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Opus 4\.8/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Sonnet 5/ })).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: /Opus 4\.7/ }).length).toBeGreaterThan(0)
+    await clickByRole(/Opus 5/)
+    expect(onRuntimeChange).toHaveBeenCalledWith(expect.objectContaining({
+      providerId: null, modelId: 'claude-opus-5',
+    }))
   })
 
   it('does not query official OAuth status when mounted', () => {
@@ -1217,8 +1223,8 @@ describe('ModelSelector', () => {
 
   it('replaces a stale Grok runtime model with the current official default', async () => {
     const grokModels: ModelInfo[] = [{
-      id: 'grok-4.6',
-      name: 'Grok 4.6',
+      id: 'grok-4.7',
+      name: 'Grok 4.7',
       description: "SpaceXAI's latest frontier model",
       context: '500000',
       defaultReasoningEffort: 'high',
@@ -1249,11 +1255,11 @@ describe('ModelSelector', () => {
     render(<ModelSelector runtimeKey="session-stale-grok" />)
 
     expect(screen.queryByText('grok-build')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Grok 4.6, Grok Official' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Grok 4.7, Grok Official' })).toBeInTheDocument()
     await waitFor(() => {
       expect(useSessionRuntimeStore.getState().selections['session-stale-grok']).toEqual({
         providerId: 'grok-official',
-        modelId: 'grok-4.6',
+        modelId: 'grok-4.7',
         effortLevel: 'high',
       })
     })

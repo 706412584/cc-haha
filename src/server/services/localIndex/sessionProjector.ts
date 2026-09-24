@@ -123,6 +123,20 @@ type SourceProjectionBundle = {
   locatorWrite: 'append' | 'replace'
 }
 
+export const MAX_PROJECTION_RECORD_BYTES = 8 * 1024 * 1024
+export const MAX_PROJECTION_RECORDS = 50_000
+export const MAX_PROJECTION_METADATA_BYTES = 16 * 1024 * 1024
+const projectionMetadataBytes = new WeakMap<TranscriptProjection, number>()
+const projectionRecordCounts = new WeakMap<TranscriptProjection, number>()
+const MAX_CACHED_PROJECTIONS = 8
+
+class ProjectionLimitError extends Error {
+  readonly code = 'LOCAL_INDEX_SOURCE_LIMIT'
+  constructor() {
+    super('Transcript exceeds the bounded local-index projection budget')
+  }
+}
+
 const READ_BUFFER_BYTES = 64 * 1024
 export const SESSION_INDEX_MAX_SOURCE_BYTES = 256 * 1024 * 1024
 const REDUCE_CHUNK_LIMIT = 256
@@ -209,6 +223,7 @@ function initialProjection(candidate: SessionSourceCandidate): TranscriptProject
 }
 
 function retryFrom(error: unknown): Extract<SourceChange, { kind: 'retry' }> {
+  if (error instanceof ProjectionLimitError) throw error
   if (error instanceof SourceReadRetryError) return error.change
   return { kind: 'retry', reason: 'transient-io' }
 }
@@ -260,6 +275,8 @@ async function streamProjection(options: {
     let pendingSegmentsLength = 0
     let chunks: TranscriptChunk[] = []
     let chunkBytes = 0
+    let recordsRead = projectionRecordCounts.get(options.seed) ?? 0
+    let metadataBytes = projectionMetadataBytes.get(options.seed) ?? 0
     const entryLocators: TranscriptEntryLocator[] = []
     const readEnd = Math.min(options.snapshot.size, options.readLimit)
     const truncated = readEnd < options.snapshot.size
@@ -271,7 +288,48 @@ async function streamProjection(options: {
       const reduced = reduceTranscriptWithLocators(
         chunks,
         projection,
-        { isSubagent: options.isSubagent },
+        {
+          isSubagent: options.isSubagent,
+          validateRetainedMetadata(entry) {
+            const fields = ['type', 'uuid', 'messageId', 'timestamp', 'parent_tool_use_id',
+              'cwd', 'workDir', 'runtimeProviderId', 'runtimeModelId', 'customTitle', 'aiTitle',
+              'repository', 'worktreeSession', 'requestId', 'version', 'sessionId']
+            const message = entry.message as Record<string, unknown> | undefined
+            const values: unknown[] = fields.map(field => entry[field])
+            values.push(message?.id, message?.role, message?.model)
+            const content = message?.content
+            if (Array.isArray(content)) for (const block of content) {
+              if (block?.type !== 'tool_use') continue
+              values.push(block.name, block.name === 'Skill' ? block.input?.skill : undefined)
+              if (values.length > 16_384) throw new ProjectionLimitError()
+            }
+            const iterations = (message?.usage as { iterations?: unknown } | undefined)?.iterations
+            if (Array.isArray(iterations)) for (const iteration of iterations) {
+              if (iteration?.type === 'advisor_message') values.push(iteration.model)
+              if (values.length > 16_384) throw new ProjectionLimitError()
+            }
+            // Charge only metadata that the reducer/locators can retain. Large text
+            // and tool bodies are deliberately excluded from this lifetime budget.
+            let visited = 0
+            while (values.length) {
+              const value = values.pop()
+              if (value === undefined || value === null) continue
+              if (++visited > 16_384) throw new ProjectionLimitError()
+              metadataBytes += 64
+              if (typeof value === 'string') {
+                if (value.length > 4096) throw new ProjectionLimitError()
+                metadataBytes += Buffer.byteLength(value)
+              } else if (typeof value === 'object') {
+                for (const key in value) {
+                  metadataBytes += Buffer.byteLength(key)
+                  values.push((value as Record<string, unknown>)[key])
+                  if (values.length > 16_384) throw new ProjectionLimitError()
+                }
+              }
+              if (metadataBytes > MAX_PROJECTION_METADATA_BYTES) throw new ProjectionLimitError()
+            }
+          },
+        },
       )
       projection = reduced.projection
       entryLocators.push(...reduced.locators)
@@ -293,6 +351,7 @@ async function streamProjection(options: {
         const newline = bytes.indexOf(0x0a, segmentStart)
         if (newline === -1) {
           const segment = bytes.subarray(segmentStart)
+          if (pendingSegmentsLength + segment.length > MAX_PROJECTION_RECORD_BYTES) throw new ProjectionLimitError()
           pendingSegments.push(segment)
           pendingSegmentsLength += segment.length
           work.maxBufferedBytes = Math.max(
@@ -303,6 +362,9 @@ async function streamProjection(options: {
         }
 
         const finalSegment = bytes.subarray(segmentStart, newline + 1)
+        if (pendingSegmentsLength + finalSegment.length > MAX_PROJECTION_RECORD_BYTES) throw new ProjectionLimitError()
+        recordsRead += 1
+        if (recordsRead > MAX_PROJECTION_RECORDS) throw new ProjectionLimitError()
         let completeLine: Buffer
         if (pendingSegments.length === 0) {
           completeLine = finalSegment
@@ -333,6 +395,8 @@ async function streamProjection(options: {
         }
       }
       position += bytesRead
+      // File reads may resolve from cache; explicitly let UI/API work run between chunks.
+      await new Promise<void>(resolve => setImmediate(resolve))
     }
 
     flush()
@@ -385,10 +449,13 @@ async function streamProjection(options: {
     }
     options.assertActive()
 
+    projectionMetadataBytes.set(projection, metadataBytes)
+    projectionRecordCounts.set(projection, recordsRead)
     return { projection, entryLocators, work }
   } catch (error) {
     thrown = error
     if (
+      error instanceof ProjectionLimitError ||
       error instanceof SourceReadRetryError ||
       error instanceof TranscriptRebuildRequiredError ||
       error instanceof ProjectionGenerationCancelledError
@@ -865,7 +932,11 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
         }
         throw error
       }
+      projectionCache.delete(candidate.path)
       projectionCache.set(candidate.path, built.projection)
+      while (projectionCache.size > MAX_CACHED_PROJECTIONS) {
+        projectionCache.delete(projectionCache.keys().next().value!)
+      }
       return { kind: 'indexed', action, ...built }
     },
 
@@ -1009,7 +1080,11 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
         }
         throw error
       }
+      projectionCache.delete(candidate.path)
       projectionCache.set(candidate.path, built.projection)
+      while (projectionCache.size > MAX_CACHED_PROJECTIONS) {
+        projectionCache.delete(projectionCache.keys().next().value!)
+      }
       return { kind: 'indexed', action, ...built }
     },
 

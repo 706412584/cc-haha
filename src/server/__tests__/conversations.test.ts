@@ -842,6 +842,87 @@ describe('ConversationService', () => {
     expect(svc.getSessionPermissionMode(sessionId)).toBe('default')
   })
 
+  it('resolves setModel only after the CLI acks the set_model control request', async () => {
+    const svc = new ConversationService()
+    const sent: unknown[] = []
+    const sessionId = 'session-set-model'
+    ;(svc as any).sessions.set(sessionId, {
+      proc: null,
+      outputCallbacks: [],
+      workDir: process.cwd(),
+      permissionMode: 'default',
+      sdkToken: 'token',
+      sdkSocket: {
+        send(data: string) {
+          sent.push(JSON.parse(data))
+        },
+      },
+      pendingOutbound: [],
+      stderrLines: [],
+      sdkMessages: [],
+      pendingPermissionRequests: new Map(),
+    })
+
+    const change = svc.setModel(sessionId, 'deepseek-v4-flash')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({
+      type: 'control_request',
+      request: {
+        subtype: 'set_model',
+        model: 'deepseek-v4-flash',
+      },
+    })
+
+    const requestId = (sent[0] as { request_id: string }).request_id
+    svc.handleSdkPayload(sessionId, `${JSON.stringify({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: requestId,
+        response: {},
+      },
+    })}\n`)
+
+    await expect(change).resolves.toBe(true)
+  })
+
+  it('rejects setModel when the CLI reports a set_model error', async () => {
+    const svc = new ConversationService()
+    const sent: Array<{ request_id: string }> = []
+    const sessionId = 'session-set-model-rejected'
+    ;(svc as any).sessions.set(sessionId, {
+      proc: null,
+      outputCallbacks: [],
+      workDir: process.cwd(),
+      permissionMode: 'default',
+      sdkToken: 'token',
+      sdkSocket: {
+        send(data: string) {
+          sent.push(JSON.parse(data))
+        },
+      },
+      pendingOutbound: [],
+      stderrLines: [],
+      sdkMessages: [],
+      pendingPermissionRequests: new Map(),
+    })
+
+    const change = svc.setModel(sessionId, 'unknown-model')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    svc.handleSdkPayload(sessionId, `${JSON.stringify({
+      type: 'control_response',
+      response: {
+        subtype: 'error',
+        request_id: sent[0]!.request_id,
+        error: 'model unavailable',
+      },
+    })}\n`)
+
+    await expect(change).rejects.toThrow('model unavailable')
+  })
+
   it('should not inject a desktop-specific ask override in default permission mode', () => {
     const svc = new ConversationService()
     expect((svc as any).getPermissionArgs('default', false)).toEqual([
@@ -1785,6 +1866,14 @@ describe('ConversationService', () => {
 
       expect(contextEstimate?.model).toBe('MiniMax-M3')
       expect(contextEstimate?.rawMaxTokens).toBe(1_000_000)
+
+      // No transcript append: provider edits alone must invalidate inspection data.
+      await providerService.updateProvider(provider.id, {
+        modelContextWindows: { 'MiniMax-M3': 64_000 },
+      })
+      const changed = await svc.getInspectionTranscriptSnapshot(sessionId)
+      expect(changed?.contextEstimate?.rawMaxTokens).toBe(64_000)
+      expect(changed?.usage?.models[0]?.contextWindow).toBe(64_000)
     } finally {
       if (previousConfigDir === undefined) {
         delete process.env.CLAUDE_CONFIG_DIR
@@ -2559,7 +2648,7 @@ describe('WebSocket Chat Integration', () => {
     return messages
   }
 
-  async function runTurnUntilComplete(sessionId: string, content: string): Promise<any[]> {
+  async function runTurnUntilComplete(sessionId: string, content: string, onMessage?: (message: any) => void): Promise<any[]> {
     const messages: any[] = []
     const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
 
@@ -2572,6 +2661,7 @@ describe('WebSocket Chat Integration', () => {
       ws.onmessage = (e) => {
         const msg = JSON.parse(e.data as string)
         messages.push(msg)
+        onMessage?.(msg)
         if (msg.type === 'connected') {
           ws.send(JSON.stringify({ type: 'user_message', content }))
         }
@@ -3440,9 +3530,19 @@ describe('WebSocket Chat Integration', () => {
   }, 15_000)
 
   it('should not add a CLI exit error after a reported SDK API error', async () => {
+    const sessionId = `chat-api-error-exit-${crypto.randomUUID()}`
     const messages = await runTurnUntilComplete(
-      `chat-api-error-exit-${crypto.randomUUID()}`,
+      sessionId,
       'trigger api error then exit',
+      (message) => {
+        if (message.type === 'error' && message.code === 'invalid_request') {
+          // Prove the error was reported before asking the fixture to exit.
+          // Transport flushing alone does not settle the async SDK handler.
+          void conversationService.requestControl(sessionId, {
+            subtype: 'mock_exit_after_api_error_ack',
+          }).catch(() => undefined)
+        }
+      },
     )
 
     const errors = messages.filter((m) => m.type === 'error')
@@ -4488,6 +4588,20 @@ describe('WebSocket Chat Integration', () => {
 
     const originalStartSession = conversationService.startSession.bind(conversationService)
     const originalSendMessage = conversationService.sendMessage.bind(conversationService)
+    const originalStopSession = conversationService.stopSession.bind(conversationService)
+    const originalAppendMetadata = sessionService.appendSessionMetadata.bind(sessionService)
+    let firstStartPending = true
+    let stoppedDuringFirstStart = false
+    let markRuntimePersisted!: () => void
+    const runtimePersisted = new Promise<void>((resolve) => { markRuntimePersisted = resolve })
+    conversationService.stopSession = ((sid: string) => {
+      if (sid === sessionId && firstStartPending) stoppedDuringFirstStart = true
+      return originalStopSession(sid)
+    }) as typeof conversationService.stopSession
+    sessionService.appendSessionMetadata = (async (sid, metadata) => {
+      await originalAppendMetadata(sid, metadata)
+      if (sid === sessionId && metadata.runtimeModelId === 'first-turn-sonnet') markRuntimePersisted()
+    }) as typeof sessionService.appendSessionMetadata
     const startCalls: Array<{
       sessionId: string
       options: { permissionMode?: string; model?: string; effort?: string; providerId?: string | null } | undefined
@@ -4510,8 +4624,13 @@ describe('WebSocket Chat Integration', () => {
     ) {
       startCalls.push({ sessionId: sid, options })
       if (startCalls.length === 1) {
+        // Expose a registered process while the public startup promise is
+        // deliberately unresolved. hasSession alone must not admit a restart.
+        await originalStartSession(sid, workDir, sdkUrl, options)
         markFirstStart()
         await firstStartGate
+        firstStartPending = false
+        return
       }
       return originalStartSession(sid, workDir, sdkUrl, options)
     }) as typeof conversationService.startSession
@@ -4539,7 +4658,7 @@ describe('WebSocket Chat Integration', () => {
 
           if (msg.type === 'connected') {
             ws.send(JSON.stringify({ type: 'prewarm_session' }))
-            void firstStartEntered.then(() => {
+            void firstStartEntered.then(async () => {
               ws.send(JSON.stringify({ type: 'user_message', content: 'first turn while runtime changes' }))
               ws.send(JSON.stringify({
                 type: 'set_runtime_config',
@@ -4547,6 +4666,10 @@ describe('WebSocket Chat Integration', () => {
                 providerId: provider.id,
                 modelId: 'first-turn-sonnet',
               }))
+              await runtimePersisted
+              // Drain the transition continuation after its controlled metadata
+              // write, without depending on a wall-clock delay or SDK timing.
+              await new Promise<void>((resolve) => setImmediate(resolve))
               releaseFirstStart()
             })
             return
@@ -4570,6 +4693,7 @@ describe('WebSocket Chat Integration', () => {
         }
       })
 
+      expect(stoppedDuringFirstStart).toBe(false)
       expect(startCalls).toHaveLength(2)
       expect(startCalls[0]).toMatchObject({ sessionId })
       expect(startCalls[0]?.options?.providerId).toBeNull()
@@ -4589,6 +4713,9 @@ describe('WebSocket Chat Integration', () => {
       ws.close()
       conversationService.startSession = originalStartSession
       conversationService.sendMessage = originalSendMessage
+      conversationService.stopSession = originalStopSession
+      sessionService.appendSessionMetadata = originalAppendMetadata
+      releaseFirstStart()
       conversationService.stopSession(sessionId)
     }
   }, 20_000)
@@ -5058,6 +5185,15 @@ describe('WebSocket Chat Integration', () => {
       const { sessionId } = await createRes.json() as { sessionId: string }
 
       const originalStartSession = conversationService.startSession.bind(conversationService)
+      let terminalSdkResultReceived = false
+      let restartedBeforeTerminalResult = false
+      const originalHandleSdkPayload = conversationService.handleSdkPayload.bind(conversationService)
+      const sdkPayloadSpy = spyOn(conversationService, 'handleSdkPayload').mockImplementation((sid, payload, options) => {
+        if (sid === sessionId && payload.split('\n').some((line) => {
+          try { return JSON.parse(line).type === 'result' } catch { return false }
+        })) terminalSdkResultReceived = true
+        originalHandleSdkPayload(sid, payload, options)
+      })
       const startCalls: Array<{
         sessionId: string
         options: { permissionMode?: string; model?: string; effort?: string; providerId?: string | null } | undefined
@@ -5069,6 +5205,7 @@ describe('WebSocket Chat Integration', () => {
         sdkUrl: string,
         options?: { permissionMode?: string; model?: string; effort?: string; thinking?: 'enabled' | 'adaptive' | 'disabled'; providerId?: string | null },
       ) {
+        if (startCalls.length > 0 && !terminalSdkResultReceived) restartedBeforeTerminalResult = true
         startCalls.push({ sessionId: sid, options })
         return originalStartSession(sid, workDir, sdkUrl, options)
       }) as typeof conversationService.startSession
@@ -5135,7 +5272,8 @@ describe('WebSocket Chat Integration', () => {
 
             if (msg.type === 'message_complete' && switchTriggered && !turnComplete) {
               turnComplete = true
-              expect(startCalls).toHaveLength(1)
+              // The server may already have restarted by the time this queued
+              // client event arrives; ordering is checked at SDK receipt above.
               return
             }
 
@@ -5152,6 +5290,7 @@ describe('WebSocket Chat Integration', () => {
           }
         })
 
+        expect(restartedBeforeTerminalResult).toBe(false)
         expect(startCalls).toHaveLength(2)
         expect(startCalls[0]).toMatchObject({
           sessionId,
@@ -5169,6 +5308,7 @@ describe('WebSocket Chat Integration', () => {
         })
       } finally {
         ws.close()
+        sdkPayloadSpy.mockRestore()
         conversationService.startSession = originalStartSession
         conversationService.stopSession(sessionId)
       }
@@ -5214,6 +5354,15 @@ describe('WebSocket Chat Integration', () => {
       const { sessionId } = await createRes.json() as { sessionId: string }
 
       const originalStartSession = conversationService.startSession.bind(conversationService)
+      let terminalSdkResultReceived = false
+      let restartedBeforeTerminalResult = false
+      const originalHandleSdkPayload = conversationService.handleSdkPayload.bind(conversationService)
+      const sdkPayloadSpy = spyOn(conversationService, 'handleSdkPayload').mockImplementation((sid, payload, options) => {
+        if (sid === sessionId && payload.split('\n').some((line) => {
+          try { return JSON.parse(line).type === 'result' } catch { return false }
+        })) terminalSdkResultReceived = true
+        originalHandleSdkPayload(sid, payload, options)
+      })
       const startCalls: Array<{
         sessionId: string
         options: { permissionMode?: string; model?: string; effort?: string; providerId?: string | null } | undefined
@@ -5225,6 +5374,7 @@ describe('WebSocket Chat Integration', () => {
         sdkUrl: string,
         options?: { permissionMode?: string; model?: string; effort?: string; thinking?: 'enabled' | 'adaptive' | 'disabled'; providerId?: string | null },
       ) {
+        if (startCalls.length > 0 && !terminalSdkResultReceived) restartedBeforeTerminalResult = true
         startCalls.push({ sessionId: sid, options })
         if (startCalls.length > 1) {
           throw new Error('deferred restart failed')
@@ -5275,7 +5425,8 @@ describe('WebSocket Chat Integration', () => {
 
             if (msg.type === 'message_complete' && switchTriggered && !turnComplete) {
               turnComplete = true
-              expect(startCalls).toHaveLength(1)
+              // The server may already have restarted by the time this queued
+              // client event arrives; ordering is checked at SDK receipt above.
               return
             }
 
@@ -5308,6 +5459,7 @@ describe('WebSocket Chat Integration', () => {
         expect(switchTriggered).toBe(true)
         expect(turnComplete).toBe(true)
         expect(restartError).toBe(true)
+        expect(restartedBeforeTerminalResult).toBe(false)
         expect(startCalls).toHaveLength(2)
         expect(startCalls[1]).toMatchObject({
           sessionId,
@@ -5318,6 +5470,7 @@ describe('WebSocket Chat Integration', () => {
         })
       } finally {
         ws.close()
+        sdkPayloadSpy.mockRestore()
         conversationService.startSession = originalStartSession
         conversationService.stopSession(sessionId)
       }
@@ -6657,19 +6810,22 @@ describe('WebSocket Chat Integration', () => {
           firstMessages.push(msg)
 
           if (msg.type === 'connected') {
-            ws1.send(JSON.stringify({ type: 'user_message', content: 'resume after reconnect' }))
+            ws1.send(JSON.stringify({ type: 'user_message', content: 'MOCK_RECONNECT_GATE resume after reconnect' }))
             return
           }
 
           if (msg.type === 'thinking' && !reconnected) {
             reconnected = true
-            ws1.close()
-
-            setTimeout(() => {
+            ws1.onclose = () => {
               ws2 = new WebSocket(`${wsUrl}/ws/${sessionId}`)
               ws2.onmessage = (reconnectEvent) => {
                 const reconnectMsg = JSON.parse(reconnectEvent.data as string)
                 secondMessages.push(reconnectMsg)
+                if (reconnectMsg.type === 'connected') {
+                  void conversationService.requestControl(sessionId, {
+                    subtype: 'mock_release_reconnect_stream',
+                  }).catch(error => handleFailure(String(error)))
+                }
                 if (reconnectMsg.type === 'error') {
                   handleFailure(reconnectMsg.message)
                   return
@@ -6679,7 +6835,8 @@ describe('WebSocket Chat Integration', () => {
                 }
               }
               ws2.onerror = () => handleFailure(`WebSocket reconnect error for session ${sessionId}`)
-            }, 50)
+            }
+            ws1.close()
           }
         }
 

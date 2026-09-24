@@ -1,6 +1,10 @@
 import * as fs from 'fs'
 import * as path from 'path'
 
+import {
+  resolveModelApiFormat,
+  type ModelApiFormatRule,
+} from '../../shared/modelApiFormats.js'
 import { MODEL_CONTEXT_WINDOWS_ENV_KEY } from '../../utils/model/modelContextWindows.js'
 import {
   isProviderManagedEnvVar,
@@ -364,6 +368,46 @@ export function getPresetAuthStrategy(presetId: string): ProviderAuthStrategy {
   return PROVIDER_PRESETS.find((preset) => preset.id === presetId)?.authStrategy ?? 'auth_token'
 }
 
+/**
+ * Per-model protocol rules for path-bound gateways. Resolved from the preset
+ * rather than the saved provider on purpose: the rules ship with the app version,
+ * so they need neither persistence nor a migration nor an edit-form control.
+ */
+export function getPresetModelApiFormats(presetId: string): ModelApiFormatRule<ApiFormat>[] {
+  return PROVIDER_PRESETS.find((preset) => preset.id === presetId)?.modelApiFormats ?? []
+}
+
+export function getPresetUpstreamHeaders(presetId: string): Record<string, string> {
+  return PROVIDER_PRESETS.find((preset) => preset.id === presetId)?.upstreamHeaders ?? {}
+}
+
+/**
+ * The format this provider's record stands for.
+ *
+ * Normally that is simply the saved `apiFormat`. A preset that declares per-model
+ * rules is the exception: a single recorded value cannot express a per-model
+ * split, so the preset — not the record — is authoritative for those. Without
+ * this, anything that writes the record an unhelpful format (a cc-switch import
+ * defaulting to anthropic, a hand edit, the format dropdown) would silently
+ * disable every rule and point the CLI straight at the upstream.
+ */
+export function resolveProviderApiFormat(
+  provider: Pick<SavedProvider, 'presetId' | 'apiFormat'>,
+): ApiFormat {
+  const providerFormat = provider.apiFormat ?? 'anthropic'
+  if (getPresetModelApiFormats(provider.presetId).length === 0) return providerFormat
+  return PROVIDER_PRESETS.find((preset) => preset.id === provider.presetId)?.apiFormat ?? providerFormat
+}
+
+/** The protocol a request for this model actually uses, provider format otherwise. */
+export function resolveProviderModelApiFormat(
+  provider: Pick<SavedProvider, 'presetId' | 'apiFormat'>,
+  modelId: string | null | undefined,
+): ApiFormat {
+  return resolveModelApiFormat(getPresetModelApiFormats(provider.presetId), modelId)
+    ?? resolveProviderApiFormat(provider)
+}
+
 function getPresetModelContextWindows(presetId: string): Record<string, number> {
   return PROVIDER_PRESETS.find((preset) => preset.id === presetId)?.modelContextWindows ?? {}
 }
@@ -408,6 +452,7 @@ function getProviderCapabilityEnv(
   provider: SavedProvider,
   models: SavedProvider['models'],
 ): Record<string, string> {
+  const apiFormat = resolveProviderApiFormat(provider)
   const providerKind = getPresetReasoningProviderKind(provider.presetId)
   if (provider.presetId === 'custom') {
     // Custom providers keep the broad custom capability set, unless a slot's
@@ -440,7 +485,6 @@ function getProviderCapabilityEnv(
     }
   }
 
-  const apiFormat = provider.apiFormat ?? 'anthropic'
   return {
     ...(models.fable
       ? {
@@ -546,10 +590,12 @@ export function buildProviderManagedEnv(
     return buildGrokOfficialRuntimeEnv()
   }
 
-  const apiFormat: ApiFormat = provider.apiFormat ?? 'anthropic'
+  const apiFormat: ApiFormat = resolveProviderApiFormat(provider)
   // Anthropic-format providers normally connect directly to the upstream. When
   // the provider opts out of nested tool-result media, route through the proxy
-  // so images/documents are lifted out of tool_result before forwarding.
+  // so images/documents are lifted out of tool_result before forwarding. A
+  // preset with per-model rules resolves to an OpenAI format here, which also
+  // forces the proxy — the only place those rules are applied.
   const needsProxy = providerNeedsProxy(apiFormat, provider.supportsNestedToolResultMedia)
   const proxyPath = options?.proxyPath ?? '/proxy'
   const serverPort = options?.serverPort ?? 3456
@@ -708,9 +754,10 @@ export function activeProviderNeedsProxy(configDir: string): boolean {
   if (!provider) return false
 
   // Keep in sync with buildProviderManagedEnv: anthropic-format providers
-  // that opt out of nested tool-result media also route through the proxy.
+  // that opt out of nested tool-result media also route through the proxy,
+  // and a preset with per-model rules resolves to an OpenAI format.
   return providerNeedsProxy(
-    provider.apiFormat ?? 'anthropic',
+    resolveProviderApiFormat(provider),
     provider.supportsNestedToolResultMedia,
   )
 }

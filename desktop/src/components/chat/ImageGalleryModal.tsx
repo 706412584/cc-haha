@@ -75,7 +75,7 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
               size="lg"
               tone="secondary"
               shape="circle"
-              surface="terminal"
+              surface="media"
               onClick={onClose}
             />
           </div>

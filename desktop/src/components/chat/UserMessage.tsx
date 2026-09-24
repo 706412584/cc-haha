@@ -1,3 +1,5 @@
+import { Button } from '@/components/ui/Button'
+import { openSessionSource, sessionSourceTitle } from '@/lib/sessionNavigation'
 import { memo, useCallback, useMemo } from 'react'
 import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react'
 import { UsersRound } from 'lucide-react'
@@ -6,13 +8,17 @@ import { useTranslation } from '../../i18n'
 import { openPreviewLink } from '../../lib/openPreviewLink'
 import { splitTextByUrls } from '../../lib/urlBoundary'
 import { AttachmentGallery } from './AttachmentGallery'
-import { MessageActionBar, type MessageBranchAction } from './MessageActionBar'
+import { MessageActionBar, type MessageBranchAction, type MessageRewindAction } from './MessageActionBar'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 
 type Props = {
   content: string
+  sessionReferences?: Array<{ sessionId: string }>
+  /** Set when this message was delivered from another collaborating session. */
+  collaboration?: { sourceSessionId: string; messageId?: string }
   attachments?: UIAttachment[]
   branchAction?: MessageBranchAction
+  rewindAction?: MessageRewindAction
   timestamp?: number
   sessionId?: string
   /** Set when this turn came from another agent rather than from the user. */
@@ -24,8 +30,11 @@ type Props = {
 
 export const UserMessage = memo(function UserMessage({
   content,
+  sessionReferences,
+  collaboration,
   attachments,
   branchAction,
+  rewindAction,
   timestamp,
   sessionId,
   teammateFrom,
@@ -147,6 +156,12 @@ export const UserMessage = memo(function UserMessage({
         className="group flex min-w-0 max-w-[82%] flex-col items-end sm:max-w-[78%] lg:max-w-[640px]"
       >
         <div className="flex max-w-full flex-col items-end gap-2">
+          {collaboration ? <div className="px-0.5 text-[11px] text-[var(--color-text-tertiary)]">
+            <Button size="sm" variant="ghost" onClick={() => openSessionSource(collaboration.sourceSessionId)}>{t('chat.collaborationMessageFrom', { id: sessionSourceTitle(collaboration.sourceSessionId) })}</Button>
+          </div> : null}
+          {sessionReferences?.length ? <div className="flex max-w-full flex-wrap gap-1" aria-label={t('chat.referenceSessions')}>
+            {sessionReferences.map(reference => <Button key={reference.sessionId} size="sm" variant="ghost" onClick={() => openSessionSource(reference.sessionId)}>{t('chat.openReferencedSession', { id: sessionSourceTitle(reference.sessionId) })}</Button>)}
+          </div> : null}
           {attachments && attachments.length > 0 && (
             <AttachmentGallery attachments={attachments} variant="message" />
           )}
@@ -170,6 +185,7 @@ export const UserMessage = memo(function UserMessage({
             copyText={content}
             copyLabel={t('chat.copyPrompt')}
             branchAction={branchAction}
+            rewindAction={rewindAction}
             align="end"
             timestamp={timestamp}
           />

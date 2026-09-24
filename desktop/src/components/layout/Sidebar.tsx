@@ -9,7 +9,6 @@ import { BrandSeal } from '@/components/composite/BrandSeal'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { ErrorState } from '@/components/ui/ErrorState'
 import { IconButton } from '@/components/ui/IconButton'
 import { Spinner } from '@/components/ui/Spinner'
 import { useDismissable } from '@/hooks/useDismissable'
@@ -17,6 +16,7 @@ import { GlobalSearchModal } from '../search/GlobalSearchModal'
 import { FindInPageModal } from '../search/FindInPageModal'
 import { ProjectEditorModal, type ProjectEditorSubmission } from './ProjectEditorModal'
 import { SidebarTaskList } from './SidebarTaskList'
+import { SIDEBAR_PROJECT_SESSION_PREVIEW_LIMIT } from '../../lib/sessionListPagination'
 import { ProjectSessionList, notifyProjectHistoryAtSidebarBottom } from '@/components/layout/ProjectSessionList'
 import {
   buildSidebarTaskGroups,
@@ -45,7 +45,7 @@ import {
 import { projectsApi } from '../../api/projects'
 import { getDesktopHost } from '../../lib/desktopHost'
 import { hasRunningBackgroundTasks } from '../../lib/backgroundTasks'
-import { getSessionWorkspaceState } from '../../lib/sessionWorkspace'
+import { getSessionWorkspaceState, getSessionSeedWorkDir } from '../../lib/sessionWorkspace'
 
 // Reachability: extracted sidebar primitives live in ./sidebarComponents.
 // Local copies below still own the live props (mobile actionsRef / hideTimestamp);
@@ -57,13 +57,14 @@ const desktopHost = getDesktopHost()
 const isDesktopRuntime = desktopHost.isDesktop
 const isWindows = typeof navigator !== 'undefined' && /Win/.test(navigator.platform)
 const SESSION_LIST_AUTO_REFRESH_MS = 30_000
+const SESSION_LIST_BUILDING_REFRESH_MS = 1_500
 const SESSION_LIST_FOCUS_REFRESH_MIN_MS = 5_000
 const PROJECT_ORDER_STORAGE_KEY = 'cc-haha-sidebar-project-order'
 const PROJECT_PINNED_STORAGE_KEY = 'cc-haha-sidebar-pinned-projects'
 const PROJECT_HIDDEN_STORAGE_KEY = 'cc-haha-sidebar-hidden-projects'
 const PROJECT_ORGANIZATION_STORAGE_KEY = 'cc-haha-sidebar-project-organization'
 const PROJECT_SORT_STORAGE_KEY = 'cc-haha-sidebar-project-sort'
-const PROJECT_GROUP_VISIBLE_COUNT = 6
+const PROJECT_GROUP_VISIBLE_COUNT = SIDEBAR_PROJECT_SESSION_PREVIEW_LIMIT
 
 type SidebarProjectOrganization = 'project' | 'recentProject' | 'time'
 type SidebarProjectSortBy = 'createdAt' | 'updatedAt'
@@ -123,9 +124,10 @@ export function Sidebar({
   const t = useTranslation()
   const sessions = useSessionStore((s) => s.sessions)
   const projectHistory = useSessionStore((s) => s.projectHistory)
+  const projectSessionTotals = useSessionStore((s) => s.projectSessionTotals)
   const isLoading = useSessionStore((s) => s.isLoading)
-  const error = useSessionStore((s) => s.error)
   const indexStatus = useSessionStore((s) => s.indexStatus)
+  const indexBuilding = indexStatus?.mode === 'on' && indexStatus.state === 'building'
   const fetchSessions = useSessionStore((s) => s.fetchSessions)
   const syncIndexes = useSessionStore((s) => s.syncIndexes)
   const deleteSession = useSessionStore((s) => s.deleteSession)
@@ -195,10 +197,11 @@ export function Sidebar({
   } | null>(null)
   const sessionScrollAreaRef = useRef<HTMLDivElement>(null)
   const pendingSessionScrollAnchorRef = useRef<SessionScrollAnchor | null>(null)
-  useSessionListAutoRefresh(fetchSessions)
+  const refreshSessionsNow = useSessionListAutoRefresh(fetchSessions, indexBuilding)
   const handleManualRefresh = useCallback(async () => {
     await syncIndexes()
-  }, [syncIndexes])
+    await refreshSessionsNow()
+  }, [syncIndexes, refreshSessionsNow])
 
   useEffect(() => useSessionStore.subscribe((nextState, previousState) => {
     if (nextState.sessions === previousState.sessions) return
@@ -291,12 +294,11 @@ export function Sidebar({
   const isTaskView = projectOrganization === 'time'
   const showInitialLoading = isLoading && sessions.length === 0
   const showRefreshLoading = showInitialLoading
-  // Index building/ready/off are implementation details of how the list is
-  // loaded, not something the user acts on, so they stay silent in both the
-  // visible sidebar and the live region. Only `degraded` is announced: there
-  // the list really is served a different way, which the user can perceive.
-  const showIndexDegraded = indexStatus?.state === 'degraded'
-  const indexAnnouncement = showIndexDegraded ? t('sidebar.indexDegraded') : ''
+  // Every index state is an implementation detail of how the list is loaded,
+  // not something the user acts on. Even `degraded` only changes the source
+  // the list is read from — the rows, their order, and search results stay
+  // identical — so it stays silent in both the visible sidebar and the live
+  // region instead of taking a row to explain itself.
   const filteredSessionIds = useMemo(() => filteredSessions.map((session) => session.id), [filteredSessions])
   const selectedCount = selectedSessionIds.size
   const sessionsById = useMemo(
@@ -1261,7 +1263,7 @@ export function Sidebar({
             const currentSession = currentTabId
               ? useSessionStore.getState().sessions.find((s) => s.id === currentTabId)
               : null
-            void createSessionForWorkDir(currentSession?.workDir || currentSession?.projectRoot || undefined)
+            void createSessionForWorkDir(getSessionSeedWorkDir(currentSession))
           }}
           icon={<PlusIcon />}
         >
@@ -1414,35 +1416,12 @@ export function Sidebar({
                 </div>
               </div>
             )}
-            <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
-              {indexAnnouncement}
-            </div>
-            {showIndexDegraded && (
-              <div
-                data-testid="sidebar-index-degraded"
-                aria-hidden="true"
-                className="mx-4 mb-1 flex-none text-[11px] leading-5 text-[var(--color-text-tertiary)]"
-              >
-                {t('sidebar.indexDegraded')}
-              </div>
-            )}
             <div
               ref={sessionScrollAreaRef}
               onScroll={(event) => notifyProjectHistoryAtSidebarBottom(event.currentTarget)}
               data-testid="sidebar-session-scroll-area"
               className="sidebar-scroll-area min-h-0 flex-1 overflow-y-auto px-3 pb-20"
             >
-              {error && (
-                <ErrorState
-                  className="mx-1 mt-2 break-words"
-                  size="sm"
-                  tone="strong"
-                  title={t('sidebar.sessionListFailed')}
-                  detail={error}
-                  onRetry={() => fetchSessions()}
-                  retryLabel={t('common.retry')}
-                />
-              )}
               {showInitialLoading ? (
                 <div
                   role="status"
@@ -1451,7 +1430,7 @@ export function Sidebar({
                 >
                   {t('common.loading')}
                 </div>
-              ) : !error && filteredSessions.length === 0 && (
+              ) : filteredSessions.length === 0 && (
                 <div className="px-3 py-2">
                   <EmptyState variant="inline" title={t('sidebar.noSessions')} />
                 </div>
@@ -1493,6 +1472,12 @@ export function Sidebar({
                   ? []
                   : getVisibleProjectSessions(project.sessions, sessionsExpanded, activeTabId)
                 const hiddenCount = project.sessions.length - visibleItems.length
+                const projectSessionTotal = projectSessionTotals[project.key]
+                const hasUnloadedSessions = projectSessionTotal === undefined
+                  ? false
+                  : projectSessionTotal > project.sessions.length
+                const showSessionFoldControl = project.sessions.length > PROJECT_GROUP_VISIBLE_COUNT ||
+                  (projectSessionTotal ?? 0) > PROJECT_GROUP_VISIBLE_COUNT
                 const groupIds = project.sessions.map((session) => session.id)
                 const groupSelectedCount = groupIds.filter((id) => selectedSessionIds.has(id)).length
                 const history = projectHistory[project.key]
@@ -1616,11 +1601,11 @@ export function Sidebar({
                           outerScrollRef={sessionScrollAreaRef}
                           testId={`sidebar-project-session-list-${domSafeProjectKey(project.key)}`}
                           expanded={sessionsExpanded}
-                          hasHiddenSessions={hiddenCount > 0}
+                          hasHiddenSessions={hiddenCount > 0 || hasUnloadedSessions}
                           itemCount={visibleItems.length}
                           nextCursor={history?.nextCursor}
                           isLoading={history?.isLoading ?? false}
-                          hasMore={history?.hasMore ?? true}
+                          hasMore={history?.hasMore ?? (projectSessionTotal === undefined || hasUnloadedSessions)}
                           error={history?.error}
                           onExpand={() => setExpandedProjectKeys((current) => new Set([...current, project.key]))}
                           onLoadMore={() => useSessionStore.getState().loadMoreProjectSessions(project.key)}
@@ -1702,7 +1687,7 @@ export function Sidebar({
                             </div>
                           ))}
                         </ProjectSessionList>
-                        {(hiddenCount > 0 || sessionsExpanded) && (
+                        {showSessionFoldControl && (
                           <div className="mt-2 flex justify-start px-2.5">
                             <button
                               type="button"
@@ -2025,15 +2010,21 @@ export function Sidebar({
   )
 }
 
-function useSessionListAutoRefresh(fetchSessions: () => Promise<void>): () => Promise<void> {
+function useSessionListAutoRefresh(
+  fetchSessions: () => Promise<void>,
+  indexBuilding = false,
+): () => Promise<void> {
   const inFlightRef = useRef<Promise<void> | null>(null)
   const lastStartedAtRef = useRef(0)
+  const minIntervalMs = indexBuilding
+    ? SESSION_LIST_BUILDING_REFRESH_MS
+    : SESSION_LIST_FOCUS_REFRESH_MIN_MS
 
   const refreshSessions = useCallback((force = false) => {
     if (inFlightRef.current && !force) return inFlightRef.current
 
     const now = Date.now()
-    if (!force && now - lastStartedAtRef.current < SESSION_LIST_FOCUS_REFRESH_MIN_MS) {
+    if (!force && now - lastStartedAtRef.current < minIntervalMs) {
       return Promise.resolve()
     }
 
@@ -2048,7 +2039,7 @@ function useSessionListAutoRefresh(fetchSessions: () => Promise<void>): () => Pr
       })
     inFlightRef.current = request
     return request
-  }, [fetchSessions])
+  }, [fetchSessions, minIntervalMs])
 
   useEffect(() => {
     void refreshSessions(true)
@@ -2063,14 +2054,14 @@ function useSessionListAutoRefresh(fetchSessions: () => Promise<void>): () => Pr
     const timer = window.setInterval(() => {
       if (!isDocumentVisible()) return
       void refreshSessions()
-    }, SESSION_LIST_AUTO_REFRESH_MS)
+    }, indexBuilding ? SESSION_LIST_BUILDING_REFRESH_MS : SESSION_LIST_AUTO_REFRESH_MS)
 
     return () => {
       window.removeEventListener('focus', refreshIfVisible)
       document.removeEventListener('visibilitychange', refreshIfVisible)
       window.clearInterval(timer)
     }
-  }, [refreshSessions])
+  }, [refreshSessions, indexBuilding])
 
   return useCallback(() => refreshSessions(true), [refreshSessions])
 }

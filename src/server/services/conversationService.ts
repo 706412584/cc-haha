@@ -257,6 +257,7 @@ type SessionProcess = {
       toolName: string
       toolUseId?: string
       description?: string
+      displayName?: string
       input: Record<string, unknown>
       permissionSuggestions?: unknown[]
     }
@@ -270,6 +271,7 @@ export type PendingPermissionRequest = {
   toolUseId?: string
   input: Record<string, unknown>
   description?: string
+  displayName?: string
 }
 
 type SessionStartOptions = {
@@ -440,7 +442,16 @@ export class ConversationService {
     }
 
     if (shouldReplacePlaceholder) {
-      await sessionService.clearSessionTranscript(sessionId, workDir)
+      // A collaboration session is named before its first turn starts. Replacing
+      // that empty launch placeholder must not erase the only title copy before
+      // the CLI creates the real worktree transcript. User-initiated /clear does
+      // not pass a title and therefore keeps its existing reset semantics.
+      await sessionService.clearSessionTranscript(
+        sessionId,
+        workDir,
+        undefined,
+        launchInfo.customTitle,
+      )
     }
 
     let launchWorkDir = workDir
@@ -632,8 +643,12 @@ export class ConversationService {
       !!options?.model ||
       !!options?.effort
     if (shouldReplacePlaceholder || !launchInfo || shouldPersistRuntimeMetadata) {
+      // system/init can move a newly-created session into its worktree while
+      // startup is still awaiting the SDK. Once that authoritative cwd is
+      // known, never recreate a late metadata placeholder in launchWorkDir.
+      const metadataWorkDir = this.getSessionWorkDir(sessionId) || launchWorkDir
       await sessionService.appendSessionMetadata(sessionId, {
-        workDir: launchWorkDir,
+        workDir: metadataWorkDir,
         customTitle: launchInfo?.customTitle ?? null,
         repository: launchRepository,
         permissionMode: options?.permissionMode || launchInfo?.permissionMode,
@@ -880,6 +895,27 @@ export class ConversationService {
     return true
   }
 
+  getPendingPermissionToolName(sessionId: string, requestId: string): string | undefined {
+    return this.sessions.get(sessionId)?.pendingPermissionRequests.get(requestId)?.toolName
+  }
+
+  /**
+   * In-process main-loop model switch via the SDK set_model control request.
+   * Only the model name changes — provider env is fixed at process spawn, so
+   * this is only valid when the target model belongs to the session's current
+   * provider. The ack resolves before the CLI's next API request is built, so
+   * sending this while the CLI is blocked on a permission decision is
+   * race-free (unlike sending it after the allow response).
+   */
+  async setModel(sessionId: string, model: string, timeoutMs = 10_000): Promise<boolean> {
+    if (!this.sessions.has(sessionId)) return false
+    await this.requestControl(sessionId, {
+      subtype: 'set_model',
+      model,
+    }, timeoutMs)
+    return this.sessions.has(sessionId)
+  }
+
   setMaxThinkingTokens(sessionId: string, maxThinkingTokens: number | null): boolean {
     return this.sendSdkMessage(sessionId, {
       type: 'control_request',
@@ -940,6 +976,7 @@ export class ConversationService {
     request: Record<string, unknown>,
     timeoutMs = 10_000,
     signal?: AbortSignal,
+    canSend?: () => boolean,
   ): Promise<Record<string, unknown>> {
     if (signal?.aborted) {
       return Promise.reject(controlRequestAbortReason(signal))
@@ -1010,7 +1047,7 @@ export class ConversationService {
         handleAbort()
         return
       }
-      const sent = this.sessions.get(sessionId) === session && this.sendSdkMessage(sessionId, {
+      const sent = (!canSend || canSend()) && this.sessions.get(sessionId) === session && this.sendSdkMessage(sessionId, {
         type: 'control_request',
         request_id: requestId,
         request,
@@ -1051,6 +1088,7 @@ export class ConversationService {
       ...(request.toolUseId ? { toolUseId: request.toolUseId } : {}),
       input: request.input,
       ...(request.description ? { description: request.description } : {}),
+      ...(request.displayName ? { displayName: request.displayName } : {}),
     }))
   }
 
@@ -1192,6 +1230,10 @@ export class ConversationService {
             description:
               typeof msg.request.description === 'string' && msg.request.description.trim()
                 ? msg.request.description
+                : undefined,
+            displayName:
+              typeof msg.request.display_name === 'string' && msg.request.display_name.trim()
+                ? msg.request.display_name.trim()
                 : undefined,
             permissionSuggestions: Array.isArray(msg.request.permission_suggestions)
               ? msg.request.permission_suggestions
@@ -1687,6 +1729,8 @@ export class ConversationService {
       networkRuntimeMetadata.streamMaxDurationDerived =
         !cleanEnv.CLAUDE_STREAM_MAX_DURATION_MS
     }
+    delete cleanEnv.CC_HAHA_SESSION_COLLABORATION_TOKEN
+    delete cleanEnv.CC_HAHA_SESSION_ID
     delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN
     if (options?.resumeInterruptedTurn === false) {
       delete cleanEnv.CLAUDE_CODE_RESUME_INTERRUPTED_TURN
@@ -1846,7 +1890,11 @@ export class ConversationService {
           }
         : {}),
       ...(desktopServerUrl
-        ? { CC_HAHA_DESKTOP_SERVER_URL: desktopServerUrl }
+        ? {
+            CC_HAHA_DESKTOP_SERVER_URL: desktopServerUrl,
+            CC_HAHA_SESSION_COLLABORATION_TOKEN: new URL(sdkUrl!).searchParams.get('token') ?? '',
+            CC_HAHA_SESSION_ID: new URL(sdkUrl!).pathname.split('/').pop() ?? '',
+          }
         : {}),
       ...(sdkUrl
         ? {

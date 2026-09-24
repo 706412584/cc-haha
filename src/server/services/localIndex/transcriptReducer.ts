@@ -121,6 +121,7 @@ type ReducerState = {
 
 export type TranscriptReductionOptions = {
   isSubagent?: boolean
+  validateRetainedMetadata?: (entry: Record<string, unknown>) => void
 }
 
 const projectionStates = new WeakMap<TranscriptProjection, ReducerState>()
@@ -763,6 +764,9 @@ export function reduceTranscriptWithLocators(
     } catch {
       malformedLineCount += 1
       continue
+    }
+    if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+      options.validateRetainedMetadata?.(entry)
     }
     applyEntry(state, entry)
     const locator = locatorFromEntry(entry, chunk, state, jsonlLine)
