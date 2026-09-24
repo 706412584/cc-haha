@@ -302,6 +302,14 @@ export type SessionMessagesWithEvidence = {
   transcriptEvidenceComplete: boolean
 }
 
+/**
+ * `includeSubagents: false` returns the root transcript alone, which is what HTTP callers
+ * need: the child transcripts are read per run from `/subagents/by-tool`.
+ */
+export type SessionMessagesOptions = {
+  includeSubagents?: boolean
+}
+
 type SubagentMessagesResult = {
   messages: MessageEntry[]
   subagentEvidenceComplete: boolean
@@ -1976,15 +1984,21 @@ export class SessionService {
     const handleLine = (line: Buffer, completeLine: boolean): void => {
       const trimmed = line.toString('utf8').trim()
       if (!trimmed) return
+      // Only a JSON parse failure is a malformed line. `onEntry` may throw a real error
+      // (an oversized-record budget, for one) and swallowing it would report a partial
+      // fold as authoritative.
+      let entry: RawEntry
       try {
-        onEntry(JSON.parse(trimmed) as RawEntry)
-        if (completeLine) completeEntries += 1
+        entry = JSON.parse(trimmed) as RawEntry
       } catch {
         // A malformed *complete* line is a real gap in the transcript. A
         // trailing partial is not: it is a record still being written, and the
         // full-read path does not treat it as malformed either.
         if (completeLine) onMalformedLine?.()
+        return
       }
+      onEntry(entry)
+      if (completeLine) completeEntries += 1
     }
 
     try {
@@ -4023,6 +4037,11 @@ export class SessionService {
     const countedUsageKeys = new Set<string>()
 
     const { consumed: consumedOffset } = await this.streamJsonlFileFrom(filePath, startOffset, (entry) => {
+      // Inspection reduces original records, so a record above the semantic read limit
+      // cannot be folded in without reporting a partial total as authoritative.
+      if (Buffer.byteLength(JSON.stringify(entry)) > HISTORY_SEMANTIC_RECORD_BYTES) {
+        throw new ApiError(413, 'Transcript inspection contains records above the semantic read limit', 'HISTORY_INSPECTION_LIMIT')
+      }
       if (typeof entry.message?.model === 'string') {
         metadata.model = entry.message.model
       }
@@ -4845,7 +4864,7 @@ export class SessionService {
   /**
    * Get full session detail including all messages.
    */
-  async getSession(sessionId: string): Promise<SessionDetail | null> {
+  async getSession(sessionId: string, options?: SessionMessagesOptions): Promise<SessionDetail | null> {
     const found = await this.findSessionFile(sessionId)
     if (!found) return null
 
@@ -4853,11 +4872,10 @@ export class SessionService {
     const stat = await fs.stat(filePath)
     const entries = await this.readJsonlFile(filePath)
 
-    const { messages } = await this.appendSubagentToolMessages(
-      projectDir,
-      sessionId,
-      this.entriesToMessages(entries),
-    )
+    const rootMessages = this.entriesToMessages(entries)
+    const messages = options?.includeSubagents === false
+      ? rootMessages
+      : (await this.appendSubagentToolMessages(projectDir, sessionId, rootMessages)).messages
     const title = this.extractTitle(entries)
     const workDir = this.resolveWorkDirFromEntries(entries, projectDir)
     const permissionMode = this.resolvePermissionModeFromEntries(entries)
@@ -4908,8 +4926,11 @@ export class SessionService {
   /**
    * Get only the messages for a session (lighter than full detail).
    */
-  async getSessionMessages(sessionId: string): Promise<MessageEntry[]> {
-    return (await this.getSessionMessagesWithEvidence(sessionId)).messages
+  async getSessionMessages(
+    sessionId: string,
+    options?: SessionMessagesOptions,
+  ): Promise<MessageEntry[]> {
+    return (await this.getSessionMessagesWithEvidence(sessionId, options)).messages
   }
 
   /**
@@ -5154,6 +5175,7 @@ export class SessionService {
 
   async getSessionMessagesWithEvidence(
     sessionId: string,
+    options?: SessionMessagesOptions,
   ): Promise<SessionMessagesWithEvidence> {
     const found = await this.findSessionFile(sessionId)
     if (!found) {
@@ -5168,15 +5190,22 @@ export class SessionService {
     }
 
     const rootTranscript = await this.readJsonlFileWithDiagnostics(found.filePath)
+    const rootMessages = this.entriesToMessages(rootTranscript.entries)
+    const rootEvidenceComplete = rootTranscript.exists && rootTranscript.parseComplete
+    // HTTP callers read each Agent run from `/subagents/by-tool` instead: merging the
+    // child transcripts here is what pushes a large session past the browser's
+    // string limit.
+    if (options?.includeSubagents === false) {
+      return { messages: rootMessages, transcriptEvidenceComplete: rootEvidenceComplete }
+    }
     const subagentResult = await this.appendSubagentToolMessages(
       found.projectDir,
       sessionId,
-      this.entriesToMessages(rootTranscript.entries),
+      rootMessages,
     )
     return {
       messages: subagentResult.messages,
-      transcriptEvidenceComplete: rootTranscript.exists &&
-        rootTranscript.parseComplete &&
+      transcriptEvidenceComplete: rootEvidenceComplete &&
         subagentResult.subagentEvidenceComplete,
     }
   }
