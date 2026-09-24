@@ -92,13 +92,6 @@ const INSPECTION_CONTEXT_TIMEOUT_MS = 5_000
  */
 const USAGE_ONLY_CONTROL_TIMEOUT_MS = 2_500
 
-/**
- * Budget for the polling `get_session_usage` control. Shorter than the inspection's basic
- * control timeout because the caller retries on its own cadence: a slow answer is worth less
- * than a stale one that blocks the next poll.
- */
-const USAGE_ONLY_CONTROL_TIMEOUT_MS = 2_500
-
 const workspaceService = new WorkspaceService(
   async (sessionId) => (
     conversationService.getSessionWorkDir(sessionId) ||

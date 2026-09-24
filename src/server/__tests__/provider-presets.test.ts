@@ -44,22 +44,26 @@ function makeRequest(
 }
 
 describe('provider presets API', () => {
-  test('exposes AruHub first among sponsors with signup copy and the new badge', async () => {
+  // Code Council fork policy: the upstream sponsor row is removed — no `featured` slot, no
+  // "New"/"Sponsor" badge, no promo copy and no `?aff=` referral link. AruHub stays selectable.
+  test('exposes AruHub as a selectable preset with no sponsor metadata', async () => {
     const { req, url, segments } = makeRequest('GET', '/api/providers/presets')
     const response = await handleProvidersApi(req, url, segments)
     const { presets } = await response.json()
-    const sponsors = presets.filter((preset: { featured?: boolean }) => preset.featured)
-    expect(sponsors[0]).toMatchObject({
+    expect(presets.filter((preset: { featured?: boolean }) => preset.featured)).toEqual([])
+    const aruhub = presets.find((preset: { id: string }) => preset.id === 'aruhub')
+    expect(aruhub).toMatchObject({
       id: 'aruhub',
       baseUrl: 'https://direct.aruhub.com:8443',
       apiFormat: 'anthropic',
       authStrategy: 'api_key',
-      apiKeyUrl: 'https://aruhub.com/sign-up?aff=Z54g',
-      isNew: true,
       needsApiKey: true,
       defaultModels: { main: 'claude-opus-5', haiku: 'claude-sonnet-5', sonnet: 'claude-sonnet-5', opus: 'claude-opus-5' },
     })
-    expect(sponsors[0].promoText).toContain('注册即送 1 美元全模型通用额度')
+    expect(aruhub.featured).toBeUndefined()
+    expect(aruhub.isNew).toBeUndefined()
+    expect(aruhub.promoText).toBeUndefined()
+    expect(aruhub.apiKeyUrl).toBeUndefined()
     const preset = PROVIDER_PRESETS.find((candidate) => candidate.id === 'aruhub')!
     expect(buildProviderManagedEnv({
       id: 'aruhub-test', presetId: preset.id, name: preset.name,
@@ -303,9 +307,8 @@ describe('provider presets API', () => {
     expect(qiniuai?.modelContextWindows?.['deepseek/deepseek-v4-flash']).toBe(1000000)
     expect(qiniuai?.modelContextWindows?.['z-ai/glm-5.2']).toBe(1000000)
     expect(qiniuai?.modelContextWindows?.['moonshotai/kimi-k3']).toBe(262144)
-    expect(atlascloud?.apiKeyUrl).toBe(
-      'https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=cc-haha',
-    )
+    // Code Council fork policy: the upstream tracking link is stripped from the preset.
+    expect(atlascloud?.apiKeyUrl).toBeUndefined()
     expect(atlascloud?.featured).toBeUndefined()
     expect(custom?.promoText).toBeUndefined()
     expect(custom?.authStrategy).toBe('auth_token')
@@ -404,8 +407,10 @@ describe('provider presets API', () => {
   describe('OpenCode Go preset', () => {
     const opencodeGo = PROVIDER_PRESETS.find((preset) => preset.id === 'opencode-go')!
 
-    test('links API key signup to the referral page with concise setup guidance', () => {
-      expect(opencodeGo.apiKeyUrl).toBe('https://opencode.ai/go?ref=3RK0WVVCGD')
+    test('links API key signup without a referral code and keeps concise setup guidance', () => {
+      // Code Council fork policy: the upstream `?ref=` referral code is stripped.
+      expect(opencodeGo.apiKeyUrl).toBe('https://opencode.ai/go')
+      expect(opencodeGo.apiKeyUrl).not.toContain('?ref=')
       expect(opencodeGo.promoText).toBe('订阅后填入 API Key，即可获取并选择模型。')
     })
 

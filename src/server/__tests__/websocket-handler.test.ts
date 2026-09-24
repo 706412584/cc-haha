@@ -4282,10 +4282,11 @@ describe('WebSocket handler session isolation', () => {
     })
   })
 
-  it('still reports a failure when a legacy CLI rejects with the plain not_found message', async () => {
-    // Only the structured `{ reason: 'not_found' }` success converges. A CLI
-    // without the idempotent stop keeps the explicit failure path — the
-    // server never string-matches error text across the process boundary.
+  it('converges when a legacy CLI rejects with the plain not_found message', async () => {
+    // Code Council fork behaviour: a CLI without the idempotent stop answers a
+    // late Stop with the plain `No task found with ID` message. The fork treats
+    // that as the stop's goal state and converges, because reporting a failure
+    // only re-arms the stop button for a task that can never be stopped again.
     const sessionId = `stop-background-legacy-${crypto.randomUUID()}`
     const ws = makeClientSocket(sessionId)
     spyOn(conversationService, 'requestControl')
@@ -4300,10 +4301,12 @@ describe('WebSocket handler session isolation', () => {
     await Promise.resolve()
 
     expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
-      type: 'background_task_stop_failed',
+      type: 'background_task_stopped',
       taskId: 'bash-task-1',
-      message: 'No task found with ID: bash-task-1',
     })
+    expect(ws.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ type: 'background_task_stop_failed' }),
+    )
   })
 
   it('converges a stale running entry when the CLI reports the task already gone', async () => {

@@ -45,7 +45,6 @@ import {
   type TraceBodySnapshot,
   type TraceProviderInfo,
 } from '../services/traceCaptureService.js'
-import { resolveModelReasoningProfile } from '../../shared/modelReasoning.js'
 import { resolveModelApiFormat } from '../../shared/modelApiFormats.js'
 import { applyUpstreamHeaders, resolveUpstreamHeaders } from './upstreamHeaders.js'
 

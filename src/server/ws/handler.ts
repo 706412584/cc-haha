@@ -1294,6 +1294,9 @@ async function handleUserMessage(
     let userMessageSent = false
     const shouldForwardCurrentTurnLocalCommand =
       createCurrentTurnLocalCommandForwarder(desktopSlashCommand)
+    // Record which title turn this admission owns so `bindTitleSessionOutput` can drop
+    // output that belongs to a superseded turn instead of mixing it into the title.
+    activeTurn.titleTurnNumber = titleTurnNumber ?? undefined
     const removeTitleOutputCallback = titleTurnNumber === null
       ? null
       : bindTitleSessionOutput(ws, sessionId, activeTurn, () => userMessageSent)
