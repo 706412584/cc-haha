@@ -6061,10 +6061,12 @@ export class SessionService {
       timestamp: new Date().toISOString(),
     })
 
-    if (metadata.customTitle && this.canPersistTitle(sessionId, metadata.customTitle)) {
+    // `customTitle` may have been carried over from the transcript that holds the
+    // conversation, so write it here rather than only the caller-supplied one.
+    if (customTitle && this.canPersistTitle(sessionId, customTitle)) {
       await this.appendJsonlEntry(targetFilePath, {
         type: 'custom-title',
-        customTitle: metadata.customTitle,
+        customTitle,
         timestamp: new Date().toISOString(),
       })
     }
@@ -6095,7 +6097,9 @@ export class SessionService {
       const entries = await this.readJsonlFile(filePath)
       if (entries.length === 0) continue
 
-      if (this.countTranscriptMessages(entries) > 0) continue
+      // Keep the transcript that holds a conversation — including a collaboration
+      // delivery persisted as isMeta — rather than only counting ordinary messages.
+      if (this.hasConversationTranscript(entries)) continue
 
       await fs.rm(filePath, { force: true })
       this.invalidateReadCache(filePath)
