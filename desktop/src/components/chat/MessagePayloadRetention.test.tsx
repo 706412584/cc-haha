@@ -35,7 +35,9 @@ describe('complete message payloads', () => {
     expect(screen.getByText('notes.md')).toBeInTheDocument()
   })
 
-  it('renders both sides of a large successful Edit', async () => {
+  // Diffing 5000 lines dominates this test's runtime (~2s locally, and it crossed the
+  // default 5s ceiling on a loaded CI runner), so it gets its own budget.
+  it('renders both sides of a large successful Edit', { timeout: 20_000 }, async () => {
     const message = {
       id: 'edit', type: 'tool_use', toolName: 'Edit', toolUseId: 'edit', timestamp: 1,
       input: { file_path: '/tmp/example.ts', old_string: 'old line\n'.repeat(5000), new_string: 'fixed' },

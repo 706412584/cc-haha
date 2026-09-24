@@ -189,6 +189,8 @@ export type SessionLaunchInfo = {
   transcriptMessageCount: number
   customTitle: string | null
   permissionMode?: string
+  /** Mode to restore when the session leaves plan mode (Code Council fork feature). */
+  prePlanPermissionMode?: string
   runtimeProviderId?: string | null
   runtimeModelId?: string
   effortLevel?: string
@@ -396,6 +398,8 @@ type RawEntry = {
   }
   customTitle?: string
   permissionMode?: string
+  /** Code Council fork feature; `null` is the explicit "already restored" tombstone. */
+  prePlanPermissionMode?: string | null
   worktreeSession?: PersistedWorktreeSession | null
   title?: string
   [key: string]: unknown
@@ -1018,6 +1022,12 @@ export class SessionService {
       return false
     }
     if (
+      metadata.prePlanPermissionMode !== undefined &&
+      launchInfo.prePlanPermissionMode !== (metadata.prePlanPermissionMode ?? undefined)
+    ) {
+      return false
+    }
+    if (
       metadata.runtimeProviderId !== undefined &&
       launchInfo.runtimeProviderId !== metadata.runtimeProviderId
     ) {
@@ -1330,6 +1340,7 @@ export class SessionService {
         repository: undefined as PreparedSessionWorkspace['repository'] | undefined,
         worktreeSession: undefined as PersistedWorktreeSession | null | undefined,
         permissionMode: undefined as string | undefined,
+        prePlanPermissionMode: undefined as string | undefined,
         runtimeProviderId: undefined as string | null | undefined,
         runtimeModelId: undefined as string | undefined, effortLevel: undefined as string | undefined,
         customTitle: null as string | null, nonemptyCustomTitle: null as string | null,
@@ -1351,6 +1362,12 @@ export class SessionService {
         if (entry.type === 'session-meta') {
           if (typeof record.workDir === 'string') state.workDir = normalizeDriveRootPathForPlatform(record.workDir)
           state.permissionMode = this.resolvePermissionModeFromEntries([entry]) ?? state.permissionMode
+          // `null` is a tombstone, so an explicit clear must win over an older string.
+          if (record.prePlanPermissionMode === null) state.prePlanPermissionMode = undefined
+          else {
+            const resolved = this.resolvePrePlanPermissionModeFromEntries([entry])
+            if (resolved !== undefined) state.prePlanPermissionMode = resolved
+          }
           if (record.runtimeProviderId === null || typeof record.runtimeProviderId === 'string') state.runtimeProviderId = record.runtimeProviderId as string | null
           if (typeof record.runtimeModelId === 'string') state.runtimeModelId = record.runtimeModelId
           if (typeof record.effortLevel === 'string' && VALID_SESSION_EFFORT_LEVELS.has(record.effortLevel)) state.effortLevel = record.effortLevel
@@ -1396,6 +1413,8 @@ export class SessionService {
           customTitle: launch.customTitle,
           transcriptMessageCount: launch.launchCount,
           ...shared(launch),
+          // Only the launch info carries this: it is a restore target, not list metadata.
+          ...(launch.prePlanPermissionMode ? { prePlanPermissionMode: launch.prePlanPermissionMode } : {}),
         },
         customTitle: launch.nonemptyCustomTitle,
         complete: scan.oversizedRecords === 0,
@@ -1734,6 +1753,29 @@ export class SessionService {
         VALID_SESSION_PERMISSION_MODES.has(permissionMode)
       ) {
         return permissionMode
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * The mode the session was in immediately before it entered plan mode, so leaving plan
+   * restores what the user actually had instead of a hardcoded default. `null` is an explicit
+   * tombstone (the mode was already restored) and must stop the search rather than let an
+   * older string win.
+   */
+  private resolvePrePlanPermissionModeFromEntries(entries: RawEntry[]): string | undefined {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i]
+      if (entry?.type !== 'session-meta') continue
+      const prePlanPermissionMode = entry.prePlanPermissionMode
+      if (prePlanPermissionMode === null) return undefined
+      if (
+        typeof prePlanPermissionMode === 'string' &&
+        VALID_SESSION_PERMISSION_MODES.has(prePlanPermissionMode) &&
+        prePlanPermissionMode !== 'plan'
+      ) {
+        return prePlanPermissionMode
       }
     }
     return undefined
@@ -4750,6 +4792,11 @@ export class SessionService {
       )
         ? preservedPermissionMode
         : preserved.permissionMode
+      // Code Council fork feature: remember the mode plan mode replaced, so leaving plan
+      // restores what the user actually had.
+      const prePlanPermissionMode = permissionMode === 'plan'
+        ? this.resolvePrePlanPermissionModeFromEntries(entries)
+        : undefined
       const now = new Date().toISOString()
 
       const initialEntry = {
@@ -4769,6 +4816,7 @@ export class SessionService {
         workDir,
         repository,
         ...(permissionMode ? { permissionMode } : {}),
+        ...(prePlanPermissionMode ? { prePlanPermissionMode } : {}),
         timestamp: now,
       }
 
@@ -4819,6 +4867,8 @@ export class SessionService {
       customTitle?: string | null
       repository?: PreparedSessionWorkspace['repository']
       permissionMode?: string
+      /** `null` clears the stored restore target (Code Council fork feature). */
+      prePlanPermissionMode?: string | null
       runtimeProviderId?: string | null
       runtimeModelId?: string
       effortLevel?: string
@@ -4925,6 +4975,11 @@ export class SessionService {
       repository,
       ...(metadata.permissionMode && VALID_SESSION_PERMISSION_MODES.has(metadata.permissionMode)
         ? { permissionMode: metadata.permissionMode }
+        : {}),
+      // `null` is written through on purpose: it is the tombstone that stops an older
+      // restore target from being replayed.
+      ...(metadata.prePlanPermissionMode !== undefined
+        ? { prePlanPermissionMode: metadata.prePlanPermissionMode }
         : {}),
       ...(metadata.runtimeProviderId !== undefined
         ? { runtimeProviderId: metadata.runtimeProviderId }
