@@ -5681,7 +5681,12 @@ export class SessionService {
     const found = await this.findSessionFile(sessionId)
     if (!found) return null
 
-    const entries = await this.readJsonlFile(found.filePath)
+    return this.readCustomTitleFromFile(found.filePath)
+  }
+
+  /** Last non-empty `custom-title` in one transcript, or null. */
+  private async readCustomTitleFromFile(filePath: string): Promise<string | null> {
+    const entries = await this.readJsonlFile(filePath).catch(() => [] as RawEntry[])
     let customTitle: string | null = null
     for (const entry of entries) {
       if (entry.type === 'custom-title' && typeof entry.customTitle === 'string' && entry.customTitle.trim()) {
@@ -5810,6 +5815,7 @@ export class SessionService {
     sessionId: string,
     fallbackWorkDir?: string,
     preservedPermissionMode?: string,
+    preservedCustomTitle?: string | null,
   ): Promise<void> {
     const persist = this.shouldPersistSession()
     const nextEpoch = (this.taskNotificationMutationEpochs.get(sessionId) ?? 0) + 1
@@ -5831,7 +5837,9 @@ export class SessionService {
         } : null)
         if (info) {
           this.memoryLaunchInfo.set(this.memorySessionKey(sessionId), {
-            ...info, transcriptMessageCount: 0, customTitle: null,
+            ...info,
+            transcriptMessageCount: 0,
+            customTitle: preservedCustomTitle?.trim() || null,
             ...(preservedPermissionMode && VALID_SESSION_PERMISSION_MODES.has(preservedPermissionMode)
               ? { permissionMode: preservedPermissionMode } : {}),
           })
@@ -5888,11 +5896,23 @@ export class SessionService {
         timestamp: now,
       }
 
+      // A collaboration title belongs to the session, not to the transcript being cleared,
+      // so re-write it alongside the fresh metadata rather than letting it disappear.
+      const customTitleEntry = preservedCustomTitle?.trim()
+        ? {
+            type: 'custom-title',
+            customTitle: preservedCustomTitle.trim(),
+            timestamp: now,
+          }
+        : null
+
       if (!this.shouldPersistSession()) return
       this.memoryLaunchInfo.delete(this.memorySessionKey(sessionId))
       await fs.writeFile(
         found.filePath,
-        `${JSON.stringify(initialEntry)}\n${JSON.stringify(metaEntry)}\n`,
+        [initialEntry, metaEntry, ...(customTitleEntry ? [customTitleEntry] : [])]
+          .map(entry => JSON.stringify(entry))
+          .join('\n') + '\n',
         'utf-8',
       )
       this.invalidateSessionListCache()
@@ -5987,7 +6007,28 @@ export class SessionService {
       }
     }
 
-    if (!metadata.customTitle && !this.memoryLaunchInfo.has(this.memorySessionKey(sessionId))) {
+    // Startup names the directory the session was launched from, so a collaboration title
+    // can land on that placeholder. Once the conversation lives in another transcript, keep
+    // the title with the file that survives placeholder cleanup instead of letting the only
+    // copy be deleted. Re-ported from upstream.
+    let customTitle = metadata.customTitle ?? null
+    if (!customTitle) {
+      const targetTitle = matches.some((match) => match.filePath === targetFilePath)
+        ? await this.readCustomTitleFromFile(targetFilePath)
+        : null
+      if (!targetTitle) {
+        for (const match of matches) {
+          if (match.filePath === targetFilePath) continue
+          const title = await this.readCustomTitleFromFile(match.filePath)
+          if (title) {
+            customTitle = title
+            break
+          }
+        }
+      }
+    }
+
+    if (!customTitle && !this.memoryLaunchInfo.has(this.memorySessionKey(sessionId))) {
       if (this.metadataMatchesLaunchInfo(previousInfo, {
         ...metadata,
         workDir: normalizedWorkDir,
