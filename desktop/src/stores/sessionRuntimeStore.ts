@@ -440,7 +440,11 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => {
         const matchesCurrent = selection &&
           current?.providerId === selection.providerId &&
           current.modelId === selection.modelId &&
-          current.effortLevel === selection.effortLevel
+          current.effortLevel === selection.effortLevel &&
+          // Code Council fork behaviour: a `thinkingEnabled` override that changed on the
+          // server must still be applied, otherwise toggling thinking in the CLI leaves the
+          // desktop composer showing a stale override.
+          current.thinkingEnabled === selection.thinkingEnabled
         const pending = current && pendingRuntimes.has(current)
         if (pending && !matchesCurrent) continue
         if (!selection) {

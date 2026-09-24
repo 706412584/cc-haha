@@ -33,6 +33,20 @@ import { useTabStore } from '../../stores/tabStore'
 
 const ACTIVE_TAB = 'active-tab'
 
+/**
+ * Code Council fork feature: `sendMessage` re-aligns the server-side orchestration mode
+ * (`set_coordinator_mode` / `set_pipeline_mode`) before every real user turn. Those frames are
+ * not part of the question-answering contract under test, so assertions about "how many messages
+ * did the user send" count only the substantive frames.
+ */
+const ORCHESTRATION_FRAME_TYPES = ['set_coordinator_mode', 'set_pipeline_mode']
+
+function substantiveSends() {
+  return sendMock.mock.calls.filter(
+    ([, payload]) => !ORCHESTRATION_FRAME_TYPES.includes((payload as { type?: string })?.type ?? ''),
+  )
+}
+
 function patchSession(patch: Partial<PerSessionState>) {
   useChatStore.setState((state) => ({
     sessions: {
@@ -665,7 +679,7 @@ describe('AskUserQuestion', () => {
       fireEvent.click(chatButton)
       fireEvent.click(chatButton)
 
-      expect(sendMock).toHaveBeenCalledTimes(1)
+      expect(substantiveSends()).toHaveLength(1)
     })
   })
 
@@ -713,7 +727,7 @@ describe('AskUserQuestion', () => {
       fireEvent.click(screen.getByRole('button', { name: /^Single page$/ }))
       fireEvent.click(submitButton())
 
-      expect(sendMock).toHaveBeenCalledTimes(1)
+      expect(substantiveSends()).toHaveLength(1)
       expect(sendMock).toHaveBeenCalledWith(ACTIVE_TAB, expect.objectContaining({
         type: 'user_message',
         content: expect.stringContaining('- "Which scope?"\n  Answer: Single page'),
@@ -730,7 +744,7 @@ describe('AskUserQuestion', () => {
 
       fireEvent.click(chatButton())
 
-      expect(sendMock).toHaveBeenCalledTimes(1)
+      expect(substantiveSends()).toHaveLength(1)
       expect(sendMock).toHaveBeenCalledWith(ACTIVE_TAB, expect.objectContaining({
         type: 'user_message',
         content: expect.stringContaining('Start by asking them what they would like to clarify'),
@@ -878,7 +892,7 @@ describe('AskUserQuestion', () => {
       } }} />)
 
       expect(screen.queryByPlaceholderText('Type your answer...')).toBeNull()
-      expect(sendMock).toHaveBeenCalledTimes(1)
+      expect(substantiveSends()).toHaveLength(1)
     })
 
     it('keeps the sent-as-message marker across a remount', () => {
@@ -894,7 +908,7 @@ describe('AskUserQuestion', () => {
 
       expect(screen.getByText(/Sent as a new message/)).toBeTruthy()
       expect(screen.queryByRole('button', { name: /send as new message/i })).toBeNull()
-      expect(sendMock).toHaveBeenCalledTimes(1)
+      expect(substantiveSends()).toHaveLength(1)
     })
 
     it('leaves nothing behind when the card was never filled in', () => {

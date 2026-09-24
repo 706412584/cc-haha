@@ -348,7 +348,7 @@ function ExitPlanModePermissionDialog({
     activeProviderId,
     activeProviderName,
     providers,
-    currentModel?.id,
+    currentModel,
   )
   const preview = extractPlanPreview(input)
   const permissionUpdates = buildPromptPermissionUpdates(preview.allowedPrompts)

@@ -91,6 +91,9 @@ function buildInput(overrides: Partial<CapabilityMenuInput> = {}): CapabilityMen
     teams: [team],
     workflows: [workflow],
     computerUse: { supported: true, enabled: false },
+    // Code Council fork feature: per-session orchestration switch rows. `null` means there is no
+    // active session yet, which is the zero-state composer the sections are built for here.
+    orchestration: null,
     teamCreatePrompt: 'Create a team: ',
     t,
     ...overrides,

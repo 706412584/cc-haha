@@ -197,11 +197,12 @@ export function Sidebar({
   } | null>(null)
   const sessionScrollAreaRef = useRef<HTMLDivElement>(null)
   const pendingSessionScrollAnchorRef = useRef<SessionScrollAnchor | null>(null)
-  const refreshSessionsNow = useSessionListAutoRefresh(fetchSessions, indexBuilding)
+  useSessionListAutoRefresh(fetchSessions, indexBuilding)
+  // `syncIndexes` already refreshes the list once its sync completes, so calling the auto-refresh
+  // helper here too would issue a second, redundant `fetchSessions` on every manual refresh.
   const handleManualRefresh = useCallback(async () => {
     await syncIndexes()
-    await refreshSessionsNow()
-  }, [syncIndexes, refreshSessionsNow])
+  }, [syncIndexes])
 
   useEffect(() => useSessionStore.subscribe((nextState, previousState) => {
     if (nextState.sessions === previousState.sessions) return

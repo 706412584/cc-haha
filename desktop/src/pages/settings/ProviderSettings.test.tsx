@@ -41,7 +41,10 @@ describe('ApiSmart sponsor provider', () => {
     vi.restoreAllMocks()
   })
 
-  it('puts AruHub first in the sponsor row with badges and its signup offer', async () => {
+  // Code Council fork policy: the upstream sponsor row (featured presets, "New"/"Sponsor"
+  // badges and referral links) is deliberately removed. AruHub stays selectable, but with no
+  // promo copy and no `?aff=` referral on its signup link.
+  it('keeps AruHub selectable with no sponsor badges and no referral link', async () => {
     const create = vi.spyOn(providersApi, 'create').mockImplementation(async (input) => ({
       provider: { ...input, id: 'saved-aruhub', apiFormat: input.apiFormat ?? 'anthropic' },
     }))
@@ -50,27 +53,19 @@ describe('ApiSmart sponsor provider', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Add Model/ }))
     const dialog = within(screen.getByRole('dialog'))
     const sponsor = dialog.getByRole('button', { name: 'AruHub' })
-    expect(sponsor.parentElement?.firstElementChild).toBe(sponsor)
-    expect(sponsor.parentElement).toBe(dialog.getByRole('button', { name: 'Atlas Cloud' }).parentElement)
-    expect(within(sponsor).getByText('New')).toBeInTheDocument()
-    expect(within(sponsor).getByLabelText('Sponsor')).toBeInTheDocument()
-    for (const name of ['Atlas Cloud', 'ApiSmart']) {
-      expect(within(dialog.getByRole('button', { name })).queryByLabelText('Sponsor')).not.toBeInTheDocument()
-    }
+    expect(within(sponsor).queryByText('New')).not.toBeInTheDocument()
+    expect(within(sponsor).queryByLabelText('Sponsor')).not.toBeInTheDocument()
     fireEvent.click(sponsor)
     expect(dialog.getByDisplayValue('https://direct.aruhub.com:8443')).toBeInTheDocument()
     expect(dialog.getAllByDisplayValue('claude-opus-5')).toHaveLength(2)
     expect(dialog.getAllByDisplayValue('claude-sonnet-5')).toHaveLength(2)
-    const offer = dialog.getByRole('button', { name: /注册即送 1 美元全模型通用额度/ })
-    fireEvent.click(offer)
-    expect(open).toHaveBeenCalledWith('https://aruhub.com/sign-up?aff=Z54g')
-    fireEvent.click(dialog.getByRole('button', { name: /Get API Key/ }))
-    expect(open).toHaveBeenCalledTimes(2)
-    fireEvent.change(dialog.getAllByPlaceholderText('sk-...')[0]!, { target: { value: 'fake-aruhub-key' } })
-    expect(dialog.getByText(/注册即送 1 美元全模型通用额度/)).toBeInTheDocument()
-    fireEvent.change(dialog.getByDisplayValue('https://direct.aruhub.com:8443'), { target: { value: 'https://other.invalid' } })
+    // No signup offer copy survives the de-advertising policy.
     expect(dialog.queryByText(/注册即送 1 美元全模型通用额度/)).not.toBeInTheDocument()
-    fireEvent.change(dialog.getByDisplayValue('https://other.invalid'), { target: { value: 'https://direct.aruhub.com:8443' } })
+    // `apiKeyUrl` is stripped from the preset, so the "Get API Key" shortcut is gone too —
+    // nothing in the dialog may open a link carrying a referral code.
+    expect(dialog.queryByRole('button', { name: /Get API Key/ })).not.toBeInTheDocument()
+    expect(open).not.toHaveBeenCalled()
+    fireEvent.change(dialog.getAllByPlaceholderText('sk-...')[0]!, { target: { value: 'fake-aruhub-key' } })
     fireEvent.click(dialog.getByRole('button', { name: 'Add' }))
     await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({
       presetId: 'aruhub',
@@ -93,7 +88,7 @@ describe('ApiSmart sponsor provider', () => {
 
     // AruHub is an Anthropic-endpoint preset that also serves OpenAI, so the
     // protocol starts on the preset's own value and is the user's to change.
-    const formatTrigger = dialog.getByRole('button', { name: /Anthropic Messages \(native\)/ })
+    const formatTrigger = dialog.getByRole('button', { name: /Anthropic Messages \(native protocol\)/ })
     expect(dialog.queryByText(/point the base URL at an endpoint that serves it/)).not.toBeInTheDocument()
 
     fireEvent.click(formatTrigger)
@@ -119,7 +114,7 @@ describe('ApiSmart sponsor provider', () => {
     const dialog = within(screen.getByRole('dialog'))
     fireEvent.click(dialog.getByRole('button', { name: 'ApiSmart' }))
 
-    expect(dialog.getByRole('button', { name: /OpenAI Chat Completions \(proxy\)/ })).toBeInTheDocument()
+    expect(dialog.getByRole('button', { name: /OpenAI Chat Completions \(local protocol translation\)/ })).toBeInTheDocument()
     expect(dialog.queryByText(/point the base URL at an endpoint that serves it/)).not.toBeInTheDocument()
   })
 
@@ -390,7 +385,9 @@ describe('OpenCode Go provider', () => {
     fireEvent.change(key, { target: { value: 'fake-opencode-key' } })
     expect(fetch).toBeEnabled()
     fireEvent.click(dialog.getByRole('button', { name: /Get API Key/ }))
-    expect(open).toHaveBeenCalledWith('https://opencode.ai/go?ref=3RK0WVVCGD')
+    // Code Council fork policy: the upstream referral code is stripped from the preset.
+    expect(open).toHaveBeenCalledWith('https://opencode.ai/go')
+    expect(open).not.toHaveBeenCalledWith(expect.stringContaining('?ref='))
     expect(screen.queryByText(/CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1/)).not.toBeInTheDocument()
     fireEvent.focus(dialog.getByRole('button', { name: 'Disable experimental beta headers' }))
     expect(await screen.findByRole('tooltip')).toHaveTextContent('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1')
@@ -474,11 +471,11 @@ describe('OpenCode Go provider', () => {
     const dialog = within(screen.getByRole('dialog'))
     fireEvent.click(dialog.getByRole('button', { name: 'OpenCode Go' }))
 
-    expect(dialog.getByText('OpenAI Chat Completions (proxy)')).toBeInTheDocument()
+    expect(dialog.getByText('OpenAI Chat Completions (local protocol translation)')).toBeInTheDocument()
     expect(dialog.getByText(/picks the protocol per model/)).toBeInTheDocument()
     // A record-level format cannot express the per-model split, so the server
     // ignores it; leaving a dropdown here would offer a switch that does nothing.
-    expect(dialog.queryByRole('button', { name: /OpenAI Chat Completions \(proxy\)|Anthropic Messages/ })).toBeNull()
+    expect(dialog.queryByRole('button', { name: /OpenAI Chat Completions \(local protocol translation\)|Anthropic Messages/ })).toBeNull()
   })
 
   it('sends the preset id with a connectivity test so the server resolves the same protocol', async () => {

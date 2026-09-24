@@ -654,7 +654,8 @@ describe('TraceSession', () => {
       .mockResolvedValueOnce({ messages: pendingMessages })
       .mockReturnValue(refreshedMessages)
 
-    await renderReady()
+    // A 20ms poll so the second revision/signature observation lands within the test.
+    await renderReady(20)
 
     let tree = within(screen.getByTestId('trace-tree'))
     fireEvent.click(tree.getByText('Bash'))

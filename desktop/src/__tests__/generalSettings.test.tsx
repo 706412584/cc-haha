@@ -2813,7 +2813,7 @@ describe('Settings > Providers tab', () => {
     })
   })
 
-  it('closes the edit form without waiting for settings to refresh', async () => {
+  it('keeps the edit form open until settings have been refreshed', async () => {
     providerStoreState.updateProvider = vi.fn().mockResolvedValue(providerStoreState.providers[0])
     useSettingsStore.setState({
       fetchAll: vi.fn().mockReturnValue(new Promise(() => {})),
@@ -2830,13 +2830,14 @@ describe('Settings > Providers tab', () => {
 
     await waitFor(() => {
       expect(providerStoreState.updateProvider).toHaveBeenCalledTimes(1)
-      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     })
+    // Closing happens only after `fetchSettings()` resolves — closing first would let the list
+    // render stale values for the row the user just edited.
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
   })
 
-  it('shows a visible error and unlocks the form when saving fails', async () => {
+  it('shows a visible error and keeps the form open when saving fails', async () => {
     providerStoreState.updateProvider = vi.fn().mockRejectedValue(new Error('disk full'))
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     render(<Settings />)
 
@@ -2848,16 +2849,11 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
 
     await waitFor(() => {
-      expect(useUIStore.getState().toasts).toEqual([
-        expect.objectContaining({
-          type: 'error',
-          message: 'Failed to save provider',
-        }),
-      ])
+      // The dialog reports the failure inline instead of closing and raising a toast.
+      expect(within(dialog).getByRole('alert')).toBeInTheDocument()
       expect(within(dialog).getByRole('button', { name: 'Save' })).toBeEnabled()
     })
-    expect(consoleError).toHaveBeenCalledWith('Failed to save provider:', expect.any(Error))
-    consoleError.mockRestore()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
   })
 
   it('keeps the provider form locked while save is in flight', async () => {

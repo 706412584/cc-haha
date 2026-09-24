@@ -1,7 +1,7 @@
 import { SessionToolLinks, SESSION_TOOL_NAMES } from '@/components/chat/SessionToolLinks'
 import { memo, useMemo, useState } from 'react'
 import { getDisclosure, setDisclosure } from '../../lib/disclosureMemory'
-import { CircleStop, CircleX, LoaderCircle } from 'lucide-react'
+import { CircleX, LoaderCircle } from 'lucide-react'
 import { activitySegmentIcon } from './activityGroupModel'
 import { CodeViewer } from './CodeViewer'
 import { DiffViewer } from './DiffViewer'
@@ -126,13 +126,6 @@ export function resolveShellOutputKind(content: unknown, toolName: string): Shel
       ? content.length > 0
       : Boolean(content)
   return hasUnrenderableBlocks ? { kind: 'opaque' } : { kind: 'empty' }
-}
-
-type ContentStats = {
-  lines: number
-  chars: number
-  visibleLines?: number
-  windowed?: boolean
 }
 
 export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, result, compact = false, chrome = 'card', isPending = false, status, partialInput, defaultExpanded = false, durationMs, disclosureKey }: Props) {

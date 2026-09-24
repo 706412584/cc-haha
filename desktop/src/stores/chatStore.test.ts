@@ -193,6 +193,13 @@ import {
 const TEST_SESSION_ID = 'test-session-1'
 const initialState = useChatStore.getState()
 
+/**
+ * Code Council fork feature: `sendMessage` re-aligns the server-side orchestration mode
+ * (`set_coordinator_mode` / `set_pipeline_mode`) before every real user turn. Assertions about
+ * the frames a user action produces filter these out so they describe the behaviour under test.
+ */
+const ORCHESTRATION_FRAME_TYPES = ['set_coordinator_mode', 'set_pipeline_mode']
+
 /** Thinking deltas are buffered for ~50ms before they reach the transcript.
  *  Tests that assert on thinking content straight after a delta flush the
  *  buffer explicitly rather than adopting fake timers, so what they check is
@@ -9352,7 +9359,12 @@ describe('chatStore history mapping', () => {
     sendMock.mockClear()
     useChatStore.getState().connectToSession(TEST_SESSION_ID)
 
-    expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, { type: 'set_runtime_config', ...next })
+    // The frame carries a server-generated `requestId` for the transition acknowledgement, so
+    // match on the fields this case is about rather than the whole payload.
+    expect(sendMock).toHaveBeenCalledWith(
+      TEST_SESSION_ID,
+      expect.objectContaining({ type: 'set_runtime_config', ...next }),
+    )
     expect(sendMock).not.toHaveBeenCalledWith(TEST_SESSION_ID, expect.objectContaining({ modelId: 'k3[1m]' }))
   })
 
@@ -9384,11 +9396,24 @@ describe('chatStore history mapping', () => {
       if (arrival === 'after-confirmation') deliverOldResponse()
 
       expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(next)
-      expect(sendMock.mock.calls.map(([, message]) => message)).toEqual([
-        { type: 'stop_generation' },
-        { type: 'set_runtime_config', ...next },
-        { type: 'user_message', content: 'Continue with the selected model', attachments: undefined },
+      // Code Council fork feature: `sendMessage` re-aligns the orchestration mode before the
+      // user turn, so filter those frames out before asserting the ordering under test.
+      const frames = sendMock.mock.calls
+        .map(([, message]) => message)
+        .filter((message) => !ORCHESTRATION_FRAME_TYPES.includes((message as { type?: string }).type ?? ''))
+      expect(frames.map((message) => (message as { type?: string }).type)).toEqual([
+        'stop_generation',
+        'set_runtime_config',
+        'user_message',
       ])
+      // The transition frame carries a server-generated `requestId`, so match its runtime fields
+      // rather than the whole payload.
+      expect(frames[1]).toEqual(expect.objectContaining({ type: 'set_runtime_config', ...next }))
+      expect(frames[2]).toEqual({
+        type: 'user_message',
+        content: 'Continue with the selected model',
+        attachments: undefined,
+      })
     },
   )
 
