@@ -1994,7 +1994,9 @@ describe('SessionService', () => {
     const projectDir = '-tmp-inspection-budget'
     await writeSessionFile(projectDir, sessionId, [makeSessionMetaEntry('/tmp/inspection'), makeUserEntry('x'.repeat(256 * 1024), crypto.randomUUID())])
     const fullRead = spyOn(service as any, 'readJsonlFile').mockImplementation(() => { throw new Error('unbounded history read') })
-    const stream = spyOn(service as any, 'streamJsonlFile')
+    // The fork resumes the inspection fold from a byte offset, so the read to count is
+    // `streamJsonlFileFrom` rather than the whole-file `streamJsonlFile` upstream spies on.
+    const stream = spyOn(service as any, 'streamJsonlFileFrom')
     try {
       await Promise.all([service.getTranscriptMetadata(sessionId), service.getTranscriptContextEstimate(sessionId), service.getTranscriptUsage(sessionId)])
       expect(fullRead).not.toHaveBeenCalled()
