@@ -9,7 +9,7 @@
 
 ## 合并概况
 
-- merge 触及 **1218** 个文件,其中 **380** 个进入合并提交索引。
+- merge 触及 **1219** 个文件(两父提交并集;`git diff 2f0ef19d 2f8d819d` 为 1218,`git diff 5f252915^1 5f252915` 为 380)。
 - 冲突已 **全部解决**:`git diff --diff-filter=U` = 0,全仓无残留 `<<<<<<<` / `>>>>>>>` 标记。
 - 括号/JSX 平衡自检通过(chatStore.ts 的朴素计数“不平衡”是字符串/正则/注释里的括号,fork HEAD 原版同值,非本次引入)。
 
@@ -33,11 +33,20 @@
 - `thinking` 透传:proxy 层与 `thinkingEnabled` 字段保留。
 - Code Council wordmark:`Sidebar.tsx`(“Code <span>Council</span>”)、`AppShell.tsx` 保留。
 - 全库 GitHub 链接指向 `706412584/cc-haha`。
+  - **更正(2026-09-25,独立审核发现)**:此前“均已确认保留”的说法**不准确**。合并**新增了 2 个含 `NanmiCoder` 的文件**:`desktop/src/__tests__/directoryPicker.test.tsx`(3 处 `NanmiCoder/cc-haha`,已改为 `706412584/cc-haha`)与 `desktop/src/lib/fuzzyScore.test.ts`(2 处 `NanmiCoder/MediaCrawler`,是**另一个无关项目**当夹具数据用,非本仓库链接,保留)。
+  - **`desktop/src/pages/settings/AboutSettings.tsx` 的 `AUTHOR_GITHUB = 'https://github.com/NanmiCoder'` 是 fork 有意保留的原作者署名**(该文件注释明确写明 “Original author attribution … is intentionally preserved below”,并另有 `FORK_AUTHOR_GITHUB`)。这**不是**违规,不应改动。
+  - 其余 `NanmiCoder` / `anthropics/claude-code` 出现处(`docs/`、`.github/`、`src/` 中的 issue URL 注释)在 fork 里**早已存在**,合并既未新增也未删除。
+- **`ProviderSettings.tsx` 的 provider 兼容性徽章:合并时整体丢失,已回植(commit `195126a0`)。**
+  - 该文件整体取了上游版,而上游没有这两个徽章,于是 `provider-compat-badge-{id}`(伪 `tool_use` 计数 ≥ 阈值)与 `provider-thinking-badge-{id}`(thinking 不兼容)连同 store 订阅、两处 `clearProvider` 调用一并消失 —— 无冲突、无类型错误、无测试失败。
+  - **影响不只是少了个角标**:`chatStore.ts` 仍在调 `recordThinkingIncompatible`,store 仍在累计,7 个语言文件的 i18n key 也都在,但没有任何渲染器 —— 用户只看到一次性 toast,再也看不到持久状态。
+  - **根因是覆盖缺口**:fork 自己也**没有**这两个徽章的测试,所以合并丢掉它们时没有任何信号。已补 2 个回归测试,并验证「删掉徽章 → 测试失败」。
 - **fork 有意回退项(非丢失)**:`ToolCallBlock` 的 `liveStatsSummary` / `formatContentStats` 不恢复。fork commit `34aa9d71` 明确回退了上游 #823 与 #703/#707/#712/#751(pending tool UI),理由是这些改动会使第三方 provider 上的 `tool_use` 响应退化成 XML 文本块。
 
 ## 冲突解决明细
 
-**实测冲突规模:`git merge-tree --write-tree 2f0ef19d 2f8d819d` 报出 465 个冲突文件**(此前记录为“~40 文件”,严重低估)。
+**实测冲突规模:`git merge-tree --write-tree 2f0ef19d 2f8d819d` 报出 122 个冲突文件。**
+
+> **更正(2026-09-25,独立审核发现)**:本节此前写作“465 个冲突文件”,**错误**。465(实为 466)是 `git merge-tree --write-tree --name-only` 输出的**全部改动文件行数**(含自动合并成功的),不是冲突数。`--name-only` 输出首行是 tree hash,故 467 行 = 1 + 466。真实冲突数按 `CONFLICT` 记录统计为 **122**(29 add/add、92 content、1 modify/delete)。此前的“~40 文件”估算反而更接近。
 
 其中上游改动 ≥15 行的冲突文件按解决取向分布:
 
@@ -47,7 +56,11 @@
 | 整体取上游 | 22 |
 | 手工混合 | 60 |
 
-无冲突文件已用三方合并(`git merge-file`)逐文件复算,结果与实际合并提交**完全一致**(deviation = 0),即无冲突部分处理正确。
+无冲突文件已用三方合并(`git merge-file`)逐文件复算,与**合并提交 `5f252915`** 对比:**172 个中 171 个逐字节一致,唯一偏差是 `src/server/config/providerPresets.json`(去广告时有意修改)**。
+
+> **更正(2026-09-25,独立审核发现)**:本节此前写作“完全一致(deviation = 0)”,**不准确**。审核代理报告了 8 处偏差 —— 那是因为它拿 `merge-file` 输出与 **HEAD**(含本次合并之后 10 个修复提交)对比,而非与合并提交对比。两者都成立但含义不同:`merge-file` 相对合并提交偏差 1(有意),相对 HEAD 偏差 60(全部来自后续修复提交)。**报告此处本应明确对比基准是合并提交**,否则读者无法判断。
+>
+> 顺带记录一个方法论要点:`merge-file` 复算只能覆盖**非冲突**文件(本次 172 个可比较);122 个冲突文件没有等价的三方 oracle,仍依赖逐个人工判断。
 
 **源文件**:`ChatInput.tsx`、`EmptySession.tsx`、`chatStore.ts`、`TabBar.tsx`、`WorkspaceFileTreePane.tsx`(取 fork)、`WorkspaceFileTab.tsx`(取 fork)、`ContextUsageIndicator.tsx`、`ContextUsageDetails.tsx`、`ProviderSettings.tsx`、`Sidebar.tsx`、`sessionRuntimeStore.ts`、`tabStore.ts` 等。
 **能力菜单 graft 新增改动**:`capabilityMenuModel.ts`、`useCapabilityMenu.ts`(加 orchestration 支持)。
@@ -151,9 +164,16 @@ server 侧 9 个失败同样与基线一致,归入 `docs/known-pre-existing-test
 - 提出 `permissionMode` 的 `??` 与 pre-plan 字段结构相同、疑似同类 bug → **实测排除**:该 resolver 没有 tombstone 分支,且 fork 自己的整文件 resolver 对同一 transcript 给出相同结果(均为 `plan`);tombstone 场景仍能正确清除。属忠实行为,非 bug。
 - 提出 `getSessionLaunchInfo` / `getSessionWorkDir` 现在会对超限记录抛 413(而 fork 原先降级)→ **实测确认存在,但属上游行为**:上游同样抛出,且上游在 `ws/handler.ts:896`、`api/sessions.ts:1449` 有同样的裸调用点。是忠实移植,非合并混血。审核者附带"`getCustomTitle` 也会 413"的说法**不成立** —— 只有两个访问器检查 `complete`。
 
-**审核代理 B(找丢失的 fork 定制点 + 核对报告 claim)** —— 结论见下方"残余风险"更新。
+**审核代理 B(找丢失的 fork 定制点 + 核对报告 claim)** —— 这是本轮最有价值的一次审核,发现了一个 CI 全绿也查不出的真实功能丢失。
 
-> 这轮审核的价值集中在两点:(1) 我的 stdin 机制解释是**错的**,被实测推翻;(2) 我删测试时**顺手削弱了一个断言**(T4)。两者都不影响 CI 绿灯,只有独立审核能发现。同时它也提醒:**"与上游行为一致"不等于"行为正确"** —— 413 暴露与 `permissionMode` 的 `??` 都是继承自上游的设计,审核者作为缺陷报出,我核实后归为"上游既有、非本次引入",但不代表它们不需要单独评估。
+- **确认并已修复:provider 兼容性徽章整体丢失**(见上文"fork 定制点保护清单")→ 回植 + 补测试(`195126a0`)。
+- **确认并已修复:合并新增 2 个含 `NanmiCoder` 的文件**(见上文)→ 其中 3 处指向本仓库的已改为 `706412584/cc-haha`;`AboutSettings.tsx` 的原作者署名经核实是**有意保留**,不动。
+- **确认并已更正:报告三处数字/结论有误** —— 冲突数 465 实为 **122**;`merge-file` 复算"完全一致"需明确对比基准是**合并提交**(相对合并提交偏差 1,相对 HEAD 偏差 60);1218/380 的口径已补注。
+- **审核者提出但经核实为其自身方向搞反的**:`pluginBridge.ts` 的 `reloadConnectorSessions`。审核者称 fork 用了更窄的 `reason === 'failed'`、上游用了 `|| errors > 0` 因而 fork 的收紧被覆盖。**实测相反**:fork 是 `|| result.errors > 0`(更宽),**上游**才是 `reason === 'failed'`,且上游附了注释说明"error_count 覆盖会话内所有插件(含无关的 stale settings 条目),外来插件的加载错误不该否决本连接器的安装"。**取上游是正确的修复**,不是丢失。
+- **审核者提出但经核实无问题的**:`src/utils/claudemd.ts` 的 `isNestedWorktree`(审核者 grep 范围有误,实际存在 7 处,且 fork 的 nested-worktree 用例仍在;`claudemd.test.ts` 的 3 pass/18 fail 在基线 `11498836` 上**逐条相同**,属预存)、`ComposerReferenceMenu.tsx` 与 `WorkspaceBrowserTab.tsx`(均为上游较新的契约,取上游合理)。
+- 审核者自报**未能验证**的:`src/services/api/claude.ts`、`src/utils/messages.ts`、`src/services/mcp/client.ts` 等 700+ 行手工合并文件只做了符号级抽查;122 个冲突文件的冲突区域仍无三方 oracle。这两项与下方残余风险一致。
+
+> 这轮审核的价值集中在三点:(1) 我的 stdin 机制解释是**错的**,被实测推翻;(2) 我删测试时**顺手削弱了一个断言**(T4);(3) **发现了一个 CI 全绿也照不出的真实功能丢失**(provider 兼容性徽章)—— 因为它连 fork 自己都没有测试。同时它也提醒:**"与上游行为一致"不等于"行为正确"**,而**"审核者说有"也不等于"真有"** —— `pluginBridge.ts` 那条就是审核者把方向搞反了,我实测才确认取上游是对的。
 
 ## 残余风险
 
