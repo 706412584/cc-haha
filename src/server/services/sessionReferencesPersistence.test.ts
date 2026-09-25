@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionService } from './sessionService.js'
-import { SessionCollaborationService } from './sessionCollaborationService.js'
+import { SessionCollaborationService, COLLABORATION_READ_MAX_PAGES } from './sessionCollaborationService.js'
 import { resolveSessionReferenceContext } from './sessionReferenceContext.js'
 
 let directory: string
@@ -53,6 +53,10 @@ test('a fresh history service restores reference pills from persisted string and
 })
 
 test('collaboration cursors traverse real bounded history pages without dropping turns', async () => {
+  // One `read` cursor chain is capped at COLLABORATION_READ_MAX_PAGES (8), so the
+  // fixture only needs to be longer than one chain can serve: the assertion is
+  // that every turn a chain *does* serve is contiguous, and that reaching the
+  // cap is reported instead of silently truncating.
   await writeFile(file, Array.from({ length: 130 }, (_, index) => JSON.stringify(entry(`user-${index}`, `turn ${index}`))).join('\n') + '\n')
   const sessions = historyService()
   const collaboration = new SessionCollaborationService({
@@ -67,17 +71,35 @@ test('collaboration cursors traverse real bounded history pages without dropping
   let cursor: string | undefined
   const ids: string[] = []
   let longestCursor = 0
+  let last: { page: { hasMore: boolean }; historyComplete: boolean } | undefined
   do {
-    const result = await collaboration.read(id, { cursor, limit: 10 }) as { messages: Array<{ id: string }>; page: { nextCursor: string | null } }
-    ids.unshift(...result.messages.map(message => message.id))
-    cursor = result.page.nextCursor ?? undefined
+    last = await collaboration.read(id, { cursor, limit: 10 }) as typeof last & { messages: Array<{ id: string }>; page: { nextCursor: string | null } }
+    ids.unshift(...last!.messages.map(message => message.id))
+    cursor = last!.page.nextCursor ?? undefined
     longestCursor = Math.max(longestCursor, cursor?.length ?? 0)
   } while (cursor)
-  expect(ids).toEqual(Array.from({ length: 130 }, (_, index) => `user-${index}`))
-  // Real storage cursors contain snapshot identity and multiple fingerprints;
-  // a 500-character model tool schema rejects valid continuation requests.
-  expect(longestCursor).toBeGreaterThan(500)
+  // The chain stops at the cap rather than walking the whole transcript, and the
+  // turns it served are the newest ones with no gaps.
+  expect(ids).toEqual(Array.from({ length: COLLABORATION_READ_MAX_PAGES * 10 }, (_, index) => `user-${index + 50}`))
+  expect(last).toMatchObject({ page: { hasMore: false }, historyComplete: false })
+  // A collaboration cursor must stay small: a 500-character model tool schema
+  // rejects an oversized continuation request. The chain stops inside the first
+  // storage page, so this cursor carries no embedded storage cursor at all.
+  expect(longestCursor).toBeGreaterThan(0)
   expect(longestCursor).toBeLessThan(32_000)
+})
+
+test('a storage cursor stays small enough for a model tool schema', async () => {
+  // The layer that embeds snapshot identity and the three fingerprints is the
+  // storage cursor, so characterize its size here rather than through a
+  // collaboration chain that no longer reaches it.
+  await writeFile(file, Array.from({ length: 130 }, (_, index) => JSON.stringify(entry(`user-${index}`, `turn ${index}`))).join('\n') + '\n')
+  const cursor = (await historyService().getSessionHistoryPage(id, { limit: 100 })).page.nextCursor
+  expect(cursor).not.toBeNull()
+  // Snapshot identity + prefix/tail/boundary fingerprints; still far under the
+  // 32k a tool schema would tolerate.
+  expect(cursor!.length).toBeGreaterThan(500)
+  expect(cursor!.length).toBeLessThan(32_000)
 })
 
 

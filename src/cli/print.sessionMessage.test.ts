@@ -4,6 +4,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createSandboxedTestEnvironment } from '../../scripts/pr/test-environment.js'
 
+/**
+ * `bin/claude-haha` is a shebang script, which `Bun.spawn` cannot execute on
+ * Windows. Run the entrypoint through the runtime explicitly there, matching
+ * `print.backgroundTaskNotification.test.ts` and `print.partialOutput.test.ts`.
+ */
+function cliCommand(...args: string[]): string[] {
+  return process.platform === 'win32'
+    ? [process.execPath, '--no-env-file', '--feature=TRANSCRIPT_CLASSIFIER', 'src/entrypoints/cli.tsx', ...args]
+    : ['./bin/claude-haha', ...args]
+}
+
 function completion() {
   const events = [
     { type: 'message_start', message: { id: 'msg_fixture', type: 'message', role: 'assistant', model: 'claude-sonnet-4-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } },
@@ -33,7 +44,9 @@ test('headless session inbox acknowledges queued then consumed and deduplicates 
   const payload = { subtype: 'enqueue_session_message', start_if_idle: true, message_id: 'stable', sender_session_id: 'peer', text: '/clear @missing-fixture-file.txt' }
   const input = ['first', 'retry'].map(request_id => JSON.stringify({ type: 'control_request', request_id, request: payload })).join('\n') + '\n'
   try {
-    const child = Bun.spawn(['./bin/claude-haha', '--bare', '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'], { env, stdin: new Blob([input]), stdout: 'pipe', stderr: 'pipe' })
+    const child = Bun.spawn(cliCommand('--bare', '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'), { env, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
+    child.stdin.write(input)
+    child.stdin.end()
     const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
     expect({ code, stderr }).toMatchObject({ code: 0 })
     const events = stdout.trim().split('\n').map(line => JSON.parse(line))
@@ -44,7 +57,9 @@ test('headless session inbox acknowledges queued then consumed and deduplicates 
     expect(events.filter(event => event.subtype === 'session_message_receipt')).toMatchObject([{ message_id: 'stable', status: 'consumed' }])
     expect(requests).toBe(1)
     const sessionId = events.find(event => event.subtype === 'session_message_receipt').session_id
-    const resumed = Bun.spawn(['./bin/claude-haha', '--bare', '-p', '--resume', sessionId, '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'], { env, stdin: new Blob([input]), stdout: 'pipe', stderr: 'pipe' })
+    const resumed = Bun.spawn(cliCommand('--bare', '-p', '--resume', sessionId, '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'), { env, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
+    resumed.stdin.write(input)
+    resumed.stdin.end()
     const [resumedText, resumedError, resumedCode] = await Promise.all([new Response(resumed.stdout).text(), new Response(resumed.stderr).text(), resumed.exited])
     expect({ code: resumedCode, stderr: resumedError, stdout: resumedText }).toMatchObject({ code: 0 })
     const resumedEvents = resumedText.trim().split('\n').map(line => JSON.parse(line))
