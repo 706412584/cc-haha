@@ -27,7 +27,17 @@ import {
   primeKeychainCacheFromPrefetch,
 } from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import type { OpenAIOAuthTokens } from '../../services/openaiAuth/types.js'
-import { getModelOptions } from '../../utils/model/modelOptions.js'
+import {
+  getMaxOpus46_1MOption,
+  getMaxSonnet46_1MOption,
+  getModelOptions,
+  getOpus46_1MOption,
+  getSonnet46_1MOption,
+} from '../../utils/model/modelOptions.js'
+import {
+  getDefaultMainLoopModelSetting,
+  parseUserSpecifiedModel,
+} from '../../utils/model/model.js'
 import {
   getSettingsForSource,
   updateSettingsForSource,

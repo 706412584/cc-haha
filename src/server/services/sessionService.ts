@@ -984,6 +984,14 @@ export class SessionService {
    * the user is looking at (plus one transition) is worth pinning.
    */
   private readonly historyRecoveryCache = new Map<string, SessionHistoryRecovery>()
+  /**
+   * Bounded metadata projection shared by launch-info, work-dir and title reads
+   * (re-ported from upstream). One fold means a picker asking for a title never
+   * re-scans a transcript the sidebar already folded, and the fixed per-record
+   * budget stops a maliciously large scalar from materializing the whole file.
+   */
+  private readonly metadataProjectionCache = new Map<string, { signature: string; summary: SessionListSummary; launchInfo: SessionLaunchInfo; customTitle: string | null; complete: boolean }>()
+  private readonly metadataProjectionRequests = new Map<string, Promise<{ summary: SessionListSummary; launchInfo: SessionLaunchInfo; customTitle: string | null; complete: boolean }>>()
   /** Addressed Agent call lookups, keyed by `[filePath, toolRef]` and stat signature. */
   private readonly subagentLookupCache = new Map<string, { version: string; transcript: SubagentTranscript }>()
   /**
@@ -5150,7 +5158,31 @@ export class SessionService {
         this.markIndexReadFailure()
       }
     }
-    return { sessions: [], total: 0 }
+    // Scan the metadata projection once, rank before limiting, and reuse its
+    // summary cache. Do not hydrate every workspace or repeatedly page lists.
+    const scope = this.getConfigDir()
+    this.prepareSessionListCaches(scope)
+    const rows: Array<{ id: string; title: string; workDir: string | null; projectPath: string; modifiedAt: string }> = []
+    let truncated = false
+    for (const file of await this.discoverSessionFiles(undefined, scope)) {
+      options.signal?.throwIfAborted()
+      // The picker shares this process with every other request. Stop walking
+      // transcripts once its budget is spent and return the rows already read.
+      if (options.deadlineMs !== undefined && Date.now() > options.deadlineMs) { truncated = true; break }
+      try {
+        const summary = await this.getCachedSessionListSummary(file.filePath, file.projectDir, await fs.stat(file.filePath), scope)
+        rows.push({ id: file.sessionId, title: summary.title, workDir: summary.workDir, projectPath: file.projectDir, modifiedAt: summary.modifiedAt })
+      } catch { /* Match sidebar behavior for unreadable transcripts. */ }
+    }
+    const needle = query.trim().toLowerCase()
+    const rank = (row: typeof rows[number]) => {
+      if (!needle) return 0
+      const names = [row.title.toLowerCase(), row.id.toLowerCase()]
+      return names.includes(needle) ? 3 : names.some(value => value.startsWith(needle)) ? 2 : names.some(value => value.includes(needle)) ? 1 : 0
+    }
+    const matches = rows.filter(row => [row.title, row.id, row.workDir ?? '', row.projectPath].some(value => value.toLowerCase().includes(needle)))
+    matches.sort((a, b) => rank(b) - rank(a) || Date.parse(b.modifiedAt) - Date.parse(a.modifiedAt) || a.id.localeCompare(b.id) || a.projectPath.localeCompare(b.projectPath))
+    return { sessions: matches.slice(offset, offset + limit), total: matches.length, ...(truncated ? { truncated } : {}) }
   }
 
   /**
@@ -5772,7 +5804,137 @@ export class SessionService {
     const found = await this.findSessionFile(sessionId)
     if (!found) return null
 
-    return this.readCustomTitleFromFile(found.filePath)
+    return (await this.getMetadataProjection(found.filePath, found.projectDir)).customTitle
+  }
+
+  /**
+   * One bounded fold over a transcript that answers launch metadata, the list
+   * summary and the custom title at once (re-ported from upstream).
+   *
+   * `findSessionFile` deliberately avoids parsing a transcript, so the readers
+   * that need metadata cannot lean on a whole-file read: they stream the file
+   * through `streamBoundedHistory` with the semantic record budget and stop
+   * when a single scalar value would blow the fixed metadata envelope. The fold
+   * is cached by source version so a sidebar poll, a title lookup and a picker
+   * query share one pass instead of three full reads.
+   */
+  private async getMetadataProjection(filePath: string, projectDir: string): Promise<{
+    summary: SessionListSummary
+    launchInfo: SessionLaunchInfo
+    customTitle: string | null
+    complete: boolean
+  }> {
+    const stat = await fs.stat(filePath, { bigint: true })
+    const signature = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`
+    const key = `${this.getConfigDir()}\0${filePath}`
+    const cached = this.metadataProjectionCache.get(key)
+    if (cached?.signature === signature) {
+      this.metadataProjectionCache.delete(key)
+      this.metadataProjectionCache.set(key, cached)
+      return cached
+    }
+    const requestKey = `${key}\0${signature}`
+    const pending = this.metadataProjectionRequests.get(requestKey)
+    if (pending) return pending
+    const request = withHistoryReadBudget(undefined, async () => {
+      const makeState = () => ({
+        workDir: undefined as string | undefined, cwd: undefined as string | undefined,
+        repository: undefined as PreparedSessionWorkspace['repository'] | undefined,
+        worktreeSession: undefined as PersistedWorktreeSession | null | undefined,
+        permissionMode: undefined as string | undefined,
+        prePlanPermissionMode: undefined as string | undefined,
+        runtimeProviderId: undefined as string | null | undefined,
+        runtimeModelId: undefined as string | undefined, effortLevel: undefined as string | undefined,
+        thinkingEnabled: undefined as boolean | undefined,
+        providerTransition: undefined as SessionProviderTransition | undefined,
+        customTitle: null as string | null, nonemptyCustomTitle: null as string | null,
+        goalTitle: null as string | null, aiTitle: null as string | null, firstUserTitle: null as string | null,
+        createdAt: null as string | null, modifiedAt: null as string | null,
+        count: 0, launchCount: 0,
+      })
+      const launch = makeState()
+      const summary = makeState()
+      const apply = (state: ReturnType<typeof makeState>, entry: RawEntry) => {
+        if (!state.createdAt && entry.timestamp) state.createdAt = entry.timestamp
+        if ((entry.type === 'user' || entry.type === 'assistant') && entry.message?.role) {
+          state.count++
+          if (!entry.isMeta) state.modifiedAt = this.latestTimestamp(state.modifiedAt, entry.timestamp)
+        }
+        state.launchCount += this.countTranscriptMessages([entry])
+        if (typeof entry.cwd === 'string' && entry.cwd.trim()) state.cwd = normalizeDriveRootPathForPlatform(entry.cwd)
+        const record = entry as Record<string, unknown>
+        if (entry.type === 'session-meta') {
+          if (typeof record.workDir === 'string') state.workDir = normalizeDriveRootPathForPlatform(record.workDir)
+          state.permissionMode = this.resolvePermissionModeFromEntries([entry]) ?? state.permissionMode
+          // The fork persists the mode to restore on leaving plan mode; this
+          // projection is one of its read paths, so it must fold it too.
+          state.prePlanPermissionMode = this.resolvePrePlanPermissionModeFromEntries([entry]) ?? state.prePlanPermissionMode
+          if (record.runtimeProviderId === null || typeof record.runtimeProviderId === 'string') state.runtimeProviderId = record.runtimeProviderId as string | null
+          if (typeof record.runtimeModelId === 'string') state.runtimeModelId = record.runtimeModelId
+          if (typeof record.effortLevel === 'string' && VALID_SESSION_EFFORT_LEVELS.has(record.effortLevel)) state.effortLevel = record.effortLevel
+          if (typeof record.thinkingEnabled === 'boolean') state.thinkingEnabled = record.thinkingEnabled
+          if (record.providerTransition && typeof record.providerTransition === 'object') {
+            const transition = record.providerTransition as Record<string, unknown>
+            if (typeof transition.sourceSessionId === 'string' && typeof transition.selectionHash === 'string') {
+              state.providerTransition = { sourceSessionId: transition.sourceSessionId, selectionHash: transition.selectionHash }
+            }
+          }
+        }
+        state.repository = this.resolveRepositoryFromEntries([entry]) ?? state.repository
+        const worktree = this.resolveWorktreeSessionFromEntries([entry])
+        if (worktree !== undefined) state.worktreeSession = worktree
+        if (entry.type === 'custom-title') {
+          if (typeof entry.customTitle === 'string') state.customTitle = entry.customTitle
+          if (typeof entry.customTitle === 'string' && entry.customTitle.trim()) state.nonemptyCustomTitle = entry.customTitle
+        }
+        state.goalTitle ??= extractGoalCreationTitle(entry)
+        if (entry.type === 'ai-title' && entry.aiTitle) state.aiTitle = cleanSessionTitleSource(String(entry.aiTitle)) || state.aiTitle
+        if (!state.firstUserTitle && entry.type === 'user' && !entry.isMeta && entry.message?.role === 'user') state.firstUserTitle = extractTranscriptUserTitle(entry.message.content)
+        // Metadata has a separate fixed bound even when a file contains only
+        // a handful of maliciously large scalar values or repository fields.
+        if (Buffer.byteLength(JSON.stringify(state)) > 128 * 1024) throw new ApiError(413, 'Session metadata exceeds its resource budget', 'SESSION_METADATA_TOO_LARGE')
+      }
+      const scan = await streamBoundedHistory(filePath, (entry, completeLine) => {
+        apply(launch, entry as RawEntry)
+        if (completeLine) apply(summary, entry as RawEntry)
+      }, undefined, { maxRecordBytes: HISTORY_SEMANTIC_RECORD_BYTES })
+      const shared = (state: typeof summary) => ({
+        ...(state.permissionMode ? { permissionMode: state.permissionMode } : {}),
+        ...(state.prePlanPermissionMode ? { prePlanPermissionMode: state.prePlanPermissionMode } : {}),
+        ...(state.runtimeProviderId !== undefined ? { runtimeProviderId: state.runtimeProviderId } : {}),
+        ...(state.runtimeModelId ? { runtimeModelId: state.runtimeModelId } : {}),
+        ...(state.effortLevel ? { effortLevel: state.effortLevel } : {}),
+        ...(state.thinkingEnabled !== undefined ? { thinkingEnabled: state.thinkingEnabled } : {}),
+        ...(state.providerTransition ? { providerTransition: state.providerTransition } : {}),
+        ...(state.repository ? { repository: state.repository } : {}),
+        ...(state.worktreeSession !== undefined ? { worktreeSession: state.worktreeSession } : {}),
+      })
+      const result = {
+        summary: {
+          title: summary.customTitle || summary.goalTitle || summary.aiTitle || summary.firstUserTitle || 'Untitled Session',
+          createdAt: summary.createdAt ?? stat.birthtime.toISOString(),
+          modifiedAt: summary.modifiedAt ?? stat.mtime.toISOString(),
+          messageCount: summary.count,
+          workDir: summary.workDir || summary.cwd || this.desanitizePath(projectDir),
+          ...shared(summary),
+        },
+        launchInfo: {
+          filePath, projectDir,
+          workDir: (launch.workDir !== undefined ? launch.workDir : launch.cwd ?? this.desanitizePath(projectDir)) || process.cwd(),
+          customTitle: launch.customTitle,
+          transcriptMessageCount: launch.launchCount,
+          ...shared(launch),
+        },
+        customTitle: launch.nonemptyCustomTitle,
+        complete: scan.oversizedRecords === 0,
+      }
+      this.metadataProjectionCache.delete(key)
+      this.metadataProjectionCache.set(key, { signature: scan.sourceVersion, ...result })
+      while (this.metadataProjectionCache.size > 32) this.metadataProjectionCache.delete(this.metadataProjectionCache.keys().next().value!)
+      return result
+    }, 'metadata')
+    this.metadataProjectionRequests.set(requestKey, request)
+    try { return await request } finally { this.metadataProjectionRequests.delete(requestKey) }
   }
 
   /** Last non-empty `custom-title` in one transcript, or null. */
@@ -5797,8 +5959,9 @@ export class SessionService {
     const found = await this.findSessionFile(sessionId)
     if (!found) return null
 
-    const entries = await this.readJsonlFile(found.filePath)
-    return this.resolveWorkDirFromEntries(entries, found.projectDir)
+    const projection = await this.getMetadataProjection(found.filePath, found.projectDir)
+    if (!projection.complete) throw new ApiError(413, 'Session metadata contains oversized records', 'SESSION_METADATA_INCOMPLETE')
+    return projection.launchInfo.workDir
   }
 
   async getSessionMessageCwd(
@@ -5822,76 +5985,10 @@ export class SessionService {
     const found = await this.findSessionFile(sessionId)
     if (!found) return memory ? { ...memory, transcriptMessageCount: 0 } : null
 
-    const entries = await this.readJsonlFile(found.filePath)
-    const workDir = this.resolveWorkDirFromEntries(entries, found.projectDir) || process.cwd()
-    const repository = this.resolveRepositoryFromEntries(entries)
-    const worktreeSession = this.resolveWorktreeSessionFromEntries(entries)
-    const permissionMode = this.resolvePermissionModeFromEntries(entries)
-    const prePlanPermissionMode = this.resolvePrePlanPermissionModeFromEntries(entries)
-    let customTitle: string | null = null
-    let runtimeProviderId: string | null | undefined
-    let runtimeModelId: string | undefined
-    let effortLevel: string | undefined
-    let thinkingEnabled: boolean | undefined
-    let providerTransition: SessionProviderTransition | undefined
-
-    for (const entry of entries) {
-      if (entry.type === 'custom-title' && typeof entry.customTitle === 'string') {
-        customTitle = entry.customTitle
-      }
-      if (entry.type === 'session-meta') {
-        const record = entry as Record<string, unknown>
-        if (record.runtimeProviderId === null || typeof record.runtimeProviderId === 'string') {
-          runtimeProviderId = record.runtimeProviderId as string | null
-        }
-        if (typeof record.runtimeModelId === 'string') {
-          runtimeModelId = record.runtimeModelId
-        }
-        if (
-          typeof record.effortLevel === 'string' &&
-          VALID_SESSION_EFFORT_LEVELS.has(record.effortLevel)
-        ) {
-          effortLevel = record.effortLevel
-        }
-        if (typeof record.thinkingEnabled === 'boolean') {
-          thinkingEnabled = record.thinkingEnabled
-        }
-        if (
-          record.providerTransition &&
-          typeof record.providerTransition === 'object'
-        ) {
-          const transition = record.providerTransition as Record<string, unknown>
-          if (
-            typeof transition.sourceSessionId === 'string' &&
-            typeof transition.selectionHash === 'string'
-          ) {
-            providerTransition = {
-              sourceSessionId: transition.sourceSessionId,
-              selectionHash: transition.selectionHash,
-            }
-          }
-        }
-      }
-    }
-    const transcriptMessageCount = this.countTranscriptMessages(entries)
-
-    return {
-      filePath: found.filePath,
-      projectDir: found.projectDir,
-      workDir,
-      repository,
-      worktreeSession,
-      customTitle,
-      permissionMode,
-      ...(prePlanPermissionMode ? { prePlanPermissionMode } : {}),
-      ...(runtimeProviderId !== undefined ? { runtimeProviderId } : {}),
-      ...(runtimeModelId ? { runtimeModelId } : {}),
-      ...(effortLevel ? { effortLevel } : {}),
-      ...memory,
-      transcriptMessageCount,
-      ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
-      ...(providerTransition ? { providerTransition } : {}),
-    }
+    const projection = await this.getMetadataProjection(found.filePath, found.projectDir)
+    if (!projection.complete) throw new ApiError(413, 'Session metadata contains oversized records', 'SESSION_METADATA_INCOMPLETE')
+    const projected = projection.launchInfo
+    return { ...projected, ...memory, transcriptMessageCount: projected.transcriptMessageCount }
   }
 
   async deleteSessionFile(sessionId: string): Promise<void> {
@@ -6077,7 +6174,7 @@ export class SessionService {
     let repository = metadata.repository
     if (!repository) {
       for (const match of matches) {
-        const candidate = this.resolveRepositoryFromEntries(await this.readJsonlFile(match.filePath))
+        const candidate = (await this.getMetadataProjection(match.filePath, match.projectDir)).launchInfo.repository
         if (candidate) {
           repository = candidate
           break
@@ -6107,13 +6204,14 @@ export class SessionService {
     // copy be deleted. Re-ported from upstream.
     let customTitle = metadata.customTitle ?? null
     if (!customTitle) {
-      const targetTitle = matches.some((match) => match.filePath === targetFilePath)
-        ? await this.readCustomTitleFromFile(targetFilePath)
+      const target = matches.find((match) => match.filePath === targetFilePath)
+      const targetTitle = target
+        ? (await this.getMetadataProjection(target.filePath, target.projectDir)).customTitle
         : null
       if (!targetTitle) {
         for (const match of matches) {
           if (match.filePath === targetFilePath) continue
-          const title = await this.readCustomTitleFromFile(match.filePath)
+          const title = (await this.getMetadataProjection(match.filePath, match.projectDir)).customTitle
           if (title) {
             customTitle = title
             break

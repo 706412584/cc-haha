@@ -2373,8 +2373,10 @@ describe('local index coordinator', () => {
 
     await coordinator.start()
     // Before any sweep runs, startup rehydration alone must not report a degraded index.
+    // The `good` source already has committed rows, so the snapshot is servable right
+    // away: an oversized sibling is a source limitation, not an unfinished generation.
     expect(coordinator.getPublicStatus()).toMatchObject({
-      state: 'building',
+      state: 'ready',
       degradedSources: 1,
     })
     expect(coordinator.getPublicStatus().state).not.toBe('degraded')
