@@ -689,6 +689,12 @@ type InspectionFoldState = {
   transcriptMessageCount: number
   metadata: TranscriptMetadataSnapshot
   models: Map<string, TranscriptUsageSnapshot['models'][number]>
+  /**
+   * The runtime metadata in force when each model's usage was recorded. A session can
+   * switch providers mid-transcript, so a model's context window has to be resolved
+   * against the runtime that produced it rather than against the session's latest one.
+   */
+  modelRuntimeHints: Map<string, ProviderContextWindowHint>
   totalCostUSD: number
   totalInputTokens: number
   totalOutputTokens: number
@@ -724,6 +730,7 @@ function createInspectionFoldState(): InspectionFoldState {
     transcriptMessageCount: 0,
     metadata: {},
     models: new Map(),
+    modelRuntimeHints: new Map(),
     totalCostUSD: 0,
     totalInputTokens: 0,
     totalOutputTokens: 0,
@@ -753,6 +760,9 @@ function cloneInspectionFoldState(state: InspectionFoldState): InspectionFoldSta
     latestContextUsage: state.latestContextUsage ? { ...state.latestContextUsage } : null,
     models: new Map(
       [...state.models.entries()].map(([key, value]) => [key, { ...value }]),
+    ),
+    modelRuntimeHints: new Map(
+      [...state.modelRuntimeHints.entries()].map(([key, value]) => [key, { ...value }]),
     ),
   }
 }
@@ -4017,6 +4027,13 @@ export class SessionService {
     const metadata: TranscriptMetadataSnapshot = seed.fold.metadata
 
     const models = seed.fold.models
+    const modelRuntimeHints = seed.fold.modelRuntimeHints
+    // Tracks the session-meta values in force as the fold walks the transcript, so each
+    // usage record is attributed to the runtime that produced it.
+    let currentRuntimeHint: ProviderContextWindowHint = {
+      ...(runtimeProviderId !== undefined ? { runtimeProviderId } : {}),
+      ...(runtimeModelId ? { runtimeModelId } : {}),
+    }
     let totalCostUSD = seed.fold.totalCostUSD
     let totalInputTokens = seed.fold.totalInputTokens
     let totalOutputTokens = seed.fold.totalOutputTokens
@@ -4110,6 +4127,8 @@ export class SessionService {
 
       accumulateTranscriptContext(contextState, entry)
 
+      currentRuntimeHint = this.applyRuntimeContextMetadata(currentRuntimeHint, entry)
+
       const usage = entry.message?.usage
       const model = entry.message?.model
       if (!usage || typeof model !== 'string') return
@@ -4167,6 +4186,7 @@ export class SessionService {
           maxOutputTokens: getModelMaxOutputTokens(model).default,
         }
         models.set(model, modelUsage)
+        modelRuntimeHints.set(model, { ...currentRuntimeHint })
       }
 
       modelUsage.inputTokens += inputTokens
@@ -4207,6 +4227,7 @@ export class SessionService {
       transcriptMessageCount,
       metadata,
       models,
+      modelRuntimeHints,
       totalCostUSD,
       totalInputTokens,
       totalOutputTokens,
@@ -4238,10 +4259,12 @@ export class SessionService {
     }
 
     for (const modelUsage of models.values()) {
+      // Resolve against the runtime that recorded the usage, falling back to the session's
+      // latest runtime for a model whose hint predates the transcript's metadata entries.
       modelUsage.contextWindow = await this.getTranscriptContextWindow(
         sessionId,
         modelUsage.model,
-        launchInfo,
+        modelRuntimeHints.get(modelUsage.model) ?? launchInfo,
       )
     }
 
