@@ -74,15 +74,18 @@
 server 侧 9 个失败同样与基线一致,归入 `docs/known-pre-existing-test-failures.md` 的根因 C(Windows symlink / EBUSY / 路径)。
 这些 Windows 特有的失败在 Linux CI 上不出现。
 
-### `server-checks` 最后剩下的 2 个文件(上游自带,非本次合并引入)
+### `server-checks` 最后剩下的 2 个文件(测试脚手架缺陷,非本次合并引入,已修)
 
-两者与上游 `2f8d819d` **逐字节相同**(`git rev-parse <rev>:<path>` 相等),且**在 Windows 与 Linux(WSL 实测)上都以同样方式失败**,即上游自己的 CI 从未跑绿过它们:
+两者与上游 `2f8d819d` **逐字节相同**,且在 Windows 与 Linux(WSL 实测)上都以同样方式失败 —— 但根因在**测试脚手架**,不在被测产品,因此**都不应进 quarantine**:
 
-- `src/cli/print.sessionMessage.test.ts` —— 测试用 `Bun.spawn(['./bin/claude-haha', …])` 依赖 shebang;该进程在两种平台上都不产出 stdout,于是 `stdout.trim().split('\n').map(JSON.parse)` 抛 `Unexpected EOF`。同目录另两个测试(`print.backgroundTaskNotification.test.ts`、`print.partialOutput.test.ts`)已各自用 `process.platform === 'win32'` 分支绕开同一限制,这个文件没有。
-  - 取证:把该测试的 spawn 参数换成 `process.execPath … src/entrypoints/cli.tsx` 后,**合并版与上游版都立刻通过**(1 pass)。说明失败在启动方式,不在被测的 inbox 逻辑。
-- `src/server/services/sessionReferencesPersistence.test.ts` —— 用例「collaboration cursors traverse real bounded history pages without dropping turns」要求 130 轮分页全部走完,但同仓库的 `COLLABORATION_READ_MAX_PAGES = 8`(上游 `4ed18f09` 引入)只允许 8 页,故 50–129 号 turn 必然取不到。**上游自己的常量让自己的用例不可能通过**,且该常量与用例在同一天由同一作者引入、未同步更新。
+- `src/cli/print.sessionMessage.test.ts` —— 两处缺陷叠加:
+  1. `Bun.spawn(..., { stdin: new Blob([input]) })` **在两种平台上都不向子进程投递任何字节**,于是 CLI 无 stdout,`stdout.trim().split('\n').map(JSON.parse)` 抛 `Unexpected EOF`。同参数改用真实管道即正常(Linux 实测:Blob → 0 字节,pipe → 168 字节)。改为 `stdin: 'pipe'` + `write()`/`end()`。
+  2. `bin/claude-haha` 是 shebang 脚本,`Bun.spawn` 在 Windows 上无法直接执行(ENOENT)。按同目录两个兄弟测试已有的 `cliCommand()` 写法,在 Windows 上显式经运行时跑入口。
+- `src/server/services/sessionReferencesPersistence.test.ts` —— 两处过期断言:
+  1. 用例「collaboration cursors…」期望 130 轮分页走完,但上游自己的 `COLLABORATION_READ_MAX_PAGES = 8`(`4ed18f09` 引入)使单条 cursor 链最多 8 页 × 10 turn,随后以 `hasMore: false, historyComplete: false` 明示到达上限而非静默截断。改为按该常量断言「链式读取所服务的 turn 连续且为最新 80 条,并正确报告到达上限」。
+  2. `longestCursor > 500` 已不可达:有了页上限,链在第一个存储页内就结束,内嵌的存储 cursor(实测 531 字符)根本不会出现。把该不变量移到真正产出它的层 —— 新增用例直接断言存储 cursor 的长度区间。
 
-两者都应按已知预存失败处理(登记 `scripts/quality-gate/quarantine.json` 或在上游修复),**不应**在本分支放宽被测逻辑去迁就。
+> 方法论教训:上一轮我把这两个文件判为「上游自带、应放行」。**「与上游逐字节相同 + 上游同样红」只能证明不是本次合并引入,不能证明不是 bug。** 二者实际都是可修的脚手架缺陷,修完在两个平台上都转绿。判定「不是我们的问题」之后,仍应问一句「那它是什么问题、能否修」。
 
 
 ### 修复清单(25 文件)
@@ -115,20 +118,25 @@ server 侧 9 个失败同样与基线一致,归入 `docs/known-pre-existing-test
 - `TraceSession.test.tsx`:补回上游的 `renderReady(20)`,使第二次 revision/签名观察落在测试窗口内。
 - `ProviderSettings.test.tsx`:协议文案对齐 fork 的 `local protocol translation` 措辞(`providerProtocolTranslation.test.ts` 为此有专门守卫);AruHub 用例改为去广告语义(无徽章、无 `?aff=`、无 signup 文案);OpenCode Go 用例去掉 `?ref=` 推荐码。
 
-**E. 第二轮:会话子系统重合并后 CI 暴露的 6 个文件(commit `5aa756a9`)**
+**E. 第二轮:会话子系统重合并后 CI 暴露的 8 个文件(commit `5aa756a9` → `22a42815` → `25efb892`)**
 
-`server-checks` 在 `11498836` 上仍红 8 个文件 / 18 个用例。逐一对照 `2f0ef19d`(fork)、`2f8d819d`(上游)与合并版三方后,归为两类:
+`server-checks` 在 `11498836` 上仍红 8 个文件 / 18 个用例。逐一对照 `2f0ef19d`(fork)、`2f8d819d`(上游)与合并版三方后,归为三类:
 
-- **真实回归(2 处,均为“回植时把方法截断了”)**
+- **真实回归(3 处,均为“回植时把方法截断/写错”)**
   - `sessionService.ts` 的 `getMetadataProjection`:会话子系统整体取 fork 版时,上游这个**有界元数据折叠**从未回植,于是三个本不该解析整份 transcript 的读取口被指回 `readJsonlFile` —— `getSessionLaunchInfo` / `getSessionWorkDir` 会把整份文件读进内存(测试里 24 条 256 KB 记录即触发),`appendSessionMetadata` 为解析 repository 与跨占位文件搬运标题也要全读。已按上游实现回植单一折叠(经 `streamBoundedHistory` + `HISTORY_SEMANTIC_RECORD_BYTES` 流式读取,128 KB 元数据信封上限),并保留 fork 必须随投影携带的字段(`prePlanPermissionMode`、`thinkingEnabled`、`providerTransition`)。
+  - 同一方法里的 `prePlanPermissionMode` 初版用了 `??`,**无法表达“已清除”**:`resolvePrePlanPermissionModeFromEntries` 对“没有条目”和“见到 `null` 墓碑”都返回 `undefined`,于是恢复用户原权限模式后旧值仍在,`getSessionLaunchInfo` 继续上报。改为显式判墓碑(与 resolver 自身契约一致)。
   - `sessionService.ts` 的 `searchSessionMetadata`:回植时被截成“只用索引,否则返回空”,丢掉上游的 JSONL 扫描 + 排序兜底。已补回。
 - **测试组成错配(4 个文件,上游用例贴到了 fork 实现上)**
   - `src/server/__tests__/settings.test.ts`:保留了上游新增的 4 个用例,却保留了 fork 的 import 块 → `getDefaultMainLoopModelSetting` / `parseUserSpecifiedModel` / `getSonnet46_1MOption` 未定义。补回上游 import 块即可(89 pass)。
   - `src/server/services/localIndex/searchContentProjector.test.ts`(7 个用例):实现侧是 **fork 的批处理架构**(与本报告决策 2 一致),而上游追加的用例测的是上游独有的 `onBatch` / `onCommitStarted` 钩子(配套文件 `searchContentCommitWorker.ts` 未被采用)。恢复 fork 测试文件(11 pass)。
   - `src/server/services/localIndex/searchContentCoordinator.test.ts`(2 个):删掉上游那个测 worker 写锁合并的 describe(`d16aabcf` 引入,架构未采用),保留已回植的 `suggestSessions` 断言(20 pass)。
   - `src/server/services/localIndex/coordinator.test.ts`(1 个):上游 `9c88a5cc`(已有提交行的快照可继续服务)已被采用,故启动再水合后的状态是 `ready` 而非 `building`,更新该断言(51 pass)。
+  - `src/server/__tests__/sessions.test.ts` 的 `readJsonlFile parse cache`(T1/T4/T5):该套件借 `getSessionWorkDir` 驱动 fork 的 `readJsonlFile` 解析缓存,而上游已把该读取口改走有界投影(`fs.open`,不是 `fs.readFile`),于是 T1/T4 断言在投影根本不做的读取上失败,T5 变成 0 === 0 的空转。三个用例改走仍在用 `readJsonlFile` 的 `getSessionMessages`,并给 T5 补回「确实发生过整文件读取」的前置断言,避免它以错误的理由通过。
+- **测试脚手架缺陷(2 个文件,与上游逐字节相同,但可修)** —— 见上节。
 
-> 第二轮的一个方法论教训:判“是否合并引入”必须用**合并版自己的 blob** 与两侧对照。我一度用主仓的 `HEAD`(即 `main`/fork)当“合并版”去比对,得出了相反的归属结论。正确做法是 `git -C <merge-worktree> rev-parse HEAD:<path>`,或直接跑三方矩阵。
+> 第二轮的两个方法论教训:
+> 1. 判“是否合并引入”必须用**合并版自己的 blob** 与两侧对照。我一度用主仓的 `HEAD`(即 `main`/fork)当“合并版”去比对,得出了相反的归属结论。正确做法是 `git -C <merge-worktree> rev-parse HEAD:<path>`,或直接跑三方矩阵。
+> 2. **“与上游逐字节相同 + 上游同样红”只证明不是本次引入,不证明不是 bug。** 那两个文件实际都是可修的脚手架缺陷。
 
 ## 残余风险
 
