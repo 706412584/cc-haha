@@ -138,15 +138,36 @@ server 侧 9 个失败同样与基线一致,归入 `docs/known-pre-existing-test
 > 1. 判“是否合并引入”必须用**合并版自己的 blob** 与两侧对照。我一度用主仓的 `HEAD`(即 `main`/fork)当“合并版”去比对,得出了相反的归属结论。正确做法是 `git -C <merge-worktree> rev-parse HEAD:<path>`,或直接跑三方矩阵。
 > 2. **“与上游逐字节相同 + 上游同样红”只证明不是本次引入,不证明不是 bug。** 那两个文件实际都是可修的脚手架缺陷。
 
+## 独立审核(2026-09-25,两个子代理)
+
+对会话子系统回植与整体合并各派了一个独立审核代理,结论与处置:
+
+**审核代理 A(审 `sessionService.ts` 回植等价性 + 测试合法性)**
+
+- 逐字段比对确认 `getMetadataProjection` 的 `apply()` / `shared()` 与上游**逐字等价**,仅多出 fork 必需的三个字段;缓存键、签名、LRU 上限、in-flight 去重与上游一致;三处调用点与上游 4565/4592/4796/4828/4833 行一致。**结论:回植忠实。**
+- 指出 `readCustomTitleFromFile` 成为死代码 → **已删除**(`1b46a976`)。
+- 指出 `sessions.test.ts` T4 丢了内容断言(`toEqual` 在两个空数组上也成立)→ **已补断言**(`1b46a976`)。
+- 指出 `print.sessionMessage.test.ts` 的 stdin 机制说明有误 → **经实测更正**:`Bun.spawn` 的 Blob stdin 在两种平台上**都能投递**(11/11 字节),我原先"Blob 不投递"的说法是错的;真实差异是 **Linux 上 Blob → 0 字节 stdout、pipe → 173 字节**,而 Windows 两者都正常。注释已改为记录实测数据而非错误理论。
+- 提出 `permissionMode` 的 `??` 与 pre-plan 字段结构相同、疑似同类 bug → **实测排除**:该 resolver 没有 tombstone 分支,且 fork 自己的整文件 resolver 对同一 transcript 给出相同结果(均为 `plan`);tombstone 场景仍能正确清除。属忠实行为,非 bug。
+- 提出 `getSessionLaunchInfo` / `getSessionWorkDir` 现在会对超限记录抛 413(而 fork 原先降级)→ **实测确认存在,但属上游行为**:上游同样抛出,且上游在 `ws/handler.ts:896`、`api/sessions.ts:1449` 有同样的裸调用点。是忠实移植,非合并混血。审核者附带"`getCustomTitle` 也会 413"的说法**不成立** —— 只有两个访问器检查 `complete`。
+
+**审核代理 B(找丢失的 fork 定制点 + 核对报告 claim)** —— 结论见下方"残余风险"更新。
+
+> 这轮审核的价值集中在两点:(1) 我的 stdin 机制解释是**错的**,被实测推翻;(2) 我删测试时**顺手削弱了一个断言**(T4)。两者都不影响 CI 绿灯,只有独立审核能发现。同时它也提醒:**"与上游行为一致"不等于"行为正确"** —— 413 暴露与 `permissionMode` 的 `??` 都是继承自上游的设计,审核者作为缺陷报出,我核实后归为"上游既有、非本次引入",但不代表它们不需要单独评估。
+
 ## 残余风险
 
 - **手工混合的 60 个冲突文件没有等价的三方验证手段。** 无冲突文件已用 `git merge-file` 复算确认无误,冲突文件则依赖逐个人工判断。本轮已发现并修复 6 处回归(4 处 fork 行为丢失 + 1 处重复声明 + 1 处上游兜底被截断),**不排除其他手工混合处仍有未被测试覆盖的偏差**。这是本次合并最大的不确定性来源。
 - **fork 行为丢失的模式值得警惕**:多处丢失都是“fork/上游在某个函数里多加了一个字段、比较或兜底分支,合并取了另一侧后该增量消失”。这类丢失不产生类型错误、不影响编译,只有对应测试才会暴露。建议后续合并时对 `sessionService.ts`、`ws/handler.ts`、`sessionRuntimeStore.ts` 这三个文件做 fork-vs-merge 的逐函数字段比对。
 - **`sessionService.ts` 的回归尤其危险**:该文件在本次合并中整体取了 fork 版(6177 行),上游所有新增方法都要手工回植,任何一处漏掉或截断都只在运行时暴露。本轮已在其中发现 2 处(`getMetadataProjection` 整块缺失、`searchSessionMetadata` 兜底被截)。**建议下次合并对该文件做方法级清单核对**:先 `grep` 出上游侧的全部 public/private 方法名,再逐个确认合并版里存在且未被简化。
+- **root `src/` 没有任何类型检查 lane。** `check:desktop` 对 desktop 跑 `tsc --noEmit`,但**没有任何 quality 脚本对 root `src/` 跑 `tsc`**;Bun 只剥离类型不做检查。也就是说本次 257 行的 `sessionService.ts` 改动**只被测试验证,未被类型验证**。我用 desktop 的 tsc + 临时 tsconfig 单独跑了该文件,与改动前按错误码多重集逐项对比:**零新增、零移除**。但这是手工动作,建议把 root `tsc --noEmit` 纳入 CI(需先补 `bun-types` 依赖,当前 `tsconfig.json` 引用了它却未安装)。
+- **`getSessionLaunchInfo` / `getSessionWorkDir` 对超限记录抛 413 是继承自上游的行为变更。** fork 原先走整文件读取、对超限记录降级;改走有界投影后,单条 >8 MiB 的记录会让这两个访问器抛 `SESSION_METADATA_INCOMPLETE`。上游同样如此、且有同样的裸调用点,故非本次引入 —— 但 fork 的调用方(如 `ws/handler.ts:1214` 的标题路径,虽在 try 内但会向上 rethrow)从未面对过这个失败模式。**建议单独评估**:是否需要让标题/工作目录这类非关键路径在超限时降级而非抛错。
+- **被删的上游 projector 用例带走了回滚/原子性覆盖。** 删除的 5 个用例测的是上游 worker/spool 架构(该架构未被采用),删除本身正确;但 fork 的批处理路径下,「插入失败后不留半成品行」「abort 后保留旧快照」这类不变量现在只有 `commits projection batches…leaves interrupted writes pending` 和 `rebuilds after an interrupted append…` 两个用例间接覆盖(合并前 fork 也是如此)。建议补 1–2 个针对批处理提交回滚的用例。
 - `searchSessionMetadata` 的兜底路径现由 `sessionMetadataSearch.test.ts` 覆盖(2 pass),但 `getMetadataProjection` 目前只被 `sessionHistoryRecovery.test.ts` 的「不读整份 transcript」用例间接覆盖。建议补一个直接断言:元数据读取在超过 128 KB 信封时抛 `SESSION_METADATA_TOO_LARGE`,以及缓存按源版本失效。
 - `ContextUsageDetails.tsx` 回植的 compact 按钮目前无专门单测覆盖(上游该子系统无此功能,`ContextUsageIndicator.test.tsx` 的 27 个用例全部通过,但不含 compact 交互)。建议后续补一个「compact 在 turn 进行中禁用、点击后发送 `/compact`」的用例。
 - `ToolCallBlock.tsx` 上游 `liveStatsSummary` 的回退依赖 `34aa9d71` 的既有决策;若上游后续修复了第三方 provider 的 XML 退化问题,可考虑重新评估是否恢复。
 - 本地(Windows)与 CI(Linux)的失败集合不同:本地 desktop 15 个 / server 9 个失败在 CI 上不出现,而 CI 的 desktop 1 个 / server 15 个失败在本地也不完全复现。**以 CI 结果为准**,本地跑测试只能用于快速定位。
+- **跨文件测试污染会伪造回归信号。** 批量跑 10 个引用会话访问器的测试文件时出现 24 个失败,但**同一批次在改动前的 `11498836` 上失败集合逐条相同**,且这 10 个文件**单独跑全部通过**。判定任何批量失败前,必须先与基线跑同一批次对比,否则会把既有污染误判成本次引入。
 
 ## 恢复工作方式
 
