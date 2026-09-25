@@ -1,10 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { providersApi } from '../../api/providers'
 import { ApiError } from '../../api/client'
 import { getDesktopHost } from '../../lib/desktopHost'
 import { useProviderStore } from '../../stores/providerStore'
+import { useProviderCompatStore, PROVIDER_COMPAT_WARN_THRESHOLD } from '../../stores/providerCompatStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import type { SavedProvider } from '../../types/provider'
 import { ProviderSettings } from './ProviderSettings'
@@ -497,4 +498,46 @@ describe('OpenCode Go provider', () => {
     })))
   })
 
+})
+
+// The fork renders two compatibility badges on the provider card. They are fed
+// by `providerCompatStore`, which the chat surface keeps updating, so losing the
+// renderer leaves live state with no way to see it. Nothing covered this before,
+// which is exactly how the upstream merge dropped it unnoticed.
+describe('provider compatibility badges', () => {
+  const provider = { ...savedProviders[0]!, id: 'badge-provider' }
+  beforeEach(() => {
+    useSettingsStore.setState({ locale: 'en' })
+    vi.spyOn(useSettingsStore.getState(), 'fetchAll').mockResolvedValue()
+    vi.spyOn(providersApi, 'list').mockResolvedValue({ providers: [provider], activeId: null })
+    useProviderCompatStore.setState({ events: {}, thinkingIncompatibleProviderIds: new Set() })
+  })
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+    useProviderCompatStore.setState({ events: {}, thinkingIncompatibleProviderIds: new Set() })
+  })
+
+  it('shows the fake tool_use badge only once the warning threshold is reached', async () => {
+    useProviderCompatStore.setState({
+      events: { [provider.id]: { count: PROVIDER_COMPAT_WARN_THRESHOLD - 1, lastSeenAt: 0, lastToolName: 'Read' } },
+    })
+    render(<ProviderSettings />)
+    await screen.findByTestId(`provider-${provider.id}`)
+    expect(screen.queryByTestId(`provider-compat-badge-${provider.id}`)).not.toBeInTheDocument()
+
+    await act(async () => {
+      useProviderCompatStore.setState({
+        events: { [provider.id]: { count: PROVIDER_COMPAT_WARN_THRESHOLD, lastSeenAt: 0, lastToolName: 'Read' } },
+      })
+    })
+    expect(screen.getByTestId(`provider-compat-badge-${provider.id}`)).toBeInTheDocument()
+  })
+
+  it('shows the thinking-incompatible badge for a flagged provider', async () => {
+    useProviderCompatStore.setState({ thinkingIncompatibleProviderIds: new Set([provider.id]) })
+    render(<ProviderSettings />)
+    await screen.findByTestId(`provider-${provider.id}`)
+    expect(screen.getByTestId(`provider-thinking-badge-${provider.id}`)).toBeInTheDocument()
+  })
 })

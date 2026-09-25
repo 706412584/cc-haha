@@ -5,6 +5,7 @@ import { CSS } from '@dnd-kit/utilities'
 import { GripVertical } from 'lucide-react'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useProviderStore } from '../../stores/providerStore'
+import { useProviderCompatStore, PROVIDER_COMPAT_WARN_THRESHOLD } from '../../stores/providerCompatStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useTranslation } from '../../i18n'
 import { Modal } from '@/components/ui/Modal'
@@ -141,6 +142,13 @@ export function ProviderSettings({ browserMode = false }: { browserMode?: boolea
     testProvider,
   } = useProviderStore()
   const fetchSettings = useSettingsStore((s) => s.fetchAll)
+  // Compatibility events keyed by provider id. Subscribed at this scope so a
+  // toast-triggered count change re-renders the badge in the same Settings tab
+  // the user is already looking at.
+  const compatEvents = useProviderCompatStore((s) => s.events)
+  const thinkingIncompatibleProviderIds = useProviderCompatStore(
+    (s) => s.thinkingIncompatibleProviderIds,
+  )
   const t = useTranslation()
   const [editingProvider, setEditingProvider] = useState<SavedProvider | null>(null)
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -178,6 +186,7 @@ export function ProviderSettings({ browserMode = false }: { browserMode?: boolea
     setActionFailed(false)
     try {
       await deleteProvider(pendingDeleteProvider.id)
+      useProviderCompatStore.getState().clearProvider(pendingDeleteProvider.id)
       setPendingDeleteProvider(null)
     } catch {
       setActionFailed(true)
@@ -365,6 +374,30 @@ export function ProviderSettings({ browserMode = false }: { browserMode?: boolea
                         <Badge tone="warning">
                           {provider.apiFormat === 'openai_chat' ? 'OpenAI Chat' : 'OpenAI Responses'}
                         </Badge>
+                      )}
+                      {(() => {
+                        const compat = compatEvents[provider.id]
+                        if (!compat || compat.count < PROVIDER_COMPAT_WARN_THRESHOLD) return null
+                        return (
+                          <span
+                            data-testid={`provider-compat-badge-${provider.id}`}
+                            title={t('providerCompat.badge.tooltip', { count: String(compat.count) })}
+                            className="inline-flex items-center gap-1 rounded border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--color-warning)]"
+                          >
+                            <span className="material-symbols-outlined text-[12px]" aria-hidden="true">warning</span>
+                            {t('providerCompat.badge.label')}
+                          </span>
+                        )
+                      })()}
+                      {thinkingIncompatibleProviderIds.has(provider.id) && (
+                        <span
+                          data-testid={`provider-thinking-badge-${provider.id}`}
+                          title={t('providerCompat.thinkingBadge.tooltip')}
+                          className="inline-flex items-center gap-1 rounded border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--color-warning)]"
+                        >
+                          <span className="material-symbols-outlined text-[12px]" aria-hidden="true">psychology_alt</span>
+                          {t('providerCompat.thinkingBadge.label')}
+                        </span>
                       )}
                       {isActive && (
                         <Badge tone="brand" bordered>{t('settings.providers.default')}</Badge>
@@ -1623,6 +1656,11 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
         }
         if (apiKey.trim()) input.apiKey = apiKey.trim()
         await updateProvider(provider.id, input)
+        // The user just changed something about this provider (URL, key,
+        // model, etc.). Reset its fake-tool_use counter so a previous
+        // incompatibility warning doesn't stick around — if the new config
+        // is still broken, we'll re-warn after the next 3 leaks.
+        useProviderCompatStore.getState().clearProvider(provider.id)
       }
       await fetchSettings()
       onClose()
