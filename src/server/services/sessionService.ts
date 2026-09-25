@@ -5866,9 +5866,12 @@ export class SessionService {
         if (entry.type === 'session-meta') {
           if (typeof record.workDir === 'string') state.workDir = normalizeDriveRootPathForPlatform(record.workDir)
           state.permissionMode = this.resolvePermissionModeFromEntries([entry]) ?? state.permissionMode
-          // The fork persists the mode to restore on leaving plan mode; this
-          // projection is one of its read paths, so it must fold it too.
-          state.prePlanPermissionMode = this.resolvePrePlanPermissionModeFromEntries([entry]) ?? state.prePlanPermissionMode
+          // The fork persists the mode to restore on leaving plan mode, with
+          // `null` acting as a tombstone once it has been restored. A tombstone
+          // must clear the folded value, so it cannot go through the `??` form:
+          // the resolver reports "cleared" and "never set" both as `undefined`.
+          if (record.prePlanPermissionMode === null) state.prePlanPermissionMode = undefined
+          else state.prePlanPermissionMode = this.resolvePrePlanPermissionModeFromEntries([entry]) ?? state.prePlanPermissionMode
           if (record.runtimeProviderId === null || typeof record.runtimeProviderId === 'string') state.runtimeProviderId = record.runtimeProviderId as string | null
           if (typeof record.runtimeModelId === 'string') state.runtimeModelId = record.runtimeModelId
           if (typeof record.effortLevel === 'string' && VALID_SESSION_EFFORT_LEVELS.has(record.effortLevel)) state.effortLevel = record.effortLevel

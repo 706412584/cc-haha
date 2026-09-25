@@ -64,14 +64,26 @@
 | desktop 失败文件 | 17 | **6** | 6 | 逐一对应 |
 | `tsc --noEmit` (desktop) | 2 错误(阻断后续分析) | **0 错误** | 0 | 通过 |
 | `vite build` (desktop) | 未跑 | **通过** | — | 通过 |
-| `check:server` | 235 pass / 9 fail | **237 pass / 9 fail** | 相同 9 个 | 全部预存 |
+| `check:server`(CI,Linux) | 未跑 | **2 个文件红,均属上游自带** | — | 见下 |
+| `check:server`(本地,Windows) | 235 pass / 9 fail | 与基线相同的 9 个 | 相同 9 个 | 全部预存 |
 
 > **注意**:上表的“修复前”是**只修 desktop 之后**的状态。CI 上的 `chat-contract-checks`、`provider-contract-checks`、`policy-enforcement`、`server-checks`、`desktop-native-checks`、`coverage-checks` 当时全部为红 —— 第一轮修复只跑了 `check:server` 与 desktop 单测,没有跑 `check:impact` 选中的其余 lane。补跑后又发现 3 个功能回归与 1 处重复声明(见下)。
 
 剩余 15 个 desktop 失败与基线逐条一致,属预存问题(非本次引入):
 `scripts/build-macos-arm64.test.ts`、`electron/services/serverRuntime.test.ts`、`SessionActivityPanel.test.tsx`、`ModelSelector.test.tsx`、`TabBar.test.tsx`、`AgentManager.test.tsx`。
 server 侧 9 个失败同样与基线一致,归入 `docs/known-pre-existing-test-failures.md` 的根因 C(Windows symlink / EBUSY / 路径)。
-这些 Windows 特有的失败在 Linux CI 上不出现(CI 实测 desktop 仅 1 个失败、server 15 个失败,均为真实问题,已修)。
+这些 Windows 特有的失败在 Linux CI 上不出现。
+
+### `server-checks` 最后剩下的 2 个文件(上游自带,非本次合并引入)
+
+两者与上游 `2f8d819d` **逐字节相同**(`git rev-parse <rev>:<path>` 相等),且**在 Windows 与 Linux(WSL 实测)上都以同样方式失败**,即上游自己的 CI 从未跑绿过它们:
+
+- `src/cli/print.sessionMessage.test.ts` —— 测试用 `Bun.spawn(['./bin/claude-haha', …])` 依赖 shebang;该进程在两种平台上都不产出 stdout,于是 `stdout.trim().split('\n').map(JSON.parse)` 抛 `Unexpected EOF`。同目录另两个测试(`print.backgroundTaskNotification.test.ts`、`print.partialOutput.test.ts`)已各自用 `process.platform === 'win32'` 分支绕开同一限制,这个文件没有。
+  - 取证:把该测试的 spawn 参数换成 `process.execPath … src/entrypoints/cli.tsx` 后,**合并版与上游版都立刻通过**(1 pass)。说明失败在启动方式,不在被测的 inbox 逻辑。
+- `src/server/services/sessionReferencesPersistence.test.ts` —— 用例「collaboration cursors traverse real bounded history pages without dropping turns」要求 130 轮分页全部走完,但同仓库的 `COLLABORATION_READ_MAX_PAGES = 8`(上游 `4ed18f09` 引入)只允许 8 页,故 50–129 号 turn 必然取不到。**上游自己的常量让自己的用例不可能通过**,且该常量与用例在同一天由同一作者引入、未同步更新。
+
+两者都应按已知预存失败处理(登记 `scripts/quality-gate/quarantine.json` 或在上游修复),**不应**在本分支放宽被测逻辑去迁就。
+
 
 ### 修复清单(25 文件)
 
@@ -103,10 +115,27 @@ server 侧 9 个失败同样与基线一致,归入 `docs/known-pre-existing-test
 - `TraceSession.test.tsx`:补回上游的 `renderReady(20)`,使第二次 revision/签名观察落在测试窗口内。
 - `ProviderSettings.test.tsx`:协议文案对齐 fork 的 `local protocol translation` 措辞(`providerProtocolTranslation.test.ts` 为此有专门守卫);AruHub 用例改为去广告语义(无徽章、无 `?aff=`、无 signup 文案);OpenCode Go 用例去掉 `?ref=` 推荐码。
 
+**E. 第二轮:会话子系统重合并后 CI 暴露的 6 个文件(commit `5aa756a9`)**
+
+`server-checks` 在 `11498836` 上仍红 8 个文件 / 18 个用例。逐一对照 `2f0ef19d`(fork)、`2f8d819d`(上游)与合并版三方后,归为两类:
+
+- **真实回归(2 处,均为“回植时把方法截断了”)**
+  - `sessionService.ts` 的 `getMetadataProjection`:会话子系统整体取 fork 版时,上游这个**有界元数据折叠**从未回植,于是三个本不该解析整份 transcript 的读取口被指回 `readJsonlFile` —— `getSessionLaunchInfo` / `getSessionWorkDir` 会把整份文件读进内存(测试里 24 条 256 KB 记录即触发),`appendSessionMetadata` 为解析 repository 与跨占位文件搬运标题也要全读。已按上游实现回植单一折叠(经 `streamBoundedHistory` + `HISTORY_SEMANTIC_RECORD_BYTES` 流式读取,128 KB 元数据信封上限),并保留 fork 必须随投影携带的字段(`prePlanPermissionMode`、`thinkingEnabled`、`providerTransition`)。
+  - `sessionService.ts` 的 `searchSessionMetadata`:回植时被截成“只用索引,否则返回空”,丢掉上游的 JSONL 扫描 + 排序兜底。已补回。
+- **测试组成错配(4 个文件,上游用例贴到了 fork 实现上)**
+  - `src/server/__tests__/settings.test.ts`:保留了上游新增的 4 个用例,却保留了 fork 的 import 块 → `getDefaultMainLoopModelSetting` / `parseUserSpecifiedModel` / `getSonnet46_1MOption` 未定义。补回上游 import 块即可(89 pass)。
+  - `src/server/services/localIndex/searchContentProjector.test.ts`(7 个用例):实现侧是 **fork 的批处理架构**(与本报告决策 2 一致),而上游追加的用例测的是上游独有的 `onBatch` / `onCommitStarted` 钩子(配套文件 `searchContentCommitWorker.ts` 未被采用)。恢复 fork 测试文件(11 pass)。
+  - `src/server/services/localIndex/searchContentCoordinator.test.ts`(2 个):删掉上游那个测 worker 写锁合并的 describe(`d16aabcf` 引入,架构未采用),保留已回植的 `suggestSessions` 断言(20 pass)。
+  - `src/server/services/localIndex/coordinator.test.ts`(1 个):上游 `9c88a5cc`(已有提交行的快照可继续服务)已被采用,故启动再水合后的状态是 `ready` 而非 `building`,更新该断言(51 pass)。
+
+> 第二轮的一个方法论教训:判“是否合并引入”必须用**合并版自己的 blob** 与两侧对照。我一度用主仓的 `HEAD`(即 `main`/fork)当“合并版”去比对,得出了相反的归属结论。正确做法是 `git -C <merge-worktree> rev-parse HEAD:<path>`,或直接跑三方矩阵。
+
 ## 残余风险
 
-- **手工混合的 60 个冲突文件没有等价的三方验证手段。** 无冲突文件已用 `git merge-file` 复算确认无误,冲突文件则依赖逐个人工判断。本轮已发现并修复 4 处回归(3 处 fork 行为丢失 + 1 处重复声明),**不排除其他手工混合处仍有未被测试覆盖的偏差**。这是本次合并最大的不确定性来源。
-- **fork 行为丢失的模式值得警惕**:3 处丢失都是“fork 在某个函数里多加了一个字段/比较,合并取了上游版本后该增量消失”。这类丢失不产生类型错误、不影响编译,只有对应测试才会暴露。建议后续合并时对 `sessionService.ts`、`ws/handler.ts`、`sessionRuntimeStore.ts` 这三个文件做 fork-vs-merge 的逐函数字段比对。
+- **手工混合的 60 个冲突文件没有等价的三方验证手段。** 无冲突文件已用 `git merge-file` 复算确认无误,冲突文件则依赖逐个人工判断。本轮已发现并修复 6 处回归(4 处 fork 行为丢失 + 1 处重复声明 + 1 处上游兜底被截断),**不排除其他手工混合处仍有未被测试覆盖的偏差**。这是本次合并最大的不确定性来源。
+- **fork 行为丢失的模式值得警惕**:多处丢失都是“fork/上游在某个函数里多加了一个字段、比较或兜底分支,合并取了另一侧后该增量消失”。这类丢失不产生类型错误、不影响编译,只有对应测试才会暴露。建议后续合并时对 `sessionService.ts`、`ws/handler.ts`、`sessionRuntimeStore.ts` 这三个文件做 fork-vs-merge 的逐函数字段比对。
+- **`sessionService.ts` 的回归尤其危险**:该文件在本次合并中整体取了 fork 版(6177 行),上游所有新增方法都要手工回植,任何一处漏掉或截断都只在运行时暴露。本轮已在其中发现 2 处(`getMetadataProjection` 整块缺失、`searchSessionMetadata` 兜底被截)。**建议下次合并对该文件做方法级清单核对**:先 `grep` 出上游侧的全部 public/private 方法名,再逐个确认合并版里存在且未被简化。
+- `searchSessionMetadata` 的兜底路径现由 `sessionMetadataSearch.test.ts` 覆盖(2 pass),但 `getMetadataProjection` 目前只被 `sessionHistoryRecovery.test.ts` 的「不读整份 transcript」用例间接覆盖。建议补一个直接断言:元数据读取在超过 128 KB 信封时抛 `SESSION_METADATA_TOO_LARGE`,以及缓存按源版本失效。
 - `ContextUsageDetails.tsx` 回植的 compact 按钮目前无专门单测覆盖(上游该子系统无此功能,`ContextUsageIndicator.test.tsx` 的 27 个用例全部通过,但不含 compact 交互)。建议后续补一个「compact 在 turn 进行中禁用、点击后发送 `/compact`」的用例。
 - `ToolCallBlock.tsx` 上游 `liveStatsSummary` 的回退依赖 `34aa9d71` 的既有决策;若上游后续修复了第三方 provider 的 XML 退化问题,可考虑重新评估是否恢复。
 - 本地(Windows)与 CI(Linux)的失败集合不同:本地 desktop 15 个 / server 9 个失败在 CI 上不出现,而 CI 的 desktop 1 个 / server 15 个失败在本地也不完全复现。**以 CI 结果为准**,本地跑测试只能用于快速定位。

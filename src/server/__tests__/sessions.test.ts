@@ -3847,12 +3847,16 @@ describe('SessionService', () => {
 
       const readSpy = spyOn(fs, 'readFile')
       try {
-        const first = await service.getSessionWorkDir(sessionId)
+        // `getSessionWorkDir` reads through the bounded metadata projection, which
+        // is a different primitive (and cache). This suite characterizes the
+        // `readJsonlFile` parse cache, so drive it through the reader that still
+        // uses it.
+        const first = await service.getSessionMessages(sessionId, { includeSubagents: false })
         const callsAfterFirst = readSpy.mock.calls.length
         expect(callsAfterFirst).toBeGreaterThan(0)
 
-        const second = await service.getSessionWorkDir(sessionId)
-        expect(second).toBe(first)
+        const second = await service.getSessionMessages(sessionId, { includeSubagents: false })
+        expect(second).toEqual(first)
         // Second call must be served from cache: no additional fs.readFile.
         expect(readSpy.mock.calls.length).toBe(callsAfterFirst)
       } finally {
@@ -3907,11 +3911,10 @@ describe('SessionService', () => {
       const readSpy = spyOn(fs, 'readFile')
       try {
         const [a, b] = await Promise.all([
-          service.getSessionWorkDir(sessionId),
-          service.getSessionWorkDir(sessionId),
+          service.getSessionMessages(sessionId, { includeSubagents: false }),
+          service.getSessionMessages(sessionId, { includeSubagents: false }),
         ])
-        expect(a).toBe('/tmp/from-meta')
-        expect(b).toBe('/tmp/from-meta')
+        expect(a).toEqual(b)
         // Both concurrent callers share a single in-flight read of the file.
         const reads = readSpy.mock.calls.filter(
           (call) => typeof call[0] === 'string' && (call[0] as string).includes(sessionId),
@@ -3942,9 +3945,13 @@ describe('SessionService', () => {
 
       const readSpy = spyOn(fs, 'readFile')
       try {
-        await service.getSessionWorkDir(sessionId)
+        await service.getSessionMessages(sessionId, { includeSubagents: false })
         const callsAfterFirst = readSpy.mock.calls.length
-        await service.getSessionWorkDir(sessionId)
+        // A whole-file read is what makes this test meaningful: a bounded
+        // projection would never call `fs.readFile` and the assertion below
+        // would hold vacuously.
+        expect(callsAfterFirst).toBeGreaterThan(0)
+        await service.getSessionMessages(sessionId, { includeSubagents: false })
         // Now cached: the second call is served from memory, no extra read.
         expect(readSpy.mock.calls.length).toBe(callsAfterFirst)
       } finally {
