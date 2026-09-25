@@ -4352,26 +4352,33 @@ export class SessionService {
   private async loadProjectHistoryRows(): Promise<ProjectHistoryRow[]> {
     const scope = this.getConfigDir()
     let indexedRows: IndexedSessionRow[] | null = null
-    if (this.getUsableIndexMode() === 'on' && this.localIndexGateway.getPublicStatus().state === 'ready') {
-      try {
-        indexedRows = []
-        // No await between index pages: a coordinator projection cannot shift
-        // the order while this synchronous metadata snapshot is collected.
-        for (let offset = 0; ; offset += 500) {
-          const page = this.localIndexGateway.listSessions({ limit: 500, offset })
-          if (!this.indexStatusRemainsUsable()) throw new Error('Index unavailable')
-          indexedRows.push(...page.sessions)
-          if (offset + page.sessions.length >= page.total) break
-          if (page.sessions.length === 0) throw new Error('Incomplete index page')
+    if (this.getUsableIndexMode() === 'on') {
+      const status = this.localIndexGateway.getPublicStatus()
+      // A building index is usable here: its rows are already project-grouped, which is
+      // exactly what this page needs, and waiting for `ready` would scan every transcript.
+      if (status.state === 'ready' || status.state === 'building') {
+        try {
+          indexedRows = []
+          // No await between index pages: a coordinator projection cannot shift
+          // the order while this synchronous metadata snapshot is collected.
+          for (let offset = 0; ; offset += 500) {
+            const page = this.localIndexGateway.listSessions({ limit: 500, offset })
+            if (!this.indexStatusRemainsUsable()) throw new Error('Index unavailable')
+            indexedRows.push(...page.sessions)
+            if (offset + page.sessions.length >= page.total) break
+            if (page.sessions.length === 0) break
+          }
+        } catch {
+          this.markIndexReadFailure()
+          indexedRows = null
         }
-      } catch {
-        this.markIndexReadFailure()
-        indexedRows = null
       }
     }
     if (indexedRows === null) {
+      // Same rule as listSessions: never scan every JSONL just to fill history.
+      if (this.getUsableIndexMode() === 'on') return []
       indexedRows = []
-      // Files remain authoritative in off/shadow/building mode. Summaries are
+      // Files remain authoritative in off/shadow mode. Summaries are
       // streamed and shared with the existing list cache; messages never load.
       for (const file of await this.discoverSessionFiles(undefined, scope)) {
         try {
