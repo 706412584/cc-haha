@@ -67,6 +67,7 @@ import { recoverBoundedSessionHistory, type SessionHistoryRecovery } from './ses
 import {
   HISTORY_SEMANTIC_RECORD_BYTES,
   HISTORY_PAGE_BYTES,
+  displayPreview,
   readBoundedHistoryPage,
   streamBoundedHistory,
   withHistoryReadBudget,
@@ -830,6 +831,17 @@ export class SessionService {
       !this.privateTitles.get(this.memorySessionKey(sessionId))?.has(title)
   }
 
+  /**
+   * Patch an existing index row with a title the transcript just received.
+   *
+   * A title entry is a tiny, authoritative mutation. Without this the row keeps the old
+   * title until the transcript watcher runs its full projection, which a cold restart can
+   * outrun — serving a stale title for a session whose transcript already has the new one.
+   */
+  private syncIndexedSessionTitle(sessionId: string, title: string): void {
+    this.localIndexGateway.updateSessionTitle?.(sessionId, title)
+  }
+
   private readonly pendingTaskNotificationWrites = new Map<
     string,
     Set<{
@@ -1269,7 +1281,11 @@ export class SessionService {
 
     if (status.state === 'off' || status.state === 'degraded') return null
     try {
-      if (!this.localIndexGateway.isSessionScopeReady()) return null
+      // While building, the scope is expected to be incomplete: routing to the index is
+      // what keeps an in-progress build from being answered by a full JSONL scan.
+      if (status.state !== 'building' && !this.localIndexGateway.isSessionScopeReady()) {
+        return null
+      }
     } catch {
       this.markIndexReadFailure()
       return null
@@ -4475,46 +4491,6 @@ export class SessionService {
     }
   }
 
-  /**
-   * Whether a page read while the index is still `building` can stand in for the
-   * file scan.
-   *
-   * Discovery sorts candidates only within a batch and walks project
-   * directories in readdir order, so a partially built index holds an arbitrary
-   * subset of sessions — the first page can silently omit sessions that are
-   * newer than everything in it. Only a row count that already covers every
-   * discovered transcript is safe to serve; anything short of that falls back to
-   * the file scan, which is complete by construction.
-   *
-   * Counting is a readdir per project directory (~6ms for 30 directories), and
-   * only while building, so it is far cheaper than the summary scan it guards.
-   */
-  /**
-   * Whether a `building` index holds a row for every transcript on disk.
-   *
-   * While building, `status.discovered` only counts what the sweep has walked so
-   * far, so `indexed/discovered` stays near 1 and says nothing about coverage.
-   * Worse, discovery sorts by mtime only *within* a 25-file batch and visits
-   * project directories in readdir order, so a partial index is an arbitrary
-   * subset — page 1 can silently omit genuinely newer sessions.
-   *
-   * The denominator is a readdir of the project directories (no file reads),
-   * which measured ~6ms here, so we pay it rather than serve a wrong ordering.
-   */
-  private async indexedPageCoversDiscoveredFiles(
-    indexedTotal: number,
-    project?: string,
-  ): Promise<boolean> {
-    // An empty index during building is never authoritative.
-    if (indexedTotal === 0) return false
-    try {
-      const discovered = await this.discoverSessionFiles(project)
-      return indexedTotal >= discovered.length
-    } catch {
-      return false
-    }
-  }
-
   private async tryListSessionsFromIndex(options?: {
     project?: string
     limit?: number
@@ -4540,33 +4516,48 @@ export class SessionService {
 
       const status = this.localIndexGateway.getPublicStatus()
       if (requireReady && status.state !== 'ready') return null
-      if (status.state === 'building' && !await this.indexedPageCoversDiscoveredFiles(
-        indexedPage.total,
-        options?.project,
-      )) {
-        return null
+      // An empty page while building is not authoritative, but it must not fall through to
+      // a full JSONL scan either: the sidebar already renders an empty building page as
+      // loading, and scanning every transcript there is the cost this route exists to avoid.
+      if (indexedPage.sessions.length === 0) {
+        return status.state === 'building'
+          ? { sessions: [], total: indexedPage.total }
+          : null
       }
+      // A partial page while building is served as-is rather than merged with a file scan:
+      // the rows that are indexed are correct, and the sidebar fills in as the build
+      // progresses. Falling back here would re-read every transcript on each poll.
 
       const pathExists = this.createCachedPathExists(targetPath =>
         this.pathExistsForSessionList(targetPath))
       const projectsRoot = indexedPage.sessions.length > 0
         ? await fs.realpath(this.getProjectsDir())
         : null
+      // Drop a single stale or unreadable row rather than abandoning the whole page and
+      // scanning every transcript: one bad row must not cost the index route its win.
+      const sessions: SessionListItem[] = []
       for (const row of indexedPage.sessions) {
-        await this.validateIndexedTranscriptPath(
-          row.transcriptPath,
-          row.projectPath,
-          row.id,
-          projectsRoot!,
-        )
+        try {
+          await this.validateIndexedTranscriptPath(
+            row.transcriptPath,
+            row.projectPath,
+            row.id,
+            projectsRoot!,
+          )
+          sessions.push(await this.hydrateIndexedSessionForList(row, pathExists))
+        } catch {
+          // Dropped below by omission.
+        }
       }
-      const sessions = await Promise.all(indexedPage.sessions.map(row =>
-        this.hydrateIndexedSessionForList(row, pathExists)))
-      if (sessions.length !== indexedPage.sessions.length) return null
       if (
         indexedMutationEpoch !== getSharedSessionMutationState(this.localIndexGateway).epoch
       ) {
         return null
+      }
+      if (sessions.length === 0) {
+        return status.state === 'building'
+          ? { sessions: [], total: indexedPage.total }
+          : null
       }
       return { sessions, total: indexedPage.total }
     } catch {
@@ -5174,25 +5165,43 @@ export class SessionService {
     const key = JSON.stringify([filePath, toolRef])
     const cached = this.subagentLookupCache.get(key)
     if (cached?.version === version) return cached.transcript
-    const transcript = await withHistoryReadBudget(undefined, async () => {
+    return withHistoryReadBudget(undefined, async () => {
       const entries: RawEntry[] = []
       const taskNotifications: SessionTaskNotification[] = []
-      let matched = false
-      await streamBoundedHistory(filePath, entry => {
-        const raw = entry as RawEntry
-        const toolUseId = typeof raw.message?.id === 'string' ? raw.message.id : undefined
-        const matches = (toolUseId && ids.has(toolUseId)) || this.extractAgentToolUseId(raw) !== null
-        if (matched && !matches) return
-        if (matches) matched = true
-        if (!matched) return
-        if (this.isVisibleTranscriptMessageEntry(raw)) entries.push(raw)
-        taskNotifications.push(...this.taskNotificationsFromEntries([raw]))
+      let bytes = 0
+      let incomplete = false
+      let suppressTaskNotificationResponse = false
+      const scan = await streamBoundedHistory(filePath, raw => {
+        const entry = raw as RawEntry
+        const message = raw.message as { role?: string; content?: unknown } | undefined
+        if (!entry.isMeta && message?.role === 'user') {
+          if (this.isTaskNotificationContent(message.content)) suppressTaskNotificationResponse = true
+          else if (!this.isToolResultContent(message.content)) suppressTaskNotificationResponse = false
+        }
+        const content = Array.isArray(message?.content) ? message.content.filter((block: any) =>
+          block?.type === 'tool_use' ? ids.has(block.id) : block?.type === 'tool_result' && ids.has(block.tool_use_id)) : []
+        const notices = this.taskNotificationsFromEntries([entry]).filter(notice => ids.has(notice.toolUseId))
+        const selected = content.length && !suppressTaskNotificationResponse
+          ? displayPreview({ ...entry, message: { ...message, content } }) : undefined
+        if (selected?.bodyTruncated) incomplete = true
+        const selectedBytes = (selected ? Buffer.byteLength(JSON.stringify(selected)) : 0) +
+          (notices.length ? Buffer.byteLength(JSON.stringify(notices)) : 0)
+        if (bytes + selectedBytes > 2 * 1024 * 1024 || entries.length + taskNotifications.length + (selected ? 1 : 0) + notices.length > 2048) {
+          incomplete = true
+          return
+        }
+        bytes += selectedBytes
+        if (selected) entries.push(selected as RawEntry)
+        taskNotifications.push(...notices)
       }, undefined, { maxRecordBytes: HISTORY_SEMANTIC_RECORD_BYTES })
-      return { messages: this.entriesToMessages(entries), taskNotifications, historyComplete: true }
+      // A skipped record may be unrelated to this Agent. Preserve the evidence
+      // we did read without claiming that absence proves a missing run.
+      const transcript = { messages: this.entriesToMessages(entries), taskNotifications, historyComplete: !incomplete && scan.omittedRecords === 0 }
+      this.subagentLookupCache.delete(key)
+      this.subagentLookupCache.set(key, { version, transcript })
+      while (this.subagentLookupCache.size > 4) this.subagentLookupCache.delete(this.subagentLookupCache.keys().next().value!)
+      return transcript
     }, 'metadata')
-    this.subagentLookupCache.set(key, { version, transcript })
-    while (this.subagentLookupCache.size > 8) this.subagentLookupCache.delete(this.subagentLookupCache.keys().next().value!)
-    return transcript
   }
 
 
@@ -5243,30 +5252,76 @@ export class SessionService {
   async getSubagentTranscript(
     sessionId: string,
     agentId: string,
+    options: { bounded?: boolean; toolUseId?: string } = {},
   ): Promise<SubagentTranscript> {
+    if (options.toolUseId) return this.getSubagentRunLookup(sessionId, options.toolUseId, agentId)
     const found = await this.findSessionFile(sessionId)
-    if (!found) {
-      throw ApiError.notFound(`Session not found: ${sessionId}`)
+    if (!found) throw ApiError.notFound(`Session not found: ${sessionId}`)
+    const filePath = this.subagentTranscriptPath(found.projectDir, sessionId, agentId)
+    if (options.bounded) {
+      try {
+        // A byte-bounded small transcript can preserve the full Activity view,
+        // including more than 1000 tiny records. Large files use the tail page.
+        if ((await fs.stat(filePath)).size <= 1536 * 1024) {
+          return await withHistoryReadBudget(undefined, async () => {
+            const entries: RawEntry[] = []
+            let retainedBytes = 0
+            const scan = await streamBoundedHistory(filePath, entry => {
+              retainedBytes += Buffer.byteLength(JSON.stringify(entry))
+              if (retainedBytes > 2 * 1024 * 1024) throw new ApiError(413, 'Agent transcript changed beyond its viewing budget', 'SUBAGENT_RECORD_LIMIT')
+              if (entries.length >= 10_000) throw new ApiError(413, 'Agent transcript exceeds its record budget', 'SUBAGENT_RECORD_LIMIT')
+              entries.push(entry as RawEntry)
+            }, undefined, { maxRecordBytes: HISTORY_SEMANTIC_RECORD_BYTES })
+            return { messages: this.entriesToMessages(entries), taskNotifications: this.taskNotificationsFromEntries(entries), historyComplete: scan.omittedRecords === 0 }
+          })
+        }
+        const result = await readBoundedHistoryPage(filePath)
+        const projection = await this.projectHistoryPageEntries(filePath, result, undefined, true)
+        const entries = result.entries.map(item => item.entry as RawEntry)
+        return {
+          messages: this.entriesToMessages(projection.entries),
+          taskNotifications: this.taskNotificationsFromEntries(entries),
+          historyComplete: result.page.historyComplete,
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { messages: [], taskNotifications: [], historyComplete: true }
+        throw error
+      }
     }
+    const entries = await this.readJsonlFile(filePath)
+    return { messages: this.entriesToMessages(entries), taskNotifications: this.taskNotificationsFromEntries(entries) }
+  }
 
-    const entries = await this.readJsonlFile(
-      this.subagentTranscriptPath(found.projectDir, sessionId, agentId),
-    )
-    return {
-      messages: this.entriesToMessages(entries),
-      taskNotifications: this.taskNotificationsFromEntries(entries),
-    }
+  /**
+   * Read one Agent sidecar, bounded to its viewing budget.
+   *
+   * The file is read through a fixed-size buffer rather than `fs.readFile` so a
+   * pathologically large sidecar is rejected instead of materialized.
+   */
+  private async readSubagentMetadata(filePath: string): Promise<Record<string, unknown>> {
+    const handle = await fs.open(filePath, 'r')
+    try {
+      const buffer = Buffer.alloc(64 * 1024 + 1)
+      let length = 0
+      while (length < buffer.length) {
+        const read = await handle.read(buffer, length, buffer.length - length, length)
+        if (!read.bytesRead) break
+        length += read.bytesRead
+      }
+      if (length > 64 * 1024) throw new ApiError(413, 'Agent metadata exceeds its viewing budget', 'SUBAGENT_METADATA_LIMIT')
+      return JSON.parse(buffer.subarray(0, length).toString('utf8')) as Record<string, unknown>
+    } finally { await handle.close() }
   }
 
   /**
    * Resolve which subagent transcript belongs to an Agent tool call.
    *
-   * The sidecar metadata is written before the agent's query loop starts, so
-   * this resolves while the run is still in flight. The parent transcript's
-   * `tool_result` — the other way to recover an agent id — only lands once the
-   * agent has finished, which left live runs pointing at no transcript at all.
-   * `expectedOwnerAgentId` is the physical parent transcript id; null denotes
-   * a root-owned tool call.
+   * The sidecar metadata is written before the agent's query loop starts, so this resolves
+   * while the run is still in flight. The parent transcript's `tool_result` — the other way
+   * to recover an agent id — only lands once the agent has finished, which left live runs
+   * pointing at no transcript at all.
+   * `expectedOwnerAgentId` is the physical parent transcript id; null denotes a root-owned
+   * tool call.
    */
   async findSubagentAgentIdByToolUseId(
     sessionId: string,
@@ -5285,14 +5340,13 @@ export class SessionService {
       'subagents',
     )
     const files = await fs.readdir(subagentsDir).catch(() => [])
+    if (files.length > 4096) throw new ApiError(413, 'Agent directory exceeds its viewing budget', 'SUBAGENT_METADATA_LIMIT')
     const candidates: Array<{ agentId: string; ownerAgentId?: string }> = []
     let metadataComplete = true
 
     for (const metadataFile of files.filter((file) => file.endsWith('.meta.json'))) {
       try {
-        const metadata = JSON.parse(
-          await fs.readFile(path.join(subagentsDir, metadataFile), 'utf8'),
-        ) as Record<string, unknown>
+        const metadata = await this.readSubagentMetadata(path.join(subagentsDir, metadataFile))
         if (metadata.toolUseId !== toolUseId) continue
         const ownerAgentId = typeof metadata.ownerAgentId === 'string' && metadata.ownerAgentId
           ? metadata.ownerAgentId
@@ -5301,7 +5355,10 @@ export class SessionService {
           agentId: metadataFile.replace(/^agent-/, '').replace(/\.meta\.json$/, ''),
           ...(ownerAgentId ? { ownerAgentId } : {}),
         })
-      } catch {
+      } catch (error) {
+        // A budget rejection is about the session, not this one file: propagating it
+        // keeps the caller from reporting a complete answer built on skipped metadata.
+        if (error instanceof ApiError) throw error
         // A half-written sidecar must not hide the other candidates.
         metadataComplete = false
       }
@@ -5332,6 +5389,7 @@ export class SessionService {
   async getSubagentTranscriptFragmentsByAgentType(
     sessionId: string,
     agentType: string,
+    options: { bounded?: boolean; toolUseId?: string } = {},
   ): Promise<SubagentTranscriptFragment[]> {
     const found = await this.findSessionFile(sessionId)
     if (!found) {
@@ -5345,13 +5403,12 @@ export class SessionService {
       'subagents',
     )
     const files = await fs.readdir(subagentsDir).catch(() => [])
+    if (files.length > 4096) throw new ApiError(413, 'Agent directory exceeds its viewing budget', 'SUBAGENT_METADATA_LIMIT')
     const fragments: SubagentTranscriptFragment[] = []
 
     for (const metadataFile of files.filter((file) => file.endsWith('.meta.json'))) {
       try {
-        const metadata = JSON.parse(
-          await fs.readFile(path.join(subagentsDir, metadataFile), 'utf8'),
-        ) as Record<string, unknown>
+        const metadata = await this.readSubagentMetadata(path.join(subagentsDir, metadataFile))
         if (metadata.agentType !== agentType) continue
 
         const transcriptFile = metadataFile.replace(/\.meta\.json$/, '.jsonl')
@@ -5366,7 +5423,9 @@ export class SessionService {
           taskNotifications: this.taskNotificationsFromEntries(entries),
           modifiedAt: stat.mtimeMs,
         })
-      } catch {
+        if (options.bounded && (fragments.length > 16 || Buffer.byteLength(JSON.stringify(fragments)) > 4 * 1024 * 1024)) throw new ApiError(413, 'Agent fragments exceed their viewing budget', 'SUBAGENT_FRAGMENTS_LIMIT')
+      } catch (error) {
+        if (error instanceof ApiError) throw error
         // A partially persisted fragment must not hide the other resumable runs.
       }
     }
@@ -5676,6 +5735,7 @@ export class SessionService {
     }
 
     await this.appendJsonlEntry(found.filePath, entry)
+    this.syncIndexedSessionTitle(sessionId, title)
     this.invalidateSessionListCache()
   }
 
@@ -5695,6 +5755,7 @@ export class SessionService {
       aiTitle: title,
       timestamp: new Date().toISOString(),
     })
+    this.syncIndexedSessionTitle(sessionId, title)
     this.invalidateSessionListCache()
   }
 
@@ -5938,6 +5999,9 @@ export class SessionService {
           .join('\n') + '\n',
         'utf-8',
       )
+      if (customTitleEntry) {
+        this.syncIndexedSessionTitle(sessionId, customTitleEntry.customTitle)
+      }
       this.invalidateSessionListCache()
     } catch (error) {
       // Clear aborts old-generation appends so none can land after a successful
@@ -6092,6 +6156,7 @@ export class SessionService {
         customTitle,
         timestamp: new Date().toISOString(),
       })
+      this.syncIndexedSessionTitle(sessionId, customTitle)
     }
     this.invalidateSessionListCache()
   }
