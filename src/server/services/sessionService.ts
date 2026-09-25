@@ -5940,18 +5940,6 @@ export class SessionService {
     try { return await request } finally { this.metadataProjectionRequests.delete(requestKey) }
   }
 
-  /** Last non-empty `custom-title` in one transcript, or null. */
-  private async readCustomTitleFromFile(filePath: string): Promise<string | null> {
-    const entries = await this.readJsonlFile(filePath).catch(() => [] as RawEntry[])
-    let customTitle: string | null = null
-    for (const entry of entries) {
-      if (entry.type === 'custom-title' && typeof entry.customTitle === 'string' && entry.customTitle.trim()) {
-        customTitle = entry.customTitle
-      }
-    }
-    return customTitle
-  }
-
   /**
    * Get the actual working directory for a session.
    * First checks for stored session-meta entry, then falls back to desanitizePath.

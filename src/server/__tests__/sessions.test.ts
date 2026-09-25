@@ -3914,7 +3914,9 @@ describe('SessionService', () => {
           service.getSessionMessages(sessionId, { includeSubagents: false }),
           service.getSessionMessages(sessionId, { includeSubagents: false }),
         ])
-        expect(a).toEqual(b)
+        // Assert the content, not just equality: two empty arrays are equal too.
+        expect(a.map(message => message.id)).toEqual([expect.any(String)])
+        expect(b).toEqual(a)
         // Both concurrent callers share a single in-flight read of the file.
         const reads = readSpy.mock.calls.filter(
           (call) => typeof call[0] === 'string' && (call[0] as string).includes(sessionId),
