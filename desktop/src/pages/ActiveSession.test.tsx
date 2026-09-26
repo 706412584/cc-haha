@@ -140,6 +140,7 @@ afterEach(() => {
   useTeamStore.getState().stopMemberPolling()
   useTeamStore.setState(useTeamStore.getInitialState(), true)
   useWorkspaceStore.setState(useWorkspaceStore.getInitialState(), true)
+  useCLITaskStore.setState(useCLITaskStore.getInitialState(), true)
 })
 
 function renderBackgroundTaskDrawerForLocale(locale: 'jp' | 'kr', sessionId: string) {
@@ -3600,6 +3601,7 @@ describe('ActiveSession task polling', () => {
     render(<ActiveSession />)
     expect(screen.queryByTestId('workspace-surface-side')).not.toBeInTheDocument()
   })
+
 
 describe('ActiveSession header', () => {
   // 回归锚点：标题曾经是 text-[22px] 且不截断，长标题会折成两行再加一行元数据，

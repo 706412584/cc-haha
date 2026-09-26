@@ -97,6 +97,23 @@ describe('WorkspaceTabStrip', () => {
     expect(screen.getAllByRole('tab')).toHaveLength(1)
   })
 
+  it('lets leftover window-header space drag the window without capturing tab controls', () => {
+    renderStrip({ placement: 'window' })
+    const strip = screen.getByTestId('workspace-tab-strip-side')
+    const tab = screen.getByTestId('workspace-tab-wrap-tab-file')
+    const add = screen.getByTestId('workspace-add-tab-side').closest('span')
+
+    expect(strip).toHaveAttribute('data-desktop-drag-region')
+    expect(tab).toHaveClass('tab-bar-interactive')
+    expect(add).toHaveClass('tab-bar-interactive')
+    expect(tab).not.toHaveAttribute('data-desktop-drag-region')
+  })
+
+  it('does not turn a dock strip into window chrome', () => {
+    renderStrip({ placement: 'dock' })
+    expect(screen.getByTestId('workspace-tab-strip-side')).not.toHaveAttribute('data-desktop-drag-region')
+  })
+
   it('titles each kind from its own identity', () => {
     renderStrip({ tabs: [FILE_TAB, BROWSER_TAB, REVIEW_TAB, TERMINAL_TAB] })
 

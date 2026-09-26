@@ -99,7 +99,7 @@ describe('provider-aware thinking support', () => {
     process.env.ANTHROPIC_BASE_URL = 'https://api.anthropic.com'
     clearCapabilityCache()
 
-    for (const model of ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5']) {
+    for (const model of ['claude-fable-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-5']) {
       expect(modelSupportsThinking(model)).toBe(true)
       expect(modelSupportsAdaptiveThinking(model)).toBe(true)
       expect(modelSupportsEffort(model)).toBe(true)
@@ -254,7 +254,7 @@ describe('provider-aware thinking support', () => {
     clearCapabilityCache()
     clearBetaCache()
 
-    for (const model of ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5']) {
+    for (const model of ['claude-fable-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-5']) {
       expect(modelSupportsEffort(model)).toBe(false)
       expect(modelSupportsMaxEffort(model)).toBe(false)
       expect(modelSupportsISP(model)).toBe(false)

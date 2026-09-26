@@ -10,6 +10,10 @@ import type { RuntimeSelection } from '../types/runtime'
 export type SessionsResponse = {
   sessions: SessionListItem[]
   total: number
+  projects?: Array<{
+    projectRoot: string
+    total: number
+  }>
   index?: LocalIndexStatus
 }
 export type ProjectSessionHistoryParams = {
@@ -31,6 +35,25 @@ export type SessionChatStatusResponse = {
 type MessagesResponse = {
   messages: MessageEntry[]
   taskNotifications?: AgentTaskNotification[]
+}
+export type SessionHistoryPage = MessagesResponse & {
+  page?: {
+    nextCursor: string | null
+    previousCursor?: string | null
+    hasMore: boolean
+    contentTruncated?: boolean
+    historyComplete: boolean
+    sourceVersion: string
+    scannedBytes: number
+    omittedOversizedEntries: number
+  }
+}
+export type SessionHistoryRecovery = MessagesResponse & {
+  sourceVersion: string
+  status: 'ready' | 'incomplete'
+  completeness?: { goal: boolean; todos: boolean; activity: boolean; usage: boolean }
+  tokenUsage: { input_tokens: number; output_tokens: number; cache_read_tokens?: number; cache_creation_tokens?: number } | null
+  omittedRecords: number
 }
 type CreateSessionResponse = { sessionId: string; workDir?: string }
 export type BatchDeleteSessionsResponse = {
@@ -181,8 +204,8 @@ export type SessionUsageSnapshot = {
   totalAPIDuration: number
   /**
    * Milliseconds the model spent emitting tokens, excluding prefill and tool execution.
-   * Absent or 0 means unknown (transcript source, aborted turn, non-streaming fallback) —
-   * never "instant", so a tokens/sec reading must be withheld rather than computed.
+   * The panel's tok/s uses `totalAPIDuration` instead: decode-only rates ignore TTFT and
+   * read as a peak the user never felt. Kept so resume snapshots still round-trip.
    */
   totalDecodeDuration?: number
   /** Milliseconds spent waiting for the first token, summed over the session's requests. */
@@ -459,11 +482,19 @@ function buildLspPath(
 }
 
 export const sessionsApi = {
-  list(params?: { project?: string; limit?: number; offset?: number }, options?: ApiRequestOptions) {
+  list(params?: {
+    project?: string
+    limit?: number
+    offset?: number
+    view?: 'sidebar'
+    perProjectLimit?: number
+  }, options?: ApiRequestOptions) {
     const query = new URLSearchParams()
     if (params?.project) query.set('project', params.project)
     if (params?.limit) query.set('limit', String(params.limit))
     if (params?.offset) query.set('offset', String(params.offset))
+    if (params?.view) query.set('view', params.view)
+    if (params?.perProjectLimit) query.set('perProjectLimit', String(params.perProjectLimit))
     const qs = query.toString()
     return api.get<SessionsResponse>(`/api/sessions${qs ? `?${qs}` : ''}`, options)
   },
@@ -477,8 +508,21 @@ export const sessionsApi = {
     return api.get<ProjectSessionHistoryResponse>(`/api/sessions/project-history?${query.toString()}`, options)
   },
 
-  getMessages(sessionId: string) {
-    return api.get<MessagesResponse>(`/api/sessions/${sessionId}/messages`)
+  // The timeline loads the whole transcript in one call. `mode=full` keeps the
+  // server's own byte budget but returns a single newest-first slice plus a
+  // `historyComplete` flag, so the UI never stitches page boundaries together.
+  getFullHistory(sessionId: string, options?: ApiRequestOptions) {
+    return api.get<SessionHistoryPage>(`/api/sessions/${sessionId}/messages?mode=full`, options)
+  },
+
+  getHistoryPage(sessionId: string, page?: { cursor?: string }, options?: ApiRequestOptions) {
+    const query = new URLSearchParams()
+    if (page?.cursor) query.set('cursor', page.cursor)
+    return api.get<SessionHistoryPage>(`/api/sessions/${sessionId}/messages${query.size ? `?${query}` : ''}`, options)
+  },
+
+  getHistoryRecovery(sessionId: string, options?: ApiRequestOptions) {
+    return api.get<SessionHistoryRecovery>(`/api/sessions/${sessionId}/history-recovery`, options)
   },
 
   getSummary(sessionId: string, options?: ApiRequestOptions) {
@@ -489,8 +533,13 @@ export const sessionsApi = {
     return api.get<SessionChatStatusResponse>(`/api/sessions/${sessionId}/chat/status`, { signal })
   },
 
-  getTrace(sessionId: string) {
-    return api.get<TraceSession>(`/api/sessions/${sessionId}/trace`)
+  getTrace(sessionId: string, options?: ApiRequestOptions, page?: { offset?: number; revisionToken?: string; scanCursor?: string }) {
+    const query = new URLSearchParams()
+    if (page?.offset) query.set('offset', String(page.offset))
+    if (page?.revisionToken) query.set('revisionToken', page.revisionToken)
+    if (page?.scanCursor) query.set('scanCursor', page.scanCursor)
+    const suffix = query.size ? `?${query}` : ''
+    return api.get<TraceSession>(`/api/sessions/${sessionId}/trace${suffix}`, options)
   },
 
   getTraceCall(sessionId: string, callId: string) {
@@ -528,8 +577,11 @@ export const sessionsApi = {
     return api.post('/api/sessions/sync-indexes')
   },
 
-  getRecentProjects(limit?: number) {
-    const query = typeof limit === 'number' ? `?limit=${limit}` : ''
+  getRecentProjects(limit?: number, scan?: number) {
+    const params = new URLSearchParams()
+    if (typeof limit === 'number') params.set('limit', String(limit))
+    if (typeof scan === 'number') params.set('scan', String(scan))
+    const query = params.size > 0 ? `?${params.toString()}` : ''
     return api.get<{ projects: RecentProject[] }>(`/api/sessions/recent-projects${query}`)
   },
 

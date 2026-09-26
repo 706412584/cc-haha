@@ -1,0 +1,205 @@
+# 上游合并报告 — upstream v0.6.6 → fork
+
+- **日期**: 2026-09-24
+- **分支**: `merge/upstream-v0.6.6`
+- **合并对象**: upstream `v0.6.6` (commit `2f8d819d`,tag `v0.6.6`)
+- **fork 侧**: `2f0ef19d` (release: v0.6.7)
+- **merge base**: `85e7f3a2`
+- **合并策略**: **以 fork 为主,吸收上游优化;大改子系统以上游为基底回植 fork 定制点**
+
+## 合并概况
+
+- merge 触及 **1219** 个文件(两父提交并集;`git diff 2f0ef19d 2f8d819d` 为 1218,`git diff 5f252915^1 5f252915` 为 380)。
+- 冲突已 **全部解决**:`git diff --diff-filter=U` = 0,全仓无残留 `<<<<<<<` / `>>>>>>>` 标记。
+- 括号/JSX 平衡自检通过(chatStore.ts 的朴素计数“不平衡”是字符串/正则/注释里的括号,fork HEAD 原版同值,非本次引入)。
+
+## 关键架构决策(二选一/取舍)
+
+1. **会话历史读取子系统** → **取上游分页架构**(`getSessionHistoryPage` / `recoverSessionHistory` / `historyComplete` 分页恢复),但**回植 fork 的 `thinkingEnabled` / `prePlanPermissionMode` 持久化字段**(handler.ts 有多处依赖)。desktop 侧 `getMessages` API 已被上游 `getFullHistory` / `getHistoryPage` 取代。
+2. **搜索索引子系统** → **保 fork 批处理架构**,回植上游 `suggestSessions` 等特性(此前会话已定,本次保持一致)。
+3. **Composer “+” 能力菜单** → **取上游 `ComposerCapabilityMenu` / `useCapabilityMenu` / `capabilityMenuModel` 统一架构**,并**把 fork 三个编排开关(协调者 coordinator / Solo / 逆向流水线 RE)作为 switch 行回植进共享 model**(`toggleCoordinator` / `setPipeline` action;lucide 图标 Share2/Target/Layers)。ChatInput 传入 `orchestration`;EmptySession 传 `null`(建会话前无 per-session 状态,与 fork 原行为一致)。删除了 fork 旧的内联 `SkillPickerMenu`/`+`菜单实现。
+4. **文件树右键菜单** (`WorkspaceFileTreePane` / `WorkspaceFileTab`) → **整体取 fork 侧**:保留 `WorkspaceFileTreeMenu`(复制路径/绝对路径、加入对话、外部程序打开)与 `WorkspaceEditableFile`(读/编辑/split 切换,上游已删该组件)。
+5. **ContextUsage 子系统** → **取上游重做版**(`ce87bb17` redesign、`467c1578` 删 caption、`31e6f7f6` 按用量填充、`c4219071` token 口径),**回植 fork 的手动 compact 动作**(`handleCompact` → `/compact` 走同一消息链,`hideDisplayContent` 隐藏气泡)。上游该子系统无 compact,属 fork 独有功能。
+6. **Provider 设置页** → **取上游实现**(含协议切换选择器),**并补齐 fork 去广告策略**:删除上游为 `aruhub` 硬编码的赞助 logo 与 `aria-label="Sponsor"` 星标。
+
+## fork 定制点保护清单(对照 CLAUDE.md,均已确认保留)
+
+- README.md / README.zh-CN.md:未被上游覆盖,Code Council 品牌与链接完整。
+- Provider preset:`teamorouter` / `xuanshuapi`(玄枢) / `fennoai` / `qiniuai` / `shengsuanyun` 保留 `deprecated` 墓碑;`jiekouai`(接口AI)可选、无广告。
+- **上游新增赞助商 `aruhub` / `atlascloud` / `apismart`:剔除 `featured` 位与 `promoText`(经用户确认)**;`opencode-go` 去掉推荐码 `?ref=`。providerPresets 测试保留 fork 版(`featuredIds === []`)。
+  - **如实说明残留**:`apismart` 仍保留 `apiKeyUrl`(值为 `https://www.apismart.ai`,无 `?aff=`/`utm_` 追踪参数,等同于 `websiteUrl`);`opencode-go` 仍保留 `promoText`(内容为“订阅后填入 API Key,即可获取并选择模型。”,属中性功能说明而非推广文案)。两者均不含推荐码或返利链接。
+- `xhigh` 推理档:保留(源码多处存在)。
+- relay 重试逻辑 `withRetry.ts`:`get_channel_failed` / `api_error` 5xx 保留(14 处)。
+- `thinking` 透传:proxy 层与 `thinkingEnabled` 字段保留。
+- Code Council wordmark:`Sidebar.tsx`(“Code <span>Council</span>”)、`AppShell.tsx` 保留。
+- 全库 GitHub 链接指向 `706412584/cc-haha`。
+  - **更正(2026-09-25,独立审核发现)**:此前“均已确认保留”的说法**不准确**。合并**新增了 2 个含 `NanmiCoder` 的文件**:`desktop/src/__tests__/directoryPicker.test.tsx`(3 处 `NanmiCoder/cc-haha`,已改为 `706412584/cc-haha`)与 `desktop/src/lib/fuzzyScore.test.ts`(2 处 `NanmiCoder/MediaCrawler`,是**另一个无关项目**当夹具数据用,非本仓库链接,保留)。
+  - **`desktop/src/pages/settings/AboutSettings.tsx` 的 `AUTHOR_GITHUB = 'https://github.com/NanmiCoder'` 是 fork 有意保留的原作者署名**(该文件注释明确写明 “Original author attribution … is intentionally preserved below”,并另有 `FORK_AUTHOR_GITHUB`)。这**不是**违规,不应改动。
+  - 其余 `NanmiCoder` / `anthropics/claude-code` 出现处(`docs/`、`.github/`、`src/` 中的 issue URL 注释)在 fork 里**早已存在**,合并既未新增也未删除。
+- **`ProviderSettings.tsx` 的 provider 兼容性徽章:合并时整体丢失,已回植(commit `195126a0`)。**
+  - 该文件整体取了上游版,而上游没有这两个徽章,于是 `provider-compat-badge-{id}`(伪 `tool_use` 计数 ≥ 阈值)与 `provider-thinking-badge-{id}`(thinking 不兼容)连同 store 订阅、两处 `clearProvider` 调用一并消失 —— 无冲突、无类型错误、无测试失败。
+  - **影响不只是少了个角标**:`chatStore.ts` 仍在调 `recordThinkingIncompatible`,store 仍在累计,7 个语言文件的 i18n key 也都在,但没有任何渲染器 —— 用户只看到一次性 toast,再也看不到持久状态。
+  - **根因是覆盖缺口**:fork 自己也**没有**这两个徽章的测试,所以合并丢掉它们时没有任何信号。已补 2 个回归测试,并验证「删掉徽章 → 测试失败」。
+- **fork 有意回退项(非丢失)**:`ToolCallBlock` 的 `liveStatsSummary` / `formatContentStats` 不恢复。fork commit `34aa9d71` 明确回退了上游 #823 与 #703/#707/#712/#751(pending tool UI),理由是这些改动会使第三方 provider 上的 `tool_use` 响应退化成 XML 文本块。
+
+## 冲突解决明细
+
+**实测冲突规模:`git merge-tree --write-tree 2f0ef19d 2f8d819d` 报出 122 个冲突文件。**
+
+> **更正(2026-09-25,独立审核发现)**:本节此前写作“465 个冲突文件”,**错误**。465(实为 466)是 `git merge-tree --write-tree --name-only` 输出的**全部改动文件行数**(含自动合并成功的),不是冲突数。`--name-only` 输出首行是 tree hash,故 467 行 = 1 + 466。真实冲突数按 `CONFLICT` 记录统计为 **122**(29 add/add、92 content、1 modify/delete)。此前的“~40 文件”估算反而更接近。
+
+其中上游改动 ≥15 行的冲突文件按解决取向分布:
+
+| 取向 | 文件数 |
+| --- | --- |
+| 整体取 fork | 22 |
+| 整体取上游 | 22 |
+| 手工混合 | 60 |
+
+无冲突文件已用三方合并(`git merge-file`)逐文件复算,与**合并提交 `5f252915`** 对比:**172 个中 171 个逐字节一致,唯一偏差是 `src/server/config/providerPresets.json`(去广告时有意修改)**。
+
+> **更正(2026-09-25,独立审核发现)**:本节此前写作“完全一致(deviation = 0)”,**不准确**。审核代理报告了 8 处偏差 —— 那是因为它拿 `merge-file` 输出与 **HEAD**(含本次合并之后 10 个修复提交)对比,而非与合并提交对比。两者都成立但含义不同:`merge-file` 相对合并提交偏差 1(有意),相对 HEAD 偏差 60(全部来自后续修复提交)。**报告此处本应明确对比基准是合并提交**,否则读者无法判断。
+>
+> 顺带记录一个方法论要点:`merge-file` 复算只能覆盖**非冲突**文件(本次 172 个可比较);122 个冲突文件没有等价的三方 oracle,仍依赖逐个人工判断。
+
+**源文件**:`ChatInput.tsx`、`EmptySession.tsx`、`chatStore.ts`、`TabBar.tsx`、`WorkspaceFileTreePane.tsx`(取 fork)、`WorkspaceFileTab.tsx`(取 fork)、`ContextUsageIndicator.tsx`、`ContextUsageDetails.tsx`、`ProviderSettings.tsx`、`Sidebar.tsx`、`sessionRuntimeStore.ts`、`tabStore.ts` 等。
+**能力菜单 graft 新增改动**:`capabilityMenuModel.ts`、`useCapabilityMenu.ts`(加 orchestration 支持)。
+**server 测试**:conversation-service、local-index-session-parity、sessions、trace-capture、websocket-handler、connectorService、workspaceWatch、cliAdapter 等 — 正交用例合并,架构相关取对应已合并侧。
+**JSON**:`src/server/config/providerPresets.json` 去赞助商广告字段。
+
+## 验证结果(本次在新机实测)
+
+环境:`bun 1.3.14`,`node_modules` 已就位(根 / `desktop` / `adapters`)。
+
+| 检查项 | 修复前 | 修复后 | pre-merge 基线 | 判定 |
+| --- | --- | --- | --- | --- |
+| desktop 单测失败数 | 46 | **15** | 15 | 新增归零 |
+| desktop 失败文件 | 17 | **6** | 6 | 逐一对应 |
+| `tsc --noEmit` (desktop) | 2 错误(阻断后续分析) | **0 错误** | 0 | 通过 |
+| `vite build` (desktop) | 未跑 | **通过** | — | 通过 |
+| `check:server`(CI,Linux) | 未跑 | **2 个文件红,均属上游自带** | — | 见下 |
+| `check:server`(本地,Windows) | 235 pass / 9 fail | 与基线相同的 9 个 | 相同 9 个 | 全部预存 |
+
+> **注意**:上表的“修复前”是**只修 desktop 之后**的状态。CI 上的 `chat-contract-checks`、`provider-contract-checks`、`policy-enforcement`、`server-checks`、`desktop-native-checks`、`coverage-checks` 当时全部为红 —— 第一轮修复只跑了 `check:server` 与 desktop 单测,没有跑 `check:impact` 选中的其余 lane。补跑后又发现 3 个功能回归与 1 处重复声明(见下)。
+
+剩余 15 个 desktop 失败与基线逐条一致,属预存问题(非本次引入):
+`scripts/build-macos-arm64.test.ts`、`electron/services/serverRuntime.test.ts`、`SessionActivityPanel.test.tsx`、`ModelSelector.test.tsx`、`TabBar.test.tsx`、`AgentManager.test.tsx`。
+server 侧 9 个失败同样与基线一致,归入 `docs/known-pre-existing-test-failures.md` 的根因 C(Windows symlink / EBUSY / 路径)。
+这些 Windows 特有的失败在 Linux CI 上不出现。
+
+### `server-checks` 最后剩下的 2 个文件(测试脚手架缺陷,非本次合并引入,已修)
+
+两者与上游 `2f8d819d` **逐字节相同**,且在 Windows 与 Linux(WSL 实测)上都以同样方式失败 —— 但根因在**测试脚手架**,不在被测产品,因此**都不应进 quarantine**:
+
+- `src/cli/print.sessionMessage.test.ts` —— 两处缺陷叠加:
+  1. `Bun.spawn(..., { stdin: new Blob([input]) })` **在两种平台上都不向子进程投递任何字节**,于是 CLI 无 stdout,`stdout.trim().split('\n').map(JSON.parse)` 抛 `Unexpected EOF`。同参数改用真实管道即正常(Linux 实测:Blob → 0 字节,pipe → 168 字节)。改为 `stdin: 'pipe'` + `write()`/`end()`。
+  2. `bin/claude-haha` 是 shebang 脚本,`Bun.spawn` 在 Windows 上无法直接执行(ENOENT)。按同目录两个兄弟测试已有的 `cliCommand()` 写法,在 Windows 上显式经运行时跑入口。
+- `src/server/services/sessionReferencesPersistence.test.ts` —— 两处过期断言:
+  1. 用例「collaboration cursors…」期望 130 轮分页走完,但上游自己的 `COLLABORATION_READ_MAX_PAGES = 8`(`4ed18f09` 引入)使单条 cursor 链最多 8 页 × 10 turn,随后以 `hasMore: false, historyComplete: false` 明示到达上限而非静默截断。改为按该常量断言「链式读取所服务的 turn 连续且为最新 80 条,并正确报告到达上限」。
+  2. `longestCursor > 500` 已不可达:有了页上限,链在第一个存储页内就结束,内嵌的存储 cursor(实测 531 字符)根本不会出现。把该不变量移到真正产出它的层 —— 新增用例直接断言存储 cursor 的长度区间。
+
+> 方法论教训:上一轮我把这两个文件判为「上游自带、应放行」。**「与上游逐字节相同 + 上游同样红」只能证明不是本次合并引入,不能证明不是 bug。** 二者实际都是可修的脚手架缺陷,修完在两个平台上都转绿。判定「不是我们的问题」之后,仍应问一句「那它是什么问题、能否修」。
+
+
+### 修复清单(25 文件)
+
+**A. 客观缺陷**
+- `desktop/src/pages/ActiveSession.test.tsx`:合并时被重复插入 557 行(7 个 `it` 各出现两次)并多出一个 `})`,导致该文件**完全无法解析**——其 44 个回归测试(终端面板 / 工作区面板 / 后台任务)一个都未执行。已去重并恢复平衡,现 44 用例全通过。
+- `src/server/api/sessions.ts`:`USAGE_ONLY_CONTROL_TIMEOUT_MS` **被声明两次**。重复声明使 `blankNonCode` 的输出无法解析,触发 `policy-enforcement` 的 dead-import 失败,并中断整文件扫描;修掉后 `check:server` 的通过文件数从 235 升到 473。
+- `src/server/proxy/handler.ts`:删除未使用的 `resolveModelReasoningProfile` import。fork 刻意**无条件**透传 `thinking` / `reasoning_content`,而不是按 DeepSeek reasoning profile 条件化,故 import 是残留。
+- `SkillPickerMenu.tsx`:能力菜单改取上游架构后成为孤儿(无 runtime importer),按 `componentReachability.test.ts` 指示删除,并清理 5 个语言文件中的 4 个专属 key。
+- `ToolCallBlock.tsx`:清理上游 import/type 残留(`CircleStop`、`ContentStats`)。
+- `capabilityMenuModel.test.ts`:补 fork 必需的 `orchestration` 字段。
+- `PermissionDialog.tsx`:`resolveDefaultRuntimeSelection` 传参由上游的 `currentModel?.id` 改为 fork 签名要求的 `currentModel`(类型不匹配)。
+
+**B. 真实功能回归(合并丢失 fork 逻辑,共 3 处,均已恢复)**
+- `sessionRuntimeStore.ts`:`matchesCurrent` 恢复 `thinkingEnabled` 比较。该比较 fork 有、上游无;丢失后服务端 thinking 覆盖值变化不会被同步,桌面端显示过期状态。
+- `src/server/ws/handler.ts`:恢复 `activeTurn.titleTurnNumber = titleTurnNumber`。丢失后第 3499 行的守卫比较永远失败,**fork 的润色标题生成功能完全失效**。
+- `src/server/services/sessionService.ts`:恢复整个 `prePlanPermissionMode` 持久化(fork 17 处引用 → 合并后 0 处)。涉及 `SessionLaunchInfo` / `RawEntry` 类型、`resolvePrePlanPermissionModeFromEntries` 解析(`null` 作为“已还原”墓碑)、`createSession` 与 `appendSessionMetadata` 写入、metadata 投影输出(仅 launchInfo)、append-skip 比较。丢失后离开 plan 模式无法还原用户原本的权限模式。
+- `Sidebar.tsx`:`handleManualRefresh` 移除冗余的 `refreshSessionsNow()` 调用。`syncIndexes()` 内部已包含 `fetchSessions()`,重复调用使每次手动刷新发出 2 次列表请求。
+
+**C. 去广告策略补齐**
+- `desktop/src/pages/settings/ProviderSettings.tsx`:删除为 `aruhub` 硬编码的赞助 logo 与 `aria-label="Sponsor"` 星标(上游新增,合并时遗漏)。
+- `src/server/__tests__/provider-presets.test.ts`:上游断言赞助商元数据(AruHub `featured` + `?aff=`、Atlas Cloud `utm_` 链接、OpenCode Go `?ref=`),改写为 fork 去广告语义(无 featured 位、无推荐码)。
+
+**D. 测试对齐**
+- `AskUserQuestion.test.tsx` / `chatStore.test.ts`:新增 `substantiveSends()` / `ORCHESTRATION_FRAME_TYPES` 过滤。fork 的 `chatStore.ts` 在每个真实用户回合前必发 `set_coordinator_mode` + `set_pipeline_mode` 两条帧,上游测试的 `toHaveBeenCalledTimes(1)` 未预料到。
+- `websocket-handler.test.ts`:上游断言“CLI 以纯 `No task found with ID` 拒绝时报告失败”。fork 刻意把它视为停止的目标态并收敛(`isBackgroundTaskAlreadyGoneMessage`,fork 独有),否则会重新点亮一个永远停不掉的按钮。
+- `tabStore.test.ts`:列表参数断言改为上游的分组形态 `{ view: 'sidebar', perProjectLimit: 6 }`;`syncFromSessions` 用例改用 `setState` 预置(该 store 把 `setSelection` 的值视为未确认用户选择,`pendingRuntimes` 会拒绝被 transcript 覆盖)。
+- `MessagePayloadRetention.test.tsx`:5000 行 Edit diff 用例单独给 20s 超时(本地约 2s,在负载较高的 CI runner 上越过默认 5s 上限)。
+- `generalSettings.test.tsx`:Provider 保存用例对齐上游行为(失败时对话框保持打开并显示 inline `role="alert"`,而非关闭 + toast + `console.error`)。
+- `TraceSession.test.tsx`:补回上游的 `renderReady(20)`,使第二次 revision/签名观察落在测试窗口内。
+- `ProviderSettings.test.tsx`:协议文案对齐 fork 的 `local protocol translation` 措辞(`providerProtocolTranslation.test.ts` 为此有专门守卫);AruHub 用例改为去广告语义(无徽章、无 `?aff=`、无 signup 文案);OpenCode Go 用例去掉 `?ref=` 推荐码。
+
+**E. 第二轮:会话子系统重合并后 CI 暴露的 8 个文件(commit `5aa756a9` → `22a42815` → `25efb892`)**
+
+`server-checks` 在 `11498836` 上仍红 8 个文件 / 18 个用例。逐一对照 `2f0ef19d`(fork)、`2f8d819d`(上游)与合并版三方后,归为三类:
+
+- **真实回归(3 处,均为“回植时把方法截断/写错”)**
+  - `sessionService.ts` 的 `getMetadataProjection`:会话子系统整体取 fork 版时,上游这个**有界元数据折叠**从未回植,于是三个本不该解析整份 transcript 的读取口被指回 `readJsonlFile` —— `getSessionLaunchInfo` / `getSessionWorkDir` 会把整份文件读进内存(测试里 24 条 256 KB 记录即触发),`appendSessionMetadata` 为解析 repository 与跨占位文件搬运标题也要全读。已按上游实现回植单一折叠(经 `streamBoundedHistory` + `HISTORY_SEMANTIC_RECORD_BYTES` 流式读取,128 KB 元数据信封上限),并保留 fork 必须随投影携带的字段(`prePlanPermissionMode`、`thinkingEnabled`、`providerTransition`)。
+  - 同一方法里的 `prePlanPermissionMode` 初版用了 `??`,**无法表达“已清除”**:`resolvePrePlanPermissionModeFromEntries` 对“没有条目”和“见到 `null` 墓碑”都返回 `undefined`,于是恢复用户原权限模式后旧值仍在,`getSessionLaunchInfo` 继续上报。改为显式判墓碑(与 resolver 自身契约一致)。
+  - `sessionService.ts` 的 `searchSessionMetadata`:回植时被截成“只用索引,否则返回空”,丢掉上游的 JSONL 扫描 + 排序兜底。已补回。
+- **测试组成错配(4 个文件,上游用例贴到了 fork 实现上)**
+  - `src/server/__tests__/settings.test.ts`:保留了上游新增的 4 个用例,却保留了 fork 的 import 块 → `getDefaultMainLoopModelSetting` / `parseUserSpecifiedModel` / `getSonnet46_1MOption` 未定义。补回上游 import 块即可(89 pass)。
+  - `src/server/services/localIndex/searchContentProjector.test.ts`(7 个用例):实现侧是 **fork 的批处理架构**(与本报告决策 2 一致),而上游追加的用例测的是上游独有的 `onBatch` / `onCommitStarted` 钩子(配套文件 `searchContentCommitWorker.ts` 未被采用)。恢复 fork 测试文件(11 pass)。
+  - `src/server/services/localIndex/searchContentCoordinator.test.ts`(2 个):删掉上游那个测 worker 写锁合并的 describe(`d16aabcf` 引入,架构未采用),保留已回植的 `suggestSessions` 断言(20 pass)。
+  - `src/server/services/localIndex/coordinator.test.ts`(1 个):上游 `9c88a5cc`(已有提交行的快照可继续服务)已被采用,故启动再水合后的状态是 `ready` 而非 `building`,更新该断言(51 pass)。
+  - `src/server/__tests__/sessions.test.ts` 的 `readJsonlFile parse cache`(T1/T4/T5):该套件借 `getSessionWorkDir` 驱动 fork 的 `readJsonlFile` 解析缓存,而上游已把该读取口改走有界投影(`fs.open`,不是 `fs.readFile`),于是 T1/T4 断言在投影根本不做的读取上失败,T5 变成 0 === 0 的空转。三个用例改走仍在用 `readJsonlFile` 的 `getSessionMessages`,并给 T5 补回「确实发生过整文件读取」的前置断言,避免它以错误的理由通过。
+- **测试脚手架缺陷(2 个文件,与上游逐字节相同,但可修)** —— 见上节。
+
+> 第二轮的两个方法论教训:
+> 1. 判“是否合并引入”必须用**合并版自己的 blob** 与两侧对照。我一度用主仓的 `HEAD`(即 `main`/fork)当“合并版”去比对,得出了相反的归属结论。正确做法是 `git -C <merge-worktree> rev-parse HEAD:<path>`,或直接跑三方矩阵。
+> 2. **“与上游逐字节相同 + 上游同样红”只证明不是本次引入,不证明不是 bug。** 那两个文件实际都是可修的脚手架缺陷。
+
+## 独立审核(2026-09-25,两个子代理)
+
+对会话子系统回植与整体合并各派了一个独立审核代理,结论与处置:
+
+**审核代理 A(审 `sessionService.ts` 回植等价性 + 测试合法性)**
+
+- 逐字段比对确认 `getMetadataProjection` 的 `apply()` / `shared()` 与上游**逐字等价**,仅多出 fork 必需的三个字段;缓存键、签名、LRU 上限、in-flight 去重与上游一致;三处调用点与上游 4565/4592/4796/4828/4833 行一致。**结论:回植忠实。**
+- 指出 `readCustomTitleFromFile` 成为死代码 → **已删除**(`1b46a976`)。
+- 指出 `sessions.test.ts` T4 丢了内容断言(`toEqual` 在两个空数组上也成立)→ **已补断言**(`1b46a976`)。
+- 指出 `print.sessionMessage.test.ts` 的 stdin 机制说明有误 → **经实测更正**:`Bun.spawn` 的 Blob stdin 在两种平台上**都能投递**(11/11 字节),我原先"Blob 不投递"的说法是错的;真实差异是 **Linux 上 Blob → 0 字节 stdout、pipe → 173 字节**,而 Windows 两者都正常。注释已改为记录实测数据而非错误理论。
+- 提出 `permissionMode` 的 `??` 与 pre-plan 字段结构相同、疑似同类 bug → **实测排除**:该 resolver 没有 tombstone 分支,且 fork 自己的整文件 resolver 对同一 transcript 给出相同结果(均为 `plan`);tombstone 场景仍能正确清除。属忠实行为,非 bug。
+- 提出 `getSessionLaunchInfo` / `getSessionWorkDir` 现在会对超限记录抛 413(而 fork 原先降级)→ **实测确认存在,但属上游行为**:上游同样抛出,且上游在 `ws/handler.ts:896`、`api/sessions.ts:1449` 有同样的裸调用点。是忠实移植,非合并混血。审核者附带"`getCustomTitle` 也会 413"的说法**不成立** —— 只有两个访问器检查 `complete`。
+
+**审核代理 B(找丢失的 fork 定制点 + 核对报告 claim)** —— 这是本轮最有价值的一次审核,发现了一个 CI 全绿也查不出的真实功能丢失。
+
+- **确认并已修复:provider 兼容性徽章整体丢失**(见上文"fork 定制点保护清单")→ 回植 + 补测试(`195126a0`)。
+- **确认并已修复:合并新增 2 个含 `NanmiCoder` 的文件**(见上文)→ 其中 3 处指向本仓库的已改为 `706412584/cc-haha`;`AboutSettings.tsx` 的原作者署名经核实是**有意保留**,不动。
+- **确认并已更正:报告三处数字/结论有误** —— 冲突数 465 实为 **122**;`merge-file` 复算"完全一致"需明确对比基准是**合并提交**(相对合并提交偏差 1,相对 HEAD 偏差 60);1218/380 的口径已补注。
+- **审核者提出但经核实为其自身方向搞反的**:`pluginBridge.ts` 的 `reloadConnectorSessions`。审核者称 fork 用了更窄的 `reason === 'failed'`、上游用了 `|| errors > 0` 因而 fork 的收紧被覆盖。**实测相反**:fork 是 `|| result.errors > 0`(更宽),**上游**才是 `reason === 'failed'`,且上游附了注释说明"error_count 覆盖会话内所有插件(含无关的 stale settings 条目),外来插件的加载错误不该否决本连接器的安装"。**取上游是正确的修复**,不是丢失。
+- **审核者提出但经核实无问题的**:`src/utils/claudemd.ts` 的 `isNestedWorktree`(审核者 grep 范围有误,实际存在 7 处,且 fork 的 nested-worktree 用例仍在;`claudemd.test.ts` 的 3 pass/18 fail 在基线 `11498836` 上**逐条相同**,属预存)、`ComposerReferenceMenu.tsx` 与 `WorkspaceBrowserTab.tsx`(均为上游较新的契约,取上游合理)。
+- 审核者自报**未能验证**的:`src/services/api/claude.ts`、`src/utils/messages.ts`、`src/services/mcp/client.ts` 等 700+ 行手工合并文件只做了符号级抽查;122 个冲突文件的冲突区域仍无三方 oracle。这两项与下方残余风险一致。
+
+> 这轮审核的价值集中在三点:(1) 我的 stdin 机制解释是**错的**,被实测推翻;(2) 我删测试时**顺手削弱了一个断言**(T4);(3) **发现了一个 CI 全绿也照不出的真实功能丢失**(provider 兼容性徽章)—— 因为它连 fork 自己都没有测试。同时它也提醒:**"与上游行为一致"不等于"行为正确"**,而**"审核者说有"也不等于"真有"** —— `pluginBridge.ts` 那条就是审核者把方向搞反了,我实测才确认取上游是对的。
+
+## 残余风险
+
+- **手工混合的 60 个冲突文件没有等价的三方验证手段。** 无冲突文件已用 `git merge-file` 复算确认无误,冲突文件则依赖逐个人工判断。本轮已发现并修复 6 处回归(4 处 fork 行为丢失 + 1 处重复声明 + 1 处上游兜底被截断),**不排除其他手工混合处仍有未被测试覆盖的偏差**。这是本次合并最大的不确定性来源。
+- **fork 行为丢失的模式值得警惕**:多处丢失都是“fork/上游在某个函数里多加了一个字段、比较或兜底分支,合并取了另一侧后该增量消失”。这类丢失不产生类型错误、不影响编译,只有对应测试才会暴露。建议后续合并时对 `sessionService.ts`、`ws/handler.ts`、`sessionRuntimeStore.ts` 这三个文件做 fork-vs-merge 的逐函数字段比对。
+- **`sessionService.ts` 的回归尤其危险**:该文件在本次合并中整体取了 fork 版(6177 行),上游所有新增方法都要手工回植,任何一处漏掉或截断都只在运行时暴露。本轮已在其中发现 2 处(`getMetadataProjection` 整块缺失、`searchSessionMetadata` 兜底被截)。**建议下次合并对该文件做方法级清单核对**:先 `grep` 出上游侧的全部 public/private 方法名,再逐个确认合并版里存在且未被简化。
+- **root `src/` 没有任何类型检查 lane。** `check:desktop` 对 desktop 跑 `tsc --noEmit`,但**没有任何 quality 脚本对 root `src/` 跑 `tsc`**;Bun 只剥离类型不做检查。也就是说本次 257 行的 `sessionService.ts` 改动**只被测试验证,未被类型验证**。我用 desktop 的 tsc + 临时 tsconfig 单独跑了该文件,与改动前按错误码多重集逐项对比:**零新增、零移除**。但这是手工动作,建议把 root `tsc --noEmit` 纳入 CI(需先补 `bun-types` 依赖,当前 `tsconfig.json` 引用了它却未安装)。
+- **`getSessionLaunchInfo` / `getSessionWorkDir` 对超限记录抛 413 是继承自上游的行为变更。** fork 原先走整文件读取、对超限记录降级;改走有界投影后,单条 >8 MiB 的记录会让这两个访问器抛 `SESSION_METADATA_INCOMPLETE`。上游同样如此、且有同样的裸调用点,故非本次引入 —— 但 fork 的调用方(如 `ws/handler.ts:1214` 的标题路径,虽在 try 内但会向上 rethrow)从未面对过这个失败模式。**建议单独评估**:是否需要让标题/工作目录这类非关键路径在超限时降级而非抛错。
+- **被删的上游 projector 用例带走了回滚/原子性覆盖。** 删除的 5 个用例测的是上游 worker/spool 架构(该架构未被采用),删除本身正确;但 fork 的批处理路径下,「插入失败后不留半成品行」「abort 后保留旧快照」这类不变量现在只有 `commits projection batches…leaves interrupted writes pending` 和 `rebuilds after an interrupted append…` 两个用例间接覆盖(合并前 fork 也是如此)。建议补 1–2 个针对批处理提交回滚的用例。
+- `searchSessionMetadata` 的兜底路径现由 `sessionMetadataSearch.test.ts` 覆盖(2 pass),但 `getMetadataProjection` 目前只被 `sessionHistoryRecovery.test.ts` 的「不读整份 transcript」用例间接覆盖。建议补一个直接断言:元数据读取在超过 128 KB 信封时抛 `SESSION_METADATA_TOO_LARGE`,以及缓存按源版本失效。
+- `ContextUsageDetails.tsx` 回植的 compact 按钮目前无专门单测覆盖(上游该子系统无此功能,`ContextUsageIndicator.test.tsx` 的 27 个用例全部通过,但不含 compact 交互)。建议后续补一个「compact 在 turn 进行中禁用、点击后发送 `/compact`」的用例。
+- `ToolCallBlock.tsx` 上游 `liveStatsSummary` 的回退依赖 `34aa9d71` 的既有决策;若上游后续修复了第三方 provider 的 XML 退化问题,可考虑重新评估是否恢复。
+- 本地(Windows)与 CI(Linux)的失败集合不同:本地 desktop 15 个 / server 9 个失败在 CI 上不出现,而 CI 的 desktop 1 个 / server 15 个失败在本地也不完全复现。**以 CI 结果为准**,本地跑测试只能用于快速定位。
+- **跨文件测试污染会伪造回归信号。** 批量跑 10 个引用会话访问器的测试文件时出现 24 个失败,但**同一批次在改动前的 `11498836` 上失败集合逐条相同**,且这 10 个文件**单独跑全部通过**。判定任何批量失败前,必须先与基线跑同一批次对比,否则会把既有污染误判成本次引入。
+
+## 恢复工作方式
+
+```bash
+git fetch origin
+git checkout merge/upstream-v0.6.6
+git pull
+bun install && cd desktop && bun install   # 装依赖
+# 按 check:impact 选中的 lane 全跑,不要只跑 desktop + check:server:
+cd desktop && node ./node_modules/typescript/bin/tsc --noEmit
+node ./node_modules/vitest/vitest.mjs run
+cd .. && bun run check:server && bun run check:provider-contract \
+  && bun run check:chat-contract && bun run check:agent-flow && bun run check:policy
+# 全绿后:走 PR 合入 main
+```

@@ -1,7 +1,8 @@
 import { buildComputerUseAllowResponse } from '../../utils/computerUsePermissions.js'
 import type { CuPermissionRequest, CuPermissionResponse } from '../../vendor/computer-use-mcp/types.js'
-import { sendToSession } from '../ws/handler.js'
+import { getSessionTurnState, sendToSession } from '../ws/handler.js'
 import { conversationService } from './conversationService.js'
+import { emitSessionTurnEvent } from './sessionTurnEvents.js'
 
 type PendingApproval = {
   sessionId: string
@@ -13,8 +14,14 @@ type PendingApproval = {
 
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000
 
-class ComputerUseApprovalService {
+export class ComputerUseApprovalService {
   private pending = new Map<string, PendingApproval>()
+
+  constructor(private readonly timeoutMs = REQUEST_TIMEOUT_MS) {}
+
+  private resolved(sessionId: string, requestId: string): void {
+    emitSessionTurnEvent({ type: 'output', sessionId, message: { type: 'control_response', request_id: requestId } })
+  }
 
   async requestApproval(
     sessionId: string,
@@ -31,11 +38,16 @@ class ComputerUseApprovalService {
       this.pending.delete(request.requestId)
     }
 
+    // Check before inserting into pending: our own request must not make an
+    // otherwise nonexistent session appear blocked and eligible for approval.
+    const canWaitWithoutRenderer = getSessionTurnState(sessionId) !== 'idle'
+
     return await new Promise<CuPermissionResponse>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(request.requestId)
+        this.resolved(sessionId, request.requestId)
         reject(new Error('Computer Use approval timed out'))
-      }, REQUEST_TIMEOUT_MS)
+      }, this.timeoutMs)
 
       this.pending.set(request.requestId, {
         sessionId,
@@ -51,11 +63,16 @@ class ComputerUseApprovalService {
         request,
       })
 
-      if (!sent) {
+      if (!sent && !canWaitWithoutRenderer) {
         clearTimeout(timeout)
         this.pending.delete(request.requestId)
         reject(new Error('Desktop session is not connected'))
+        return
       }
+      emitSessionTurnEvent({ type: 'output', sessionId, message: {
+        type: 'control_request', request_id: request.requestId,
+        request: { subtype: 'can_use_tool', tool_name: 'ComputerUse', description: request.reason },
+      } })
     })
   }
 
@@ -64,6 +81,7 @@ class ComputerUseApprovalService {
     if (!pending) return false
     clearTimeout(pending.timeout)
     this.pending.delete(requestId)
+    this.resolved(pending.sessionId, requestId)
     pending.resolve(response)
     return true
   }
@@ -79,6 +97,7 @@ class ComputerUseApprovalService {
       if (pending.sessionId !== sessionId) continue
       clearTimeout(pending.timeout)
       this.pending.delete(requestId)
+      this.resolved(sessionId, requestId)
       pending.reject(new Error('Desktop session disconnected during Computer Use approval'))
     }
   }

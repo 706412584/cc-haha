@@ -7,6 +7,13 @@
  */
 
 import type { ServerWebSocket } from 'bun'
+import { sessionMessageUuid } from '../../utils/sessionMessageInbox.js'
+import { parseSessionCollaborationEnvelope } from '../../utils/sessionCollaborationEnvelope.js'
+import { admitSessionUserTurn, emitSessionTurnEvent } from '../services/sessionTurnEvents.js'
+import { ApiError } from '../middleware/errorHandler.js'
+import { resolveSessionReferenceContext, splitSessionReferenceContext } from '../services/sessionReferenceContext.js'
+
+export type SessionConnection = Pick<ServerWebSocket<WebSocketData>, 'data' | 'send' | 'close'>
 import type {
   AgentRunStreamMessage,
   ClientMessage,
@@ -17,6 +24,7 @@ import type {
   TurnTiming,
 } from './events.js'
 import { RUNTIME_CONFIG_APPLIED_EVENT } from './events.js'
+import { PLAN_EXECUTION_CONTINUE_MESSAGE } from '../../constants/messages.js'
 import * as os from 'node:os'
 import {
   ConversationStartupError,
@@ -135,7 +143,7 @@ const settingsService = new SettingsService()
 const providerService = new ProviderService()
 
 function buildSdkWebSocketUrl(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
 ): string {
   const url = new URL(`ws://${ws.data.serverHost}:${ws.data.serverPort}/sdk/${sessionId}`)
@@ -245,7 +253,9 @@ export function classifyRuntimeTransition(_input: {
 }
 
 type ActiveUserTurnState = {
+  admissionPending?: boolean
   messageSent: boolean
+  collaborationAck?: 'queued' | 'consumed'
   sendStarted?: boolean
   stopped?: boolean
   titleTurnNumber?: number
@@ -612,7 +622,7 @@ const DEFAULT_PREWARM_IDLE_TIMEOUT_MS = 5 * 60_000
 const VALID_CLAUDE_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 
 async function sendRepositoryStartupStatus(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
   reason: 'user_message' | 'prewarm_session',
 ): Promise<void> {
@@ -687,11 +697,11 @@ export type WebSocketData = {
 
 // Active WebSocket clients, grouped by session. Desktop, H5, and IM adapters can
 // legitimately watch the same running session at the same time.
-const activeSessions = new Map<string, Set<ServerWebSocket<WebSocketData>>>()
-let activePetClient: ServerWebSocket<WebSocketData> | null = null
+const activeSessions = new Map<string, Set<SessionConnection>>()
+let activePetClient: SessionConnection | null = null
 
 const clientOutputCallbacks = new Map<
-  ServerWebSocket<WebSocketData>,
+  SessionConnection,
   {
     sessionId: string
     callback: (cliMsg: any) => void
@@ -702,7 +712,7 @@ const observedTerminalTasks = new Map<string, Set<string>>()
 const sessionTranscriptEpochs = new Map<string, number>()
 
 export const handleWebSocket = {
-  open(ws: ServerWebSocket<WebSocketData>) {
+  open(ws: SessionConnection) {
     const { sessionId, channel, sdkToken } = ws.data
 
     if (channel === 'sdk') {
@@ -746,6 +756,17 @@ export const handleWebSocket = {
 
     const msg: ServerMessage = { type: 'connected', sessionId }
     sendMessage(ws, msg)
+    // The persisted transcript is authoritative for a custom title, while the
+    // SQLite session-list projection can still be catching up after startup.
+    // Replay the title to the connected renderer so the page header, tab, and
+    // sidebar do not wait for the background reconciliation watcher.
+    void sessionService.getCustomTitle(sessionId).then((title) => {
+      if (!title || !activeSessions.get(sessionId)?.has(ws)) return
+      sendMessage(ws, { type: 'session_title_updated', sessionId, title })
+    }).catch(() => {
+      // A missing or temporarily unreadable transcript must not reject the
+      // WebSocket connection; the normal session-list refresh remains a fallback.
+    })
     const toolRequestIds = replayPendingPermissionRequests(ws, sessionId)
     const computerUseRequestIds = replayPendingComputerUsePermissionRequests(ws, sessionId)
     sendMessage(ws, {
@@ -757,7 +778,7 @@ export const handleWebSocket = {
     replayAgentStopFailures(ws, sessionId)
   },
 
-  message(ws: ServerWebSocket<WebSocketData>, rawMessage: string | Buffer) {
+  message(ws: SessionConnection, rawMessage: string | Buffer) {
     if (ws.data.channel === 'sdk') {
       const { sessionId, sdkToken } = ws.data
       if (!conversationService.authorizeSdkConnection(sessionId, sdkToken)) {
@@ -872,12 +893,13 @@ export const handleWebSocket = {
             ) {
               failSessionChatActivity(sessionId)
               clearActiveUserTurn(sessionId, activeTurn)
+              emitSessionTurnEvent({ type: 'output', sessionId, message: { type: 'result', is_error: true, result: 'The request could not be started.' } })
               const titleState = sessionTitleState.get(sessionId)
               if (titleState) titleState.activeTurn = undefined
               sendMessage(ws, {
                 type: 'error',
-                message: 'The request could not be started. Please retry.',
-                code: 'USER_TURN_FAILED',
+                message: err instanceof ApiError ? err.message : 'The request could not be started. Please retry.',
+                code: err instanceof ApiError ? err.code : 'USER_TURN_FAILED',
                 retryable: true,
               })
               sendMessage(ws, { type: 'status', state: 'idle' })
@@ -957,7 +979,7 @@ export const handleWebSocket = {
     }
   },
 
-  close(ws: ServerWebSocket<WebSocketData>, code: number, reason: string) {
+  close(ws: SessionConnection, code: number, reason: string) {
     const { sessionId, channel } = ws.data
 
     if (channel === 'sdk') {
@@ -999,7 +1021,7 @@ export const handleWebSocket = {
     watchTurnCompletionForCleanup(sessionId)
   },
 
-  drain(ws: ServerWebSocket<WebSocketData>) {
+  drain(ws: SessionConnection) {
     // Backpressure handling - called when the socket is ready to receive more data
   },
 }
@@ -1076,14 +1098,15 @@ function settleStoppedGeneration(sessionId: string): void {
 }
 
 async function handleUserMessage(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   message: Extract<ClientMessage, { type: 'user_message' }>,
   activeTurn: ActiveUserTurnState,
+  collaboration?: { messageId: string; sourceSessionId: string; canSend?: () => boolean },
 ) {
   const persistTitleSource = sessionService.shouldPersistSession()
   const { sessionId } = ws.data
 
-  const desktopSlashCommand = getDesktopSlashCommand(message.content)
+  const desktopSlashCommand = collaboration ? null : getDesktopSlashCommand(message.content)
 
   // Reject invalid /clear before waiting on stop settlement so a latched Stop
   // cannot trap argument validation behind an unresolved force-kill timer.
@@ -1135,194 +1158,329 @@ async function handleUserMessage(
   // Send thinking status
   sendMessage(ws, { type: 'status', state: 'thinking', verb: 'Thinking' })
 
-  activeTurn.expectedReplayUuid = crypto.randomUUID()
+  activeTurn.expectedReplayUuid ??= crypto.randomUUID()
   activeTurn.expectedLocalCommand = desktopSlashCommand ?? undefined
   activeTurn.replacementAfterStop =
     sessionStopRequested.has(sessionId) || agentStopRequestedSessions.has(sessionId)
+  activeTurn.admissionPending = !collaboration
   activeUserTurns.set(sessionId, activeTurn)
 
-  const initialRuntimeTransition = await waitForRuntimeTransitionBeforeUserTurn(ws, sessionId)
-  if (
-    !initialRuntimeTransition.ok ||
-    activeUserTurns.get(sessionId) !== activeTurn ||
-    activeTurn.cancelled
-  ) {
-    clearActiveUserTurn(sessionId, activeTurn)
-    return
-  }
-  if (initialRuntimeTransition.waited) {
-    sendMessage(ws, { type: 'status', state: 'thinking', verb: 'Thinking' })
-  }
-
-  // Track and emit the first placeholder title before CLI startup/streaming.
-  let titleState = sessionTitleState.get(sessionId)
-  if (!titleState) {
-    const hasCustomTitle = !!(await sessionService.getCustomTitle(sessionId))
-    const launchInfo = hasCustomTitle
-      ? null
-      : await sessionService.getSessionLaunchInfo(sessionId)
-    if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) return
-    titleState = {
-      userMessageCount: 0,
-      hasCustomTitle,
-      hasExistingTranscript: (launchInfo?.transcriptMessageCount ?? 0) > 0,
-      persistTitleSource,
-      firstUserMessage: '',
-      completedTurns: [],
-      startedGenerationKeys: new Set<string>(),
-      generationSeq: 0,
+  const content = await resolveSessionReferenceContext(message.content, message.sessionReferences,
+    async id => Boolean(await sessionService.getSessionSummary(id)))
+  if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) return
+  let admission: Awaited<ReturnType<typeof admitSessionUserTurn>> | undefined
+  if (!collaboration) {
+    try {
+      admission = await admitSessionUserTurn(sessionId, () =>
+        activeUserTurns.get(sessionId) === activeTurn && !activeTurn.cancelled)
+    } catch (error) {
+      if (activeUserTurns.get(sessionId) === activeTurn && !activeTurn.cancelled) {
+        clearActiveUserTurn(sessionId, activeTurn)
+        sendMessage(ws, {
+          type: 'error',
+          message: error instanceof Error ? error.message : 'The request could not be started. Please retry.',
+          code: error instanceof ApiError ? error.code : 'USER_TURN_FAILED',
+          retryable: true,
+        })
+        sendMessage(ws, { type: 'status', state: 'idle' })
+      }
+      return
     }
-    sessionTitleState.set(sessionId, titleState)
   }
-  const titleInput = getTitleInputForUserMessage(message.content, desktopSlashCommand)
-  let titleTurnNumber: number | null = null
-  if (titleInput) {
-    titleState.persistTitleSource &&= persistTitleSource
-    titleState.userMessageCount++
-    titleTurnNumber = titleState.userMessageCount
-    titleState.activeTurn = {
-      count: titleTurnNumber,
-      userText: titleInput,
-      assistantText: '',
-    }
-    if (titleState.userMessageCount === 1) {
-      titleState.firstUserMessage = titleInput
-    }
-    triggerTitleGeneration(ws, sessionId, 'user-message')
-  }
-
-  // 启动 CLI 子进程（如果还没有）
   try {
-    await ensureCliSessionStarted(ws, sessionId, 'user_message')
-  } catch (err) {
     if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) return
-    const errMsg = err instanceof Error ? err.message : String(err)
-    const code =
-      err instanceof ConversationStartupError ? err.code : 'CLI_START_FAILED'
-    console.error(`[WS] CLI start failed for ${sessionId}: ${errMsg}`)
-    const diagnosticMessage = await buildSessionStartupDiagnosticMessage(sessionId, errMsg)
-    if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) return
-    sendMessage(ws, {
-      type: 'error',
-      message: diagnosticMessage,
-      code,
-      retryable:
-        err instanceof ConversationStartupError ? err.retryable : false,
-    })
-    sendMessage(ws, { type: 'status', state: 'idle' })
-    failSessionChatActivity(sessionId)
-    clearActiveUserTurn(sessionId, activeTurn)
-    return
-  }
-  if (activeTurn.stopped) {
-    clearActiveUserTurn(sessionId, activeTurn)
-    return
-  }
+    activeTurn.admissionPending = false
+    if (!collaboration) emitSessionTurnEvent({ type: 'user-input', sessionId })
 
-  if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) {
-    stopRuntimeStartedByCancelledAdmission(sessionId, activeTurn)
-    return
-  }
-
-  const startupRuntimeTransition = await waitForRuntimeTransitionBeforeUserTurn(ws, sessionId)
-  if (
-    startupRuntimeTransition.ok &&
-    activeUserTurns.get(sessionId) === activeTurn &&
-    !activeTurn.cancelled
-  ) {
-    if (startupRuntimeTransition.waited) {
+    const initialRuntimeTransition = await waitForRuntimeTransitionBeforeUserTurn(ws, sessionId)
+    if (
+      !initialRuntimeTransition.ok ||
+      activeUserTurns.get(sessionId) !== activeTurn ||
+      activeTurn.cancelled
+    ) {
+      clearActiveUserTurn(sessionId, activeTurn)
+      return
+    }
+    if (initialRuntimeTransition.waited) {
       sendMessage(ws, { type: 'status', state: 'thinking', verb: 'Thinking' })
     }
-  } else {
-    clearActiveUserTurn(sessionId, activeTurn)
-    return
-  }
 
-  // Register the callback before sending the turn so startup errors are not lost.
-  // Keep output muted until the current user turn is enqueued to avoid forwarding
-  // any pre-turn SDK chatter as fresh chat history.
-  let userMessageSent = false
-  const shouldForwardCurrentTurnLocalCommand =
-    createCurrentTurnLocalCommandForwarder(desktopSlashCommand)
-  activeTurn.titleTurnNumber = titleTurnNumber ?? undefined
-  const removeTitleOutputCallback = titleTurnNumber === null
-    ? null
-    : bindTitleSessionOutput(ws, sessionId, activeTurn, () => userMessageSent)
-
-  bindAllClientSessionOutputs(sessionId, {
-    shouldForward: (cliMsg) => {
-      if (
-        userMessageSent ||
-        (cliMsg.type === 'result' && cliMsg.is_error) ||
-        isAgentRunMessageFrame(cliMsg)
-      ) {
-        return true
+    // Track and emit the first placeholder title before CLI startup/streaming.
+    let titleState = sessionTitleState.get(sessionId)
+    if (!titleState) {
+      const hasCustomTitle = !!(await sessionService.getCustomTitle(sessionId))
+      const launchInfo = hasCustomTitle
+        ? null
+        : await sessionService.getSessionLaunchInfo(sessionId)
+      if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) return
+      titleState = {
+        userMessageCount: 0,
+        hasCustomTitle,
+        hasExistingTranscript: (launchInfo?.transcriptMessageCount ?? 0) > 0,
+        persistTitleSource,
+        firstUserMessage: '',
+        completedTurns: [],
+        startedGenerationKeys: new Set<string>(),
+        generationSeq: 0,
       }
-      return shouldForwardCurrentTurnLocalCommand(cliMsg)
-    },
-  })
-  const removeActiveTurnOutputCallback = bindActiveUserTurnCompletion(ws, sessionId, activeTurn)
-  activeTurn.removeCompletionCallback = removeActiveTurnOutputCallback
-
-  if (activeTurn.stopped) {
-    removeActiveTurnOutputCallback()
-    removeTitleOutputCallback?.()
-    clearActiveUserTurn(sessionId, activeTurn)
-    discardActiveTitleTurn(sessionId, titleTurnNumber)
-    return
-  }
-
-  // The renderer may have left while the CLI was still starting, before this
-  // turn could flip messageSent=true. The disconnect handler cannot attach an
-  // effective output watcher until the ConversationService session exists, so
-  // refresh it here, immediately before sending the turn, to observe a
-  // permission request that arrives after the disconnect.
-  refreshDisconnectedTurnCleanupWatcher(sessionId)
-
-  activeTurn.sendStarted = true
-  const sent = await conversationService.sendMessage(
-    sessionId,
-    message.content,
-    message.attachments,
-    {
-      canSend: () =>
-        activeUserTurns.get(sessionId) === activeTurn && !activeTurn.cancelled,
-      messageUuid: activeTurn.expectedReplayUuid,
-      onCommitted: () => {
-        activeTurn.messageSent = true
-      },
-    },
-  )
-  if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) {
-    // Once onCommitted has run the SDK owns this turn and will still emit its
-    // terminal result. Keep the completion callback long enough to consume
-    // that boundary; only an admission revoked before the socket write is safe
-    // to detach immediately.
-    if (!activeTurn.messageSent) removeActiveTurnOutputCallback()
-    removeTitleOutputCallback?.()
-    discardActiveTitleTurn(sessionId, titleTurnNumber)
-    if (!activeTurn.messageSent) {
-      stopRuntimeStartedByCancelledAdmission(sessionId, activeTurn)
+      sessionTitleState.set(sessionId, titleState)
     }
-    return
-  }
-  if (!sent) {
-    removeActiveTurnOutputCallback()
-    clearActiveUserTurn(sessionId, activeTurn)
-    removeTitleOutputCallback?.()
-    discardActiveTitleTurn(sessionId, titleTurnNumber)
-    sendMessage(ws, {
-      type: 'error',
-      message: 'CLI process is not running. The session may have ended or the process crashed.',
-      code: 'CLI_NOT_RUNNING',
-    })
-    sendMessage(ws, { type: 'status', state: 'idle' })
-    failSessionChatActivity(sessionId)
-    return
-  }
+    const titleInput = getTitleInputForUserMessage(message.content, desktopSlashCommand)
+    let titleTurnNumber: number | null = null
+    if (titleInput) {
+      titleState.persistTitleSource &&= persistTitleSource
+      titleState.userMessageCount++
+      titleTurnNumber = titleState.userMessageCount
+      titleState.activeTurn = {
+        count: titleTurnNumber,
+        userText: titleInput,
+        assistantText: '',
+      }
+      if (titleState.userMessageCount === 1) {
+        titleState.firstUserMessage = titleInput
+      }
+      triggerTitleGeneration(ws, sessionId, 'user-message')
+    }
 
-  userMessageSent = true
-  activeTurn.messageSent = true
+    // 启动 CLI 子进程（如果还没有）
+    try {
+      await ensureCliSessionStarted(ws, sessionId, 'user_message')
+    } catch (err) {
+      if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) return
+      const errMsg = err instanceof Error ? err.message : String(err)
+      const code =
+        err instanceof ConversationStartupError ? err.code : 'CLI_START_FAILED'
+      console.error(`[WS] CLI start failed for ${sessionId}: ${errMsg}`)
+      const diagnosticMessage = await buildSessionStartupDiagnosticMessage(sessionId, errMsg)
+      if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) return
+      sendMessage(ws, {
+        type: 'error',
+        message: diagnosticMessage,
+        code,
+        retryable:
+          err instanceof ConversationStartupError ? err.retryable : false,
+      })
+      sendMessage(ws, { type: 'status', state: 'idle' })
+      failSessionChatActivity(sessionId)
+      clearActiveUserTurn(sessionId, activeTurn)
+      if (!collaboration) emitSessionTurnEvent({ type: 'output', sessionId, message: { type: 'result', is_error: true, result: diagnosticMessage } })
+      return
+    }
+
+    if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) {
+      stopRuntimeStartedByCancelledAdmission(sessionId, activeTurn)
+      return
+    }
+
+    const startupRuntimeTransition = await waitForRuntimeTransitionBeforeUserTurn(ws, sessionId)
+    if (
+      startupRuntimeTransition.ok &&
+      activeUserTurns.get(sessionId) === activeTurn &&
+      !activeTurn.cancelled
+    ) {
+      if (startupRuntimeTransition.waited) {
+        sendMessage(ws, { type: 'status', state: 'thinking', verb: 'Thinking' })
+      }
+    } else {
+      clearActiveUserTurn(sessionId, activeTurn)
+      return
+    }
+
+    bindSessionTurnObserver(sessionId)
+
+    // Register the callback before sending the turn so startup errors are not lost.
+    // Keep output muted until the current user turn is enqueued to avoid forwarding
+    // any pre-turn SDK chatter as fresh chat history.
+    let userMessageSent = false
+    const shouldForwardCurrentTurnLocalCommand =
+      createCurrentTurnLocalCommandForwarder(desktopSlashCommand)
+    // Record which title turn this admission owns so `bindTitleSessionOutput` can drop
+    // output that belongs to a superseded turn instead of mixing it into the title.
+    activeTurn.titleTurnNumber = titleTurnNumber ?? undefined
+    const removeTitleOutputCallback = titleTurnNumber === null
+      ? null
+      : bindTitleSessionOutput(ws, sessionId, activeTurn, () => userMessageSent)
+
+    bindAllClientSessionOutputs(sessionId, {
+      shouldForward: (cliMsg) => {
+        if (
+          userMessageSent ||
+          (cliMsg.type === 'result' && cliMsg.is_error) ||
+          isAgentRunMessageFrame(cliMsg)
+        ) {
+          return true
+        }
+        return shouldForwardCurrentTurnLocalCommand(cliMsg)
+      },
+    })
+    const removeActiveTurnOutputCallback = bindActiveUserTurnCompletion(ws, sessionId, activeTurn)
+
+    // The renderer may have left while the CLI was still starting, before this
+    // turn could flip messageSent=true. The disconnect handler cannot attach an
+    // effective output watcher until the ConversationService session exists, so
+    // refresh it here, immediately before sending the turn, to observe a
+    // permission request that arrives after the disconnect.
+    refreshDisconnectedTurnCleanupWatcher(sessionId)
+
+    activeTurn.sendStarted = true
+    const sent = collaboration
+      ? await (async () => {
+          if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) return false
+          const result = await conversationService.requestControl(sessionId, {
+            subtype: 'enqueue_session_message', message_id: collaboration.messageId,
+            sender_session_id: collaboration.sourceSessionId, text: content, start_if_idle: true,
+          }, 10_000, undefined, () => activeUserTurns.get(sessionId) === activeTurn && !activeTurn.cancelled && (collaboration.canSend?.() ?? true))
+          if (result.status !== 'queued' && result.status !== 'consumed') return false
+          activeTurn.collaborationAck = result.status
+          activeTurn.messageSent = true
+          if (result.status === 'consumed') {
+            clearActiveUserTurn(sessionId, activeTurn)
+            removeActiveTurnOutputCallback()
+          }
+          return true
+        })()
+      : await conversationService.sendMessage(
+      sessionId,
+      content,
+      message.attachments,
+      {
+        canSend: () =>
+          activeUserTurns.get(sessionId) === activeTurn && !activeTurn.cancelled,
+        messageUuid: activeTurn.expectedReplayUuid,
+        onCommitted: () => {
+          activeTurn.messageSent = true
+        },
+      },
+    )
+    if (collaboration && sent && activeTurn.messageSent && !activeUserTurns.has(sessionId)) return
+    if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) {
+      // Once onCommitted has run the SDK owns this turn and will still emit its
+      // terminal result. Keep the completion callback long enough to consume
+      // that boundary; only an admission revoked before the socket write is safe
+      // to detach immediately.
+      if (!activeTurn.messageSent) removeActiveTurnOutputCallback()
+      removeTitleOutputCallback?.()
+      discardActiveTitleTurn(sessionId, titleTurnNumber)
+      if (!activeTurn.messageSent) {
+        stopRuntimeStartedByCancelledAdmission(sessionId, activeTurn)
+      }
+      return
+    }
+    if (!sent) {
+      removeActiveTurnOutputCallback()
+      clearActiveUserTurn(sessionId, activeTurn)
+      removeTitleOutputCallback?.()
+      discardActiveTitleTurn(sessionId, titleTurnNumber)
+      sendMessage(ws, {
+        type: 'error',
+        message: 'CLI process is not running. The session may have ended or the process crashed.',
+        code: 'CLI_NOT_RUNNING',
+      })
+      sendMessage(ws, { type: 'status', state: 'idle' })
+      failSessionChatActivity(sessionId)
+      if (!collaboration) emitSessionTurnEvent({ type: 'output', sessionId, message: { type: 'result', is_error: true, result: 'CLI process is not running.' } })
+      return
+    }
+
+    userMessageSent = true
+    activeTurn.messageSent = true
+    if (!collaboration) emitSessionTurnEvent({ type: 'input-committed', sessionId })
+  } finally {
+    if (!activeTurn.messageSent) await admission?.release()
+  }
+}
+
+/** Shared turn admission for desktop input and independent background sessions. */
+export async function submitSessionTurn(
+  sessionId: string,
+  content: string,
+  options: { serverHost: string; serverPort: number; messageId: string; sourceSessionId: string; canSend?: () => boolean },
+): Promise<{ status: 'queued' | 'consumed' }> {
+  if (options.canSend && !options.canSend()) throw new Error('Session delivery was cancelled')
+  if (hasPendingOrActiveUserTurn(sessionId)) throw new Error('Session already has an active turn')
+  let failure: string | undefined
+  const connection = sessionTurnConnection(sessionId, options, message => {
+    if (message.type === 'error') failure = message.message
+  })
+  const turn: ActiveUserTurnState = { messageSent: false, expectedReplayUuid: sessionMessageUuid(options.messageId) }
+  try {
+    await handleUserMessage(connection, { type: 'user_message', content }, turn, options)
+  } catch (error) {
+    if (activeUserTurns.get(sessionId) === turn) {
+      clearActiveUserTurn(sessionId, turn)
+      failSessionChatActivity(sessionId)
+    }
+    throw error
+  }
+  if (!turn.messageSent) throw new Error(failure ?? 'Session turn was cancelled before delivery')
+  if (!turn.collaborationAck) throw new Error('CLI did not acknowledge the session message')
+  return { status: turn.collaborationAck }
+}
+
+function sessionTurnConnection(
+  sessionId: string,
+  endpoint: { serverHost: string; serverPort: number },
+  observe?: (message: ServerMessage) => void,
+): SessionConnection {
+  return {
+    data: { sessionId, connectedAt: Date.now(), channel: 'client', sdkToken: null, ...endpoint },
+    send(data) {
+      const message = JSON.parse(String(data)) as ServerMessage
+      observe?.(message)
+      sendToSession(sessionId, message)
+      return 1
+    },
+    close() {},
+  }
+}
+
+export function stopSessionTurn(sessionId: string): void {
+  const hadActiveTurn = activeUserTurns.has(sessionId)
+  handleStopGeneration(sessionTurnConnection(sessionId, { serverHost: '127.0.0.1', serverPort: 0 }))
+  // A result can clear the host turn while peer work still waits in the CLI
+  // inbox. Group Stop must revoke that queue even at the idle boundary.
+  if (!hadActiveTurn && conversationService.hasSession(sessionId)) conversationService.sendInterrupt(sessionId)
+}
+
+export function isSessionTurnStopped(sessionId: string): boolean {
+  return interruptedSessionChats.has(sessionId) || activeUserTurns.get(sessionId)?.cancelled === true
+}
+
+export function getSessionTurnState(sessionId: string): 'running' | 'blocked' | 'idle' {
+  // A manual turn awaiting capacity owns its token, but must not make the
+  // collaboration dispatcher treat an unadmitted worker as already running.
+  if (activeUserTurns.get(sessionId)?.admissionPending) return 'blocked'
+  if (conversationService.getPendingPermissionRequests(sessionId).length > 0 ||
+    computerUseApprovalService.getPendingRequests(sessionId).length > 0) return 'blocked'
+  return hasPendingOrActiveUserTurn(sessionId) || activeCliRuns.has(sessionId) ? 'running' : 'idle'
+}
+
+const sessionTurnObservers = new Map<string, (message: any) => void>()
+function bindSessionTurnObserver(sessionId: string): void {
+  const previous = sessionTurnObservers.get(sessionId)
+  if (previous) conversationService.removeOutputCallback(sessionId, previous)
+  const callback = (message: any) => {
+    // The observer is independent of renderer subscriptions, so background
+    // sessions keep their task/permission lifecycle when no page is open.
+    if (!hasActiveClients(sessionId)) {
+      trackCliRunState(sessionId, message)
+      trackCliBackgroundTaskLifecycle(sessionId, message)
+      persistThenForwardCliMessage(sessionId, message, () => {})
+    }
+    queueMicrotask(() => {
+      if (sessionTurnObservers.get(sessionId) === callback) {
+        emitSessionTurnEvent({ type: 'output', sessionId, message })
+      }
+    })
+  }
+  sessionTurnObservers.set(sessionId, callback)
+  conversationService.onOutput(sessionId, callback)
+}
+
+function clearSessionTurnObserver(sessionId: string): void {
+  const callback = sessionTurnObservers.get(sessionId)
+  sessionTurnObservers.delete(sessionId)
+  if (callback) conversationService.removeOutputCallback(sessionId, callback)
 }
 
 function clearActiveUserTurn(sessionId: string, activeTurn: ActiveUserTurnState): void {
@@ -1332,6 +1490,8 @@ function clearActiveUserTurn(sessionId: string, activeTurn: ActiveUserTurnState)
 }
 
 function matchesActiveTurnReplay(activeTurn: ActiveUserTurnState, cliMsg: any): boolean {
+  if (cliMsg?.type === 'system' && cliMsg.subtype === 'session_message_receipt' &&
+    cliMsg.status === 'consumed' && cliMsg.source_uuid === activeTurn.expectedReplayUuid) return true
   return cliMsg?.type === 'user' &&
     cliMsg.isReplay === true &&
     typeof cliMsg.uuid === 'string' &&
@@ -1446,7 +1606,7 @@ function stopRuntimeStartedByCancelledAdmission(
 }
 
 function bindActiveUserTurnCompletion(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
   activeTurn: ActiveUserTurnState,
 ): () => void {
@@ -1499,7 +1659,7 @@ function shouldDeferRuntimeRestartForActiveTurn(sessionId: string): boolean {
 }
 
 function applyDeferredPermissionModeAfterActiveTurn(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
 ): void {
   const deferredMode = deferredPermissionModes.get(sessionId)
@@ -1513,7 +1673,7 @@ function applyDeferredPermissionModeAfterActiveTurn(
 }
 
 function applyDeferredRuntimeRestartAfterActiveTurn(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
 ): void {
   const deferred = deferredRuntimeRestarts.get(sessionId)
@@ -1536,7 +1696,7 @@ function applyDeferredRuntimeRestartAfterActiveTurn(
 }
 
 async function handleDesktopClearCommand(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
 ) {
   const turnToCancel = activeUserTurns.get(ws.data.sessionId)
   if (turnToCancel) turnToCancel.cancelled = true
@@ -1546,7 +1706,7 @@ async function handleDesktopClearCommand(
 }
 
 async function performDesktopClearCommand(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   turnToCancel: ActiveUserTurnState | undefined,
 ) {
   const { sessionId } = ws.data
@@ -1632,7 +1792,7 @@ async function performDesktopClearCommand(
   })
 }
 
-async function handlePrewarmSession(ws: ServerWebSocket<WebSocketData>) {
+async function handlePrewarmSession(ws: SessionConnection) {
   const { sessionId } = ws.data
   if (conversationService.hasSession(sessionId) || sessionStartupPromises.has(sessionId)) {
     return
@@ -1680,10 +1840,12 @@ async function handlePrewarmSession(ws: ServerWebSocket<WebSocketData>) {
     })
 }
 
-async function handlePermissionResponse(
-  ws: ServerWebSocket<WebSocketData>,
-  message: Extract<ClientMessage, { type: 'permission_response' }>
-) {
+const EXIT_PLAN_MODE_TOOL_NAME = 'ExitPlanMode'
+
+async function finalizePermissionResponse(
+  ws: SessionConnection,
+  message: Extract<ClientMessage, { type: 'permission_response' }>,
+): Promise<void> {
   const { sessionId } = ws.data
   const pendingRequest = conversationService
     .getPendingPermissionRequests(sessionId)
@@ -1712,6 +1874,7 @@ async function handlePermissionResponse(
     permissionUpdates,
   )
   if (resolved) {
+    emitSessionTurnEvent({ type: 'output', sessionId, message: { type: 'control_response', request_id: message.requestId } })
     sendToSession(sessionId, {
       type: 'permission_resolved',
       requestId: message.requestId,
@@ -1722,8 +1885,177 @@ async function handlePermissionResponse(
   console.log(`[WS] Permission response for ${message.requestId}: ${message.allowed}`)
 }
 
+async function handlePermissionResponse(
+  ws: SessionConnection,
+  message: Extract<ClientMessage, { type: 'permission_response' }>
+) {
+  const { sessionId } = ws.data
+  if (
+    message.allowed &&
+    message.runtimeOverride &&
+    conversationService.getPendingPermissionToolName(sessionId, message.requestId) ===
+      EXIT_PLAN_MODE_TOOL_NAME
+  ) {
+    void handlePlanApprovalWithRuntimeOverride(ws, message).catch((err) => {
+      // The approval was NOT sent: the CLI is still waiting on the permission
+      // and the user can retry. Note the desktop optimistically dismissed the
+      // approval bar on send — it reappears on the reconnect replay.
+      console.error(`[WS] Plan approval with runtime override failed for ${sessionId}:`, err)
+      sendMessage(ws, {
+        type: 'error',
+        message: 'Failed to apply the execution model. The plan is still waiting for approval.',
+        code: 'RUNTIME_CONFIG_INVALID',
+      })
+    })
+    return
+  }
+  await finalizePermissionResponse(ws, message)
+}
+
+/**
+ * Extract the session-scoped setMode entry a plan approval may carry, so the
+ * approved mode is persisted before the runtime restart reads it back via
+ * getRuntimeSettings — the CLI's own status broadcast → persist round-trip can
+ * lose the race against our interrupt → restart sequence.
+ */
+function extractSessionModeUpdate(
+  permissionUpdates: unknown[] | undefined,
+): PermissionMode | undefined {
+  if (!Array.isArray(permissionUpdates)) return undefined
+  for (const update of permissionUpdates) {
+    if (!update || typeof update !== 'object') continue
+    const candidate = update as { type?: unknown; destination?: unknown; mode?: unknown }
+    if (
+      candidate.type === 'setMode' &&
+      candidate.destination === 'session' &&
+      isPermissionMode(candidate.mode)
+    ) {
+      return candidate.mode
+    }
+  }
+  return undefined
+}
+
+function waitForTurnResultOrTimeout(sessionId: string, timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      conversationService.removeOutputCallback(sessionId, callback)
+      resolve()
+    }, timeoutMs)
+    const callback = (msg: any) => {
+      if (msg?.type !== 'result') return
+      clearTimeout(timeout)
+      conversationService.removeOutputCallback(sessionId, callback)
+      resolve()
+    }
+    conversationService.onOutput(sessionId, callback)
+  })
+}
+
+async function handlePlanApprovalWithRuntimeOverride(
+  ws: SessionConnection,
+  message: Extract<ClientMessage, { type: 'permission_response' }>,
+): Promise<void> {
+  const { sessionId } = ws.data
+  const normalized = await normalizeRuntimeOverrideInput(message.runtimeOverride!)
+  if (!normalized.ok) {
+    sendMessage(ws, {
+      type: 'error',
+      message:
+        normalized.reason === 'model'
+          ? 'Runtime model selection is invalid.'
+          : 'Runtime effort selection is invalid.',
+      code: 'RUNTIME_CONFIG_INVALID',
+    })
+    return
+  }
+  const nextOverride = normalized.override
+
+  const launchInfo = await sessionService.getSessionLaunchInfo(sessionId).catch(() => null)
+  const prevOverride = runtimeOverrides.get(sessionId)
+  const currentProviderId = prevOverride?.providerId ?? launchInfo?.runtimeProviderId ?? null
+  const currentModelId = prevOverride?.modelId ?? launchInfo?.runtimeModelId ?? undefined
+  const currentEffort = prevOverride?.effort ?? launchInfo?.effortLevel ?? undefined
+
+  if (
+    currentProviderId === nextOverride.providerId &&
+    currentModelId === nextOverride.modelId &&
+    currentEffort === nextOverride.effort
+  ) {
+    await finalizePermissionResponse(ws, message)
+    return
+  }
+
+  const canSwitchInProcess =
+    conversationService.hasSession(sessionId) &&
+    currentProviderId === nextOverride.providerId &&
+    (nextOverride.effort === undefined || nextOverride.effort === currentEffort)
+
+  if (canSwitchInProcess) {
+    // Same provider: the CLI is blocked on this very permission request, so a
+    // set_model control request is acked before the allow response frees the
+    // turn — the first execution request is guaranteed to read the new model.
+    // On failure the transition rejects, the catch in handlePermissionResponse
+    // reports it, and the permission stays pending (override untouched).
+    await enqueueRuntimeTransition(sessionId, async () => {
+      await conversationService.setModel(sessionId, nextOverride.modelId)
+      runtimeOverrides.set(sessionId, nextOverride)
+      runtimeOverrideVersions.set(
+        sessionId,
+        (runtimeOverrideVersions.get(sessionId) ?? 0) + 1,
+      )
+      await persistSessionRuntimeConfig(sessionId, nextOverride)
+      broadcastAppliedRuntimeConfig(sessionId)
+    })
+    await finalizePermissionResponse(ws, message)
+    return
+  }
+
+  // Cross-provider (or effort change): provider env is fixed at process spawn,
+  // so this automates the manual "approve → stop → switch model → continue"
+  // flow. The interrupted turn may bill one partial request to the planning
+  // model — same as the manual flow.
+  await enqueueRuntimeTransition(sessionId, async () => {
+    runtimeOverrides.set(sessionId, nextOverride)
+    runtimeOverrideVersions.set(
+      sessionId,
+      (runtimeOverrideVersions.get(sessionId) ?? 0) + 1,
+    )
+    await persistSessionRuntimeConfig(sessionId, nextOverride)
+    const approvedMode = extractSessionModeUpdate(message.permissionUpdates)
+    if (approvedMode) {
+      await persistSessionPermissionMode(sessionId, approvedMode)
+    }
+  })
+
+  await finalizePermissionResponse(ws, message)
+  handleStopGeneration(ws)
+  // Let the CLI write the interrupted result before the restart kills the
+  // process. The timeout only bounds a wedged interrupt — the restart's own
+  // stopSession is the hard guarantee.
+  await waitForTurnResultOrTimeout(sessionId, 10_000)
+
+  let restarted = false
+  await enqueueRuntimeTransition(sessionId, async () => {
+    restarted = await restartSessionWithRuntimeConfig(ws, sessionId)
+  })
+  if (!restarted) return
+
+  const clients = activeSessions.get(sessionId)
+  const resumeWs = clients && clients.has(ws) ? ws : clients?.values().next().value
+  if (!resumeWs) return
+  const resumeTurn: ActiveUserTurnState = { messageSent: false }
+  void handleUserMessage(
+    resumeWs,
+    { type: 'user_message', content: PLAN_EXECUTION_CONTINUE_MESSAGE },
+    resumeTurn,
+  ).catch((err) => {
+    console.error(`[WS] Failed to auto-continue plan execution for ${sessionId}:`, err)
+  })
+}
+
 function handleComputerUsePermissionResponse(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   message: Extract<ClientMessage, { type: 'computer_use_permission_response' }>
 ) {
   const { sessionId } = ws.data
@@ -1743,10 +2075,11 @@ function handleComputerUsePermissionResponse(
     permissionType: 'computer_use',
     allowed: message.response.userConsented !== false,
   })
+  emitSessionTurnEvent({ type: 'output', sessionId, message: { type: 'control_response', request_id: message.requestId } })
 }
 
 async function handleSetPermissionMode(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   message: Extract<ClientMessage, { type: 'set_permission_mode' }>
 ): Promise<void> {
   const { sessionId } = ws.data
@@ -1799,7 +2132,7 @@ export function shouldFallbackToPermissionRestart(
 }
 
 async function applyPermissionModeToActiveSession(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
   mode: PermissionMode,
 ): Promise<void> {
@@ -1998,8 +2331,41 @@ async function handleSetHandoffSummary(
   )
 }
 
+/**
+ * Shared normalization for runtime overrides arriving over WS
+ * (set_runtime_config and the plan-approval runtimeOverride): trims and
+ * validates the model id, applies the Grok catalog model fixup, and validates
+ * the requested effort against the provider's reasoning profile.
+ */
+async function normalizeRuntimeOverrideInput(
+  input: { providerId: string | null; modelId: string; effortLevel?: string },
+): Promise<
+  | { ok: true; override: RuntimeOverride }
+  | { ok: false; reason: 'model' | 'effort' }
+> {
+  let modelId = typeof input.modelId === 'string' ? input.modelId.trim() : ''
+  if (!modelId) return { ok: false, reason: 'model' }
+  if (isGrokOfficialProviderId(input.providerId)) {
+    modelId = (await getGrokReasoningEfforts(modelId)).modelId
+  }
+  const requestedEffort =
+    typeof input.effortLevel === 'string' ? input.effortLevel.trim() : undefined
+  const effortResolution = requestedEffort === undefined
+    ? { valid: true, effort: undefined }
+    : await resolveRuntimeEffort(input.providerId, modelId, requestedEffort)
+  if (!effortResolution.valid) return { ok: false, reason: 'effort' }
+  return {
+    ok: true,
+    override: {
+      providerId: input.providerId ?? null,
+      modelId,
+      ...(effortResolution.effort ? { effort: effortResolution.effort } : {}),
+    },
+  }
+}
+
 async function handleSetRuntimeConfig(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   message: Extract<ClientMessage, { type: 'set_runtime_config' }>
 ) {
   const { sessionId } = ws.data
@@ -2012,34 +2378,25 @@ async function handleSetRuntimeConfig(
     })
     return
   }
-  const requestedEffort =
-    typeof message.effortLevel === 'string' ? message.effortLevel.trim() : undefined
 
   // Register the transition before remote model-catalog or provider validation.
   // A user message arriving in that async admission window must wait for the
   // selected runtime instead of entering the previous provider's CLI process.
   await enqueueRuntimeTransition(sessionId, async () => {
-    let modelId = requestedModelId
-    if (isGrokOfficialProviderId(message.providerId)) {
-      modelId = (await getGrokReasoningEfforts(modelId)).modelId
-    }
-    const effortResolution = requestedEffort === undefined
-      ? { valid: true, effort: undefined }
-      : await resolveRuntimeEffort(message.providerId, modelId, requestedEffort)
-    if (!effortResolution.valid) {
+    const normalized = await normalizeRuntimeOverrideInput(message)
+    if (!normalized.ok) {
       sendMessage(ws, {
         type: 'error',
-        message: 'Runtime effort selection is invalid.',
+        message:
+          normalized.reason === 'model'
+            ? 'Runtime model selection is invalid.'
+            : 'Runtime effort selection is invalid.',
         code: 'RUNTIME_CONFIG_INVALID',
       })
       return
     }
 
-    const nextOverride = {
-      providerId: message.providerId ?? null,
-      modelId,
-      ...(effortResolution.effort ? { effort: effortResolution.effort } : {}),
-    }
+    const nextOverride = normalized.override
     const prevOverride = runtimeOverrides.get(sessionId)
     if (
       prevOverride &&
@@ -2062,12 +2419,9 @@ async function handleSetRuntimeConfig(
       return
     }
 
-    if (conversationService.hasSession(sessionId)) {
-      await persistSessionRuntimeConfig(sessionId, nextOverride)
-      await restartSessionWithRuntimeConfig(ws, sessionId)
-      return
-    }
-
+    // A spawned process is already registered before its SDK startup settles.
+    // Wait for that startup before restarting, otherwise stopping it rejects
+    // the first turn that is still awaiting the same startup promise.
     const pendingStartup = sessionStartupPromises.get(sessionId)
     if (pendingStartup) {
       const startupRuntimeVersion = sessionStartupRuntimeVersions.get(sessionId) ?? 0
@@ -2094,13 +2448,19 @@ async function handleSetRuntimeConfig(
       return
     }
 
+    if (conversationService.hasSession(sessionId)) {
+      await persistSessionRuntimeConfig(sessionId, nextOverride)
+      await restartSessionWithRuntimeConfig(ws, sessionId)
+      return
+    }
+
     await persistSessionRuntimeConfig(sessionId, nextOverride)
     broadcastAppliedRuntimeConfig(sessionId)
   })
 }
 
 async function restartSessionWithPermissionMode(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
   mode: PermissionMode,
 ): Promise<void> {
@@ -2245,9 +2605,9 @@ async function resolveRuntimeRestartWorkDir(sessionId: string): Promise<string> 
 }
 
 async function restartSessionWithRuntimeConfig(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const workDir = await resolveRuntimeRestartWorkDir(sessionId)
     markActiveAgentsStopping(sessionId)
@@ -2264,6 +2624,7 @@ async function restartSessionWithRuntimeConfig(
     broadcastAppliedRuntimeConfig(sessionId)
     sendMessage(ws, { type: 'status', state: 'idle' })
     console.log(`[WS] Restarted CLI for ${sessionId} with runtime override`)
+    return true
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err)
     void diagnosticsService.recordEvent({
@@ -2283,6 +2644,7 @@ async function restartSessionWithRuntimeConfig(
       code: 'CLI_RESTART_FAILED',
     })
     sendMessage(ws, { type: 'status', state: 'idle' })
+    return false
   }
 }
 
@@ -2297,8 +2659,9 @@ function isBackgroundTaskAlreadyGoneMessage(message: string): boolean {
   )
 }
 
-function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
+function handleStopGeneration(ws: SessionConnection) {
   const { sessionId } = ws.data
+  emitSessionTurnEvent({ type: 'stopped', sessionId })
   const stoppedTurn = activeUserTurns.get(sessionId)
   const agentTasks = [...(activeAgentTasks.get(sessionId)?.values() ?? [])]
   console.log(`[WS] Stop generation requested for session: ${sessionId}`)
@@ -2451,7 +2814,7 @@ function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
 }
 
 async function handleStopBackgroundTask(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   message: Extract<ClientMessage, { type: 'stop_background_task' }>,
 ) {
   const { sessionId } = ws.data
@@ -2470,7 +2833,7 @@ async function handleStopBackgroundTask(
 }
 
 async function requestStopBackgroundTask(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   taskId: string,
 ): Promise<void> {
   const { sessionId } = ws.data
@@ -2486,11 +2849,15 @@ async function requestStopBackgroundTask(
   })
 
   try {
-    await conversationService.requestControl(sessionId, {
+    const response = await conversationService.requestControl(sessionId, {
       subtype: 'stop_task',
       task_id: taskId,
     })
-    confirmStopped()
+    if (response?.reason === 'not_found') {
+      convergeEvictedBackgroundTaskStop(sessionId, taskId)
+    } else {
+      confirmStopped()
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (
@@ -2505,6 +2872,35 @@ async function requestStopBackgroundTask(
   }
 }
 
+/**
+ * The CLI evicts a shell task the turn after it terminates (and a process
+ * restart clears the registry outright), so a Stop that lands late is
+ * answered with `not_found`. That is the stop's goal state, not a failure:
+ * drop the task from local tracking and send the terminal notification
+ * clients need to converge an entry they still show as running. Reporting
+ * `No task found with ID` here only re-arms the stop button for a task that
+ * can never be stopped again.
+ */
+function convergeEvictedBackgroundTaskStop(sessionId: string, taskId: string): void {
+  const tracked = activeNonAgentTasks.get(sessionId)?.get(taskId)
+  untrackCliBackgroundTask(sessionId, taskId)
+  const description = tracked?.description
+  sendToSession(sessionId, {
+    type: 'system_notification',
+    subtype: 'task_notification',
+    message: description ? `${description} stopped` : 'Background task stopped',
+    data: {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: taskId,
+      tool_use_id: tracked?.toolUseId,
+      status: 'stopped',
+      summary: description ? `${description} stopped` : 'Background task stopped',
+      timestamp: new Date().toISOString(),
+    },
+  })
+}
+
 const AGENT_STOP_CONTROL_TIMEOUT_MS = 3_000
 const AUTHORITATIVE_STOP_PERSIST_ATTEMPTS = 3
 const AUTHORITATIVE_STOP_PERSIST_TIMEOUT_MS = 1_000
@@ -2513,7 +2909,7 @@ const AGENT_STOP_FINALIZATION_RETRY_DELAYS_MS = [250, 500] as const
 async function requestStopTrackedAgentTask(
   sessionId: string,
   task: ActiveAgentTaskState,
-  ws?: ServerWebSocket<WebSocketData>,
+  ws?: SessionConnection,
 ): Promise<void> {
   const current = activeAgentTasks.get(sessionId)?.get(task.taskId)
   if (!current) return
@@ -2633,7 +3029,7 @@ function ensureRemoteAgentArchive(
 
 function reportBackgroundTaskStopFailure(
   sessionId: string,
-  ws: ServerWebSocket<WebSocketData> | undefined,
+  ws: SessionConnection | undefined,
   taskId: string,
   error: unknown,
 ): void {
@@ -2657,7 +3053,7 @@ function reportBackgroundTaskStopFailure(
 
 function reportAgentStopFailure(
   sessionId: string,
-  _ws: ServerWebSocket<WebSocketData> | undefined,
+  _ws: SessionConnection | undefined,
   task: ActiveAgentTaskState,
   error: unknown,
 ): void {
@@ -2669,7 +3065,7 @@ function reportAgentStopFailure(
 }
 
 function replayAgentStopFailures(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
 ): void {
   for (const task of activeAgentTasks.get(sessionId)?.values() ?? []) {
@@ -2746,7 +3142,7 @@ function closeLateNonAgentTaskAfterRuntimeExit(
 function emitAuthoritativeAgentStopped(
   sessionId: string,
   task: ActiveAgentTaskState,
-  ws?: ServerWebSocket<WebSocketData>,
+  ws?: SessionConnection,
 ): Promise<boolean> {
   const current = activeAgentTasks.get(sessionId)?.get(task.taskId)
   if (!current) return Promise.resolve(false)
@@ -2972,7 +3368,7 @@ function closeStoppedAgentsAfterRuntimeExit(sessionId: string, cliMsg: any): voi
 type TitleGenerationPhase = 'user-message' | 'turn-complete'
 
 function triggerTitleGeneration(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
   phase: TitleGenerationPhase,
   completedTurnCount?: number,
@@ -3034,6 +3430,7 @@ function triggerTitleGeneration(
         text,
         runtimeProviderId,
         titleLanguagePreference,
+        sessionId,
       )
       if (generationSeq !== state.generationSeq) return
       if (aiTitle) {
@@ -3058,7 +3455,7 @@ async function getResponseLanguageSetting(): Promise<string | undefined> {
 }
 
 function sendSessionTitleUpdated(
-  fallbackWs: ServerWebSocket<WebSocketData>,
+  fallbackWs: SessionConnection,
   sessionId: string,
   title: string,
 ): void {
@@ -3074,7 +3471,7 @@ function sendSessionTitleUpdated(
 }
 
 function bindTitleSessionOutput(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
   activeTurn: ActiveUserTurnState,
   shouldProcess: () => boolean,
@@ -3307,6 +3704,7 @@ function cleanupSessionRuntimeState(
   } else {
     activeBackgroundTaskIds.delete(sessionId)
   }
+  clearSessionTurnObserver(sessionId)
   clearAgentRuntimeState(sessionId, {
     preserveRetryableStops: options?.preserveRetryableAgentStops,
   })
@@ -3558,7 +3956,7 @@ async function resolveSessionWorkDir(sessionId: string, fallback = os.homedir())
 }
 
 async function ensureCliSessionStarted(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
   reason: 'user_message' | 'prewarm_session',
 ): Promise<void> {
@@ -3584,6 +3982,7 @@ async function ensureCliSessionStarted(
     await sendRepositoryStartupStatus(ws, sessionId, reason)
     console.log(`[WS] Starting CLI for ${sessionId} due to ${reason}`)
     await conversationService.startSession(sessionId, workDir, sdkUrl, startupSettings)
+    bindSessionTurnObserver(sessionId)
     runtimeExitStoppedSessions.delete(sessionId)
   })()
 
@@ -3820,10 +4219,17 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
 
       const replayText = extractReplayUserText(cliMsg)
       if (replayText) {
-        messages.push({
-          type: 'user_message_replay',
-          content: replayText,
-        })
+        const collaborationEnvelope = parseSessionCollaborationEnvelope(replayText)
+        messages.push(collaborationEnvelope
+          ? {
+              type: 'user_message_replay',
+              content: collaborationEnvelope.text,
+              collaboration: { sourceSessionId: collaborationEnvelope.senderSessionId, messageId: collaborationEnvelope.messageId },
+            }
+          : {
+              type: 'user_message_replay',
+              ...splitSessionReferenceContext(replayText),
+            })
       }
 
       return messages
@@ -3993,6 +4399,10 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
               : undefined,
           input: cliMsg.request.input || {},
           description: cliMsg.request.description,
+          ...(typeof cliMsg.request.display_name === 'string' &&
+          cliMsg.request.display_name.trim()
+            ? { displayName: cliMsg.request.display_name.trim() }
+            : {}),
         }]
       }
       return []
@@ -4317,7 +4727,7 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
 
 
 
-function sendMessage(ws: ServerWebSocket<WebSocketData>, message: ServerMessage) {
+function sendMessage(ws: SessionConnection, message: ServerMessage) {
   const outgoing = ws.data.clientKind === 'pet'
     ? toPetServerMessage(message)
     : message
@@ -4333,13 +4743,13 @@ function sendMessage(ws: ServerWebSocket<WebSocketData>, message: ServerMessage)
 // by the turn's `result` callback in `bindActiveUserTurnCompletion`), which
 // gates on the real turn lifecycle rather than on outbound status events.
 async function scheduleRestartSessionWithRuntimeConfig(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
 ): Promise<void> {
   await restartSessionWithRuntimeConfig(ws, sessionId)
 }
 
-function sendError(ws: ServerWebSocket<WebSocketData>, message: string, code: string) {
+function sendError(ws: SessionConnection, message: string, code: string) {
   sendMessage(ws, { type: 'error', message, code })
 }
 
@@ -4518,7 +4928,7 @@ function cancelSessionDisconnectWatcher(sessionId: string): void {
 }
 
 function replayPendingPermissionRequests(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
 ): string[] {
   const requests = conversationService.getPendingPermissionRequests(sessionId)
@@ -4530,13 +4940,14 @@ function replayPendingPermissionRequests(
       ...(request.toolUseId ? { toolUseId: request.toolUseId } : {}),
       input: request.input,
       ...(request.description ? { description: request.description } : {}),
+      ...(request.displayName ? { displayName: request.displayName } : {}),
     })
   }
   return requests.map((request) => request.requestId)
 }
 
 function replayPendingComputerUsePermissionRequests(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
 ): string[] {
   const requests = computerUseApprovalService.getPendingRequests(sessionId)
@@ -4641,7 +5052,7 @@ function isLocalCommandOutputMessage(cliMsg: any): boolean {
 
 function addActiveClient(
   sessionId: string,
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
 ): void {
   let clients = activeSessions.get(sessionId)
   if (!clients) {
@@ -4653,7 +5064,7 @@ function addActiveClient(
 
 function removeActiveClient(
   sessionId: string,
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
 ): boolean {
   const clients = activeSessions.get(sessionId)
   if (!clients?.has(ws)) return false
@@ -4668,7 +5079,7 @@ function hasActiveClients(sessionId: string): boolean {
   return (activeSessions.get(sessionId)?.size ?? 0) > 0
 }
 
-function removeClientOutputCallback(ws: ServerWebSocket<WebSocketData>): void {
+function removeClientOutputCallback(ws: SessionConnection): void {
   const entry = clientOutputCallbacks.get(ws)
   if (!entry) return
   conversationService.removeOutputCallback(entry.sessionId, entry.callback)
@@ -4762,7 +5173,7 @@ function persistThenForwardCliMessage(
 
 function forwardCliMessageToClient(
   sessionId: string,
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   cliMsg: any,
 ): void {
   handleCliPermissionModeBroadcast(sessionId, cliMsg)
@@ -4795,7 +5206,7 @@ function bindAllClientSessionOutputs(
 
 function bindClientSessionOutput(
   sessionId: string,
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   options?: {
     shouldForward?: (cliMsg: any) => boolean
   },
@@ -5197,7 +5608,7 @@ export function runtimeOverridesMatch(
   )
 }
 
-async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> {
+export async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> {
   const coordinatorMode = sessionId ? coordinatorModeSessions.has(sessionId) : false
   const pipelineFlavor = sessionId ? pipelineModeSessions.get(sessionId) ?? null : null
   const soloPipelineMode = pipelineFlavor === 'solo'
@@ -5495,7 +5906,7 @@ function enqueueRuntimeTransition(
 }
 
 async function waitForRuntimeTransitionBeforeUserTurn(
-  ws: ServerWebSocket<WebSocketData>,
+  ws: SessionConnection,
   sessionId: string,
 ): Promise<{ ok: boolean; waited: boolean }> {
   let waited = false
@@ -5704,6 +6115,14 @@ export function __resetWebSocketHandlerStateForTests(): void {
   interruptedSessionChats.clear()
   runtimeTransitionPromises.clear()
   sessionStartupPromises.clear()
+  for (const [sessionId, callback] of sessionTurnObservers) {
+    conversationService.removeOutputCallback(sessionId, callback)
+  }
+  sessionTurnObservers.clear()
+  runtimeOverrides.clear()
+  runtimeOverrideVersions.clear()
+  deferredRuntimeRestarts.clear()
+  deferredPermissionModes.clear()
 }
 
 export function __markPrewarmPendingForTests(sessionId: string): void {

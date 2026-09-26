@@ -386,7 +386,8 @@ describe('tabStore', () => {
 
     useTabStore.getState().closeTab(historical.id)
     await useSessionStore.getState().fetchSessions()
-    expect(sessionsApi.list).toHaveBeenLastCalledWith({ limit: 400 })
+    // The sidebar list is project-grouped upstream: no flat `limit`, but a per-project preview cap.
+    expect(sessionsApi.list).toHaveBeenLastCalledWith({ view: 'sidebar', perProjectLimit: 6 })
     expect(useSessionStore.getState().sessions).toEqual([historical])
     useTabStore.getState().closeTab(traceId)
     await useSessionStore.getState().fetchSessions()
@@ -514,7 +515,8 @@ describe('tabStore', () => {
       await restoring
 
       expect(sessionsApi.list).toHaveBeenNthCalledWith(1, { limit: 200 })
-      expect(sessionsApi.list).toHaveBeenNthCalledWith(2, { limit: 400 })
+      // Second call is the sidebar refresh, which is project-grouped upstream.
+      expect(sessionsApi.list).toHaveBeenNthCalledWith(2, { view: 'sidebar', perProjectLimit: 6 })
       expect(useSessionStore.getState().sessions.find((session) => session.id === freshRecent.id))
         .toEqual(freshRecent)
       expect(useSessionRuntimeStore.getState().selections[freshRecent.id]).toEqual({
@@ -528,10 +530,11 @@ describe('tabStore', () => {
   )
 
   it('hydrates restored tabs with authoritative transcript runtime metadata', async () => {
-    useSessionRuntimeStore.getState().setSelection('session-1', {
-      providerId: null,
-      modelId: 'gpt-5.4',
-      effortLevel: 'max',
+    // Seeded via `setState`, not `setSelection`: the store treats a `setSelection` value as an
+    // unconfirmed user choice (pendingRuntimes) and deliberately refuses to let the transcript
+    // overwrite it. This case is about a *settled* selection being superseded by the transcript.
+    useSessionRuntimeStore.setState({
+      selections: { 'session-1': { providerId: null, modelId: 'gpt-5.4', effortLevel: 'max' } },
     })
     localStorage.setItem('cc-haha-open-tabs', JSON.stringify({
       openTabs: [{ sessionId: 'session-1', title: 'Runtime session', type: 'session' }],

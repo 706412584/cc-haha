@@ -1,4 +1,5 @@
-import { memo, useState, useEffect, useMemo, useRef } from 'react'
+import { memo, useState, useEffect, useMemo, useRef, useCallback } from 'react'
+import { getDisclosure, setDisclosure } from '../../lib/disclosureMemory'
 import { Brain } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -11,13 +12,21 @@ import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 export const ThinkingBlock = memo(function ThinkingBlock({
   content,
   isActive = false,
+  disclosureKey,
 }: {
   content: string
   isActive?: boolean
+  /** Stable key that survives virtualized row unmount/remount. */
+  disclosureKey?: string
 }) {
   const t = useTranslation()
   const thinkingAutoCollapse = useSettingsStore((s) => s.thinkingAutoCollapse)
-  const [expanded, setExpanded] = useState(!thinkingAutoCollapse)
+  const [localExpanded, setLocalExpanded] = useState(!thinkingAutoCollapse)
+  const expanded = disclosureKey ? (getDisclosure(disclosureKey) ?? localExpanded) : localExpanded
+  const setExpanded = useCallback((next: boolean) => {
+    setLocalExpanded(next)
+    if (disclosureKey) setDisclosure(disclosureKey, next)
+  }, [disclosureKey])
   const contentRef = useRef<HTMLDivElement>(null)
   const displayContent = useMemo(() => content.replace(/\r\n?/g, '\n').trimEnd(), [content])
   const hasDisplayContent = displayContent.trim().length > 0
@@ -79,7 +88,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({
         type="button"
         data-chat-disclosure="true"
         data-thinking-row="true"
-        onClick={() => setExpanded((v) => !v)}
+        onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
         className="-mx-2 flex w-[calc(100%+1rem)] items-baseline gap-2 rounded-[var(--radius-md)] px-2 py-1 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus:outline-none focus-visible:shadow-[var(--shadow-focus-ring)]"
       >

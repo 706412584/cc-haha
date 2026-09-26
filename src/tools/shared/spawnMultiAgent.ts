@@ -79,14 +79,13 @@ import {
 
 function getDefaultTeammateModel(leaderModel: string | null): string {
   const configured = getGlobalConfig().teammateDefaultModel
-  if (configured === null) {
-    // User picked "Default" in the /config picker — follow the leader.
-    return leaderModel ?? getHardcodedTeammateModelFallback()
-  }
-  if (configured !== undefined) {
+  if (typeof configured === 'string' && configured.trim()) {
     return parseUserSpecifiedModel(configured)
   }
-  return getHardcodedTeammateModelFallback()
+  // Unset (`undefined`) and /config "Default" (`null`) both follow the leader.
+  // A first-party Opus ID here is what sent mapped third-party teammates
+  // (cc-switch DeepSeek, etc.) to the upstream's most expensive model.
+  return leaderModel ?? getHardcodedTeammateModelFallback()
 }
 
 /**
@@ -126,7 +125,7 @@ export function resolveTeammateModel(
     if (invocationModel.toLowerCase() === 'inherit') {
       return leaderModel ?? getDefaultTeammateModel(leaderModel)
     }
-    return invocationModel
+    return parseUserSpecifiedModel(invocationModel)
   }
 
   if (hasAgentDefinition) {
@@ -135,15 +134,18 @@ export function resolveTeammateModel(
       definitionModel &&
       definitionModel.toLowerCase() !== 'inherit'
     ) {
-      return definitionModel
+      // Agent page / frontmatter is the highest teammate-specific pin.
+      // Resolve aliases so `opus` on a mapped provider becomes that
+      // provider's opus slot, not a first-party Opus ID.
+      return parseUserSpecifiedModel(definitionModel)
     }
     // Official Agent frontmatter defaults to `inherit`, so a selected Agent
     // follows the leader when its model is omitted or explicitly inherit.
     return leaderModel ?? getDefaultTeammateModel(leaderModel)
   }
 
-  // Plain teammates retain the existing /config teammateDefaultModel
-  // contract. Do not let the presence of a leader bypass that setting.
+  // Plain teammates: a pinned /config teammateDefaultModel still wins;
+  // otherwise follow the leader (same as an Agent whose model is inherit).
   return getDefaultTeammateModel(leaderModel)
 }
 

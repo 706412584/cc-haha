@@ -520,10 +520,11 @@ describe('ContextUsageIndicator request behavior', () => {
 
     fireEvent.click(screen.getByTestId('context-usage-indicator'))
     const popover = await screen.findByTestId('context-usage-popover')
-    expect(popover).toHaveTextContent('7%')
+    // The panel headlines the *remaining* window, so session-2's 7% used reads as 93% here.
+    expect(popover).toHaveTextContent('93%')
     // session-2 fixture reuses the same model string as session-1; the meter
     // percentage is the session-isolation signal under test.
-    expect(popover).not.toHaveTextContent('21%')
+    expect(popover).not.toHaveTextContent('79%')
   })
 
   it('forces a fresh inspection when refreshNonce bumps after a compaction (#743)', async () => {
@@ -570,12 +571,11 @@ describe('ContextUsageIndicator request behavior', () => {
     })
   })
 
-  it('retries the forced refresh through a bounded retry window when compaction finishes into a busy CLI', async () => {
+  it('retries the forced refresh once when it fails right after compaction (#743)', async () => {
     vi.useFakeTimers()
     try {
       sessionsApiMock.getInspection
         .mockResolvedValueOnce(baseInspection)
-        .mockRejectedValueOnce(new Error('Request timed out after 30s'))
         .mockRejectedValueOnce(new Error('Request timed out after 30s'))
         .mockResolvedValueOnce({
           ...baseInspection,
@@ -608,61 +608,12 @@ describe('ContextUsageIndicator request behavior', () => {
       })
       expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(2)
 
+      // The CLI was still busy and the forced refresh failed — one delayed
+      // retry recovers the meter instead of leaving the stale percentage.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_000)
       })
       expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(3)
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(10_000)
-        await Promise.resolve()
-      })
-      expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(4)
-      expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('5%')
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('forces one recovery refresh after chat state returns to idle', async () => {
-    vi.useFakeTimers()
-    try {
-      sessionsApiMock.getInspection
-        .mockResolvedValueOnce(baseInspection)
-        .mockResolvedValueOnce({
-          ...baseInspection,
-          context: { ...baseInspection.context, totalTokens: 9_000, percentage: 5 },
-        })
-
-      const { rerender } = render(
-        <ContextUsageIndicator
-          sessionId="session-1"
-          chatState="compacting"
-          messageCount={1}
-          refreshNonce={0}
-        />,
-      )
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0)
-      })
-      expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(1)
-
-      rerender(
-        <ContextUsageIndicator
-          sessionId="session-1"
-          chatState="idle"
-          messageCount={1}
-          refreshNonce={0}
-        />,
-      )
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(3_000)
-        await Promise.resolve()
-      })
-      expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(2)
-      expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('5%')
     } finally {
       vi.useRealTimers()
     }
@@ -685,7 +636,7 @@ describe('ContextUsageIndicator touch target', () => {
     render(<ContextUsageIndicator sessionId="session-1" chatState="idle" messageCount={1} compact />)
 
     const trigger = screen.getByTestId('context-usage-indicator')
-    expect(trigger).toHaveClass('h-8')
+    expect(trigger).toHaveClass('h-8', 'w-8')
     expect(trigger).not.toHaveClass('h-11')
   })
 
@@ -696,7 +647,7 @@ describe('ContextUsageIndicator touch target', () => {
     render(<ContextUsageIndicator sessionId="session-1" chatState="idle" messageCount={1} compact />)
 
     const trigger = screen.getByTestId('context-usage-indicator')
-    expect(trigger).toHaveClass('h-11')
+    expect(trigger).toHaveClass('h-11', 'w-11')
     expect(trigger).not.toHaveClass('h-8')
   })
 
@@ -750,13 +701,23 @@ describe('ContextUsageIndicator presentation', () => {
     await waitFor(() => {
       expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('21%')
     })
+    const trigger = screen.getByTestId('context-usage-indicator')
+    expect(trigger).toHaveClass('h-8', 'w-8')
+    expect(trigger.querySelector('.font-mono')).not.toBeInTheDocument()
     expect(screen.queryByTestId('context-usage-popover')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByTestId('context-usage-indicator'))
     const popover = await screen.findByTestId('context-usage-popover')
     expect(popover).toBeInTheDocument()
     expect(popover).toHaveTextContent('kimi-k2.6')
-    expect(popover).toHaveTextContent('Messages')
+    // The category list is collapsed behind the breakdown toggle; the segmented bar is the
+    // always-visible summary of the same data.
+    expect(popover).not.toHaveTextContent('Messages')
+    // 42,000 of 200,000 is 21% of the track, in the brand color — not an empty grey bar.
+    const fill = screen.getByTestId('context-usage-fill')
+    expect(fill).toHaveStyle({ width: '21%' })
+    expect(fill.className).toContain('bg-[var(--color-brand)]')
+    expect(screen.getByTestId('context-segmented-bar')).toHaveAttribute('aria-valuenow', '21')
     expect(document.body.contains(popover)).toBe(true)
     expect(screen.queryByTestId('context-usage-sheet')).not.toBeInTheDocument()
 
@@ -764,6 +725,63 @@ describe('ContextUsageIndicator presentation', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('context-usage-popover')).not.toBeInTheDocument()
     })
+  })
+
+  it('reveals the category breakdown only after expanding its toggle', async () => {
+    render(
+      <ContextUsageIndicator
+        sessionId="session-1"
+        chatState="idle"
+        messageCount={1}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('21%')
+    })
+
+    fireEvent.click(screen.getByTestId('context-usage-indicator'))
+    const popover = await screen.findByTestId('context-usage-popover')
+    const toggle = await screen.findByTestId('context-breakdown-toggle')
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(popover).not.toHaveTextContent('Messages')
+
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(popover).toHaveTextContent('Messages')
+    expect(popover).toHaveTextContent('42,000')
+  })
+
+  it('fills the meter from used tokens, not from a category color', async () => {
+    sessionsApiMock.getInspection.mockResolvedValue({
+      ...baseInspection,
+      context: {
+        ...baseInspection.context,
+        // What the CLI actually sends: a terminal theme key, which is not a CSS color.
+        categories: [{ name: 'Messages', tokens: 20_000, color: 'purple_FOR_SUBAGENTS_ONLY' }],
+        totalTokens: 172_787,
+        rawMaxTokens: 1_000_000,
+        percentage: 17,
+      },
+    })
+
+    render(
+      <ContextUsageIndicator
+        sessionId="session-1"
+        chatState="idle"
+        messageCount={1}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('17%')
+    })
+    fireEvent.click(screen.getByTestId('context-usage-indicator'))
+    await screen.findByTestId('context-usage-popover')
+
+    const fill = screen.getByTestId('context-usage-fill')
+    expect(fill).toHaveStyle({ width: '17.2787%' })
+    expect(fill).not.toHaveAttribute('style', expect.stringContaining('purple_FOR_SUBAGENTS_ONLY'))
   })
 
   it('uses the bottom sheet when the composer is compact (Workbench / narrow column)', async () => {
@@ -804,68 +822,6 @@ describe('ContextUsageIndicator presentation', () => {
     fireEvent.click(screen.getByTestId('context-usage-indicator'))
     expect(await screen.findByTestId('context-usage-sheet')).toBeInTheDocument()
     expect(screen.queryByTestId('context-usage-popover')).not.toBeInTheDocument()
-  })
-
-  it('sends a hidden /compact message from the details action and disables it while busy', async () => {
-    const sendMessage = vi.fn()
-    const { useChatStore: mockedStore } = await import('../../stores/chatStore')
-    mockedStore.setState({
-      sessions: {
-        ...mockedStore.getState().sessions,
-        'session-1': {
-          ...mockedStore.getState().getSession('session-1'),
-          chatState: 'idle',
-        },
-      },
-    } as never)
-    // Spy at the store level: the component calls useChatStore.getState().sendMessage
-    vi.spyOn(mockedStore.getState(), 'sendMessage').mockImplementation(sendMessage)
-
-    try {
-      const { rerender } = render(
-        <ContextUsageIndicator
-          sessionId="session-1"
-          chatState="idle"
-          messageCount={1}
-        />,
-      )
-
-      await waitFor(() => {
-        expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('21%')
-      })
-
-      fireEvent.click(screen.getByTestId('context-usage-indicator'))
-      await waitFor(() => {
-        expect(screen.queryByTestId('context-usage-popover')).toBeInTheDocument()
-      })
-      const button = await screen.findByTestId('context-compact-button')
-      expect(button).toBeEnabled()
-
-      fireEvent.click(button)
-      expect(sendMessage).toHaveBeenCalledTimes(1)
-      expect(sendMessage).toHaveBeenCalledWith('session-1', '/compact', [], {
-        hideDisplayContent: true,
-      })
-
-      // While a turn is in flight the action must be disabled.
-      rerender(
-        <ContextUsageIndicator
-          sessionId="session-1"
-          chatState="compacting"
-          messageCount={1}
-        />,
-      )
-      await waitFor(() => {
-        expect(screen.getByTestId('context-usage-indicator')).toBeEnabled()
-      })
-      fireEvent.click(screen.getByTestId('context-usage-indicator'))
-      await waitFor(() => {
-        expect(screen.getByTestId('context-compact-button')).toBeDisabled()
-      })
-      expect(screen.getByTestId('context-compact-button')).toHaveTextContent('Compacting…')
-    } finally {
-      vi.restoreAllMocks()
-    }
   })
 })
 
@@ -933,11 +889,12 @@ describe('ContextUsageIndicator session usage', () => {
 
     fireEvent.click(screen.getByTestId('context-usage-indicator'))
 
-    // 1000 input + 9000 cache read + 2400 output; the cached tokens are counted once.
-    expect(await screen.findByTestId('session-total-tokens')).toHaveTextContent('12.4K')
-    expect(screen.getByTestId('session-cache-hit')).toHaveTextContent('90.0%')
-    expect(screen.getByTestId('session-speed')).toHaveTextContent('200')
+    // Cache reads stay in the hit-rate row; they are not a separate headline.
+    expect(await screen.findByTestId('session-cache-hit')).toHaveTextContent('90.0%')
+    // 2400 output / 42s API time, including prefill — not the 12s decode span (200 tok/s).
+    expect(screen.getByTestId('session-speed')).toHaveTextContent('57')
     expect(screen.getByTestId('session-speed')).toHaveTextContent('tok/s')
+    expect(screen.getByTestId('session-cost')).toHaveTextContent('$1.23')
     expect(sessionsApiMock.getSessionUsage).toHaveBeenCalledWith('session-1', expect.anything())
   })
 
@@ -960,11 +917,12 @@ describe('ContextUsageIndicator session usage', () => {
     expect(screen.getByTestId('session-cache-hit')).not.toHaveTextContent('100%')
   })
 
-  it('withholds the speed reading when the session reported no decode span', async () => {
-    // Transcript-sourced usage has no generation timing. Showing a number here would mean
-    // dividing by wall clock, which includes tool execution.
+  it('withholds the speed reading when the session reported no API duration', async () => {
+    // Transcript-sourced usage has no request timing. Showing a number here would mean
+    // dividing by session wall clock, which includes tool execution.
     sessionsApiMock.getSessionUsage.mockResolvedValue(usageInspection({
       ...baseUsage,
+      totalAPIDuration: 0,
       totalDecodeDuration: 0,
     }))
 
@@ -980,7 +938,7 @@ describe('ContextUsageIndicator session usage', () => {
     expect(screen.getByTestId('session-speed')).not.toHaveTextContent('tok/s')
   })
 
-  it('hides the block entirely for a session that has spent nothing', async () => {
+  it('hides the block entirely for a session that has produced nothing', async () => {
     sessionsApiMock.getSessionUsage.mockResolvedValue(usageInspection({
       ...baseUsage,
       totalInputTokens: 0,
@@ -999,7 +957,9 @@ describe('ContextUsageIndicator session usage', () => {
 
     await screen.findByTestId('context-usage-popover')
     // An all-zero row would read as a measurement rather than an absence.
-    expect(screen.queryByTestId('session-total-tokens')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('session-speed')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('session-cache-hit')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('session-cost')).not.toBeInTheDocument()
   })
 
   it('does not stack polls behind a request that has not answered yet', async () => {

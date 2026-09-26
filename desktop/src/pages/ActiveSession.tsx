@@ -47,7 +47,6 @@ import {
   WorkspaceSurface,
   useWorkspaceBrowserEventBridge,
 } from '../components/workbench/WorkspaceSurface'
-
 import { AgentTeamsStrip } from '../components/agentTeams/AgentTeamsSummary'
 import { snapshotWithHistoricalMembers } from '../components/agentTeams/agentTeamsModel'
 import {
@@ -448,6 +447,21 @@ export function ActiveSession() {
       void fetchTeamForSession(activeTabId)
     }
   }, [activeTabId, connectToSession, fetchTeamForSession, isMemberSession])
+
+  useEffect(() => {
+    if (!activeTabId || !isSessionTabState(activeTabId, activeTabType)) return
+    void useWorkspaceContentStore.getState().loadStatus(activeTabId)
+  }, [activeTabId, activeTabType])
+
+  // Subscribed once for the app, not per task: the owner of each event is
+  // resolved from the page id, so a background task's pages keep reporting.
+  useWorkspaceBrowserEventBridge(!isMobileLayout)
+  useWorkspaceFocusReturn(workspaceEnabled ? activeTabId : null)
+  useWorkspaceShortcuts({
+    sessionId: activeTabId,
+    cwd: getSessionTerminalCwd(session) ?? '',
+    enabled: workspaceEnabled,
+  })
 
   useEffect(() => {
     if (!activeTabId || !isSessionTabState(activeTabId, activeTabType)) return

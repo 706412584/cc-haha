@@ -660,11 +660,22 @@ export function TabBar() {
       >
       <div
         data-testid="workspace-window-header"
+        data-desktop-drag-region={hasWorkspaceHeader && isDesktopRuntime ? true : undefined}
         className={hasWorkspaceHeader
           ? 'flex min-w-0 flex-1 items-center gap-1 pr-2'
           : 'relative flex shrink-0 items-center gap-1 px-2 before:absolute before:left-0 before:top-1/2 before:h-4 before:w-px before:-translate-y-1/2 before:bg-[var(--color-tab-separator)]'}
       >
-        {hasWorkspaceHeader ? <div ref={workspaceHeader.ref} data-testid="workspace-header-slot" className="tab-bar-interactive flex h-[52px] min-w-0 flex-1" /> : null}
+        {hasWorkspaceHeader ? (
+          <div
+            ref={workspaceHeader.ref}
+            data-testid="workspace-header-slot"
+            data-desktop-drag-region={isDesktopRuntime ? true : undefined}
+            // The slot is titlebar chrome: empty space must drag the window.
+            // `tab-bar-interactive` here would also mark every descendant as
+            // no-drag, including the resource strip's leftover flex space.
+            className="flex h-[52px] min-w-0 flex-1"
+          />
+        ) : null}
         {showActivityButton && activeTabId && (
           <SessionActivityButton sessionId={activeTabId} />
         )}

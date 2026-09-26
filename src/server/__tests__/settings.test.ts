@@ -27,7 +27,17 @@ import {
   primeKeychainCacheFromPrefetch,
 } from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import type { OpenAIOAuthTokens } from '../../services/openaiAuth/types.js'
-import { getModelOptions } from '../../utils/model/modelOptions.js'
+import {
+  getMaxOpus46_1MOption,
+  getMaxSonnet46_1MOption,
+  getModelOptions,
+  getOpus46_1MOption,
+  getSonnet46_1MOption,
+} from '../../utils/model/modelOptions.js'
+import {
+  getDefaultMainLoopModelSetting,
+  parseUserSpecifiedModel,
+} from '../../utils/model/model.js'
 import {
   getSettingsForSource,
   updateSettingsForSource,
@@ -936,6 +946,14 @@ describe('Models API', () => {
         context: '1m',
       },
       {
+        id: 'claude-opus-5',
+        name: 'Opus 5',
+        description: 'Best for complex agentic coding and enterprise work',
+        context: '1m',
+        defaultReasoningEffort: 'high',
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      {
         id: 'claude-opus-4-8',
         name: 'Opus 4.8',
         description: 'Best for complex agentic coding and enterprise work',
@@ -1152,7 +1170,7 @@ describe('Models API', () => {
 
     expect(res.status).toBe(200)
     const body = await res.json()
-    expect(body.model.id).toBe('claude-opus-4-8')
+    expect(body.model.id).toBe('claude-opus-5')
   })
 
   it('GET /api/models/current should replace the legacy opus[1m] default with the Claude OAuth Pro default', async () => {
@@ -1189,6 +1207,7 @@ describe('Models API', () => {
     expect(listBody.models.map((model: { id: string }) => model.id)).toEqual([
       'claude-fable-5-1',
       'claude-fable-5',
+      'claude-opus-5',
       'claude-opus-4-8',
       'claude-sonnet-5',
       'claude-haiku-4-5',
@@ -1210,8 +1229,8 @@ describe('Models API', () => {
     const body = await response.json()
 
     expect(body.model).toMatchObject({
-      id: 'claude-opus-4-8',
-      name: 'Opus 4.8',
+      id: 'claude-opus-5',
+      name: 'Opus 5',
     })
   })
 
@@ -1467,10 +1486,13 @@ describe('Models API', () => {
     }
     expect(body.provider).toEqual({ id: 'grok-official', name: 'Grok Official' })
     expect(body.models.map((model) => model.id)).toEqual([
+      'grok-4.7',
+      'grok-4.7-build-fast',
       'grok-4.6',
       'grok-4.5',
-      'grok-composer-2.5-fast',
     ])
+    expect(body.models.find((model) => model.id === 'grok-4.7')?.context).toBe('500000')
+    expect(body.models.find((model) => model.id === 'grok-4.7-build-fast')?.context).toBe('500000')
     expect(body.models.find((model) => model.id === 'grok-4.6')?.context).toBe('500000')
     expect(body.models.find((model) => model.id === 'grok-4.5')?.context).toBe('500000')
   })
@@ -1535,6 +1557,92 @@ describe('Models API', () => {
 describe('Model Options', () => {
   beforeEach(setup)
   afterEach(teardown)
+
+  it('defaults Anthropic API users to Opus 5 and exposes the current official options once', () => {
+    process.env.ANTHROPIC_API_KEY = 'test-api-key'
+
+    expect(getDefaultMainLoopModelSetting()).toBe('claude-opus-5')
+
+    const options = getModelOptions()
+    const values = options.map(option => option.value)
+
+    expect(options[0]?.description).toContain('Opus 5')
+    expect(options[0]?.description).toContain('$5')
+    expect(values).toContain('fable')
+    expect(values).toContain('sonnet')
+    expect(values).not.toContain('opus')
+    expect(values).not.toContain('opus[1m]')
+  })
+
+  it('keeps Anthropic-compatible third-party URLs on lag-safe defaults', () => {
+    process.env.ANTHROPIC_API_KEY = 'third-party-key'
+    process.env.ANTHROPIC_BASE_URL = 'https://api.deepseek.com/anthropic'
+
+    expect(getDefaultMainLoopModelSetting()).toBe('claude-sonnet-4-5-20250929')
+    expect(parseUserSpecifiedModel('best')).toBe('claude-opus-4-7')
+    expect(parseUserSpecifiedModel('fable')).toBe('claude-opus-4-7')
+
+    const options = getModelOptions()
+    const values = options.map(option => option.value)
+
+    expect(options[0]?.description).toContain('Sonnet 4.5')
+    expect(values).not.toContain('fable')
+    expect(values).not.toContain('claude-fable-5')
+  })
+
+  it('exposes a custom Fable alias only when a third-party provider configures it', () => {
+    process.env.ANTHROPIC_API_KEY = 'third-party-key'
+    process.env.ANTHROPIC_BASE_URL = 'https://api.deepseek.com/anthropic'
+    process.env.ANTHROPIC_DEFAULT_FABLE_MODEL = 'deepseek-v4-fable'
+    process.env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME = 'DeepSeek Fable'
+
+    expect(parseUserSpecifiedModel('fable')).toBe('deepseek-v4-fable')
+    expect(parseUserSpecifiedModel('best')).toBe('deepseek-v4-fable')
+    expect(getModelOptions()).toContainEqual(expect.objectContaining({
+      value: 'fable',
+      label: 'DeepSeek Fable',
+    }))
+  })
+
+  it('labels extended-context options with current first-party and conservative third-party names', () => {
+    process.env.ANTHROPIC_API_KEY = 'test-api-key'
+
+    expect(getSonnet46_1MOption().description).toContain('Sonnet 5')
+    expect(getOpus46_1MOption().description).toContain('Opus 5')
+    expect(getMaxSonnet46_1MOption().description).toContain('Sonnet 5')
+    expect(getMaxOpus46_1MOption().description).toContain('Opus 5')
+
+    process.env.ANTHROPIC_BASE_URL = 'https://api.deepseek.com/anthropic'
+
+    expect(getSonnet46_1MOption().description).toContain('Sonnet 4.6')
+    expect(getOpus46_1MOption().description).toContain('Opus 4.7')
+  })
+
+  it('does not offer redundant Sonnet 1M choices when extended context is disabled', () => {
+    process.env.ANTHROPIC_API_KEY = 'test-api-key'
+    process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1'
+
+    expect(getModelOptions().map(option => option.value)).not.toContain('sonnet[1m]')
+  })
+
+  it('renders explicit current aliases and Fable model IDs with current marketing names', () => {
+    process.env.ANTHROPIC_API_KEY = 'test-api-key'
+
+    process.env.ANTHROPIC_MODEL = 'opus'
+    expect(getModelOptions().find(option => option.value === 'opus')?.description)
+      .toContain('Opus 5')
+
+    process.env.ANTHROPIC_MODEL = 'opus[1m]'
+    expect(getModelOptions().find(option => option.value === 'opus[1m]')?.description)
+      .toContain('Opus 5')
+
+    process.env.ANTHROPIC_MODEL = 'claude-fable-5'
+    expect(getModelOptions()).toContainEqual(expect.objectContaining({
+      value: 'claude-fable-5',
+      label: 'Fable 5',
+      description: 'claude-fable-5',
+    }))
+  })
 
   it('should keep OpenAI OAuth models visible alongside env-configured provider models', () => {
     process.env.ANTHROPIC_API_KEY = 'deepseek-key'

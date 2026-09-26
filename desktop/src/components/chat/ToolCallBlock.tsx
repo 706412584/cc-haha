@@ -1,4 +1,6 @@
+import { SessionToolLinks, SESSION_TOOL_NAMES } from '@/components/chat/SessionToolLinks'
 import { memo, useMemo, useState } from 'react'
+import { getDisclosure, setDisclosure } from '../../lib/disclosureMemory'
 import { CircleX, LoaderCircle } from 'lucide-react'
 import { activitySegmentIcon } from './activityGroupModel'
 import { CodeViewer } from './CodeViewer'
@@ -39,9 +41,12 @@ type Props = {
   partialInput?: string
   defaultExpanded?: boolean
   durationMs?: number
+  /** Stable key that survives virtualized row unmount/remount. */
+  disclosureKey?: string
 }
 
 const TOOL_ICONS: Record<string, string> = {
+  ListSessions: 'forum', ReadSession: 'forum', CreateSession: 'add_comment', SendSessionMessage: 'send', WaitSessions: 'hourglass_top',
   Bash: 'terminal',
   PowerShell: 'terminal',
   Read: 'description',
@@ -123,11 +128,17 @@ export function resolveShellOutputKind(content: unknown, toolName: string): Shel
   return hasUnrenderableBlocks ? { kind: 'opaque' } : { kind: 'empty' }
 }
 
-export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, result, compact = false, chrome = 'card', isPending = false, status, partialInput, defaultExpanded = false, durationMs }: Props) {
+export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, result, compact = false, chrome = 'card', isPending = false, status, partialInput, defaultExpanded = false, durationMs, disclosureKey }: Props) {
   const isRow = chrome === 'row'
   const isExitPlanTool = isExitPlanModeTool(toolName)
   const isEnterPlanTool = isEnterPlanModeTool(toolName)
-  const [expanded, setExpanded] = useState(defaultExpanded || isExitPlanTool)
+  const [localExpanded, setLocalExpanded] = useState(defaultExpanded || isExitPlanTool)
+  const expanded = disclosureKey ? (getDisclosure(disclosureKey) ?? localExpanded) : localExpanded
+  const setExpanded = (next: boolean | ((value: boolean) => boolean)) => {
+    const resolved = typeof next === 'function' ? next(expanded) : next
+    setLocalExpanded(resolved)
+    if (disclosureKey) setDisclosure(disclosureKey, resolved)
+  }
   const t = useTranslation()
   const obj = input && typeof input === 'object' ? (input as Record<string, unknown>) : {}
   const icon = TOOL_ICONS[toolName] || 'build'
@@ -313,6 +324,8 @@ export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, resu
           </span>
         )}
       </button>
+
+      {SESSION_TOOL_NAMES.has(toolName) ? <SessionToolLinks input={input} result={result?.content} /> : null}
 
       {expandable && expanded && (
         <div
@@ -1160,6 +1173,9 @@ function RowToolIcon({ toolName, active }: { toolName: string; active: boolean }
 /** Whether the row's summary is a sentence rather than something code-shaped. */
 function isProseToolSummary(toolName: string, obj: Record<string, unknown>): boolean {
   switch (toolName) {
+    case 'CreateSession':
+    case 'SendSessionMessage':
+      return true
     case 'Bash':
     case 'PowerShell':
     case 'Agent':
@@ -1175,6 +1191,11 @@ function isProseToolSummary(toolName: string, obj: Record<string, unknown>): boo
 
 function getToolSummary(toolName: string, obj: Record<string, unknown>, t?: (key: TranslationKey, params?: Record<string, string | number>) => string): string {
   switch (toolName) {
+    case 'ListSessions': return typeof obj.query === 'string' ? obj.query : ''
+    case 'CreateSession': return String(obj.title ?? obj.prompt ?? '')
+    case 'ReadSession': return String(obj.sessionId ?? '')
+    case 'SendSessionMessage': return String(obj.content ?? '')
+    case 'WaitSessions': return Array.isArray(obj.sessionIds) ? obj.sessionIds.join(', ') : ''
     case 'Bash':
     case 'PowerShell':
       // The model sends a short description of what the command is for, in the

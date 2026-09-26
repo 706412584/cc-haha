@@ -1,3 +1,6 @@
+import { configureSessionCollaborationHost, getSessionCollaborationService } from './services/sessionCollaborationHost.js'
+import { authenticateCollaborationCaller, collaborationToolAction } from './sessionCollaborationAuth.js'
+import { handleSessionCollaborationApi } from './api/sessionCollaboration.js'
 /**
  * Claude Code Desktop App — HTTP + WebSocket Server
  *
@@ -25,10 +28,12 @@ import { OPENAI_CODEX_REDIRECT_PATH } from '../services/openaiAuth/client.js'
 import { ensureDesktopCliLauncherInstalled } from './services/desktopCliLauncherService.js'
 import { enableConfigs } from '../utils/config.js'
 import { diagnosticsService } from './services/diagnosticsService.js'
+import { apiPerformanceMonitor } from './services/apiPerformanceMonitor.js'
 import { ensurePersistentStorageUpgraded } from './services/persistentStorageMigrations.js'
 import { handleStaticH5Request } from './staticH5.js'
 import {
   classifyH5Request,
+  resolveTrustedRendererOrigin,
   isH5AccessControlPath,
   isLocalCredentialOnlyPath,
   requiresLocalAccessCredential,
@@ -84,7 +89,60 @@ const PORT = SERVER_OPTIONS.port
 const HOST = SERVER_OPTIONS.host
 export const HTTP_CONNECTION_IDLE_TIMEOUT_SECONDS = 0
 
+type BackgroundIndexStartupOptions = {
+  startPrimary?: () => Promise<void>
+  getPrimaryState?: () => string
+  startSearch?: () => Promise<void>
+  wait?: () => Promise<void>
+  now?: () => number
+  maxPrimaryWaitMs?: number
+  signal?: AbortSignal
+}
+
+/** Give the session-list projection first access to cold-start I/O. */
+export async function startBackgroundIndexesInPriorityOrder(
+  options: BackgroundIndexStartupOptions = {},
+): Promise<void> {
+  const startPrimary = options.startPrimary ?? (() => localIndexCoordinator.start())
+  const getPrimaryState = options.getPrimaryState ?? (
+    () => localIndexCoordinator.getPublicStatus().state
+  )
+  const startSearch = options.startSearch ?? (() => searchContentCoordinator.start())
+  const wait = options.wait ?? (
+    () => new Promise<void>(resolve => setTimeout(resolve, SEARCH_INDEX_PRIMARY_POLL_MS))
+  )
+  const now = options.now ?? Date.now
+  const deadline = now() + Math.max(
+    0,
+    options.maxPrimaryWaitMs ?? SEARCH_INDEX_PRIMARY_WAIT_MS,
+  )
+
+  await startPrimary()
+  while (
+    !options.signal?.aborted &&
+    getPrimaryState() === 'building' &&
+    now() < deadline
+  ) await wait()
+  if (!options.signal?.aborted) await startSearch()
+}
+
 const publicAccessServers = new Set<PublicAccessServer>()
+
+let backgroundIndexStartupController: AbortController | undefined
+let backgroundIndexStartup: Promise<void> | undefined
+
+function beginBackgroundIndexStartup(): void {
+  backgroundIndexStartupController?.abort()
+  const controller = new AbortController()
+  backgroundIndexStartupController = controller
+  const operation = startBackgroundIndexesInPriorityOrder({
+    signal: controller.signal,
+  }).catch(() => undefined)
+  backgroundIndexStartup = operation
+  void operation.finally(() => {
+    if (backgroundIndexStartup === operation) backgroundIndexStartup = undefined
+  })
+}
 
 function withCors(response: Response, cors: CorsResolution): Response {
   const headers = new Headers(response.headers)
@@ -167,6 +225,7 @@ function originFromUrl(value: string | null): string | null {
 
 export function startServer(port = PORT, host = HOST) {
   enableConfigs()
+  const trustedRendererOrigin = resolveTrustedRendererOrigin(process.env.CC_HAHA_TRUSTED_RENDERER_ORIGIN)
   // Warm the synchronous disconnect-grace cache from managed settings so the
   // first client disconnect honors the configured value (issue #764).
   void refreshDisconnectGraceMs()
@@ -215,6 +274,11 @@ export function startServer(port = PORT, host = HOST) {
   publicAccessServers.add(publicAccess)
   let server: ReturnType<typeof Bun.serve<WebSocketData>>
 
+  // Open SQLite before the first REST request. Discovery still runs in the
+  // background; without this, getPublicStatus() reports `off` and the sidebar
+  // falls through to a full JSONL scan that can exceed the 120s client timeout.
+  void localIndexCoordinator.start().catch(() => undefined)
+
   try {
     server = Bun.serve<WebSocketData>({
       port,
@@ -240,7 +304,14 @@ export function startServer(port = PORT, host = HOST) {
           )
         }
 
+        await localIndexCoordinator.start().catch(() => undefined)
         await ensurePersistentStorageUpgraded()
+        const collaborationAction = collaborationToolAction(url.pathname)
+        if (collaborationAction) {
+          const caller = authenticateCollaborationCaller(req, (id, token) => conversationService.authorizeSdkConnection(id, token))
+          if (!caller) return Response.json({ error: 'Invalid session credential' }, { status: 401 })
+          return handleSessionCollaborationApi(req, collaborationAction, caller, await getSessionCollaborationService())
+        }
         const origin = req.headers.get('Origin')
         const clientAddress = server.requestIP(req)?.address ?? null
         const localTokenOverride = url.searchParams.get('localToken') ?? url.searchParams.get('token')
@@ -283,6 +354,7 @@ export function startServer(port = PORT, host = HOST) {
         const sdkToken = url.searchParams.get('token')
         const h5RequestContext = {
           clientAddress,
+          trustedRendererOrigin,
           localAccessTokenConfigured:
             hasConfiguredLocalAccessToken() || hasConfiguredPetAccessToken(),
           localAccessAuthorized:
@@ -551,14 +623,18 @@ export function startServer(port = PORT, host = HOST) {
 
       websocket: handleWebSocket,
     })
+    const disposeCollaboration = configureSessionCollaborationHost(localConnectHost, server.port)
     const stop = server.stop.bind(server)
     server.stop = (closeActiveConnections?: boolean) => {
+      apiPerformanceMonitor.stop()
+      disposeCollaboration()
       publicAccess.disable()
       publicAccessServers.delete(publicAccess)
       return stop(closeActiveConnections)
     }
     serverPort = server.port
     ProviderService.setServerPort(serverPort)
+    apiPerformanceMonitor.start()
   } catch (error) {
     publicAccess.disable()
     publicAccessServers.delete(publicAccess)

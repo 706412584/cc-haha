@@ -26,6 +26,7 @@ export type TabType = 'session' | 'settings' | 'scheduled' | 'connectors' | 'mar
 type PersistentSpecialTabType = 'settings' | 'scheduled' | 'connectors' | 'market' | 'traces'
 
 
+
 export type Tab = {
   sessionId: string
   title: string
@@ -61,7 +62,6 @@ type TabStore = {
   openTerminalTab: (cwd?: string, terminalRuntimeId?: string) => string
   openOfficeTab: (sourceSessionId: string, title?: string) => string
   returnFromOffice: (tabId: string) => void
-
   openSubagentTab: (
     sourceSessionId: string,
     toolUseId: string,
@@ -246,7 +246,6 @@ export const useTabStore = create<TabStore>((set, get) => ({
     }
     get().closeTab(tabId)
   },
-
 
   openSubagentTab: (sourceSessionId, toolUseId, title = 'SubAgent', taskId, returnTabId) => {
     const tabId = `${SUBAGENT_TAB_PREFIX}${sourceSessionId}__${toolUseId}`
@@ -470,6 +469,7 @@ export const useTabStore = create<TabStore>((set, get) => ({
   restoreTabs: async () => {
     try {
       const restoreStartedWith = get()
+      const runtimeSelections = useSessionRuntimeStore.getState().selections
       const restoreStillCurrent = () => {
         const current = get()
         return current.tabs === restoreStartedWith.tabs &&
@@ -518,10 +518,10 @@ export const useTabStore = create<TabStore>((set, get) => ({
       const recentSessions = reconcileSessionSnapshots(sessions, useSessionStore.getState().sessions)
       for (const session of recentSessions) sessionsById.set(session.id, session)
       if (historicalSessions.length > 0) {
-        const hydrated = useSessionStore.getState().hydrateHistoricalSessions(historicalSessions)
+        const hydrated = useSessionStore.getState().hydrateHistoricalSessions(historicalSessions, runtimeSelections)
         for (const session of hydrated) sessionsById.set(session.id, session)
       }
-      useSessionRuntimeStore.getState().syncFromSessions(recentSessions)
+      useSessionRuntimeStore.getState().syncFromSessions(recentSessions, runtimeSelections)
 
       const validTabs: Tab[] = data.openTabs
         .filter((t) => {

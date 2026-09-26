@@ -1864,6 +1864,39 @@ describe('ConversationService', () => {
     }))
   })
 
+  test('retains teammate display_name on pending permission requests', () => {
+    const service = new ConversationService() as any
+    service.sessions.set('lead-session', {
+      outputCallbacks: [],
+      seenSdkMessageUuids: new Set<string>(),
+      sdkMessages: [],
+      initMessage: null,
+      pendingPermissionRequests: new Map(),
+    })
+
+    service.handleSdkPayload('lead-session', JSON.stringify({
+      type: 'control_request',
+      request_id: 'teammate-perm',
+      request: {
+        subtype: 'can_use_tool',
+        tool_name: 'Bash',
+        tool_use_id: 'toolu_teammate',
+        input: { command: 'ls' },
+        description: 'list files',
+        display_name: 'researcher',
+      },
+    }))
+
+    expect(service.getPendingPermissionRequests('lead-session')).toEqual([{
+      requestId: 'teammate-perm',
+      toolName: 'Bash',
+      toolUseId: 'toolu_teammate',
+      input: { command: 'ls' },
+      description: 'list files',
+      displayName: 'researcher',
+    }])
+  })
+
   // CLI 的 WebSocketTransport 每次重连成功都会把整个发送缓冲区重放一遍，并假定
   // 「The server deduplicates by UUID」。以前 server 没实现这个契约：笔记本睡醒后
   // CLI 重连，一整轮早已结束的对话会被重新推上来，前端当成实时输出再渲染一遍

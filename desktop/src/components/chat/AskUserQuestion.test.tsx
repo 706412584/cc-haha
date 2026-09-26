@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 
 const { sendMock } = vi.hoisted(() => ({
   sendMock: vi.fn(),
@@ -27,11 +27,34 @@ vi.mock('../../api/sessions', () => ({
 }))
 
 import { AskUserQuestion } from './AskUserQuestion'
-import { useChatStore } from '../../stores/chatStore'
+import { useChatStore, type PerSessionState } from '../../stores/chatStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useTabStore } from '../../stores/tabStore'
 
 const ACTIVE_TAB = 'active-tab'
+
+/**
+ * Code Council fork feature: `sendMessage` re-aligns the server-side orchestration mode
+ * (`set_coordinator_mode` / `set_pipeline_mode`) before every real user turn. Those frames are
+ * not part of the question-answering contract under test, so assertions about "how many messages
+ * did the user send" count only the substantive frames.
+ */
+const ORCHESTRATION_FRAME_TYPES = ['set_coordinator_mode', 'set_pipeline_mode']
+
+function substantiveSends() {
+  return sendMock.mock.calls.filter(
+    ([, payload]) => !ORCHESTRATION_FRAME_TYPES.includes((payload as { type?: string })?.type ?? ''),
+  )
+}
+
+function patchSession(patch: Partial<PerSessionState>) {
+  useChatStore.setState((state) => ({
+    sessions: {
+      ...state.sessions,
+      [ACTIVE_TAB]: { ...state.sessions[ACTIVE_TAB]!, ...patch },
+    },
+  }))
+}
 
 describe('AskUserQuestion', () => {
   beforeEach(() => {
@@ -42,6 +65,9 @@ describe('AskUserQuestion', () => {
       tabs: [{ sessionId: ACTIVE_TAB, title: 'Test', type: 'session', status: 'idle' }],
     })
     useChatStore.setState({
+      // Drafts live outside `sessions`; without this they survive into the next
+      // test and a handed-off one would render every later card as terminal.
+      askUserQuestionDrafts: {},
       sessions: {
         [ACTIVE_TAB]: {
           messages: [],
@@ -653,7 +679,244 @@ describe('AskUserQuestion', () => {
       fireEvent.click(chatButton)
       fireEvent.click(chatButton)
 
-      expect(sendMock).toHaveBeenCalledTimes(1)
+      expect(substantiveSends()).toHaveLength(1)
+    })
+  })
+
+  /**
+   * The card is rendered from the transcript, so it outlives the live permission
+   * request it belongs to. Before this, that state rendered a fully editable form
+   * whose Submit and Chat buttons were silently dead: a question nobody was
+   * waiting for any more, with no way to answer it and nothing saying why.
+   */
+  describe('question with no live request left', () => {
+    const SCOPE_INPUT = {
+      questions: [
+        {
+          question: 'Which scope?',
+          options: [{ label: 'Single page' }, { label: 'Tabs' }],
+        },
+      ],
+    }
+
+    const dropPendingRequest = (chatState: PerSessionState['chatState'] = 'idle') =>
+      patchSession({ pendingPermission: null, pendingPermissions: {}, chatState })
+
+    const submitButton = () => screen.getByRole('button', { name: /submit|send as new message/i })
+    const chatButton = () => screen.getByRole('button', { name: /chat about this/i })
+
+    // The accident's reverse guard: as long as the request is live, both actions
+    // must stay usable. If this ever goes red, the fix has swallowed the prompt
+    // it was supposed to protect.
+    it('keeps both actions usable while a live request is waiting', () => {
+      render(<AskUserQuestion toolUseId="tool-1" input={SCOPE_INPUT} />)
+
+      expect(chatButton()).toHaveProperty('disabled', false)
+      fireEvent.click(screen.getByRole('button', { name: /^Tabs$/ }))
+      expect(submitButton()).toHaveProperty('disabled', false)
+      expect(screen.queryByText(/no longer waiting/)).toBeNull()
+    })
+
+    it('says so, and sends the answers as a new message instead of answering', () => {
+      dropPendingRequest()
+      render(<AskUserQuestion toolUseId="tool-1" input={SCOPE_INPUT} />)
+
+      expect(screen.getByText(/no longer waiting/)).toBeTruthy()
+      expect(screen.getByText('Expired')).toBeTruthy()
+
+      fireEvent.click(screen.getByRole('button', { name: /^Single page$/ }))
+      fireEvent.click(submitButton())
+
+      expect(substantiveSends()).toHaveLength(1)
+      expect(sendMock).toHaveBeenCalledWith(ACTIVE_TAB, expect.objectContaining({
+        type: 'user_message',
+        content: expect.stringContaining('- "Which scope?"\n  Answer: Single page'),
+      }))
+      expect(sendMock).not.toHaveBeenCalledWith(
+        ACTIVE_TAB,
+        expect.objectContaining({ type: 'permission_response' }),
+      )
+    })
+
+    it('hands the question back as a message when there is nothing to deny', () => {
+      dropPendingRequest()
+      render(<AskUserQuestion toolUseId="tool-1" input={SCOPE_INPUT} />)
+
+      fireEvent.click(chatButton())
+
+      expect(substantiveSends()).toHaveLength(1)
+      expect(sendMock).toHaveBeenCalledWith(ACTIVE_TAB, expect.objectContaining({
+        type: 'user_message',
+        content: expect.stringContaining('Start by asking them what they would like to clarify'),
+      }))
+    })
+
+    // The card renders as soon as the tool_use block is complete, which is before
+    // the can_use_tool request lands. Judging that window as expired would flash a
+    // bogus notice — and a click there would send a message that cancels the very
+    // turn waiting on the prompt.
+    it('stays neutral while the session is still mid-turn', () => {
+      dropPendingRequest('tool_executing')
+      render(<AskUserQuestion toolUseId="tool-1" input={SCOPE_INPUT} />)
+
+      expect(screen.queryByText(/no longer waiting/)).toBeNull()
+      expect(submitButton()).toHaveProperty('disabled', true)
+      expect(chatButton()).toHaveProperty('disabled', true)
+
+      fireEvent.click(chatButton())
+      expect(sendMock).not.toHaveBeenCalled()
+    })
+
+    // Server status messages can flip chatState to idle without touching the
+    // permission record, so `pendingRequest` — not chatState — decides the channel.
+    it('answers through the permission channel while a request still exists', () => {
+      patchSession({ chatState: 'idle' })
+      render(<AskUserQuestion toolUseId="tool-1" input={SCOPE_INPUT} />)
+
+      fireEvent.click(screen.getByRole('button', { name: /^Tabs$/ }))
+      fireEvent.click(submitButton())
+
+      expect(sendMock).toHaveBeenCalledWith(ACTIVE_TAB, {
+        type: 'permission_response',
+        requestId: 'perm-1',
+        allowed: true,
+        updatedInput: { ...SCOPE_INPUT, answers: { 'Which scope?': 'Tabs' } },
+      })
+    })
+
+    it('queues the message when a new turn started between render and click', () => {
+      dropPendingRequest()
+      render(
+        <AskUserQuestion toolUseId="tool-1" input={SCOPE_INPUT} supersededByUserMessage />,
+      )
+
+      fireEvent.click(screen.getByRole('button', { name: /^Tabs$/ }))
+      // The user already spoke past this question, so it stays expired — but the
+      // session is busy again, and interrupting that turn would be worse.
+      act(() => patchSession({ chatState: 'thinking' }))
+      fireEvent.click(submitButton())
+
+      expect(sendMock).not.toHaveBeenCalled()
+      const queued = useChatStore.getState().sessions[ACTIVE_TAB]?.queuedUserMessages ?? []
+      expect(queued).toHaveLength(1)
+      expect(queued[0]?.content).toContain('Answer: Tabs')
+    })
+
+    it('reports the message as sent instead of leaving the form editable', () => {
+      dropPendingRequest()
+      render(<AskUserQuestion toolUseId="tool-1" input={SCOPE_INPUT} />)
+
+      fireEvent.click(screen.getByRole('button', { name: /^Tabs$/ }))
+      fireEvent.click(submitButton())
+
+      expect(screen.getByText(/Sent as a new message/)).toBeTruthy()
+      expect(screen.queryByPlaceholderText('Type your answer...')).toBeNull()
+      expect(screen.queryByRole('button', { name: /send as new message/i })).toBeNull()
+    })
+
+    // While reconnecting, the replayed permission snapshot may not have arrived
+    // yet: an empty pending map there means "unknown", not "expired".
+    it('stays neutral while the session is not connected', () => {
+      patchSession({
+        pendingPermission: null,
+        pendingPermissions: {},
+        chatState: 'idle',
+        connectionState: 'reconnecting',
+      })
+      render(<AskUserQuestion toolUseId="tool-1" input={SCOPE_INPUT} />)
+
+      expect(screen.queryByText(/no longer waiting/)).toBeNull()
+      expect(chatButton()).toHaveProperty('disabled', true)
+    })
+  })
+
+  /**
+   * Switching tabs unmounts the whole session page (ContentRouter renders only
+   * the active tab) and the virtualized message list unmounts cards that scroll
+   * out of its window. The answers are the user's work, so they live in the
+   * store while the card is gone.
+   */
+  describe('answers survive an unmount', () => {
+    const TWO_QUESTIONS = {
+      questions: [
+        {
+          header: 'Q1',
+          question: 'First question?',
+          options: [{ label: 'A1' }, { label: 'B1' }],
+        },
+        {
+          header: 'Q2',
+          question: 'Second question?',
+          options: [{ label: 'A2' }],
+        },
+      ],
+    }
+
+    const storedDraft = () =>
+      useChatStore.getState().askUserQuestionDrafts[ACTIVE_TAB]?.['tool-1']
+
+    it('restores picks, free text and the question on screen', () => {
+      const first = render(<AskUserQuestion toolUseId="tool-1" input={TWO_QUESTIONS} />)
+
+      fireEvent.click(screen.getByRole('button', { name: /^A1$/ }))
+      fireEvent.change(screen.getByPlaceholderText('Type your answer...'), {
+        target: { value: 'custom q2' },
+      })
+      first.unmount()
+
+      render(<AskUserQuestion toolUseId="tool-1" input={TWO_QUESTIONS} />)
+
+      // The single-select pick advanced to Q2 before the unmount; both the tab
+      // and the answer have to come back.
+      expect(screen.getByText('Second question?')).toBeTruthy()
+      expect((screen.getByPlaceholderText('Type your answer...') as HTMLTextAreaElement).value)
+        .toBe('custom q2')
+      fireEvent.click(screen.getByRole('button', { name: /Q1$/ }))
+      expect(screen.getByRole('button', { name: /^A1$/ }).getAttribute('class'))
+        .toContain('border-[var(--color-secondary)]')
+    })
+
+    it('does not resurrect the form once the question was submitted', () => {
+      const first = render(<AskUserQuestion toolUseId="tool-1" input={TWO_QUESTIONS} />)
+
+      fireEvent.click(screen.getByRole('button', { name: /^A1$/ }))
+      fireEvent.click(screen.getByRole('button', { name: /^A2$/ }))
+      fireEvent.click(screen.getByRole('button', { name: /submit/i }))
+      first.unmount()
+
+      expect(storedDraft()).toBeUndefined()
+
+      render(<AskUserQuestion toolUseId="tool-1" input={TWO_QUESTIONS} result={{ answers: {
+        'First question?': 'A1',
+        'Second question?': 'A2',
+      } }} />)
+
+      expect(screen.queryByPlaceholderText('Type your answer...')).toBeNull()
+      expect(substantiveSends()).toHaveLength(1)
+    })
+
+    it('keeps the sent-as-message marker across a remount', () => {
+      patchSession({ pendingPermission: null, pendingPermissions: {}, chatState: 'idle' })
+      const first = render(<AskUserQuestion toolUseId="tool-1" input={TWO_QUESTIONS} />)
+
+      fireEvent.click(screen.getByRole('button', { name: /^A1$/ }))
+      fireEvent.click(screen.getByRole('button', { name: /^A2$/ }))
+      fireEvent.click(screen.getByRole('button', { name: /send as new message/i }))
+      first.unmount()
+
+      render(<AskUserQuestion toolUseId="tool-1" input={TWO_QUESTIONS} />)
+
+      expect(screen.getByText(/Sent as a new message/)).toBeTruthy()
+      expect(screen.queryByRole('button', { name: /send as new message/i })).toBeNull()
+      expect(substantiveSends()).toHaveLength(1)
+    })
+
+    it('leaves nothing behind when the card was never filled in', () => {
+      const first = render(<AskUserQuestion toolUseId="tool-1" input={TWO_QUESTIONS} />)
+
+      first.unmount()
+
+      expect(storedDraft()).toBeUndefined()
     })
   })
 })

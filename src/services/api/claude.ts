@@ -1927,6 +1927,19 @@ async function* queryModel(
       options.model,
     )
 
+    // The installed SDK's effort type predates xhigh, which configureEffortParams supports.
+    const configuredEffort = outputConfig.effort as string | null | undefined
+
+    // Opus 5 rejects disabled thinking above high effort. Preserve the user's
+    // explicit thinking choice and use the highest compatible effort instead.
+    if (
+      sendsExplicitDisabledThinking &&
+      options.model.toLowerCase().includes('claude-opus-5') &&
+      (configuredEffort === 'xhigh' || configuredEffort === 'max')
+    ) {
+      outputConfig.effort = 'high'
+    }
+
     configureTaskBudgetParams(
       options.taskBudget,
       outputConfig as BetaOutputConfig & { task_budget?: TaskBudgetParam },

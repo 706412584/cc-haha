@@ -1,3 +1,4 @@
+import { createSessionMessageInbox, isPendingSessionMessage, sessionMessageUuid } from '../utils/sessionMessageInbox.js'
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import { feature } from 'bun:bundle'
 import { readFile, stat } from 'fs/promises'
@@ -56,6 +57,7 @@ import {
   peek,
   subscribeToCommandQueue,
   getCommandsByMaxPriority,
+  getCommandQueue,
 } from 'src/utils/messageQueueManager.js'
 import { notifyCommandLifecycle } from 'src/utils/commandLifecycle.js'
 import {
@@ -365,11 +367,15 @@ import {
   markMessagesAsRead,
   isShutdownApproved,
 } from '../utils/teammateMailbox.js'
+import {
+  partitionLeadMailboxMessages,
+  resolveTeammatePermissionRequests,
+} from '../utils/swarm/printLeaderPermissionBridge.js'
 import { removeTeammateFromTeamFile } from '../utils/swarm/teamHelpers.js'
 import { unassignTeammateTasks } from '../utils/tasks.js'
 import { getRunningTasks } from '../utils/task/framework.js'
 import { isBackgroundTask } from '../tasks/types.js'
-import { stopTask } from '../tasks/stopTask.js'
+import { stopTaskFromControlRequest } from '../tasks/stopTask.js'
 import {
   drainSdkEvents,
   setAgentRunMessageSink,
@@ -473,9 +479,46 @@ export function canBatchWith(
   return (
     next !== undefined &&
     next.mode === 'prompt' &&
+    !isPendingSessionMessage(head.uuid) &&
+    !isPendingSessionMessage(next.uuid) &&
     next.workload === head.workload &&
     next.isMeta === head.isMeta
   )
+}
+
+/**
+ * Replace one server's tools in a merged pool.
+ *
+ * Removing only the server's own `mcp__<server>__*` tools is not enough: a
+ * reconnect also returns the synthesized resource tools
+ * (`ListMcpResourcesTool` / `ReadMcpResourceTool`), which carry no server
+ * prefix, so a prefix-only filter leaves the previous copies in place and the
+ * append adds another pair — two more entries on every reconnect.
+ *
+ * Treat the pool as name-keyed instead: drop this server's prefixed tools and
+ * any tool the incoming set is about to re-add, then append. Re-applying the
+ * same result is then a no-op, which is what makes it safe to call per
+ * reconnect.
+ */
+export function mergeServerTools(
+  existing: Tool[],
+  serverName: string,
+  incoming: Tool[],
+): Tool[] {
+  const prefix = getMcpPrefix(serverName)
+  const incomingNames = new Set(
+    incoming.map(tool => tool.name).filter((name): name is string => !!name),
+  )
+  return [
+    ...existing.filter(tool => {
+      if (tool.name?.startsWith(prefix)) return false
+      // A tool the incoming set re-adds is this server's own contribution
+      // (only the resource tools are unprefixed); keeping the old copy would
+      // duplicate it.
+      return !(tool.name && incomingNames.has(tool.name))
+    }),
+    ...incoming,
+  ]
 }
 
 export async function runHeadless(
@@ -899,7 +942,11 @@ export async function runHeadless(
     getAppState,
     setAppState,
     agents,
-    options,
+    {
+      ...options,
+      hostPermissionPromptAvailable:
+        effectivePermissionPromptToolName === 'stdio',
+    },
     turnInterruptionState,
   )) {
     partialOutputTracker.observe(message)
@@ -1010,6 +1057,51 @@ export function bindAgentRunMessageSink(structuredIO: StructuredIO): () => void 
   })
 }
 
+export function bindBackgroundTaskNotifications(structuredIO: StructuredIO) {
+  const output = structuredIO.outbound
+  // Task completion must reach clients even while the model is still working.
+  // Keep the notification queued for its normal model follow-up, and remember
+  // the queue object so consuming it later does not repeat the SDK bookend.
+  const publishedTaskNotifications = new WeakSet<QueuedCommand>()
+  const publishTaskNotification = (command: QueuedCommand) => {
+    if (
+      command.mode !== 'task-notification' ||
+      command.agentId !== undefined ||
+      publishedTaskNotifications.has(command)
+    ) return
+    const notification = parseTaskNotificationXml(
+      typeof command.value === 'string' ? command.value : '',
+    )
+    if (!notification.status) return
+    publishedTaskNotifications.add(command)
+    // A fast shell can finish before the query loop flushes its start event.
+    for (const event of drainSdkEvents()) output.enqueue(event)
+    output.enqueue({
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: notification.taskId,
+      tool_use_id: notification.toolUseId,
+      status: notification.status,
+      output_file: notification.outputFile,
+      summary: notification.summary,
+      result: notification.result,
+      workflow_run_id: notification.workflowRunId,
+      usage: notification.usage,
+      session_id: getSessionId(),
+      uuid: randomUUID(),
+    })
+  }
+  const publishQueuedTaskNotifications = () => {
+    for (const command of getCommandQueue()) publishTaskNotification(command)
+  }
+  const unsubscribeTaskNotifications = subscribeToCommandQueue(
+    publishQueuedTaskNotifications,
+  )
+  publishQueuedTaskNotifications()
+
+  return { publish: publishTaskNotification, unsubscribe: unsubscribeTaskNotifications }
+}
+
 function runHeadlessStreaming(
   structuredIO: StructuredIO,
   mcpClients: MCPServerConnection[],
@@ -1025,6 +1117,7 @@ function runHeadlessStreaming(
     verbose: boolean | undefined
     jsonSchema: Record<string, unknown> | undefined
     permissionPromptToolName: string | undefined
+    hostPermissionPromptAvailable?: boolean
     allowedTools: string[] | undefined
     thinkingConfig: ThinkingConfig | undefined
     maxTurns: number | undefined
@@ -1059,7 +1152,15 @@ function runHeadlessStreaming(
   let abortController: AbortController | undefined
   // Same queue sendRequest() enqueues to — one FIFO for everything.
   const output = structuredIO.outbound
+  const sessionMessageInbox = createSessionMessageInbox(enqueue, receipt => {
+    output.enqueue({ type: 'system', subtype: 'session_message_receipt', ...receipt, source_uuid: sessionMessageUuid(receipt.message_id), session_id: getSessionId(), uuid: randomUUID() })
+  }, initialMessages)
   const removeAgentRunMessageSink = bindAgentRunMessageSink(structuredIO)
+
+  const {
+    publish: publishTaskNotification,
+    unsubscribe: unsubscribeTaskNotifications,
+  } = bindBackgroundTaskNotifications(structuredIO)
 
   // Ctrl+C in -p mode: abort the in-flight query, then shut down gracefully.
   // gracefulShutdown persists session state and flushes analytics, with a
@@ -2091,29 +2192,7 @@ function runHeadlessStreaming(
               typeof command.value === 'string' ? command.value : ''
             const notification = parseTaskNotificationXml(notificationText)
 
-            // Only emit a task_notification SDK event when a <status> tag is
-            // present — that means this is a terminal notification (completed/
-            // failed/stopped). Stream events from enqueueStreamEvent carry no
-            // <status> (they're progress pings); emitting them here would
-            // default to 'completed' and falsely close the task for SDK
-            // consumers. Terminal bookends are now emitted directly via
-            // emitTaskTerminatedSdk, so skipping statusless events is safe.
-            if (notification.status) {
-              output.enqueue({
-                type: 'system',
-                subtype: 'task_notification',
-                task_id: notification.taskId,
-                tool_use_id: notification.toolUseId,
-                status: notification.status,
-                output_file: notification.outputFile,
-                summary: notification.summary,
-                result: notification.result,
-                workflow_run_id: notification.workflowRunId,
-                usage: notification.usage,
-                session_id: getSessionId(),
-                uuid: randomUUID(),
-              })
-            }
+            publishTaskNotification(command)
             if (
               !shouldForwardTaskNotificationToModel(notification, {
                 structuredOutput: options.outputFormat === 'stream-json',
@@ -2594,10 +2673,29 @@ function runHeadlessStreaming(
               refreshedState.teamContext?.teamName,
             )
 
+            const teamName = refreshedState.teamContext?.teamName
+            const partitioned = partitionLeadMailboxMessages(unread)
+
+            if (
+              partitioned.permissionRequests.length > 0 ||
+              partitioned.sandboxPermissionRequests.length > 0
+            ) {
+              logForDebugging(
+                `[print.ts] Routing ${partitioned.permissionRequests.length} teammate permission request(s) and ${partitioned.sandboxPermissionRequests.length} sandbox request(s) to the host`,
+              )
+              void resolveTeammatePermissionRequests({
+                host: structuredIO,
+                canPromptHost: options.hostPermissionPromptAvailable === true,
+                teamName,
+                permissionRequests: partitioned.permissionRequests,
+                sandboxPermissionRequests:
+                  partitioned.sandboxPermissionRequests,
+              })
+            }
+
             // Process shutdown_approved messages - remove teammates from team file
             // This mirrors what useInboxPoller does in interactive mode (lines 546-606)
-            const teamName = refreshedState.teamContext?.teamName
-            for (const m of unread) {
+            for (const m of partitioned.remaining) {
               const shutdownApproval = isShutdownApproved(m.text)
               if (shutdownApproval && teamName) {
                 const teammateToRemove = shutdownApproval.from
@@ -2648,8 +2746,13 @@ function runHeadlessStreaming(
               }
             }
 
-            // Format messages same as useInboxPoller
-            const formatted = unread
+            if (partitioned.remaining.length === 0) {
+              continue
+            }
+
+            // Format remaining teammate chat the same way as useInboxPoller.
+            // Permission requests stay out of the model context.
+            const formatted = partitioned.remaining
               .map(
                 (m: { from: string; text: string; color?: string }) =>
                   `<${TEAMMATE_MESSAGE_TAG} teammate_id="${m.from}"${m.color ? ` color="${m.color}"` : ''}>\n${m.text}\n</${TEAMMATE_MESSAGE_TAG}>`,
@@ -2729,7 +2832,9 @@ function runHeadlessStreaming(
         unsubscribeSkillChanges()
         unsubscribeAuthStatus?.()
         statusListeners.delete(rateLimitListener)
+        unsubscribeTaskNotifications()
         removeAgentRunMessageSink()
+        sessionMessageInbox.dispose()
         output.done()
       }
     }
@@ -2896,7 +3001,20 @@ function runHeadlessStreaming(
       }
 
       if (message.type === 'control_request') {
-        if (message.request.subtype === 'interrupt') {
+        if (message.request.subtype === 'enqueue_session_message') {
+          try {
+            const deliveryUuid = sessionMessageUuid(message.request.message_id)
+            const persisted = !isPendingSessionMessage(deliveryUuid) && await doesMessageExistInSession(
+              getSessionId() as UUID,
+              deliveryUuid,
+            )
+            sendControlResponseSuccess(message, sessionMessageInbox.accept(message.request, persisted))
+            if (message.request.start_if_idle) void run()
+          } catch (error) {
+            sendControlResponseError(message, error instanceof Error ? error.message : String(error))
+          }
+        } else if (message.request.subtype === 'interrupt') {
+          sessionMessageInbox.cancelQueued(dequeueAllMatching)
           // Track escapes for attribution (ant-only feature)
           if (feature('COMMIT_ATTRIBUTION')) {
             setAppState(prev => ({
@@ -2916,6 +3034,7 @@ function runHeadlessStreaming(
           suggestionState.pendingSuggestion = null
           sendControlResponseSuccess(message)
         } else if (message.request.subtype === 'end_session') {
+          sessionMessageInbox.cancelQueued(dequeueAllMatching)
           logForDebugging(
             `[print.ts] end_session received, reason=${message.request.reason ?? 'unspecified'}`,
           )
@@ -3262,7 +3381,6 @@ function runHeadlessStreaming(
               sendControlResponseSuccess(message)
             } else {
               // Update appState.mcp with the new client, tools, commands, and resources
-              const prefix = getMcpPrefix(serverName)
               setAppState(prev => ({
                 ...prev,
                 mcp: {
@@ -3270,12 +3388,7 @@ function runHeadlessStreaming(
                   clients: prev.mcp.clients.map(c =>
                     c.name === serverName ? result.client : c,
                   ),
-                  tools: [
-                    ...reject(prev.mcp.tools, t =>
-                      t.name?.startsWith(prefix),
-                    ),
-                    ...result.tools,
-                  ],
+                  tools: mergeServerTools(prev.mcp.tools, serverName, result.tools),
                   commands: [
                     ...reject(prev.mcp.commands, c =>
                       commandBelongsToServer(c, serverName),
@@ -3301,12 +3414,7 @@ function runHeadlessStreaming(
                   ),
                   result.client,
                 ],
-                tools: [
-                  ...dynamicMcpState.tools.filter(
-                    t => !t.name?.startsWith(prefix),
-                  ),
-                  ...result.tools,
-                ],
+                tools: mergeServerTools(dynamicMcpState.tools, serverName, result.tools),
               }
               if (result.client.type === 'connected') {
                 registerElicitationHandlers([result.client])
@@ -3411,12 +3519,7 @@ function runHeadlessStreaming(
                   clients: prev.mcp.clients.map(c =>
                     c.name === serverName ? result.client : c,
                   ),
-                  tools: [
-                    ...reject(prev.mcp.tools, t =>
-                      t.name?.startsWith(prefix),
-                    ),
-                    ...result.tools,
-                  ],
+                  tools: mergeServerTools(prev.mcp.tools, serverName, result.tools),
                   commands: [
                     ...reject(prev.mcp.commands, c =>
                       commandBelongsToServer(c, serverName),
@@ -3573,7 +3676,6 @@ function runHeadlessStreaming(
                     })
                     return
                   }
-                  const prefix = getMcpPrefix(serverName)
                   setAppState(prev => ({
                     ...prev,
                     mcp: {
@@ -3581,12 +3683,7 @@ function runHeadlessStreaming(
                       clients: prev.mcp.clients.map(c =>
                         c.name === serverName ? result.client : c,
                       ),
-                      tools: [
-                        ...reject(prev.mcp.tools, t =>
-                          t.name?.startsWith(prefix),
-                        ),
-                        ...result.tools,
-                      ],
+                      tools: mergeServerTools(prev.mcp.tools, serverName, result.tools),
                       commands: [
                         ...reject(prev.mcp.commands, c =>
                           commandBelongsToServer(c, serverName),
@@ -3612,12 +3709,7 @@ function runHeadlessStreaming(
                       ),
                       result.client,
                     ],
-                    tools: [
-                      ...dynamicMcpState.tools.filter(
-                        t => !t.name?.startsWith(prefix),
-                      ),
-                      ...result.tools,
-                    ],
+                    tools: mergeServerTools(dynamicMcpState.tools, serverName, result.tools),
                   }
                 })
                 .catch(error => {
@@ -3847,7 +3939,6 @@ function runHeadlessStreaming(
           } else {
             await revokeServerTokens(serverName, config)
             const result = await reconnectMcpServerImpl(serverName, config)
-            const prefix = getMcpPrefix(serverName)
             setAppState(prev => ({
               ...prev,
               mcp: {
@@ -3855,10 +3946,7 @@ function runHeadlessStreaming(
                 clients: prev.mcp.clients.map(c =>
                   c.name === serverName ? result.client : c,
                 ),
-                tools: [
-                  ...reject(prev.mcp.tools, t => t.name?.startsWith(prefix)),
-                  ...result.tools,
-                ],
+                tools: mergeServerTools(prev.mcp.tools, serverName, result.tools),
                 commands: [
                   ...reject(prev.mcp.commands, c =>
                     commandBelongsToServer(c, serverName),
@@ -3951,14 +4039,21 @@ function runHeadlessStreaming(
           })
         } else if (message.request.subtype === 'stop_task') {
           const { task_id: taskId } = message.request
-          try {
-            await stopTask(taskId, {
-              getAppState,
-              setAppState,
-            })
-            sendControlResponseSuccess(message, {})
-          } catch (error) {
-            sendControlResponseError(message, errorMessage(error))
+          const result = await stopTaskFromControlRequest(taskId, {
+            getAppState,
+            setAppState,
+          })
+          if (result.ok) {
+            // alreadyGone: the registry already evicted the task (it
+            // terminated earlier, or the process restarted). Tell the caller
+            // explicitly so it can converge its stale "running" entry instead
+            // of surfacing "No task found with ID" to the user.
+            sendControlResponseSuccess(
+              message,
+              result.alreadyGone ? { stopped: false, reason: 'not_found' } : {},
+            )
+          } else {
+            sendControlResponseError(message, result.message)
           }
         } else if (message.request.subtype === 'send_agent_message') {
           const agentId = message.request.agent_id.trim()
@@ -4371,6 +4466,7 @@ function runHeadlessStreaming(
       unsubscribeSkillChanges()
       unsubscribeAuthStatus?.()
       statusListeners.delete(rateLimitListener)
+      unsubscribeTaskNotifications()
       removeAgentRunMessageSink()
       output.done()
     }

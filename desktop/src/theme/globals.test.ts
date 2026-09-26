@@ -401,6 +401,17 @@ describe('overlay opacity contract', () => {
   })
 })
 
+describe('desktop window drag', () => {
+  it('does not promote the sidebar shell into a compositing layer', () => {
+    // Electron drops -webkit-app-region hits on a macOS compositing layer, so
+    // a permanent will-change on this shell makes the traffic-light padding
+    // undraggable. The comment is allowed to mention the property; a real
+    // declaration is not.
+    const shellCss = getCssBetween('.sidebar-shell {', '.sidebar-shell[data-state="closed"] {')
+    expect(shellCss).not.toMatch(/will-change\s*:/)
+  })
+})
+
 describe('layering scale', () => {
   const scale = (() => {
     const start = normalizedCss.indexOf('/* ─── Layering scale')

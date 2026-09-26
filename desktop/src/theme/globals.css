@@ -2172,7 +2172,9 @@ button, input, textarea, select, a, [role="button"] {
   flex-shrink: 0;
   overflow: hidden;
   transition: width var(--motion-sidebar-duration) var(--motion-sidebar-easing);
-  will-change: width;
+  /* Do not promote this shell with will-change. A permanent compositing
+     layer makes Electron drop -webkit-app-region hits on macOS, so the
+     title padding around the traffic lights cannot drag the window. */
 }
 
 .sidebar-shell[data-state="closed"] {
