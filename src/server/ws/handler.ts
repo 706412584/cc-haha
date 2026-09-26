@@ -30,6 +30,7 @@ import {
   ConversationStartupError,
   conversationService,
 } from '../services/conversationService.js'
+import { removeSessionAppendPromptFile } from '../services/sessionPromptFileService.js'
 import { computerUseApprovalService } from '../services/computerUseApprovalService.js'
 import {
   sessionService,
@@ -3715,6 +3716,11 @@ function cleanupSessionRuntimeState(
   coordinatorModeSessions.delete(sessionId)
   pipelineModeSessions.delete(sessionId)
   handoffSummarySessions.delete(sessionId)
+  // Drop this session's composed --append-system-prompt-file. Only on real
+  // teardown: a mode-switch restart goes stopSession → startSession, which
+  // rewrites the file, so removing it on the restart path would delete the
+  // file the new process is about to read.
+  void removeSessionAppendPromptFile(sessionId)
   activeUserTurns.delete(sessionId)
   sessionActivityCoordinator.clear(sessionId)
   activeCliRuns.delete(sessionId)

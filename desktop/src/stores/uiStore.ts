@@ -54,6 +54,7 @@ const SETTINGS_TABS = [
   'agents',
   'skills',
   'memory',
+  'orchestration',
   'projectRules',
   'plugins',
   'pets',
@@ -240,6 +241,7 @@ export type SettingsTab =
   | 'agents'
   | 'skills'
   | 'memory'
+  | 'orchestration'
   | 'plugins'
   | 'pets'
   | 'computerUse'

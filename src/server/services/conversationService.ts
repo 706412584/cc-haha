@@ -49,7 +49,14 @@ import {
 } from '../../constants/messages.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { findCanonicalGitRoot } from '../../utils/git.js'
-import { ORCHESTRATION_SYSTEM_PROMPT } from '../orchestrationPrompt.js'
+import {
+  orchestrationPromptPreferencesService,
+  type OrchestrationPromptMode,
+} from './orchestrationPromptPreferencesService.js'
+import {
+  composeAppendSystemPrompt,
+  writeSessionAppendPromptFile,
+} from './sessionPromptFileService.js'
 import { sanitizePath } from '../../utils/path.js'
 import { getProcessEnvWithTerminalShellEnvironment } from '../../utils/terminalShellEnvironment.js'
 import { attributionHeaderEnvForModel } from './attributionHeaderPolicy.js'
@@ -292,12 +299,25 @@ type SessionStartOptions = {
    */
   soloPipelineMode?: boolean
   /**
-   * If set, append this exact text to the system prompt via
-   * `--append-system-prompt`. Used by the welcome-screen "Continue from
-   * here" flow to inject a hand-off summary of the previous session.
-   * Stored separately from coordinatorMode so both can be active at once.
+   * If set, append this exact text to the system prompt. Used by the
+   * welcome-screen "Continue from here" flow to inject a hand-off summary of
+   * the previous session. Stored separately from coordinatorMode so both can be
+   * active at once — they are merged into one file, see
+   * `resolvedAppendPromptPath`.
    */
   handoffSystemPrompt?: string
+  /**
+   * Absolute path to a file holding the already-composed system-prompt
+   * addendum (mode prompt + hand-off summary), passed to the CLI as
+   * `--append-system-prompt-file`. Resolved asynchronously in `startSession`
+   * so `getRuntimeArgs` can stay synchronous.
+   *
+   * A file rather than inline text because the Windows command line caps at
+   * 32767 characters and the mode prompts alone are 4-13KB; and because
+   * `--append-system-prompt` is scalar, so two of them would mean the last one
+   * silently wins.
+   */
+  resolvedAppendPromptPath?: string
   resumeInterruptedTurn?: boolean
 }
 
@@ -485,11 +505,13 @@ export class ConversationService {
       )
     }
 
+    const resolvedOptions = await this.resolveAppendPromptFile(sessionId, options)
+
     const args = this.buildSessionCliArgs(
       sessionId,
       sdkUrl,
       shouldResume,
-      options,
+      resolvedOptions,
       launchRepository,
     )
 
@@ -1652,6 +1674,57 @@ export class ConversationService {
     return args
   }
 
+  /**
+   * Resolve the orchestration mode prompt (user override or built-in) and merge
+   * it with the one-shot hand-off summary into a single file the CLI reads via
+   * `--append-system-prompt-file`.
+   *
+   * Async on purpose: `getRuntimeArgs` stays synchronous so the existing test
+   * surface (`(svc as any).getRuntimeArgs({...})`) keeps working, and the write
+   * completes before `Bun.spawn` — so a restart always re-reads current text.
+   */
+  private async resolveAppendPromptFile(
+    sessionId: string,
+    options: SessionStartOptions | undefined,
+  ): Promise<SessionStartOptions | undefined> {
+    if (!options) return options
+
+    const mode: OrchestrationPromptMode | null = options.coordinatorMode
+      ? 'coordinator'
+      : options.pipelineFlavor === 'solo' || options.soloPipelineMode
+        ? 'solo'
+        : options.pipelineFlavor === 're'
+          ? 're'
+          : null
+
+    if (!mode && !options.handoffSystemPrompt) {
+      return options
+    }
+
+    let modePrompt: string | null = null
+    if (mode) {
+      const resolved = await orchestrationPromptPreferencesService
+        .getResolvedPrompt(mode)
+        .catch((error: unknown) => {
+          // A broken preferences file must not block session startup — fall
+          // back to the built-in prompt rather than failing the spawn.
+          console.warn(
+            `[ConversationService] Falling back to the default ${mode} prompt: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          )
+          return null
+        })
+      modePrompt = resolved?.effective ?? null
+    }
+
+    const composed = composeAppendSystemPrompt([modePrompt, options.handoffSystemPrompt])
+    if (!composed) return options
+
+    const filePath = await writeSessionAppendPromptFile(sessionId, composed)
+    return filePath ? { ...options, resolvedAppendPromptPath: filePath } : options
+  }
+
   private getRuntimeArgs(options: SessionStartOptions | undefined): string[] {
     const args: string[] = []
 
@@ -1667,39 +1740,13 @@ export class ConversationService {
       args.push('--thinking', options.thinking)
     }
 
-    if (options?.coordinatorMode) {
-      args.push('--append-system-prompt', ORCHESTRATION_SYSTEM_PROMPT)
-    }
-
-    // Pipeline flavors append a different prompt addendum than coordinator
-    // mode. The WS handler keeps modes mutually exclusive, so at most one
-    // pipeline branch fires here. `soloPipelineMode` is a deprecated alias
-    // for `pipelineFlavor === 'solo'`.
-    const pipelineFlavor =
-      options?.pipelineFlavor ??
-      (options?.soloPipelineMode ? ('solo' as const) : null)
-    if (pipelineFlavor === 'solo') {
-      // Lazy require to avoid pulling the prompt module into builds that
-      // don't enable the COORDINATOR_MODE feature flag (the flag gates
-      // coordinator / Solo / RE wiring at the moment).
-      const { getSoloPipelineSystemPrompt } =
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        require('../../coordinator/soloPipelinePrompt.js') as typeof import('../../coordinator/soloPipelinePrompt.js')
-      args.push('--append-system-prompt', getSoloPipelineSystemPrompt())
-    } else if (pipelineFlavor === 're') {
-      const { getReverseEngineeringPipelineSystemPrompt } =
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        require('../../coordinator/reverseEngineeringPipelinePrompt.js') as typeof import('../../coordinator/reverseEngineeringPipelinePrompt.js')
-      args.push(
-        '--append-system-prompt',
-        getReverseEngineeringPipelineSystemPrompt(),
-      )
-    }
-
-    // Hand-off context from the previous session (welcome screen "Continue
-    // from here"). Independent of orchestration; both can be active.
-    if (options?.handoffSystemPrompt) {
-      args.push('--append-system-prompt', options.handoffSystemPrompt)
+    // The mode prompt and the hand-off summary are composed into one file by
+    // `resolveAppendPromptFile`. Passing a path instead of inline text keeps the
+    // command line short (Windows caps it at 32767 characters) and avoids the
+    // scalar-option collision where two `--append-system-prompt` flags would
+    // mean the last one silently wins.
+    if (options?.resolvedAppendPromptPath) {
+      args.push('--append-system-prompt-file', options.resolvedAppendPromptPath)
     }
 
     return args

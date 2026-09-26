@@ -20,6 +20,7 @@ import {
   type VirtualRenderItemMetric,
 } from './virtualHeightCache'
 import { relativizeWorkspacePath } from './CurrentTurnChangeCard'
+import { ApiError } from '../../api/client'
 import { sessionsApi } from '../../api/sessions'
 import { subagentsApi, type SubagentRunResponse } from '../../api/subagents'
 import { teamsApi } from '../../api/teams'
@@ -7916,6 +7917,56 @@ describe('MessageList nested tool calls', () => {
       expect(screen.getByText('first.ts')).toBeTruthy()
     })
     expect(screen.queryByText('Markdown')).toBeNull()
+  })
+
+  it('stays quiet when the transcript is past the checkpoint preview budget', async () => {
+    vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockRejectedValue(
+      new ApiError(413, {
+        error: 'HISTORY_CHECKPOINT_PREVIEW_LIMIT',
+        message: 'This transcript exceeds the full checkpoint preview budget. Chat history remains available in pages.',
+      }),
+    )
+
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            { id: 'user-1', type: 'user_text', content: '继续', timestamp: 1 },
+            { id: 'assistant-1', type: 'assistant_text', content: 'done', timestamp: 2 },
+          ],
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    expect(await screen.findByText('done')).toBeTruthy()
+    await waitFor(() => {
+      expect(sessionsApi.getTurnCheckpoints).toHaveBeenCalled()
+    })
+    expect(screen.queryByText(/checkpoint preview budget/)).toBeNull()
+    expect(screen.queryByLabelText('Turn changed files')).toBeNull()
+  })
+
+  it('still reports a real turn checkpoint load failure', async () => {
+    vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockRejectedValue(
+      new ApiError(500, { error: 'INTERNAL_ERROR', message: 'An unexpected error occurred' }),
+    )
+
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            { id: 'user-1', type: 'user_text', content: '继续', timestamp: 1 },
+            { id: 'assistant-1', type: 'assistant_text', content: 'done', timestamp: 2 },
+          ],
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    expect(await screen.findByText('An unexpected error occurred')).toBeTruthy()
   })
 
   it('does not load turn change cards while background tasks are still running', async () => {

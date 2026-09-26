@@ -788,7 +788,17 @@ export class ProviderService {
       }),
     )
 
-    return { connectivity: step1, proxy: step2 }
+    // Step 2 runs for two different reasons, and they are not interchangeable:
+    // an OpenAI-format provider has its whole wire protocol rewritten, whereas an
+    // Anthropic-format provider only gets its nested tool-result media rewritten.
+    // Report which one applies so the UI does not call both "protocol conversion".
+    return {
+      connectivity: step1,
+      proxy: {
+        ...step2,
+        reason: providerFormat !== 'anthropic' ? 'api_format' : 'nested_tool_result_media',
+      },
+    }
   }
 
   /**

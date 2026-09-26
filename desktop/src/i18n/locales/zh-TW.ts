@@ -1340,6 +1340,9 @@ export const zh: Record<TranslationKey, string> = {
   'settings.providers.connectivityFailed': '① 連通失敗: {error}',
   'settings.providers.proxyOk': '② 本機協議轉換 ({latency}ms)',
   'settings.providers.proxyFailed': '② 本機協議轉換失敗: {error}',
+  'settings.providers.proxyMediaOk': '② 本機處理工具結果媒體 ({latency}ms)',
+  'settings.providers.proxyMediaFailed': '② 本機處理工具結果媒體失敗: {error}',
+  'settings.providers.proxyMediaHint': '此設定不保留工具結果中的媒體，請求會先由 cc-haha 在本機改寫後再送出。',
   'settings.providers.confirmDelete': '刪除模型設定 "{name}"？此操作無法復原。',
   'settings.providers.activate': '啟用',
   'settings.providers.default': '預設',
@@ -2076,6 +2079,7 @@ export const zh: Record<TranslationKey, string> = {
 
   // Settings > Memory
   'settings.tab.memory': '記憶',
+  'settings.tab.orchestration': '編排提示詞',
   'settings.memory.title': '專案記憶',
   'settings.memory.description': '檢視和編輯 Claude 為每個專案寫入的 Markdown 記憶檔案。這些檔案存放在 ~/.claude/projects/<project>/memory/，會被 CLI 執行時載入。',
   'settings.memory.refresh': '重新整理',
@@ -2107,6 +2111,29 @@ export const zh: Record<TranslationKey, string> = {
   'settings.memory.noFileMatches': '沒有匹配的記憶檔案。',
   'settings.memory.clearSearch': '清空搜尋',
   'settings.memory.toggleFolder': '展開或摺疊 {name}',
+
+  // Settings > Orchestration
+  'settings.orchestration.title': '編排提示詞',
+  'settings.orchestration.description': '編輯輸入框 + 選單中各個編排開關背後的系統提示詞。未自訂的模式會使用內建提示詞。',
+  'settings.orchestration.coordinator': '編排模式',
+  'settings.orchestration.solo': 'Solo 模式',
+  'settings.orchestration.re': '逆向編排',
+  'settings.orchestration.customBadge': '已自訂',
+  'settings.orchestration.defaultBadge': '預設',
+  'settings.orchestration.resetToDefault': '恢復預設',
+  'settings.orchestration.resetConfirm': '要捨棄此模式的自訂提示詞，恢復為內建提示詞嗎？',
+  'settings.orchestration.save': '儲存',
+  'settings.orchestration.saved': '已儲存',
+  'settings.orchestration.saveFailed': '儲存此提示詞失敗。',
+  'settings.orchestration.loadFailed': '載入編排提示詞失敗',
+  'settings.orchestration.unsaved': '未儲存',
+  'settings.orchestration.discardUnsavedConfirm': '要放棄該提示詞未儲存的修改嗎？',
+  'settings.orchestration.tooLong': '內容過長：上限為 {max} 個字元。',
+  'settings.orchestration.applyHint': '下次切換模式或開啟新工作階段時生效。',
+  'settings.orchestration.reWarning': '自訂提示詞會完全取代預設提示詞，其中包含授權門檻與拒絕 jailbreak 的條款。',
+  'settings.orchestration.editDefaultHint': '以內建提示詞為起點進行編輯。',
+  'settings.orchestration.edit': '編輯',
+  'settings.orchestration.preview': '預覽',
 
   // Settings > Plugins
   'settings.plugins.title': '已安裝外掛',

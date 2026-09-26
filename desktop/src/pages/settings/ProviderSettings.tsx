@@ -7,7 +7,7 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useProviderStore } from '../../stores/providerStore'
 import { useProviderCompatStore, PROVIDER_COMPAT_WARN_THRESHOLD } from '../../stores/providerCompatStore'
 import { useUIStore } from '../../stores/uiStore'
-import { useTranslation } from '../../i18n'
+import { useTranslation, type TranslationKey } from '../../i18n'
 import { Modal } from '@/components/ui/Modal'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Input } from '@/components/ui/Input'
@@ -18,7 +18,7 @@ import { Spinner } from '@/components/ui/Spinner'
 import { SettingsPageHeader, SettingsPill } from '@/components/settings/SettingsSection'
 import { Dropdown } from '@/components/ui/Dropdown'
 import { Tooltip } from '@/components/ui/Tooltip'
-import type { SavedProvider, UpdateProviderInput, ProviderTestResult, ModelMapping, Model1mSupport, ApiFormat, ProviderAuthStrategy, ProviderModelInfo, ProviderModelsErrorCode } from '../../types/provider'
+import type { SavedProvider, UpdateProviderInput, ProviderTestResult, ProviderTestStepResult, ModelMapping, Model1mSupport, ApiFormat, ProviderAuthStrategy, ProviderModelInfo, ProviderModelsErrorCode } from '../../types/provider'
 import { groupProviderModels, providerModelsErrorKey } from '../../lib/providerModels'
 import { resolveModelApiFormat } from '../../../../src/shared/modelApiFormats'
 import { apply1mSupportToContextInput, apply1mSupportToContextInputs, getAutoCompactWindowErrorKey, getModelContextWindowErrorKey, MODEL_SLOTS, parseAutoCompactWindowInput, parseModelContextWindowsInput, type ModelContextInputs, type ModelSlot } from '../../lib/providerModelContext'
@@ -413,9 +413,7 @@ export function ProviderSettings({ browserMode = false }: { browserMode?: boolea
                       </span>
                       {test.result.proxy && (
                         <span className={test.result.proxy.success ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]'}>
-                          {test.result.proxy.success
-                            ? t('settings.providers.proxyOk', { latency: String(test.result.proxy.latencyMs) })
-                            : t('settings.providers.proxyFailed', { error: test.result.proxy.error || '' })}
+                          {proxyStepLabel(t, test.result.proxy)}
                         </span>
                       )}
                     </div>
@@ -962,6 +960,33 @@ function providerNeedsProxy(
   supportsNestedToolResultMedia: boolean,
 ): boolean {
   return apiFormat !== 'anthropic' || !supportsNestedToolResultMedia
+}
+
+/**
+ * Step 2 runs for two different reasons that do different work. An OpenAI-format
+ * provider has its whole wire protocol rewritten; an Anthropic-format provider
+ * with nested tool-result media disabled only gets its media rewritten. Calling
+ * both "protocol translation" made the second look like a misconfiguration when
+ * the format dropdown already said "native".
+ *
+ * `reason` is absent on results from older servers, where the only path was the
+ * protocol one.
+ */
+function proxyStepLabel(
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string,
+  proxy: ProviderTestStepResult,
+): string {
+  const mediaOnly = proxy.reason === 'nested_tool_result_media'
+  const latency = { latency: String(proxy.latencyMs) }
+  if (proxy.success) {
+    return mediaOnly
+      ? t('settings.providers.proxyMediaOk', latency)
+      : t('settings.providers.proxyOk', latency)
+  }
+  const error = { error: proxy.error || '' }
+  return mediaOnly
+    ? t('settings.providers.proxyMediaFailed', error)
+    : t('settings.providers.proxyFailed', error)
 }
 
 function updateSettingsJsonProviderConnection(
@@ -1954,9 +1979,14 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
                 </Button>
               }
             />
-            {apiFormat !== 'anthropic' && (
+            {apiFormat !== 'anthropic' ? (
               <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">{t('settings.providers.proxyHint')}</p>
-            )}
+            ) : !supportsNestedToolResultMedia ? (
+              // Native protocol still routes locally when nested tool-result
+              // media is disabled, so the hint has to cover that case too —
+              // otherwise the only visible signal is the test step's wording.
+              <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">{t('settings.providers.proxyMediaHint')}</p>
+            ) : null}
             {/* The preset's own endpoint is still in the field above; a custom
                 preset brings none, so there is nothing to warn about. */}
             {apiFormat !== selectedPreset.apiFormat && Boolean(selectedPreset.baseUrl) && (
@@ -2124,9 +2154,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
               </span>
               {testResult.proxy && (
                 <span className={`text-xs ${testResult.proxy.success ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]'}`}>
-                  {testResult.proxy.success
-                    ? t('settings.providers.proxyOk', { latency: String(testResult.proxy.latencyMs) })
-                    : t('settings.providers.proxyFailed', { error: testResult.proxy.error || '' })}
+                  {proxyStepLabel(t, testResult.proxy)}
                 </span>
               )}
             </div>

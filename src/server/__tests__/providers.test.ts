@@ -2726,6 +2726,63 @@ describe('ProviderService', () => {
         expect(result.connectivity.success).toBe(true)
         expect(result.proxy?.success).toBe(true)
         expect(calls).toHaveLength(2)
+        // Native protocol: step 2 only rewrites nested tool-result media, so the
+        // UI must not label it as protocol translation.
+        expect(result.proxy?.reason).toBe('nested_tool_result_media')
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+
+    test('reports protocol translation as the reason for OpenAI-format providers', async () => {
+      const originalFetch = globalThis.fetch
+      globalThis.fetch = mock(async () => new Response(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch
+
+      try {
+        const svc = new ProviderService()
+        const result = await svc.testProviderConfig({
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'sk-api',
+          modelId: 'gpt-4o',
+          authStrategy: 'api_key',
+          apiFormat: 'openai_chat',
+        })
+
+        expect(result.proxy?.success).toBe(true)
+        expect(result.proxy?.reason).toBe('api_format')
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+
+    test('omits the proxy step entirely when nothing needs local handling', async () => {
+      const originalFetch = globalThis.fetch
+      globalThis.fetch = mock(async () => new Response(JSON.stringify({
+        type: 'message',
+        model: 'model-main',
+        content: [{ type: 'text', text: 'ok' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch
+
+      try {
+        const svc = new ProviderService()
+        const result = await svc.testProviderConfig({
+          baseUrl: 'https://api.example.com/anthropic',
+          apiKey: 'sk-api',
+          modelId: 'model-main',
+          authStrategy: 'api_key',
+          apiFormat: 'anthropic',
+        })
+
+        expect(result.connectivity.success).toBe(true)
+        expect(result.proxy).toBeUndefined()
       } finally {
         globalThis.fetch = originalFetch
       }
