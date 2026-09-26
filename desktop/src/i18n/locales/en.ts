@@ -1340,6 +1340,9 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   'settings.providers.connectivityFailed': '① Connectivity failed: {error}',
   'settings.providers.proxyOk': '② Local protocol translation ({latency}ms)',
   'settings.providers.proxyFailed': '② Local protocol translation failed: {error}',
+  'settings.providers.proxyMediaOk': '② Local tool-result media handling ({latency}ms)',
+  'settings.providers.proxyMediaFailed': '② Local tool-result media handling failed: {error}',
+  'settings.providers.proxyMediaHint': 'This config does not preserve media inside tool results, so requests are rewritten locally by cc-haha before they are sent.',
   'settings.providers.confirmDelete': 'Delete model configuration "{name}"? This cannot be undone.',
   'settings.providers.activate': 'Activate',
   'settings.providers.default': 'Default',
@@ -2076,6 +2079,7 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
 
   // Settings > Memory
   'settings.tab.memory': 'Memory',
+  'settings.tab.orchestration': 'Orchestration',
   'settings.memory.title': 'Project Memory',
   'settings.memory.description': 'Inspect and edit the Markdown memory files Claude writes for each project. These files are stored under ~/.claude/projects/<project>/memory/ and are loaded by the CLI runtime.',
   'settings.memory.refresh': 'Refresh',
@@ -2107,6 +2111,29 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   'settings.memory.noFileMatches': 'No memory files match this search.',
   'settings.memory.clearSearch': 'Clear search',
   'settings.memory.toggleFolder': 'Toggle {name}',
+
+  // Settings > Orchestration
+  'settings.orchestration.title': 'Orchestration Prompts',
+  'settings.orchestration.description': 'Edit the system prompt behind each orchestration switch in the composer. A mode with no override runs its built-in prompt.',
+  'settings.orchestration.coordinator': 'Orchestration mode',
+  'settings.orchestration.solo': 'Solo mode',
+  'settings.orchestration.re': 'RE pipeline',
+  'settings.orchestration.customBadge': 'Custom',
+  'settings.orchestration.defaultBadge': 'Default',
+  'settings.orchestration.resetToDefault': 'Reset to default',
+  'settings.orchestration.resetConfirm': 'Discard the custom prompt for this mode and restore the built-in one?',
+  'settings.orchestration.save': 'Save',
+  'settings.orchestration.saved': 'Saved',
+  'settings.orchestration.saveFailed': 'Could not save this prompt.',
+  'settings.orchestration.loadFailed': 'Could not load orchestration prompts',
+  'settings.orchestration.unsaved': 'Unsaved',
+  'settings.orchestration.discardUnsavedConfirm': 'Discard unsaved changes to this prompt?',
+  'settings.orchestration.tooLong': 'Too long: the limit is {max} characters.',
+  'settings.orchestration.applyHint': 'Changes take effect the next time you switch modes or start a new session.',
+  'settings.orchestration.reWarning': 'A custom prompt replaces the default in full — including its authorization gate and its refusal of jailbreak instructions.',
+  'settings.orchestration.editDefaultHint': 'Start from the built-in prompt and edit it.',
+  'settings.orchestration.edit': 'Edit',
+  'settings.orchestration.preview': 'Preview',
 
   // Settings > Plugins
   'settings.plugins.title': 'Installed Plugins',

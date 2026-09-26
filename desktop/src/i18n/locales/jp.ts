@@ -1341,6 +1341,9 @@ export const jp: Record<TranslationKey, string> = {
   'settings.providers.connectivityFailed': '① 接続に失敗しました: {error}',
   'settings.providers.proxyOk': '② ローカルプロトコル変換 ({latency}ms)',
   'settings.providers.proxyFailed': '② ローカルプロトコル変換に失敗: {error}',
+  'settings.providers.proxyMediaOk': '② ツール結果メディアのローカル処理 ({latency}ms)',
+  'settings.providers.proxyMediaFailed': '② ツール結果メディアのローカル処理に失敗: {error}',
+  'settings.providers.proxyMediaHint': 'この設定はツール結果内のメディアを保持しないため、リクエストは送信前に cc-haha がローカルで書き換えます。',
   'settings.providers.confirmDelete': 'モデル設定「{name}」を削除しますか？この操作は取り消せません。',
   'settings.providers.activate': '有効化',
   'settings.providers.default': 'デフォルト',
@@ -2077,6 +2080,7 @@ export const jp: Record<TranslationKey, string> = {
 
   // Settings > Memory
   'settings.tab.memory': 'メモリ',
+  'settings.tab.orchestration': 'オーケストレーション',
   'settings.memory.title': 'プロジェクトメモリ',
   'settings.memory.description': 'Claude が各プロジェクト向けに書き込む Markdown メモリファイルを確認・編集します。これらのファイルは ~/.claude/projects/<project>/memory/ の下に保存され、CLI ランタイムによって読み込まれます。',
   'settings.memory.refresh': '更新',
@@ -2108,6 +2112,29 @@ export const jp: Record<TranslationKey, string> = {
   'settings.memory.noFileMatches': 'この検索に一致するメモリファイルはありません。',
   'settings.memory.clearSearch': '検索をクリア',
   'settings.memory.toggleFolder': '{name} を切り替え',
+
+  // Settings > Orchestration
+  'settings.orchestration.title': 'オーケストレーション プロンプト',
+  'settings.orchestration.description': '入力欄の + メニューにある各オーケストレーション スイッチの背後にあるシステムプロンプトを編集します。カスタム未設定のモードは組み込みプロンプトを使用します。',
+  'settings.orchestration.coordinator': 'オーケストレーション モード',
+  'settings.orchestration.solo': 'Solo モード',
+  'settings.orchestration.re': 'RE パイプライン',
+  'settings.orchestration.customBadge': 'カスタム',
+  'settings.orchestration.defaultBadge': 'デフォルト',
+  'settings.orchestration.resetToDefault': 'デフォルトに戻す',
+  'settings.orchestration.resetConfirm': 'このモードのカスタム プロンプトを破棄して、組み込みプロンプトに戻しますか？',
+  'settings.orchestration.save': '保存',
+  'settings.orchestration.saved': '保存しました',
+  'settings.orchestration.saveFailed': 'このプロンプトを保存できませんでした。',
+  'settings.orchestration.loadFailed': 'オーケストレーション プロンプトを読み込めませんでした',
+  'settings.orchestration.unsaved': '未保存',
+  'settings.orchestration.discardUnsavedConfirm': 'このプロンプトの未保存の変更を破棄しますか？',
+  'settings.orchestration.tooLong': '長すぎます: 上限は {max} 文字です。',
+  'settings.orchestration.applyHint': '次にモードを切り替えるか、新しいセッションを開始したときに反映されます。',
+  'settings.orchestration.reWarning': 'カスタム プロンプトは既定のプロンプトを完全に置き換えます。これには認可ゲートと jailbreak 指示を拒否する条項も含まれます。',
+  'settings.orchestration.editDefaultHint': '組み込みプロンプトを出発点として編集します。',
+  'settings.orchestration.edit': '編集',
+  'settings.orchestration.preview': 'プレビュー',
 
   // Settings > Plugins
   'settings.plugins.title': 'インストール済みプラグイン',

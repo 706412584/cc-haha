@@ -43,6 +43,7 @@ import {
 } from './h5AccessPolicy.js'
 import { H5AccessService } from './services/h5AccessService.js'
 import { registerSeedMarketplaces } from '../utils/plugins/marketplaceManager.js'
+import { sweepStaleSessionPromptFiles } from './services/sessionPromptFileService.js'
 import { refreshDisconnectGraceMs } from './ws/disconnectGraceConfig.js'
 import {
   hasConfiguredLocalAccessToken,
@@ -264,6 +265,16 @@ export function startServer(port = PORT, host = HOST) {
   void registerSeedMarketplaces().catch((err) => {
     console.error('[Server] Failed to register seed marketplaces:', err)
   })
+
+  // Housekeeping: drop per-session --append-system-prompt-file leftovers from a
+  // previous run that was hard-killed before its teardown could run. Correctness
+  // never depends on this (files are read only by their own session id), so a
+  // failure here must not affect startup.
+  void sweepStaleSessionPromptFiles().then((removed) => {
+    if (removed > 0) {
+      console.log(`[Server] Removed ${removed} stale session prompt file(s)`)
+    }
+  }).catch(() => undefined)
 
   const publicAccess = new PublicAccessServer({
     handleApiRequest,

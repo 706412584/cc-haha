@@ -1438,6 +1438,23 @@ function getApiErrorMessage(error: unknown) {
       : String(error)
 }
 
+function getApiErrorCode(error: unknown) {
+  if (!(error instanceof ApiError)) return null
+  const body = error.body
+  if (!body || typeof body !== 'object' || !('error' in body)) return null
+  return typeof body.error === 'string' ? body.error : null
+}
+
+/**
+ * The server refuses to build per-turn change cards for a transcript above its
+ * preview budget. That is a deliberate limit, not a failure: the cards being
+ * absent already says so, and a raw English banner is noise. Real load failures
+ * still report themselves.
+ */
+function isTurnChangeCardsUnavailable(error: unknown) {
+  return getApiErrorCode(error) === 'HISTORY_CHECKPOINT_PREVIEW_LIMIT'
+}
+
 function isSessionTurnCheckpoint(value: unknown): value is SessionTurnCheckpoint {
   if (!value || typeof value !== 'object') return false
   const checkpoint = value as Partial<SessionTurnCheckpoint>
@@ -3211,7 +3228,7 @@ export function MessageList({
       .catch((error) => {
         if (cancelled) return
         setTurnChangeCards([])
-        setTurnChangeLoadError(getApiErrorMessage(error))
+        setTurnChangeLoadError(isTurnChangeCardsUnavailable(error) ? null : getApiErrorMessage(error))
       })
       .finally(() => {
         if (!cancelled) {

@@ -30,6 +30,7 @@ import { handleActivityStatsApi } from './api/activityStats.js'
 import { handleOpenTargetsApi } from './api/open-targets.js'
 import { handleMemoryApi } from './api/memory.js'
 import { handleDesktopUiApi } from './api/desktop-ui.js'
+import { handleOrchestrationPromptsApi } from './api/orchestration-prompts.js'
 import { handleProjectsApi } from './api/projects.js'
 import { handleTracesApi } from './api/traces.js'
 import { handleProjectRulesApi } from './api/project-rules.js'
@@ -211,6 +212,9 @@ async function routeApiRequest(req: Request, url: URL): Promise<Response> {
 
     case 'desktop-ui':
       return handleDesktopUiApi(req, url, segments)
+
+    case 'orchestration-prompts':
+      return handleOrchestrationPromptsApi(req, url, segments)
 
     case 'projects':
       return handleProjectsApi(req, url, segments)

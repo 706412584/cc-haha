@@ -245,12 +245,21 @@ export type TestProviderInput = z.infer<typeof TestProviderSchema>
 export type FetchModelsInput = z.infer<typeof FetchModelsSchema>
 export type ReorderProvidersInput = z.infer<typeof ReorderProvidersSchema>
 
+/**
+ * Why step 2 ran. The two reasons do different work — one rewrites the wire
+ * protocol, the other only rewrites nested tool-result media — so the UI must
+ * not label both "protocol conversion".
+ */
+export type ProviderTestProxyReason = 'api_format' | 'nested_tool_result_media'
+
 export interface ProviderTestStepResult {
   success: boolean
   latencyMs: number
   error?: string
   modelUsed?: string
   httpStatus?: number
+  /** Only set on the proxy step; says what actually forced local handling. */
+  reason?: ProviderTestProxyReason
 }
 
 export interface ProviderTestResult {

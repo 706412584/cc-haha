@@ -1341,6 +1341,9 @@ export const kr: Record<TranslationKey, string> = {
   'settings.providers.connectivityFailed': '① 연결 실패: {error}',
   'settings.providers.proxyOk': '② 로컬 프로토콜 변환 ({latency}ms)',
   'settings.providers.proxyFailed': '② 로컬 프로토콜 변환 실패: {error}',
+  'settings.providers.proxyMediaOk': '② 로컬 도구 결과 미디어 처리 ({latency}ms)',
+  'settings.providers.proxyMediaFailed': '② 로컬 도구 결과 미디어 처리 실패: {error}',
+  'settings.providers.proxyMediaHint': '이 설정은 도구 결과 내 미디어를 보존하지 않으므로, 요청은 전송 전에 cc-haha가 로컬에서 다시 작성합니다.',
   'settings.providers.confirmDelete': '모델 설정 "{name}"을(를) 삭제하시겠습니까? 이 작업은 취소할 수 없습니다.',
   'settings.providers.activate': '활성화',
   'settings.providers.default': '기본값',
@@ -2077,6 +2080,7 @@ export const kr: Record<TranslationKey, string> = {
 
   // Settings > Memory
   'settings.tab.memory': '메모리',
+  'settings.tab.orchestration': '오케스트레이션',
   'settings.memory.title': '프로젝트 메모리',
   'settings.memory.description': 'Claude가 각 프로젝트용으로 작성하는 Markdown 메모리 파일을 확인하고 편집합니다. 이 파일들은 ~/.claude/projects/<project>/memory/ 아래에 저장되며 CLI 런타임에 의해 로드됩니다.',
   'settings.memory.refresh': '새로 고침',
@@ -2108,6 +2112,29 @@ export const kr: Record<TranslationKey, string> = {
   'settings.memory.noFileMatches': '이 검색과 일치하는 메모리 파일이 없습니다.',
   'settings.memory.clearSearch': '검색 지우기',
   'settings.memory.toggleFolder': '{name} 전환',
+
+  // Settings > Orchestration
+  'settings.orchestration.title': '오케스트레이션 프롬프트',
+  'settings.orchestration.description': '입력창의 + 메뉴에 있는 각 오케스트레이션 스위치 뒤의 시스템 프롬프트를 편집합니다. 사용자 지정이 없는 모드는 내장 프롬프트를 사용합니다.',
+  'settings.orchestration.coordinator': '오케스트레이션 모드',
+  'settings.orchestration.solo': 'Solo 모드',
+  'settings.orchestration.re': 'RE 파이프라인',
+  'settings.orchestration.customBadge': '사용자 지정',
+  'settings.orchestration.defaultBadge': '기본값',
+  'settings.orchestration.resetToDefault': '기본값으로 복원',
+  'settings.orchestration.resetConfirm': '이 모드의 사용자 지정 프롬프트를 버리고 내장 프롬프트로 복원할까요?',
+  'settings.orchestration.save': '저장',
+  'settings.orchestration.saved': '저장됨',
+  'settings.orchestration.saveFailed': '이 프롬프트를 저장하지 못했습니다.',
+  'settings.orchestration.loadFailed': '오케스트레이션 프롬프트를 불러오지 못했습니다',
+  'settings.orchestration.unsaved': '저장되지 않음',
+  'settings.orchestration.discardUnsavedConfirm': '이 프롬프트의 저장되지 않은 변경 사항을 버리시겠습니까?',
+  'settings.orchestration.tooLong': '너무 깁니다: 최대 {max}자입니다.',
+  'settings.orchestration.applyHint': '다음에 모드를 전환하거나 새 세션을 시작할 때 적용됩니다.',
+  'settings.orchestration.reWarning': '사용자 지정 프롬프트는 기본 프롬프트를 완전히 대체합니다. 여기에는 권한 부여 게이트와 jailbreak 지시를 거부하는 조항도 포함됩니다.',
+  'settings.orchestration.editDefaultHint': '내장 프롬프트를 시작점으로 편집하세요.',
+  'settings.orchestration.edit': '편집',
+  'settings.orchestration.preview': '미리보기',
 
   // Settings > Plugins
   'settings.plugins.title': '설치된 플러그인',

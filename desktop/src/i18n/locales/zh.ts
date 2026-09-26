@@ -1341,6 +1341,9 @@ export const zh: Record<TranslationKey, string> = {
   'settings.providers.connectivityFailed': '① 连通失败: {error}',
   'settings.providers.proxyOk': '② 本地协议转换 ({latency}ms)',
   'settings.providers.proxyFailed': '② 本地协议转换失败: {error}',
+  'settings.providers.proxyMediaOk': '② 本地处理工具结果媒体 ({latency}ms)',
+  'settings.providers.proxyMediaFailed': '② 本地处理工具结果媒体失败: {error}',
+  'settings.providers.proxyMediaHint': '该配置不保留工具结果中的媒体，请求会先由 cc-haha 在本机改写后再发出。',
   'settings.providers.confirmDelete': '删除模型配置 "{name}"？此操作不可撤销。',
   'settings.providers.activate': '激活',
   'settings.providers.default': '默认',
@@ -2077,6 +2080,7 @@ export const zh: Record<TranslationKey, string> = {
 
   // Settings > Memory
   'settings.tab.memory': '记忆',
+  'settings.tab.orchestration': '编排提示词',
   'settings.memory.title': '项目记忆',
   'settings.memory.description': '查看和编辑 Claude 为每个项目写入的 Markdown 记忆文件。这些文件存放在 ~/.claude/projects/<project>/memory/，会被 CLI 运行时加载。',
   'settings.memory.refresh': '刷新',
@@ -2108,6 +2112,29 @@ export const zh: Record<TranslationKey, string> = {
   'settings.memory.noFileMatches': '没有匹配的记忆文件。',
   'settings.memory.clearSearch': '清空搜索',
   'settings.memory.toggleFolder': '展开或折叠 {name}',
+
+  // Settings > Orchestration
+  'settings.orchestration.title': '编排提示词',
+  'settings.orchestration.description': '编辑输入框 + 菜单里各个编排开关背后的系统提示词。未自定义的模式会使用内置提示词。',
+  'settings.orchestration.coordinator': '编排模式',
+  'settings.orchestration.solo': 'Solo 模式',
+  'settings.orchestration.re': '逆向编排',
+  'settings.orchestration.customBadge': '已自定义',
+  'settings.orchestration.defaultBadge': '默认',
+  'settings.orchestration.resetToDefault': '恢复默认',
+  'settings.orchestration.resetConfirm': '要丢弃该模式的自定义提示词，恢复为内置提示词吗？',
+  'settings.orchestration.save': '保存',
+  'settings.orchestration.saved': '已保存',
+  'settings.orchestration.saveFailed': '保存该提示词失败。',
+  'settings.orchestration.loadFailed': '加载编排提示词失败',
+  'settings.orchestration.unsaved': '未保存',
+  'settings.orchestration.discardUnsavedConfirm': '要放弃该提示词未保存的修改吗？',
+  'settings.orchestration.tooLong': '内容过长：上限为 {max} 个字符。',
+  'settings.orchestration.applyHint': '下次切换模式或新建会话时生效。',
+  'settings.orchestration.reWarning': '自定义提示词会完全替换默认提示词，其中包含授权门禁与拒绝 jailbreak 的条款。',
+  'settings.orchestration.editDefaultHint': '以内置提示词为起点进行编辑。',
+  'settings.orchestration.edit': '编辑',
+  'settings.orchestration.preview': '预览',
 
   // Settings > Plugins
   'settings.plugins.title': '已安装插件',

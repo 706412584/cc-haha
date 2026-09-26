@@ -498,6 +498,40 @@ describe('OpenCode Go provider', () => {
     })))
   })
 
+  it('labels a media-only proxy step by what it actually did, not as protocol translation', async () => {
+    // A native-protocol provider with nested tool-result media disabled still
+    // routes through the local proxy. The format dropdown says "native", so
+    // calling that step "protocol translation" reads as a misconfiguration.
+    vi.spyOn(useProviderStore.getState(), 'testConfig').mockResolvedValue({
+      connectivity: { success: true, latencyMs: 10 },
+      proxy: { success: true, latencyMs: 20, reason: 'nested_tool_result_media' },
+    })
+    render(<ProviderSettings />)
+    fireEvent.click(await screen.findByRole('button', { name: /Add Model/ }))
+    const dialog = within(screen.getByRole('dialog'))
+    fireEvent.click(dialog.getByRole('button', { name: '接口AI' }))
+    fireEvent.change(dialog.getAllByPlaceholderText('sk-...')[0]!, { target: { value: 'fake-key' } })
+    fireEvent.click(dialog.getByRole('button', { name: /Test Connection/ }))
+
+    expect(await dialog.findByText('② Local tool-result media handling (20ms)')).toBeInTheDocument()
+    expect(dialog.queryByText(/Local protocol translation/)).toBeNull()
+  })
+
+  it('still calls an OpenAI-format proxy step protocol translation', async () => {
+    vi.spyOn(useProviderStore.getState(), 'testConfig').mockResolvedValue({
+      connectivity: { success: true, latencyMs: 10 },
+      proxy: { success: true, latencyMs: 20, reason: 'api_format' },
+    })
+    render(<ProviderSettings />)
+    fireEvent.click(await screen.findByRole('button', { name: /Add Model/ }))
+    const dialog = within(screen.getByRole('dialog'))
+    fireEvent.click(dialog.getByRole('button', { name: 'OpenCode Go' }))
+    fireEvent.change(dialog.getAllByPlaceholderText('sk-...')[0]!, { target: { value: 'fake-key' } })
+    fireEvent.click(dialog.getByRole('button', { name: /Test Connection/ }))
+
+    expect(await dialog.findByText('② Local protocol translation (20ms)')).toBeInTheDocument()
+  })
+
 })
 
 // The fork renders two compatibility badges on the provider card. They are fed

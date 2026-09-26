@@ -22,6 +22,7 @@ import {
   conversationService,
 } from '../services/conversationService.js'
 import { getSoloPipelineSystemPrompt } from '../../coordinator/soloPipelinePrompt.js'
+import { orchestrationPromptPreferencesService } from '../services/orchestrationPromptPreferencesService.js'
 import { ORCHESTRATION_PROMPT_MARKER, ORCHESTRATION_SYSTEM_PROMPT, ORCHESTRATION_PROPAGATE_RULES_MARKER } from '../orchestrationPrompt.js'
 import {
   ASK_USER_QUESTION_CLARIFY_MESSAGE,
@@ -958,77 +959,125 @@ describe('ConversationService', () => {
     ])
   })
 
-  it('should append the orchestration system prompt when coordinator mode is on', () => {
+  /**
+   * Compose the mode prompt + hand-off summary into a file and read it back.
+   * The prompts travel by path, not inline text, so asserting on the argv needs
+   * this indirection.
+   */
+  async function resolveAppendPrompt(
+    svc: ConversationService,
+    options: Record<string, unknown>,
+    sessionId = 'prompt-file-test-session',
+  ): Promise<{ args: string[]; path: string | null; text: string }> {
+    const resolved = await (svc as any).resolveAppendPromptFile(sessionId, options)
+    const args = (svc as any).getRuntimeArgs(resolved) as string[]
+    const idx = args.indexOf('--append-system-prompt-file')
+    if (idx < 0) return { args, path: null, text: '' }
+    const filePath = args[idx + 1]!
+    return { args, path: filePath, text: readFileSync(filePath, 'utf8') }
+  }
+
+  it('should pass the orchestration system prompt by file when coordinator mode is on', async () => {
     const svc = new ConversationService()
-    const args = (svc as any).getRuntimeArgs({ coordinatorMode: true }) as string[]
-    const idx = args.indexOf('--append-system-prompt')
-    expect(idx).toBeGreaterThanOrEqual(0)
-    expect(args[idx + 1]).toContain(ORCHESTRATION_PROMPT_MARKER)
+    const { args, path: filePath, text } = await resolveAppendPrompt(svc, { coordinatorMode: true })
+    expect(filePath).toBeString()
+    expect(text).toContain(ORCHESTRATION_PROMPT_MARKER)
+    // Inline text must not reach the command line: Windows caps it at 32767
+    // characters and the prompt alone is several KB.
+    expect(args).not.toContain('--append-system-prompt')
   })
 
-  it('should not append the orchestration system prompt when coordinator mode is off', () => {
+  it('should not append any prompt when coordinator mode is off', async () => {
     const svc = new ConversationService()
-    expect((svc as any).getRuntimeArgs({ coordinatorMode: false })).not.toContain('--append-system-prompt')
-    expect((svc as any).getRuntimeArgs({})).not.toContain('--append-system-prompt')
+    expect((await resolveAppendPrompt(svc, { coordinatorMode: false })).path).toBeNull()
+    expect((await resolveAppendPrompt(svc, {})).path).toBeNull()
   })
 
-  it('should append the Solo Pipeline system prompt when soloPipelineMode is on', () => {
+  it('should pass the Solo Pipeline system prompt by file when soloPipelineMode is on', async () => {
     const svc = new ConversationService()
-    const args = (svc as any).getRuntimeArgs({ soloPipelineMode: true }) as string[]
-    const idx = args.indexOf('--append-system-prompt')
-    expect(idx).toBeGreaterThanOrEqual(0)
+    const { text } = await resolveAppendPrompt(svc, { soloPipelineMode: true })
     // The injected text must be the Solo prompt — sniff for the unique
     // Stage-0 intent-triage phrasing locked in soloPipelinePrompt.test.ts.
-    expect(args[idx + 1]).toContain('Solo Pipeline mode')
-    expect(args[idx + 1]).toContain('A/B/C Plan Gate')
-    expect(args[idx + 1]).toContain('Critic')
-    expect(args[idx + 1]).toContain('final execution plan')
+    expect(text).toContain('Solo Pipeline mode')
+    expect(text).toContain('A/B/C Plan Gate')
+    expect(text).toContain('Critic')
+    expect(text).toContain('final execution plan')
   })
 
-  it('should not append the Solo prompt when soloPipelineMode is off', () => {
+  it('should not append the Solo prompt when soloPipelineMode is off', async () => {
     const svc = new ConversationService()
-    expect((svc as any).getRuntimeArgs({ soloPipelineMode: false })).not.toContain('--append-system-prompt')
+    expect((await resolveAppendPrompt(svc, { soloPipelineMode: false })).path).toBeNull()
   })
 
-  it('should append the RE Pipeline system prompt when pipelineFlavor is re', () => {
+  it('should pass the RE Pipeline system prompt by file when pipelineFlavor is re', async () => {
     const svc = new ConversationService()
-    const args = (svc as any).getRuntimeArgs({ pipelineFlavor: 're' }) as string[]
-    const idx = args.indexOf('--append-system-prompt')
-    expect(idx).toBeGreaterThanOrEqual(0)
-    expect(args[idx + 1]).toContain('Reverse Engineering Pipeline Mode')
-    expect(args[idx + 1]).toContain('AUTHORIZED RE TASK')
-    expect(args[idx + 1]).toContain('STAGE 1 — INVENTORY')
-    expect(args[idx + 1]).not.toContain('A/B/C Plan Gate')
+    const { text } = await resolveAppendPrompt(svc, { pipelineFlavor: 're' })
+    expect(text).toContain('Reverse Engineering Pipeline Mode')
+    expect(text).toContain('AUTHORIZED RE TASK')
+    expect(text).toContain('STAGE 1 — INVENTORY')
+    expect(text).not.toContain('A/B/C Plan Gate')
   })
 
-  it('should not append Solo and RE prompts at once when only one flavor is set', () => {
+  it('should not append Solo and RE prompts at once when only one flavor is set', async () => {
     const svc = new ConversationService()
-    const reArgs = (svc as any).getRuntimeArgs({ pipelineFlavor: 're' }) as string[]
-    const soloArgs = (svc as any).getRuntimeArgs({ pipelineFlavor: 'solo' }) as string[]
-    const reText = reArgs[reArgs.indexOf('--append-system-prompt') + 1] ?? ''
-    const soloText = soloArgs[soloArgs.indexOf('--append-system-prompt') + 1] ?? ''
-    expect(reText).toContain('Reverse Engineering Pipeline Mode')
-    expect(soloText).toContain('Solo Pipeline mode')
-    expect(reText).not.toContain('Solo Pipeline mode')
-    expect(soloText).not.toContain('Reverse Engineering Pipeline Mode')
+    const re = await resolveAppendPrompt(svc, { pipelineFlavor: 're' })
+    const solo = await resolveAppendPrompt(svc, { pipelineFlavor: 'solo' })
+    expect(re.text).toContain('Reverse Engineering Pipeline Mode')
+    expect(solo.text).toContain('Solo Pipeline mode')
+    expect(re.text).not.toContain('Solo Pipeline mode')
+    expect(solo.text).not.toContain('Reverse Engineering Pipeline Mode')
   })
 
-  it('routes coordinator and Solo into separate --append-system-prompt slots when both flags are set', () => {
-    // The WS handler enforces mutual exclusion, but getRuntimeArgs must still
-    // produce a deterministic shape if a caller somehow passes both true —
-    // we want each branch's text appended exactly once with no cross-talk.
+  it('merges coordinator and handoff into one prompt file, mode first', async () => {
+    // Regression: both addenda used to ride on `--append-system-prompt`, a
+    // scalar option, so the hand-off summary silently displaced the mode
+    // prompt. They must now land in a single file, mode framing first.
     const svc = new ConversationService()
-    const args = (svc as any).getRuntimeArgs({
+    const { args, text } = await resolveAppendPrompt(svc, {
       coordinatorMode: true,
-      soloPipelineMode: true,
-    }) as string[]
+      handoffSystemPrompt: 'HANDOFF-SUMMARY-MARKER',
+    })
     const flagIndices = args
-      .map((arg, i) => (arg === '--append-system-prompt' ? i : -1))
+      .map((arg, i) => (arg === '--append-system-prompt-file' ? i : -1))
       .filter((i) => i >= 0)
-    expect(flagIndices.length).toBe(2)
-    const texts = flagIndices.map((i) => args[i + 1] ?? '')
-    expect(texts.some((t) => t.includes(ORCHESTRATION_PROMPT_MARKER))).toBe(true)
-    expect(texts.some((t) => t.includes('A/B/C Plan Gate'))).toBe(true)
+    expect(flagIndices.length).toBe(1)
+    expect(text).toContain(ORCHESTRATION_PROMPT_MARKER)
+    expect(text).toContain('HANDOFF-SUMMARY-MARKER')
+    expect(text.indexOf(ORCHESTRATION_PROMPT_MARKER)).toBeLessThan(
+      text.indexOf('HANDOFF-SUMMARY-MARKER'),
+    )
+  })
+
+  it('never emits both --append-system-prompt and --append-system-prompt-file', async () => {
+    // The CLI exits(1) when given both, so this pairing must be impossible.
+    const svc = new ConversationService()
+    for (const options of [
+      { coordinatorMode: true },
+      { pipelineFlavor: 'solo' },
+      { pipelineFlavor: 're' },
+      { coordinatorMode: true, handoffSystemPrompt: 'handoff' },
+    ]) {
+      const { args } = await resolveAppendPrompt(svc, options)
+      expect(args).not.toContain('--append-system-prompt')
+      expect(args).toContain('--append-system-prompt-file')
+    }
+  })
+
+  it('uses the user override in place of the built-in prompt when one is set', async () => {
+    const svc = new ConversationService()
+    const preferences = orchestrationPromptPreferencesService as any
+    const originalRead = preferences.readPreferences
+    preferences.readPreferences = async () => ({
+      schemaVersion: 1,
+      coordinator: 'CUSTOM-COORDINATOR-PROMPT',
+    })
+    try {
+      const { text } = await resolveAppendPrompt(svc, { coordinatorMode: true })
+      expect(text).toBe('CUSTOM-COORDINATOR-PROMPT')
+      expect(text).not.toContain(ORCHESTRATION_PROMPT_MARKER)
+    } finally {
+      preferences.readPreferences = originalRead
+    }
   })
 
   // Locks the orchestrator's "propagate project tool rules into every dispatched
@@ -4553,12 +4602,110 @@ describe('WebSocket Chat Integration', () => {
 
       const argLines = (await fs.readFile(argsLogPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string[])
       expect(argLines.length).toBeGreaterThanOrEqual(2)
-      expect(argLines[0]).not.toContain(getSoloPipelineSystemPrompt())
-      expect(argLines.at(-1)).toContain(getSoloPipelineSystemPrompt())
+
+      // The prompt now travels by file. Read whichever prompt-file path each
+      // launch carried, and assert the prewarm launch had none while the
+      // post-toggle launch resolves to the Solo prompt.
+      const promptTextFor = (args: string[]): string | null => {
+        const idx = args.indexOf('--append-system-prompt-file')
+        if (idx < 0) return null
+        return readFileSync(args[idx + 1]!, 'utf8')
+      }
+
+      expect(promptTextFor(argLines[0]!)).toBeNull()
+      expect(promptTextFor(argLines.at(-1)!)).toContain(getSoloPipelineSystemPrompt())
     } finally {
       ws.close()
       delete process.env.MOCK_SDK_STARTUP_ARGS_LOG
       conversationService.stopSession(sessionId)
+    }
+  }, 20_000)
+
+  it('launches the CLI with the user-customized orchestration prompt', async () => {
+    // End-to-end: the override is written through the HTTP API, then a real
+    // session launch must hand the CLI a prompt file holding exactly that text
+    // instead of the built-in prompt.
+    const createRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir: process.cwd() }),
+    })
+    expect(createRes.status).toBe(201)
+    const { sessionId } = await createRes.json() as { sessionId: string }
+
+    const CUSTOM = '# Custom Solo Prompt\n\nDo the thing my way.'
+    const putRes = await fetch(`${baseUrl}/api/orchestration-prompts/solo`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: CUSTOM }),
+    })
+    expect(putRes.status).toBe(200)
+
+    const argsLogPath = path.join(tmpDir, `custom-prompt-${sessionId}.jsonl`)
+    process.env.MOCK_SDK_STARTUP_ARGS_LOG = argsLogPath
+
+    const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+    try {
+      // Prewarm first: with no live CLI process, `set_pipeline_mode` only
+      // records the flag and nothing would ever launch.
+      await new Promise<void>((resolve, reject) => {
+        // The prewarm launch lands first, then the Solo toggle restarts the CLI.
+        // Keep polling until the SECOND launch is logged, so the assertions
+        // below see the post-toggle argv rather than the prewarm one.
+        let toggleSent = false
+        const waitForRelaunch = setInterval(() => {
+          fs.readFile(argsLogPath, 'utf8')
+            .then((text) => {
+              const launches = text.trim() ? text.trim().split('\n').length : 0
+              if (launches === 0) return
+              if (!toggleSent) {
+                toggleSent = true
+                ws.send(JSON.stringify({ type: 'set_pipeline_mode', flavor: 'solo' }))
+                return
+              }
+              if (launches < 2) return
+              clearInterval(waitForRelaunch)
+              clearTimeout(timeout)
+              resolve()
+            })
+            .catch(() => undefined)
+        }, 25)
+
+        const timeout = setTimeout(() => {
+          clearInterval(waitForRelaunch)
+          reject(new Error(`Timed out waiting for custom-prompt launch for session ${sessionId}`))
+        }, 15_000)
+
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data as string)
+          if (msg.type === 'connected') {
+            ws.send(JSON.stringify({ type: 'prewarm_session' }))
+            return
+          }
+          if (msg.type === 'error') {
+            clearInterval(waitForRelaunch)
+            clearTimeout(timeout)
+            reject(new Error(msg.message))
+          }
+        }
+        ws.onerror = () => {
+          clearInterval(waitForRelaunch)
+          clearTimeout(timeout)
+          reject(new Error(`WebSocket error for custom-prompt session ${sessionId}`))
+        }
+      })
+
+      const argLines = (await fs.readFile(argsLogPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string[])
+      const lastArgs = argLines.at(-1)!
+      const idx = lastArgs.indexOf('--append-system-prompt-file')
+      expect(idx).toBeGreaterThanOrEqual(0)
+      expect(lastArgs).not.toContain('--append-system-prompt')
+      expect(readFileSync(lastArgs[idx + 1]!, 'utf8')).toBe(CUSTOM)
+    } finally {
+      ws.close()
+      delete process.env.MOCK_SDK_STARTUP_ARGS_LOG
+      conversationService.stopSession(sessionId)
+      await fetch(`${baseUrl}/api/orchestration-prompts/solo`, { method: 'DELETE' })
     }
   }, 20_000)
 

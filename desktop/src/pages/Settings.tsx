@@ -17,6 +17,7 @@ import { DiagnosticsSettings } from './DiagnosticsSettings'
 import { TraceList } from './TraceList'
 import { ActivitySettings } from './ActivitySettings'
 import { MemorySettings } from './MemorySettings'
+import { OrchestrationPromptSettings } from '../components/settings/OrchestrationPromptSettings'
 import { ProjectRulesSettings } from './ProjectRulesSettings'
 import { PetSettings } from '../features/pets/PetSettings'
 import { useUIStore } from '../stores/uiStore'
@@ -79,6 +80,7 @@ export function DesktopSettings() {
             <TabButton icon="smart_toy" label={t('settings.tab.agents')} active={activeTab === 'agents'} onClick={() => setActiveTab('agents')} />
             <TabButton icon="auto_awesome" label={t('settings.tab.skills')} active={activeTab === 'skills'} onClick={() => setActiveTab('skills')} />
             <TabButton icon="history_edu" label={t('settings.tab.memory')} active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} />
+            <TabButton icon="account_tree" label={t('settings.tab.orchestration')} active={activeTab === 'orchestration'} onClick={() => setActiveTab('orchestration')} />
             <TabButton icon="description" label={t('settings.tab.projectRules')} active={activeTab === 'projectRules'} onClick={() => setActiveTab('projectRules')} />
             <TabButton icon="extension" label={t('settings.tab.plugins')} active={activeTab === 'plugins'} onClick={() => setActiveTab('plugins')} />
             <TabButton icon="pets" label={t('settings.tab.pets')} active={activeTab === 'pets'} onClick={() => setActiveTab('pets')} />
@@ -104,6 +106,7 @@ export function DesktopSettings() {
           {activeTab === 'agents' && <AgentManager />}
           {activeTab === 'skills' && <SkillSettings />}
           {activeTab === 'memory' && <MemorySettings />}
+          {activeTab === 'orchestration' && <OrchestrationPromptSettings />}
           {activeTab === 'projectRules' && <ProjectRulesSettings />}
           {activeTab === 'plugins' && <PluginSettings />}
           {activeTab === 'pets' && <PetSettings />}
