@@ -5929,6 +5929,19 @@ export class SessionService {
           ...shared(launch),
         },
         customTitle: launch.nonemptyCustomTitle,
+        // Whether the fold saw every record. Records above the semantic read
+        // limit are skipped so a single oversized line cannot be loaded into
+        // memory — a large image in a tool_result is the common case, and
+        // base64 inflates it by 4/3, so a ~6MB screenshot is already past the
+        // 8MB line budget.
+        //
+        // This is informational, NOT a verdict on the metadata: callers must
+        // not refuse to work when it is false. The launch fields are folded
+        // from whichever records were readable (`session-meta` carries workDir
+        // and is always small), so a skipped image costs at most a fallback
+        // path, never a session that cannot be opened. The real guard against
+        // metadata being swamped by oversized *scalars* is the 128KB envelope
+        // check above, which still throws.
         complete: scan.oversizedRecords === 0,
       }
       this.metadataProjectionCache.delete(key)
@@ -5951,7 +5964,10 @@ export class SessionService {
     if (!found) return null
 
     const projection = await this.getMetadataProjection(found.filePath, found.projectDir)
-    if (!projection.complete) throw new ApiError(413, 'Session metadata contains oversized records', 'SESSION_METADATA_INCOMPLETE')
+    // A skipped oversized record must not fail the lookup: see the note on
+    // `complete` in getMetadataProjection. `projection.launchInfo.workDir`
+    // already falls back through the readable records and then the project
+    // directory, so returning it is strictly better than refusing to answer.
     return projection.launchInfo.workDir
   }
 
@@ -5977,7 +5993,10 @@ export class SessionService {
     if (!found) return memory ? { ...memory, transcriptMessageCount: 0 } : null
 
     const projection = await this.getMetadataProjection(found.filePath, found.projectDir)
-    if (!projection.complete) throw new ApiError(413, 'Session metadata contains oversized records', 'SESSION_METADATA_INCOMPLETE')
+    // Same reasoning as getSessionWorkDir: an oversized record (typically an
+    // image in a tool_result) only means the fold skipped it, not that the
+    // launch metadata is unusable. Throwing here failed every user message in
+    // the session, because sending one needs this call.
     const projected = projection.launchInfo
     return { ...projected, ...memory, transcriptMessageCount: projected.transcriptMessageCount }
   }

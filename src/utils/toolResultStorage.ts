@@ -184,6 +184,75 @@ export async function persistToolResult(
 }
 
 /**
+ * Cap for the in-memory fallback used when persisting to disk fails.
+ *
+ * Deliberately far below the persistence threshold: the whole point is to keep
+ * a pathological result out of the transcript, and the failure path has no file
+ * for the model to read the remainder from. 100k chars (~25k tokens) keeps the
+ * turn useful without letting one tool call dominate the context.
+ */
+export const IN_MEMORY_TRUNCATION_CHARS = 100_000
+
+/**
+ * A non-text block that may legally appear in a tool_result's content array.
+ * Derived from the content array itself rather than `ContentBlockParam`, which
+ * also covers blocks a tool_result cannot carry (tool_use, server_tool_use, …)
+ * and would not be assignable back into `content`.
+ */
+type ToolResultStructuredBlock = Exclude<
+  Extract<NonNullable<ToolResultBlockParam['content']>, readonly unknown[]>[number],
+  { type: 'text' }
+>
+
+/**
+ * Split a tool_result payload into the text we may truncate and the structured
+ * blocks we must not touch.
+ *
+ * `persistToolResult` only accepts pure text, so a payload mixing a long text
+ * block with a document/resource block reaches the failure path without any
+ * write being attempted. Flattening those blocks to a `[type]` placeholder
+ * would silently drop content the caller never agreed to lose — the previous
+ * behaviour (return the block unchanged) at least kept it. So they are carried
+ * through intact and only the text is truncated.
+ */
+function splitToolResultContent(
+  content: NonNullable<ToolResultBlockParam['content']>,
+): { text: string; structured: ToolResultStructuredBlock[] } {
+  if (typeof content === 'string') return { text: content, structured: [] }
+  const textParts: string[] = []
+  const structured: ToolResultStructuredBlock[] = []
+  for (const block of content) {
+    if (block.type === 'text') textParts.push(block.text)
+    else structured.push(block)
+  }
+  return { text: textParts.join('\n'), structured }
+}
+
+/**
+ * Message used when content was too large to keep and could not be persisted.
+ * Mirrors `buildLargeToolResultMessage`'s shape so the model sees the same
+ * `<persisted-output>` framing it already understands, minus the file pointer.
+ *
+ * Sizes are reported in real bytes. The caller's measurement is a character
+ * count, and `formatFileSize` is byte-oriented — passing it a length would
+ * under-report CJK content roughly threefold.
+ */
+export function buildTruncationFallbackMessage(
+  originalBytes: number,
+  preview: string,
+  hasMore: boolean,
+  reason: string,
+): string {
+  let message = `${PERSISTED_OUTPUT_TAG}\n`
+  message += `Output too large (${formatFileSize(originalBytes)}) and ${reason}.\n\n`
+  message += `Preview (first ${formatFileSize(Buffer.byteLength(preview, 'utf-8'))}):\n`
+  message += preview
+  message += hasMore ? '\n...\n' : '\n'
+  message += PERSISTED_OUTPUT_CLOSING_TAG
+  return message
+}
+
+/**
  * Build a message for large tool results with preview
  */
 export function buildLargeToolResultMessage(
@@ -314,8 +383,37 @@ async function maybePersistLargeToolResult(
   // Persist the entire content as a unit
   const result = await persistToolResult(content, toolResultBlock.tool_use_id)
   if (isPersistError(result)) {
-    // If persistence failed, return the original block unchanged
-    return toolResultBlock
+    // Persistence failed, so there is no file to point the model at — but the
+    // oversized content still cannot go on the wire as-is. Returning the block
+    // unchanged made the 50k persistence threshold silently unbounded whenever
+    // the write failed (disk full, permissions, antivirus, a read-only config
+    // dir): the full result landed in the transcript, and a transcript record
+    // above the 8MB semantic read limit is skipped by every metadata and
+    // history fold — one such record can leave a session unable to resolve its
+    // launch info at all. Degrade to an in-memory truncation instead, the same
+    // shape the MCP path already uses for this failure.
+    logEvent('tengu_tool_result_persist_failed', {
+      toolName: sanitizeToolNameForAnalytics(toolName),
+      originalSizeBytes: size,
+      thresholdUsed: threshold,
+    })
+
+    const { text, structured } = splitToolResultContent(content)
+    const { preview, hasMore } = generatePreview(text, IN_MEMORY_TRUNCATION_CHARS)
+    const truncated = buildTruncationFallbackMessage(
+      Buffer.byteLength(text, 'utf-8'),
+      preview,
+      hasMore,
+      'the full output could not be saved',
+    )
+    // Keep any structured blocks: only the text was too large, and dropping a
+    // document/resource block would lose content rather than shrink it.
+    return {
+      ...toolResultBlock,
+      content: structured.length > 0
+        ? [{ type: 'text' as const, text: truncated }, ...structured]
+        : truncated,
+    }
   }
 
   const message = buildLargeToolResultMessage(result)
@@ -729,10 +827,38 @@ async function buildReplacement(
   candidate: ToolResultCandidate,
 ): Promise<{ content: string; originalSize: number } | null> {
   const result = await persistToolResult(candidate.content, candidate.toolUseId)
-  if (isPersistError(result)) return null
+  if (!isPersistError(result)) {
+    return {
+      content: buildLargeToolResultMessage(result),
+      originalSize: result.originalSize,
+    }
+  }
+
+  // Persist failed. Returning null left the oversized content in the message,
+  // which is the same unbounded-threshold bug fixed in
+  // maybePersistLargeToolResult: the per-message budget silently stops applying
+  // and the full result reaches the transcript, where a record above the 8MB
+  // semantic limit is skipped by every history fold.
+  //
+  // Truncate in memory when the payload is pure text — the only shape
+  // persistToolResult would have accepted. A payload carrying structured blocks
+  // cannot be represented as a string without dropping them, so it stays
+  // unchanged rather than losing content.
+  const { text, structured } = splitToolResultContent(candidate.content)
+  if (structured.length > 0) return null
+
+  const { preview, hasMore } = generatePreview(text, IN_MEMORY_TRUNCATION_CHARS)
+  logEvent('tengu_tool_result_persist_failed_message_budget', {
+    originalSizeBytes: Buffer.byteLength(text, 'utf-8'),
+  })
   return {
-    content: buildLargeToolResultMessage(result),
-    originalSize: result.originalSize,
+    content: buildTruncationFallbackMessage(
+      Buffer.byteLength(text, 'utf-8'),
+      preview,
+      hasMore,
+      'the full output could not be saved',
+    ),
+    originalSize: text.length,
   }
 }
 
@@ -859,9 +985,12 @@ export async function enforceToolResultBudget(
   let replacedSize = 0
   for (const [candidate, replacement] of freshReplacements) {
     // Mark seen HERE, post-await, atomically with replacements.set for
-    // success cases. For persist failures (replacement === null) the ID
-    // is seen-but-unreplaced — the original content was sent to the
-    // model, so treating it as frozen going forward is correct.
+    // success cases. A null replacement means the payload carried structured
+    // blocks, which cannot be represented as a truncated string without
+    // dropping them — the original content goes to the model, so freezing it
+    // as seen-but-unreplaced is correct. (A failed persist on pure text now
+    // yields a truncated replacement rather than null, so the budget still
+    // applies.)
     state.seenIds.add(candidate.toolUseId)
     if (replacement === null) continue
     replacedSize += candidate.size
