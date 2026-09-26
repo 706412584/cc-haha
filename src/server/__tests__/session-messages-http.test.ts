@@ -171,6 +171,42 @@ describe('session messages HTTP surface', () => {
     } finally { canonical.mockRestore() }
   })
 
+  it('still resolves launch metadata when a transcript holds an oversized image record', async () => {
+    // Regression: reading a large image puts a base64 tool_result in the
+    // transcript. Base64 inflates by 4/3, so a ~6MB screenshot crosses the 8MB
+    // semantic record budget and the fold skips that line. That skip used to
+    // make getSessionLaunchInfo throw 413, which failed EVERY user message in
+    // the session — the session became permanently unusable. A skipped image
+    // must cost at most a fallback path, never the ability to open the session.
+    const sessionId = await seedSessionWithSubagent()
+    const filePath = path.join(tmpDir, 'projects', '-tmp-http-invariant', `${sessionId}.jsonl`)
+    await fs.appendFile(filePath, JSON.stringify({
+      parentUuid: null,
+      isSidechain: false,
+      type: 'user',
+      cwd: '/tmp/test',
+      sessionId,
+      message: {
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'call_big_image',
+          content: [{
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: 'A'.repeat(9 * 1024 * 1024) },
+          }],
+        }],
+      },
+    }) + '\n')
+
+    const launchInfo = await sessionService.getSessionLaunchInfo(sessionId)
+    expect(launchInfo).not.toBeNull()
+    // workDir comes from the small session-meta/user records, which are still read.
+    expect(launchInfo?.workDir).toBeString()
+
+    await expect(sessionService.getSessionWorkDir(sessionId)).resolves.toBeString()
+  })
+
   it('returns the whole bounded transcript in one response for mode=full', async () => {
     const sessionId = await seedSessionWithSubagent()
     const filePath = path.join(tmpDir, 'projects', '-tmp-http-invariant', `${sessionId}.jsonl`)
