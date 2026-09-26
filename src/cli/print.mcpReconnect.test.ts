@@ -32,11 +32,22 @@ const clearServerCache = mock(async () => {})
 function reconnectResult(
   client: MCPServerConnection = connectedClient(),
   withAssets = false,
+  // The real `reconnectMcpServerImpl` appends these two when the server
+  // advertises `resources`. They carry no `mcp__<server>__` prefix, which is
+  // exactly why a prefix-only merge used to duplicate them on every reconnect.
+  withResourceTools = false,
 ) {
   return {
     name: 'test-server',
     client,
-    tools: withAssets ? [{ name: 'mcp__test-server__lookup' } as Tool] : [],
+    tools: withAssets
+      ? [
+          { name: 'mcp__test-server__lookup' } as Tool,
+          ...(withResourceTools
+            ? ([{ name: 'ListMcpResourcesTool' }, { name: 'ReadMcpResourceTool' }] as Tool[])
+            : []),
+        ]
+      : [],
     commands: withAssets
       ? [{ name: 'mcp__test-server__prompt', description: '', argumentHint: '' }]
       : [],
@@ -318,6 +329,53 @@ describe('headless MCP reconnect races', () => {
     expect(getState().mcp.commands).toHaveLength(1)
     expect(getState().mcp.resources['test-server']).toHaveLength(1)
     input.done()
+  })
+
+  // A reconnect returns the synthesized resource tools too, and those carry no
+  // `mcp__<server>__` prefix. A prefix-only removal left the previous pair in
+  // place and appended another, so the pool grew by two on every reconnect.
+  test('repeated reconnects do not accumulate resource tools', async () => {
+    const input = new Stream<string>()
+    const { output, getState } = startHeadless(input)
+    // One shared iterator: the stream is single-consumer, so a fresh
+    // `nextControlResponse(output)` per reconnect would race itself.
+    const iterator = output[Symbol.asyncIterator]()
+    const nextResponse = async () => {
+      while (true) {
+        const { value, done } = await iterator.next()
+        if (done) throw new Error('Missing control response')
+        if ((value as { type?: string }).type === 'control_response') return value
+      }
+    }
+    const reconnect = async (requestId: string) => {
+      input.enqueue(
+        `${JSON.stringify({
+          type: 'control_request',
+          request_id: requestId,
+          request: { subtype: 'mcp_reconnect', serverName: 'test-server' },
+        })}\n`,
+      )
+      await Bun.sleep(0)
+      resolveReconnect?.(reconnectResult(connectedClient(), true, true))
+      await expect(nextResponse()).resolves.toMatchObject({
+        type: 'control_response',
+        response: { request_id: requestId, subtype: 'success' },
+      })
+    }
+
+    try {
+      await reconnect('reconnect-1')
+      const afterFirst = getState().mcp.tools.map(tool => tool.name)
+      await reconnect('reconnect-2')
+      await reconnect('reconnect-3')
+      const afterThird = getState().mcp.tools.map(tool => tool.name)
+
+      // The third reconnect must leave the same tool set the first one produced.
+      expect(afterThird).toEqual(afterFirst)
+      expect(new Set(afterThird).size).toBe(afterThird.length)
+    } finally {
+      input.done()
+    }
   })
 
   test.each([

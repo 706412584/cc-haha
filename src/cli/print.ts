@@ -486,6 +486,41 @@ export function canBatchWith(
   )
 }
 
+/**
+ * Replace one server's tools in a merged pool.
+ *
+ * Removing only the server's own `mcp__<server>__*` tools is not enough: a
+ * reconnect also returns the synthesized resource tools
+ * (`ListMcpResourcesTool` / `ReadMcpResourceTool`), which carry no server
+ * prefix, so a prefix-only filter leaves the previous copies in place and the
+ * append adds another pair — two more entries on every reconnect.
+ *
+ * Treat the pool as name-keyed instead: drop this server's prefixed tools and
+ * any tool the incoming set is about to re-add, then append. Re-applying the
+ * same result is then a no-op, which is what makes it safe to call per
+ * reconnect.
+ */
+export function mergeServerTools(
+  existing: Tool[],
+  serverName: string,
+  incoming: Tool[],
+): Tool[] {
+  const prefix = getMcpPrefix(serverName)
+  const incomingNames = new Set(
+    incoming.map(tool => tool.name).filter((name): name is string => !!name),
+  )
+  return [
+    ...existing.filter(tool => {
+      if (tool.name?.startsWith(prefix)) return false
+      // A tool the incoming set re-adds is this server's own contribution
+      // (only the resource tools are unprefixed); keeping the old copy would
+      // duplicate it.
+      return !(tool.name && incomingNames.has(tool.name))
+    }),
+    ...incoming,
+  ]
+}
+
 export async function runHeadless(
   inputPrompt: string | AsyncIterable<string>,
   getAppState: () => AppState,
@@ -3346,7 +3381,6 @@ function runHeadlessStreaming(
               sendControlResponseSuccess(message)
             } else {
               // Update appState.mcp with the new client, tools, commands, and resources
-              const prefix = getMcpPrefix(serverName)
               setAppState(prev => ({
                 ...prev,
                 mcp: {
@@ -3354,12 +3388,7 @@ function runHeadlessStreaming(
                   clients: prev.mcp.clients.map(c =>
                     c.name === serverName ? result.client : c,
                   ),
-                  tools: [
-                    ...reject(prev.mcp.tools, t =>
-                      t.name?.startsWith(prefix),
-                    ),
-                    ...result.tools,
-                  ],
+                  tools: mergeServerTools(prev.mcp.tools, serverName, result.tools),
                   commands: [
                     ...reject(prev.mcp.commands, c =>
                       commandBelongsToServer(c, serverName),
@@ -3385,12 +3414,7 @@ function runHeadlessStreaming(
                   ),
                   result.client,
                 ],
-                tools: [
-                  ...dynamicMcpState.tools.filter(
-                    t => !t.name?.startsWith(prefix),
-                  ),
-                  ...result.tools,
-                ],
+                tools: mergeServerTools(dynamicMcpState.tools, serverName, result.tools),
               }
               if (result.client.type === 'connected') {
                 registerElicitationHandlers([result.client])
@@ -3495,12 +3519,7 @@ function runHeadlessStreaming(
                   clients: prev.mcp.clients.map(c =>
                     c.name === serverName ? result.client : c,
                   ),
-                  tools: [
-                    ...reject(prev.mcp.tools, t =>
-                      t.name?.startsWith(prefix),
-                    ),
-                    ...result.tools,
-                  ],
+                  tools: mergeServerTools(prev.mcp.tools, serverName, result.tools),
                   commands: [
                     ...reject(prev.mcp.commands, c =>
                       commandBelongsToServer(c, serverName),
@@ -3657,7 +3676,6 @@ function runHeadlessStreaming(
                     })
                     return
                   }
-                  const prefix = getMcpPrefix(serverName)
                   setAppState(prev => ({
                     ...prev,
                     mcp: {
@@ -3665,12 +3683,7 @@ function runHeadlessStreaming(
                       clients: prev.mcp.clients.map(c =>
                         c.name === serverName ? result.client : c,
                       ),
-                      tools: [
-                        ...reject(prev.mcp.tools, t =>
-                          t.name?.startsWith(prefix),
-                        ),
-                        ...result.tools,
-                      ],
+                      tools: mergeServerTools(prev.mcp.tools, serverName, result.tools),
                       commands: [
                         ...reject(prev.mcp.commands, c =>
                           commandBelongsToServer(c, serverName),
@@ -3696,12 +3709,7 @@ function runHeadlessStreaming(
                       ),
                       result.client,
                     ],
-                    tools: [
-                      ...dynamicMcpState.tools.filter(
-                        t => !t.name?.startsWith(prefix),
-                      ),
-                      ...result.tools,
-                    ],
+                    tools: mergeServerTools(dynamicMcpState.tools, serverName, result.tools),
                   }
                 })
                 .catch(error => {
@@ -3931,7 +3939,6 @@ function runHeadlessStreaming(
           } else {
             await revokeServerTokens(serverName, config)
             const result = await reconnectMcpServerImpl(serverName, config)
-            const prefix = getMcpPrefix(serverName)
             setAppState(prev => ({
               ...prev,
               mcp: {
@@ -3939,10 +3946,7 @@ function runHeadlessStreaming(
                 clients: prev.mcp.clients.map(c =>
                   c.name === serverName ? result.client : c,
                 ),
-                tools: [
-                  ...reject(prev.mcp.tools, t => t.name?.startsWith(prefix)),
-                  ...result.tools,
-                ],
+                tools: mergeServerTools(prev.mcp.tools, serverName, result.tools),
                 commands: [
                   ...reject(prev.mcp.commands, c =>
                     commandBelongsToServer(c, serverName),
