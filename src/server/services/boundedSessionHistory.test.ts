@@ -282,3 +282,63 @@ describe('bounded history pages', () => {
     expect(await replacement).toBe('replacement')
   })
 })
+
+describe('oversized record salvage', () => {
+  /**
+   * Regression: a record over HISTORY_SEMANTIC_RECORD_BYTES used to be dropped
+   * whole. The FileRead tool stores one screenshot as both an `image` content
+   * block and `toolUseResult.file.base64`, so a ~4MB image produced a ~8MB
+   * record — and the messages that read large images vanished from the session
+   * timeline. Slimming the duplicate keeps the message.
+   */
+  const imageRow = (id: string, payloadBytes: number) => {
+    const base64 = 'A'.repeat(payloadBytes)
+    return JSON.stringify({
+      type: 'user',
+      uuid: id,
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `t-${id}`, content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64 } }] }] },
+      toolUseResult: { type: 'image', file: { base64, type: 'image/png', originalSize: payloadBytes, dimensions: { originalWidth: 1536, originalHeight: 1536, displayWidth: 1536, displayHeight: 1536 } } },
+    }) + '\n'
+  }
+
+  test('keeps a record whose bulk is a duplicated media payload', async () => {
+    const entry = imageRow('shot', 4_400_000)
+    // The record is over the semantic budget only because the payload is stored twice.
+    expect(Buffer.byteLength(entry) - 1).toBeGreaterThan(HISTORY_SEMANTIC_RECORD_BYTES)
+    await writeFile(file, row('before') + entry + row('after'))
+
+    const result = await readBoundedHistoryPage(file, { full: true })
+
+    expect(result.page.omittedOversizedEntries).toBe(0)
+    expect(result.entries.map(item => item.entry.uuid)).toEqual(['before', 'shot', 'after'])
+    const kept = result.entries.find(item => item.entry.uuid === 'shot')!.entry as Record<string, any>
+    // The bytes the model is sent survive; only the duplicate is gone.
+    expect(kept.message.content[0].content[0].source.data).toBe('A'.repeat(4_400_000))
+    expect(kept.toolUseResult.file.base64).toBeUndefined()
+    // Structural metadata the renderer reads survives.
+    expect(kept.toolUseResult.file.dimensions.originalWidth).toBe(1536)
+    expect(kept.toolUseResult.file.originalSize).toBe(4_400_000)
+    expect(Buffer.byteLength(JSON.stringify(kept))).toBeLessThan(HISTORY_SEMANTIC_RECORD_BYTES)
+  })
+
+  test('still drops a record that stays oversized after slimming', async () => {
+    // No duplicated payload to remove — genuinely oversized text cannot be
+    // shrunk without inventing content, so it is still dropped.
+    await writeFile(file, row('before') + row('huge', 'x'.repeat(HISTORY_SEMANTIC_RECORD_BYTES)) + row('after'))
+
+    const result = await readBoundedHistoryPage(file, { full: true })
+
+    expect(result.entries.map(item => item.entry.uuid)).toEqual(['before', 'after'])
+    expect(result.page.omittedOversizedEntries).toBe(1)
+  })
+
+  test('keeps a record that outgrew the semantic budget only after slimming', async () => {
+    // Just under the semantic limit on its own; the duplicate pushes it over.
+    const entry = imageRow('edge', 3_000_000)
+    expect(Buffer.byteLength(entry) - 1).toBeLessThan(HISTORY_SEMANTIC_RECORD_BYTES)
+    await writeFile(file, entry)
+    const result = await readBoundedHistoryPage(file, { full: true })
+    expect(result.entries.map(item => item.entry.uuid)).toEqual(['edge'])
+    expect(result.page.omittedOversizedEntries).toBe(0)
+  })
+})

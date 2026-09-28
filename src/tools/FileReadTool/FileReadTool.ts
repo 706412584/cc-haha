@@ -569,7 +569,11 @@ const outputSchema = lazySchema(() => {
     z.object({
       type: z.literal('image'),
       file: z.object({
-        base64: z.string().describe('Base64-encoded image data'),
+        // Optional because the persisted transcript drops this duplicate of the
+        // message's own image block (see `stripDuplicatedMediaPayload`). Both
+        // CLI renderers reject the whole result when this schema fails, so a
+        // required field would make a read-image row disappear entirely.
+        base64: z.string().optional().describe('Base64-encoded image data'),
         type: imageMediaTypes.describe('The MIME type of the image'),
         originalSize: z.number().describe('Original file size in bytes'),
         dimensions: z
@@ -614,7 +618,9 @@ const outputSchema = lazySchema(() => {
       type: z.literal('pdf'),
       file: z.object({
         filePath: z.string().describe('The path to the PDF file'),
-        base64: z.string().describe('Base64-encoded PDF data'),
+        // Optional for the same reason as the image branch above: the persisted
+        // transcript drops this duplicate of the tool_result's document block.
+        base64: z.string().optional().describe('Base64-encoded PDF data'),
         originalSize: z.number().describe('Original file size in bytes'),
       }),
     }),
