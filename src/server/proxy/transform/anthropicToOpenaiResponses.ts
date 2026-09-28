@@ -14,6 +14,7 @@ import type {
 } from './types.js'
 import { stripLeadingBillingHeader } from './billingHeader.js'
 import { normalizeOpenAIReasoningEffort } from './effort.js'
+import { isForwardableImageUrl, unfowardableImageUrlText } from './imageUrlSource.js'
 import { decodeOpenAIReasoningEnvelope } from './openaiReasoning.js'
 import { resolveRequestCompatibility, type RequestCompatibilityOptions } from './requestCompatibility.js'
 import type { ToolNameWireMap } from './toolNameWire.js'
@@ -231,6 +232,12 @@ function convertContentBlock(
   const source = block.source
   if (source.type === 'file') {
     return [{ type: 'input_text', text: '[Image omitted: file-based image source is not supported by this endpoint.]' }]
+  }
+  // A URL that cannot be forwarded must degrade rather than reach the gateway:
+  // the block is part of the transcript, so the gateway's rejection would
+  // repeat on every later turn and permanently break the session.
+  if (source.type === 'url' && !isForwardableImageUrl(source.url)) {
+    return [{ type: 'input_text', text: unfowardableImageUrlText(source.url) }]
   }
   return [{
     type: 'input_image',

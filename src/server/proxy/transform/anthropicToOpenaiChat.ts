@@ -16,6 +16,7 @@ import type {
 } from './types.js'
 import { stripLeadingBillingHeader } from './billingHeader.js'
 import { normalizeOpenAIReasoningEffort } from './effort.js'
+import { isForwardableImageUrl, unfowardableImageUrlText } from './imageUrlSource.js'
 import { resolveRequestCompatibility, type RequestCompatibilityOptions } from './requestCompatibility.js'
 import type { ToolNameWireMap } from './toolNameWire.js'
 
@@ -220,7 +221,7 @@ function convertUserMessage(
       } else {
         target.push(imageContentMode === 'text_only'
           ? { type: 'text', text: OMITTED_IMAGE_TEXT }
-          : { type: 'image_url', image_url: toImageUrl(block) })
+          : imageUrlPart(block))
       }
       continue
     }
@@ -422,7 +423,7 @@ function toolResultToParts(
         pendingDocumentBoundary = false
         textParts.push(OMITTED_IMAGE_TEXT)
       } else {
-        mediaParts.push({ type: 'image_url', image_url: toImageUrl(resultBlock) })
+        mediaParts.push(imageUrlPart(resultBlock))
       }
     } else if (resultBlock.type === 'document') {
       // Documents degrade to text where possible. Plain text sources and text
@@ -541,7 +542,7 @@ function documentContentToParts(
         // endpoints; the degraded notice carries its own separators.
         parts.push({ type: 'text', text: '\n[Image omitted from document content]\n' })
       } else {
-        parts.push({ type: 'image_url', image_url: toImageUrl(part) })
+        parts.push(imageUrlPart(part))
       }
     }
   }
@@ -561,6 +562,18 @@ function documentProvenanceText(document: { title?: string; context?: string }):
     ...(document.context ? [`[Document context: ${document.context}]`] : []),
   ]
   return lines.length > 0 ? `${lines.join('\n')}\n` : ''
+}
+
+/** The `image_url` part for a block, or a text notice when its URL is not
+ * forwardable. Callers must route `image` blocks through this rather than
+ * `toImageUrl` so an unusable URL degrades instead of reaching the gateway. */
+function imageUrlPart(
+  block: Extract<AnthropicContentBlock, { type: 'image' }>,
+): OpenAIChatContentPart {
+  if (block.source.type === 'url' && !isForwardableImageUrl(block.source.url)) {
+    return { type: 'text', text: unfowardableImageUrlText(block.source.url) }
+  }
+  return { type: 'image_url', image_url: toImageUrl(block) }
 }
 
 function toImageUrl(block: Extract<AnthropicContentBlock, { type: 'image' }>): { url: string } {
