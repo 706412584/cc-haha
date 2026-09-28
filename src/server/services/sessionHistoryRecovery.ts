@@ -25,6 +25,30 @@ const record = (value: unknown): Record<string, any> | undefined => value && typ
 const text = (value: unknown): string => typeof value === 'string' ? value : Array.isArray(value) ? value.filter(block => block?.type === 'text').map(block => block.text ?? '').join('\n') : ''
 const brief = (value: unknown): string | undefined => typeof value === 'string' ? value.slice(0, 4096) : undefined
 
+/**
+ * Strip the pre-edit file snapshot from an edit tool's result.
+ *
+ * `originalFile` is the full content of the file before the edit, kept by the
+ * edit tools for rollback. It is by far the largest field in the result (a
+ * single `Edit` on a 60KB file carries a ~63KB snapshot) and nothing that reads
+ * recovery state ever looks at it — the workspace view derives the change from
+ * `old_string`/`new_string` on the tool_use side, and the desktop only reads
+ * `answers`/`questions` (AskUserQuestion) and `backgroundTaskId` (shell tasks)
+ * from other tools' results.
+ *
+ * Every other field is preserved, so this is a size fix rather than a schema
+ * change. Without it a few ordinary edits to a large file push the entry past
+ * STATE_RECORD_BYTES, which marks the workspace incomplete and makes the API
+ * answer 413 HISTORY_WORKSPACE_LIMIT — disabling the session's change view for
+ * good.
+ */
+function slimToolUseResult(toolUseResult: unknown): unknown {
+  const structured = record(toolUseResult)
+  if (!structured || !('originalFile' in structured)) return toolUseResult
+  const { originalFile: _dropped, ...rest } = structured
+  return rest
+}
+
 /** Whole-source state reduction with bounded resident memory. Large historical
  * tool outputs are never recovery state; preserve their task identity/status,
  * and leave their bodies available through the separately paged transcript. */
@@ -171,7 +195,18 @@ export async function recoverBoundedSessionHistory(options: {
             for (const block of workspaceCalls) saveTool.run(block.id, ordinal, json, 0, block.name)
           }
         }
-        if (workspaceResults.length) saveActivity({ ordinal, message: { ...base, content: workspaceResults, toolUseResult: message.toolUseResult } }, 'workspace')
+        if (workspaceResults.length) {
+          // `toolUseResult.originalFile` is the pre-edit snapshot the edit tools
+          // keep for rollback — a full copy of the file. The workspace view never
+          // reads it: it derives status, line counts and the diff from
+          // `input.old_string`/`new_string` on the tool_use side. Carrying it here
+          // is what pushes these entries past the 64KB state budget (a single
+          // `Edit` to a 60KB file yields a ~67KB entry whose tool_result is 174
+          // bytes), which marked the workspace incomplete and made the API answer
+          // 413 HISTORY_WORKSPACE_LIMIT — permanently disabling the session's
+          // change view. Drop the snapshot; keep everything the view reads.
+          saveActivity({ ordinal, message: { ...base, content: workspaceResults, toolUseResult: slimToolUseResult(message.toolUseResult) } }, 'workspace')
+        }
         if (agentBlocks.length) saveActivity({ ordinal, message: { ...base, content: agentBlocks } })
       }, options.signal, { maxRecordBytes: HISTORY_SEMANTIC_RECORD_BYTES })
       database.exec('COMMIT')

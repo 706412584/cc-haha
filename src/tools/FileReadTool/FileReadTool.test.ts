@@ -141,3 +141,44 @@ describe('FileReadTool Windows text fidelity', () => {
     expect(block.content).toContain('1\t\t\t中文目标')
   })
 })
+
+describe('FileReadTool output schema accepts a stripped persisted result', () => {
+  /**
+   * Regression: `stripDuplicatedMediaPayload` removes `file.base64` from the
+   * persisted `toolUseResult` (it duplicates the message's own image/document
+   * block and nothing reads it). Both CLI renderers —
+   * `UserToolSuccessMessage` and `CollapsedReadSearchContent` — validate the
+   * result with `outputSchema.safeParse` and render NOTHING when it fails, so a
+   * required `base64` made a read-image row vanish from the transcript.
+   */
+  test('parses an image result whose duplicated base64 was dropped', () => {
+    const stripped = {
+      type: 'image',
+      file: {
+        type: 'image/png',
+        originalSize: 4_400_000,
+        dimensions: { originalWidth: 1536, originalHeight: 1536, displayWidth: 1536, displayHeight: 1536 },
+      },
+    }
+
+    const parsed = FileReadTool.outputSchema!.safeParse(stripped)
+
+    expect(parsed.success).toBe(true)
+  })
+
+  test('parses a pdf result whose duplicated base64 was dropped', () => {
+    const stripped = {
+      type: 'pdf',
+      file: { filePath: 'C:/tmp/a.pdf', originalSize: 1_000 },
+    }
+
+    expect(FileReadTool.outputSchema!.safeParse(stripped).success).toBe(true)
+  })
+
+  test('still rejects a result missing a required field', () => {
+    // Optional base64 must not make the schema permissive overall.
+    const missingType = { type: 'image', file: { originalSize: 1 } }
+
+    expect(FileReadTool.outputSchema!.safeParse(missingType).success).toBe(false)
+  })
+})

@@ -9,6 +9,18 @@ export const HISTORY_SCAN_BYTES = 16 * 1024 * 1024
  * with no other yield point. */
 export const HISTORY_FULL_SCAN_BYTES = 64 * 1024 * 1024
 export const HISTORY_SEMANTIC_RECORD_BYTES = 8 * 1024 * 1024
+/** Retention ceiling for a record that exceeds `HISTORY_SEMANTIC_RECORD_BYTES`.
+ *
+ * Such a record is usually not genuinely unreadable: its bulk comes from fields
+ * no reader consumes — the image base64 that duplicates the message's own
+ * `image` block, and the pre-edit file snapshot. Reading it up to this cap lets
+ * the reader strip those fields and keep the message, instead of dropping it
+ * and losing messages from a session that read a few large images.
+ *
+ * Must stay below the scan budget so the line ending is still reachable while
+ * the record is retained. Raise both together, with the resident-memory cost of
+ * one record (buffers + concatenated copy + decoded string) in mind. */
+export const HISTORY_RETAINED_RECORD_BYTES = 12 * 1024 * 1024
 export const HISTORY_RECORD_BYTES = 1024 * 1024
 export const HISTORY_PAGE_BYTES = 256 * 1024
 export const HISTORY_PAGE_RECORDS = 200
@@ -124,6 +136,45 @@ export function displayPreview(entry: Record<string, unknown>): Record<string, u
   return truncated ? { ...result, bodyTruncated: true } : result
 }
 
+/**
+ * Strip the fields that make a record huge without carrying anything a reader
+ * consumes, so a record past `HISTORY_SEMANTIC_RECORD_BYTES` can be returned
+ * instead of dropped.
+ *
+ * Two shapes account for the records seen in the wild, both duplicating bytes
+ * that are already present elsewhere in the same record:
+ *
+ * - `toolUseResult.file.base64` repeats the base64 that the message's own
+ *   `image` block already carries for the model. Nothing reads it: the desktop
+ *   reads only `answers`/`questions` and `backgroundTaskId`, and the CLI's own
+ *   renderer reads `originalSize`/`count`/`cells`/`numLines`.
+ * - `toolUseResult.originalFile` is the whole pre-edit file kept for rollback.
+ *   The workspace view derives status, line counts and the diff from
+ *   `input.old_string`/`new_string` on the tool_use side.
+ *
+ * Both are removed with `delete` (in place, never a spread copy) so the peak
+ * allocation stays at one parsed object. Structural fields survive. A record
+ * that is large for any other reason is returned unchanged and the caller falls
+ * back to dropping it — this never invents content.
+ */
+export function slimOversizedEntry(entry: Record<string, unknown>): Record<string, unknown> {
+  const toolUseResult = entry.toolUseResult
+  if (!toolUseResult || typeof toolUseResult !== 'object') return entry
+  if (Array.isArray(toolUseResult)) {
+    for (const item of toolUseResult) {
+      if (item && typeof item === 'object' && !Array.isArray(item)) delete (item as Record<string, unknown>).originalFile
+    }
+    return entry
+  }
+  const structured = toolUseResult as Record<string, unknown>
+  const file = structured.file
+  if (file && typeof file === 'object' && !Array.isArray(file)) {
+    delete (file as Record<string, unknown>).base64
+  }
+  delete structured.originalFile
+  return entry
+}
+
 export async function readBoundedHistoryPage(filePath: string, options: { cursor?: string; limit?: number; signal?: AbortSignal; full?: boolean } = {}): Promise<{ entries: BoundedHistoryEntry[]; page: HistoryPageInfo }> {
   if (options.limit !== undefined && (!Number.isFinite(options.limit) || options.limit < 1)) throw new ApiError(400, 'History limit must be a positive finite number', 'INVALID_HISTORY_LIMIT')
   const full = options.full === true
@@ -213,7 +264,7 @@ export async function readBoundedHistoryPage(filePath: string, options: { cursor
             const stop = newline < 0 ? buffer.length : newline
             const part = buffer.subarray(local, stop)
             bytes += part.length
-            if (!oversized && bytes <= HISTORY_SEMANTIC_RECORD_BYTES) parts.push(part)
+            if (!oversized && bytes <= HISTORY_RETAINED_RECORD_BYTES) parts.push(part)
             else if (!oversized) { oversized = true; parts = [] }
             position = bufferStart + stop + (newline < 0 ? 0 : 1)
             end = bufferStart + stop
@@ -225,7 +276,7 @@ export async function readBoundedHistoryPage(filePath: string, options: { cursor
             const stop = newline + 1
             const part = buffer.subarray(stop, local)
             bytes += part.length
-            if (!oversized && bytes <= HISTORY_SEMANTIC_RECORD_BYTES) parts.push(part)
+            if (!oversized && bytes <= HISTORY_RETAINED_RECORD_BYTES) parts.push(part)
             else if (!oversized) { oversized = true; parts = [] }
             position = bufferStart + stop
             start = position
@@ -234,16 +285,34 @@ export async function readBoundedHistoryPage(filePath: string, options: { cursor
           first = false
         }
         if (!complete) {
+          // The record did not end inside the available scan budget. One being
+          // skipped (inherited from the cursor, or newly past the retention
+          // ceiling) must keep advancing, or the next request would re-scan the
+          // same window forever. Anything smaller fits a fresh budget, so rewind
+          // and let the next request read it whole.
           if (oversized) { if (!skipping) omitted++; skipping = true }
           else position = boundary
           break
         }
-        if (oversized) { if (!skipping) omitted++; skipping = false; continue }
         if (!bytes) continue
+        // A record being skipped (inherited from the cursor) just ended; its
+        // omission was counted when it began.
+        if (skipping) { skipping = false; continue }
+        // Empty `parts` means the record outgrew the retention ceiling, so its
+        // bytes were never held. It cannot be returned.
+        if (!parts.length) { omitted++; continue }
         const raw = parts.length === 1 ? parts[0]! : Buffer.concat(newer ? parts : parts.reverse(), bytes)
         let entry: Record<string, unknown>
         try { entry = JSON.parse(raw.toString('utf8')) } catch { omitted++; continue }
         if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+        // A record above the semantic budget but within the retention ceiling
+        // was read whole, so it can be slimmed rather than dropped.
+        // `slimOversizedEntry` removes only fields no reader consumes, so a
+        // slimmed record keeps its message identity.
+        if (bytes > HISTORY_SEMANTIC_RECORD_BYTES) {
+          slimOversizedEntry(entry)
+          if (Buffer.byteLength(JSON.stringify(entry)) > HISTORY_SEMANTIC_RECORD_BYTES) { omitted++; continue }
+        }
         // Page whole records instead of shortening display fields. Image data,
         // tool inputs and trailing reference envelopes must remain parseable.
         // A record above the ordinary page budget owns its page; the reader's

@@ -596,6 +596,34 @@ export function buildSchemaNotSentHint(
   )
 }
 
+/**
+ * Drop the base64 payloads that `toolUseResult` duplicates from the message's
+ * own content blocks before the result is written to the transcript.
+ *
+ * The FileRead tool returns an image as both an `image` content block (the
+ * bytes the model is sent) and `toolUseResult.file.base64` (the same bytes
+ * again). One ~4MB screenshot therefore lands in the transcript as a ~8MB
+ * record, and `HISTORY_SEMANTIC_RECORD_BYTES` (8MB) then makes the history
+ * reader drop the whole record — the message disappears from the timeline.
+ *
+ * Nothing reads these fields: the desktop reads only `answers`/`questions` and
+ * `backgroundTaskId` from `toolUseResult`, and the CLI's own renderer reads
+ * `originalSize`/`count`/`cells`/`numLines`. The base64 is dropped from a
+ * shallow copy so the object handed to PostToolUse hooks and OTel is
+ * untouched. Structural metadata (`type`, `media_type`, `dimensions`,
+ * `filePath`, `originalSize`) survives.
+ */
+export function stripDuplicatedMediaPayload(toolUseResult: unknown): unknown {
+  if (!toolUseResult || typeof toolUseResult !== 'object' || Array.isArray(toolUseResult)) return toolUseResult
+  const structured = toolUseResult as Record<string, unknown>
+  const file = structured.file
+  if (!file || typeof file !== 'object' || Array.isArray(file)) return toolUseResult
+  const fileRecord = file as Record<string, unknown>
+  if (typeof fileRecord.base64 !== 'string') return toolUseResult
+  const { base64: _duplicated, ...fileWithoutPayload } = fileRecord
+  return { ...structured, file: fileWithoutPayload }
+}
+
 async function checkPermissionsAndCallTool(
   tool: Tool,
   toolUseID: string,
@@ -1460,7 +1488,7 @@ async function checkPermissionsAndCallTool(
           toolUseResult:
             toolUseContext.agentId && !toolUseContext.preserveToolUseResults
               ? undefined
-              : toolUseResult,
+              : stripDuplicatedMediaPayload(toolUseResult),
           mcpMeta: toolUseContext.agentId ? undefined : mcpMeta,
           sourceToolAssistantUUID: assistantMessage.uuid,
         }),
