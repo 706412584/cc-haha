@@ -2529,3 +2529,67 @@ describe('prompt caching semantics', () => {
     })
   })
 })
+
+describe('unforwardable URL image sources', () => {
+  /**
+   * Regression: an MCP tool returned `https://host/qr.png "扫描此二维码测试游戏"`
+   * — a caption appended to the URL. `new URL()` accepts it by percent-encoding
+   * the trailing text, so it was forwarded verbatim as `image_url.url` and the
+   * gateway rejected the whole request (`model_param_invalid`). Because the
+   * block is part of the transcript, every later turn resent it: the session
+   * was permanently broken, `/compact` included.
+   */
+  const MALFORMED = 'https://tapcode-sce.spark.xd.com/qrcode/m_qwe3.png "扫描此二维码测试游戏"'
+
+  const chatRequest = (source: Record<string, unknown>): AnthropicRequest => ({
+    model: 'deepseek-v4.1-flash',
+    max_tokens: 64,
+    messages: [{
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'qr-1', content: [{ type: 'image', source }] }],
+    }],
+  }) as unknown as AnthropicRequest
+
+  test('degrades a malformed url source instead of forwarding it (chat)', () => {
+    const result = anthropicToOpenaiChat(chatRequest({ type: 'url', url: MALFORMED }))
+    const serialized = JSON.stringify(result)
+
+    // No image part at all — the gateway never sees an invalid parameter.
+    expect(serialized).not.toContain('image_url')
+    // The notice names the source so the malformed value can be fixed; it is
+    // plain text, so it cannot invalidate the request.
+    expect(serialized).toContain('cannot be forwarded')
+    expect(serialized).toContain('tapcode-sce')
+  })
+
+  test('degrades a malformed url source instead of forwarding it (responses)', () => {
+    const result = anthropicToOpenaiResponses(chatRequest({ type: 'url', url: MALFORMED }))
+    const serialized = JSON.stringify(result)
+
+    expect(serialized).not.toContain('input_image')
+    expect(serialized).toContain('cannot be forwarded')
+  })
+
+  test('still forwards a well-formed url source', () => {
+    const good = 'https://example.com/qr.png'
+    const chat = JSON.stringify(anthropicToOpenaiChat(chatRequest({ type: 'url', url: good })))
+    const responses = JSON.stringify(anthropicToOpenaiResponses(chatRequest({ type: 'url', url: good })))
+
+    expect(chat).toContain(good)
+    expect(chat).toContain('image_url')
+    expect(responses).toContain(good)
+    expect(responses).toContain('input_image')
+  })
+
+  test('degrades a relative or scheme-less url but keeps base64 untouched', () => {
+    for (const url of ['/qrcode/m.png', 'ftp://example.com/a.png', 'example.com/a.png', '']) {
+      const serialized = JSON.stringify(anthropicToOpenaiChat(chatRequest({ type: 'url', url })))
+      expect(serialized).not.toContain('image_url')
+    }
+    // Inline base64 images are unaffected.
+    const base64 = JSON.stringify(anthropicToOpenaiChat(
+      chatRequest({ type: 'base64', media_type: 'image/png', data: 'AAAA' }),
+    ))
+    expect(base64).toContain('data:image/png;base64,AAAA')
+  })
+})
