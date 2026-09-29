@@ -91,7 +91,9 @@
 
 ### `check:server`
 
-本轮 `check:server` 在 Windows 本地两次都因**已登记的脚手架 `EBUSY`** 中止:测试脚手架 `finally` 里裸调 `rmSync(sandboxHome, { recursive: true, force: true })`,撞上刚被 kill 的子进程句柄(`claudeBetas.integration.test.ts:126`、`scripts/pr/run-server-tests.ts:126`)。这与 `docs/known-pre-existing-test-failures.md` 中登记的 `claudeBetas` / `session-protocol-rollback` 现象同源,属 Windows 本地限制,**以 CI(Linux) 结果为准**。风险最高的 server 用例已在开发过程中单独跑过并与基线对齐:`conversations.test.ts`、`websocket-handler.test.ts`、`localIndex/database.test.ts`、`compact.test.ts`(14 pass)、`dead-imports.test.ts`(28 pass)。
+本轮 `check:server` 在 Windows 本地两次都因**已登记的脚手架 `EBUSY`** 中止:测试脚手架 `finally` 里裸调 `rmSync(sandboxHome, { recursive: true, force: true })`,撞上刚被 kill 的子进程句柄(`claudeBetas.integration.test.ts:126`、`scripts/pr/run-server-tests.ts:126`)。这与 `docs/known-pre-existing-test-failures.md` 中登记的 `claudeBetas` / `session-protocol-rollback` 现象同源,属 Windows 本地限制,**以 CI(Linux) 结果为准**。
+
+**基线对照(已实测)**:在 fork main `601230e0` 上跑同一条 `check:server`,**以完全相同的方式中止** —— 同一个文件 `claudeBetas.integration.test.ts`、同一个 `EBUSY`、同样 `error: script "check:server" exited with code 1`。故该中止**不是本次合并引入**,且该文件与 fork main 逐字节相同(合并未改动它)。风险最高的 server 用例已在开发过程中单独跑过并与基线对齐:`conversations.test.ts`、`websocket-handler.test.ts`、`localIndex/database.test.ts`、`compact.test.ts`(14 pass)、`dead-imports.test.ts`(28 pass)。
 
 ## 独立审核
 

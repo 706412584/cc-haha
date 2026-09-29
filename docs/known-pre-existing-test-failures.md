@@ -16,6 +16,13 @@
 - `final macOS helper cursor resource verification`（4 个）— 已在下方「根因 C」登记（反斜杠路径 + symlink EPERM）。
 - `evaluateChangePolicy > plan-only mode publishes a blocked scope without preventing product jobs`（1 个）— 已在下方「根因 C」登记（Windows `Bun.spawn` 超 5s）。
 
+## `check:server` 在本地 Windows 会**整条中止**（基线同红，不是某个用例红）
+
+- **现象**:`[server-tests] src/services/api/claudeBetas.integration.test.ts: failed or incomplete (1)`,随后 `EBUSY: resource busy or locked, rm 'C:\Users\...\Temp\cc-haha-server-test-XXXXXX'`,`check:server` 以 exit 1 结束 —— **整条 lane 不再产出后续文件的结论**。
+- **根因**:`claudeBetas.integration.test.ts:126` 与 `scripts/pr/run-server-tests.ts:126` 的 `finally` 里裸调 `rmSync(sandboxHome, { recursive: true, force: true })`,撞上刚被 `child.kill()` 终止的子进程仍持有的句柄(Windows 上进程终止与句柄释放不同步)。
+- **基线取证(2026-09-29)**:在 fork main `601230e0` 上跑 `bun run check:server`,**同一文件、同一 `EBUSY`、同一退出码**,逐字一致。该文件与 fork main 逐字节相同。
+- **处置**:属 Windows 本地限制,CI(Linux) 上不出现。**本地不要用 `check:server` 的退出码判断合并质量** —— 它在本机无论改动与否都会红。风险最高的 server 用例请单独跑。
+
 ## `check:adapters` 的 1 个失败（本地 Windows，基线同红）
 
 - `adapters/... ImChatRuntime server stream > uploads an image referenced in the stream and skips one outside the work dir`
