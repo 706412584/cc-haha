@@ -82,6 +82,7 @@
 | `check:chat-contract` | 435 passed(3 files) | 全绿 | 通过 |
 | `check:agent-flow` | 8 passed / 0 failed | 全绿 | 通过 |
 | `check:adapters` | 1 failed / 782 passed | 1 failed(同一用例) | 预存,无新增 |
+| `provider-presets.test.ts` | 19 passed | 全绿 | 通过 |
 | `check:server` | 见下 | 见下 | 见下 |
 
 **基线对照法**:desktop 的 2 个失败是文档已登记的 Windows 环境限制(`scripts/build-macos-arm64.test.ts` 用 `spawnSync('/bin/bash')`,Windows 无 `/bin/bash` → `status: null`;`electron/services/serverRuntime.test.ts` 依赖 `SIGTERM` handler 延时清理,Windows `child.kill()` 直接终止进程)。adapters 的 1 个(`ImChatRuntime server stream > uploads an image ...`)在 fork main `601230e0` 上以完全相同的形式失败。
@@ -103,7 +104,7 @@
 - **root `src/` 仍无类型检查 lane。** `check:desktop` 只对 desktop 跑 `tsc`;root `src/` 的改动仅被测试验证。Bun 只剥离类型不检查。
 - **合并对象是 tag 而非 `upstream/main` HEAD。** HEAD 上另有 3 个提交未纳入。若其中含关键修复,需单独 cherry-pick。
 - **本地与 CI 失败集合不同。** 本地 desktop 2 / policy 7 / adapters 1 的失败在 CI 上不出现(或表现不同)。**以 CI 为准**,本地结果只用于快速定位。
-- **`providerPresets.json` 的去广告字段需在 CI 上复核。** `provider-presets.test.ts` 断言 fork 的 `featuredIds === []` 语义,本地未单独跑该文件。
+- **`check:server` 本轮未在本机跑完整。** 两次都因脚手架 `EBUSY` 中止,故 server 侧的全量通过数**未经本机确认**;风险最高的用例已单跑对齐(见上),但「没有别的文件因合并而红」这一点依赖 CI 验证。
 
 ## 恢复工作方式
 
