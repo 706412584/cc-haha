@@ -338,6 +338,7 @@ describe('compactConversation hard timeout', () => {
     if (ORIGINAL === undefined) delete process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS
     else process.env.CLAUDE_CODE_COMPACT_TIMEOUT_MS = ORIGINAL
   }, 15_000)
+})
 
 describe('oversized compaction recovery (#1373)', () => {
   function toolHistory(rounds: number): Message[] {
