@@ -19,13 +19,12 @@
  * quarantined rather than losing every other mode's override).
  */
 
-import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import { randomBytes } from 'node:crypto'
 import { getCcHahaDir } from '../../utils/envUtils.js'
 import { ApiError } from '../middleware/errorHandler.js'
 import { readRecoverableJsonFile } from './recoverableJsonFile.js'
 import { ensurePersistentStorageUpgraded } from './persistentStorageMigrations.js'
+import { writeFileAtomic } from '../storage/atomicWrite.js'
 
 const CURRENT_SCHEMA_VERSION = 1
 
@@ -140,16 +139,11 @@ export class OrchestrationPromptPreferencesService {
 
   private async writePreferences(preferences: OrchestrationPromptPreferences): Promise<void> {
     const filePath = this.getPreferencesPath()
-    const contents = JSON.stringify(preferences, null, 2) + '\n'
-    const tmpFile = `${filePath}.tmp.${process.pid}.${Date.now()}.${randomBytes(6).toString('hex')}`
-
-    await fs.mkdir(path.dirname(filePath), { recursive: true })
-
     try {
-      await fs.writeFile(tmpFile, contents, 'utf-8')
-      await fs.rename(tmpFile, filePath)
+      await writeFileAtomic(filePath, `${JSON.stringify(preferences, null, 2)}\n`, {
+        snapshot: true,
+      })
     } catch (error) {
-      await fs.unlink(tmpFile).catch(() => {})
       throw ApiError.internal(`Failed to write orchestration-prompts.json: ${error}`)
     }
   }

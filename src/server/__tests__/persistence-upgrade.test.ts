@@ -383,6 +383,68 @@ describe('persistent storage upgrade migrations', () => {
     expect(quarantined.length).toBe(1)
   })
 
+  test('recovers a zero-filled managed settings file from a snapshot instead of blanking it', async () => {
+    const ccHahaDir = path.join(tempDir, 'cc-haha')
+    await fs.mkdir(ccHahaDir, { recursive: true })
+    const settingsPath = path.join(ccHahaDir, 'settings.json')
+    const good = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://x', ANTHROPIC_AUTH_TOKEN: 'secret' } })
+    await fs.writeFile(`${settingsPath}.snapshot-1000-aaaaaa`, good)
+    // Power-loss artifact: correct length, all NUL bytes.
+    await fs.writeFile(settingsPath, Buffer.alloc(good.length, 0))
+
+    const report = await ensurePersistentStorageUpgraded()
+
+    expect(report.failures).toEqual([])
+    // The user's credentials must survive — `{}` here is silent data loss.
+    expect(JSON.parse(await fs.readFile(settingsPath, 'utf-8'))).toEqual({
+      env: { ANTHROPIC_BASE_URL: 'https://x', ANTHROPIC_AUTH_TOKEN: 'secret' },
+    })
+    const quarantined = (await listFiles(ccHahaDir)).filter((file) => file.startsWith('settings.json.invalid-'))
+    expect(quarantined).toHaveLength(1)
+  })
+
+  test('recovers a zero-filled providers index and still upgrades the restored backup', async () => {
+    const ccHahaDir = path.join(tempDir, 'cc-haha')
+    await fs.mkdir(ccHahaDir, { recursive: true })
+    const indexPath = path.join(ccHahaDir, 'providers.json')
+    const provider = {
+      id: 'p1',
+      presetId: 'custom',
+      name: 'One',
+      apiKey: 'k',
+      baseUrl: 'https://x',
+      apiFormat: 'anthropic',
+      models: { main: 'm', haiku: 'm', sonnet: 'm', opus: 'm' },
+    }
+    // Pre-migration backup: schemaVersion 1, so the restore must re-run the
+    // migration rather than write these bytes back as-is.
+    const oldBackup = JSON.stringify({ schemaVersion: 1, activeId: 'p1', providers: [provider], providerOrder: ['p1'] })
+    await fs.writeFile(`${indexPath}.snapshot-1000-aaaaaa`, oldBackup)
+    await fs.writeFile(indexPath, Buffer.alloc(oldBackup.length, 0))
+
+    const report = await ensurePersistentStorageUpgraded()
+
+    expect(report.failures).toEqual([])
+    const restored = JSON.parse(await fs.readFile(indexPath, 'utf-8'))
+    expect(restored.schemaVersion).toBe(CURRENT_PROVIDER_INDEX_SCHEMA_VERSION)
+    expect(restored.providers).toHaveLength(1)
+    expect(restored.providers[0].apiKey).toBe('k')
+    expect(restored.activeId).toBe('p1')
+    const quarantined = (await listFiles(ccHahaDir)).filter((file) => file.startsWith('providers.json.invalid-'))
+    expect(quarantined).toHaveLength(1)
+  })
+
+  test('still blanks a corrupt file that has no backup to recover from', async () => {
+    const ccHahaDir = path.join(tempDir, 'cc-haha')
+    await fs.mkdir(ccHahaDir, { recursive: true })
+    await fs.writeFile(path.join(ccHahaDir, 'settings.json'), Buffer.alloc(32, 0))
+
+    const report = await ensurePersistentStorageUpgraded()
+
+    expect(report.failures).toEqual([])
+    expect(JSON.parse(await fs.readFile(path.join(ccHahaDir, 'settings.json'), 'utf-8'))).toEqual({})
+  })
+
   test('upgrades existing DeepSeek managed env to follow global thinking settings', async () => {
     const ccHahaDir = path.join(tempDir, 'cc-haha')
     await fs.mkdir(ccHahaDir, { recursive: true })

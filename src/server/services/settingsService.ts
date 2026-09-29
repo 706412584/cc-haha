@@ -8,13 +8,12 @@
  * 合并策略：Object.assign({}, userSettings, projectSettings)
  */
 
-import * as fs from 'fs/promises'
-import { randomBytes } from 'node:crypto'
 import * as path from 'path'
 import * as os from 'os'
 import { ApiError } from '../middleware/errorHandler.js'
 import { normalizeJsonObject, readRecoverableJsonFile } from './recoverableJsonFile.js'
 import { ensurePersistentStorageUpgraded } from './persistentStorageMigrations.js'
+import { writeFileAtomic } from '../storage/atomicWrite.js'
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
 import { addFileGlobRuleToGitignore } from '../../utils/git/gitignore.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
@@ -157,21 +156,20 @@ export class SettingsService {
     filePath: string,
     data: Record<string, unknown>,
   ): Promise<void> {
-    const dir = path.dirname(filePath)
     const contents = JSON.stringify(data, null, 2) + '\n'
+    // Only the user-level settings file gets a pre-write snapshot: project and
+    // local settings live inside the user's repository, where stray
+    // `.snapshot-*` files would show up as untracked noise.
+    const snapshot = filePath === this.getUserSettingsPath()
     let lastError: unknown
 
     for (let attempt = 0; attempt < 2; attempt++) {
-      const tmpFile = `${filePath}.tmp.${process.pid}.${Date.now()}.${randomBytes(6).toString('hex')}`
       try {
-        await fs.mkdir(dir, { recursive: true })
-        await fs.writeFile(tmpFile, contents, 'utf-8')
-        await fs.rename(tmpFile, filePath)
+        await writeFileAtomic(filePath, contents, { snapshot })
         resetSettingsCache()
         return
       } catch (err) {
         lastError = err
-        await fs.unlink(tmpFile).catch(() => {})
 
         if (
           (err as NodeJS.ErrnoException).code !== 'ENOENT' ||
