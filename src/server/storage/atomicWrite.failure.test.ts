@@ -21,10 +21,18 @@ let failTempWrite = false
 let failSnapshotWrite = false
 let failSnapshotReadFor: string | null = null
 let fakeSnapshotEntries: string[] | null = null
+let renameBusyTimes = 0
 const unlinked: string[] = []
 
 mock.module('node:fs/promises', () => ({
   ...realFs,
+  rename: async (from: unknown, to: unknown) => {
+    if (renameBusyTimes > 0) {
+      renameBusyTimes -= 1
+      throw Object.assign(new Error('resource busy'), { code: 'EBUSY' })
+    }
+    return realFs.rename(from as never, to as never)
+  },
   readdir: async (dirPath: unknown) => {
     if (fakeSnapshotEntries && String(dirPath) === tempDir) {
       return fakeSnapshotEntries
@@ -73,6 +81,7 @@ beforeEach(async () => {
   failSnapshotWrite = false
   failSnapshotReadFor = null
   fakeSnapshotEntries = null
+  renameBusyTimes = 0
   unlinked.length = 0
 })
 
@@ -152,5 +161,37 @@ describe('writeFileAtomic failure branches', () => {
     )
     expect(unlinked).not.toContain('providers.json.bak-before-migration-1-aaa')
     expect(unlinked).not.toContain('providers.json.invalid-1-bbb')
+  })
+
+  test('retries the rename on a Windows EBUSY, then succeeds', async () => {
+    const target = path.join(tempDir, 'config.json')
+    const originalPlatform = process.platform
+    // The retry loop is gated on win32; force it so this path is exercised on
+    // the Linux CI runner too, not just on a Windows dev box.
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+    renameBusyTimes = 2
+    try {
+      await writeFileAtomic(target, 'eventually')
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true })
+    }
+
+    expect(await realFs.readFile(target, 'utf-8')).toBe('eventually')
+    expect(renameBusyTimes).toBe(0)
+  })
+
+  test('gives up after the retry budget is exhausted', async () => {
+    const target = path.join(tempDir, 'config.json')
+    const originalPlatform = process.platform
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+    // One more failure than the retry budget (EBUSY_RETRY_DELAYS_MS has 3).
+    renameBusyTimes = 4
+    try {
+      await expect(writeFileAtomic(target, 'payload')).rejects.toThrow('resource busy')
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true })
+    }
+
+    await expect(realFs.access(target)).rejects.toThrow()
   })
 })
