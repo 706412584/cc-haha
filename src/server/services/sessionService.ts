@@ -5074,6 +5074,11 @@ export class SessionService {
     taskNotifications: SessionTaskNotification[]
     page: HistoryPageInfo
   }> {
+    if (isSideChatId(sessionId)) {
+      const side = getSideChat(sessionId)
+      if (!side || side.closed) throw ApiError.notFound('Side chat expired')
+      return { messages: [], taskNotifications: [], page: { nextCursor: null, hasMore: false, historyComplete: true, sourceVersion: 'ephemeral', scannedBytes: 0, omittedOversizedEntries: 0 } }
+    }
     const found = await this.findSessionFile(sessionId)
     if (!found) {
       const key = this.memorySessionKey(sessionId)
@@ -5274,6 +5279,13 @@ export class SessionService {
     sessionId: string,
     options?: SessionMessagesOptions,
   ): Promise<SessionMessagesWithEvidence> {
+    if (isSideChatId(sessionId)) {
+      const side = getSideChat(sessionId)
+      if (!side || side.closed) throw ApiError.notFound('Side chat expired')
+      // Temporary history lives in the child process, not in a transcript.
+      // Missing durable evidence must disable rewind rather than report a lost session.
+      return { messages: [], transcriptEvidenceComplete: false }
+    }
     const found = await this.findSessionFile(sessionId)
     if (!found) {
       // Retention-zero sessions intentionally have no transcript. The desktop
