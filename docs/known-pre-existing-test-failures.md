@@ -4,7 +4,22 @@
 
 > 验证方法：在 pre-merge 基线（合并 commit 的第一父，`git worktree add <tmp> <first-parent> --detach`）上重跑同一批测试。若基线同样红 → 预存。
 
-最后核对日期：2026-09-16（合并上游 v0.6.3）。
+最后核对日期：2026-09-29（合并上游 v0.6.7；`check:policy` / desktop / adapters 三处重新逐条对照 fork main `601230e0`，无新增）。
+
+---
+
+## `check:policy` 的 7 个失败（本地 Windows，基线同红）
+
+2026-09-29 在 fork main `601230e0` 与合并分支上分别跑 `bun run check:policy`，两侧**同为 7 fail / 340 pass**，逐条一致：
+
+- `computer-use live smoke path confinement`（2 个）— 断言运行目录必须直接位于 `/tmp` 之下；Windows 无 `/tmp`，`deriveLiveSmokePaths` 抛 `Unsafe live-smoke run directory`。文件与 fork main、上游 `c37ab2da` 均逐字节相同。
+- `final macOS helper cursor resource verification`（4 个）— 已在下方「根因 C」登记（反斜杠路径 + symlink EPERM）。
+- `evaluateChangePolicy > plan-only mode publishes a blocked scope without preventing product jobs`（1 个）— 已在下方「根因 C」登记（Windows `Bun.spawn` 超 5s）。
+
+## `check:adapters` 的 1 个失败（本地 Windows，基线同红）
+
+- `adapters/... ImChatRuntime server stream > uploads an image referenced in the stream and skips one outside the work dir`
+  — 在 fork main `601230e0` 上以完全相同的形式失败（782 pass / 1 fail 对 749 pass / 1 fail）。合并版用例总数增加是上游新增用例所致，失败项不变。
 
 ---
 
