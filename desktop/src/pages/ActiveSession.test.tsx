@@ -3795,4 +3795,126 @@ describe('ActiveSession header', () => {
     expect(meta.textContent?.trimStart().startsWith('·')).toBe(false)
     expect(meta.querySelectorAll('[aria-hidden="true"]')).toHaveLength(2)
   })
+})
+
+describe('ActiveSession activity panel auto-close grace', () => {
+  const sessionId = 'activity-grace-session'
+
+  function seedActivitySession(overrides: Record<string, unknown> = {}) {
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Activity Grace Session',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        modifiedAt: '2026-08-02T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Activity Grace Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          ...createDefaultSessionState(),
+          messages: [{ id: 'm1', type: 'assistant_text', content: 'ready', timestamp: 1 }],
+          chatState: 'idle',
+          connectionState: 'connected',
+          historyStatus: 'ready',
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              taskType: 'agent',
+              status: 'running',
+              startedAt: 1,
+              updatedAt: 1,
+            },
+          },
+          ...overrides,
+        },
+      },
+    })
+  }
+
+  function patchSession(overrides: Record<string, unknown>) {
+    useChatStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [sessionId]: { ...state.sessions[sessionId], ...overrides },
+      },
+    }) as never)
+  }
+
+  it('keeps the panel open through transient empty states and only closes after the grace period', () => {
+    vi.useFakeTimers()
+    seedActivitySession()
+    render(<ActiveSession />)
+    act(() => {
+      useActivityPanelStore.getState().open(sessionId)
+    })
+    expect(useActivityPanelStore.getState().isOpen(sessionId)).toBe(true)
+
+    // History reload window: activity caches are briefly drained while loading.
+    act(() => {
+      patchSession({ backgroundAgentTasks: {}, messages: [], historyStatus: 'loading' })
+      vi.advanceTimersByTime(5000)
+    })
+    expect(useActivityPanelStore.getState().isOpen(sessionId)).toBe(true)
+
+    // Empty but settled: still within the grace period. The debounce timer is
+    // scheduled when React flushes the effect at act exit, so patch and
+    // advance in separate acts to keep the timeline honest.
+    act(() => {
+      patchSession({ historyStatus: 'ready' })
+    })
+    act(() => {
+      vi.advanceTimersByTime(1000)
+    })
+    expect(useActivityPanelStore.getState().isOpen(sessionId)).toBe(true)
+
+    // The empty state outlives the grace period: genuinely no activity left.
+    act(() => {
+      vi.advanceTimersByTime(1500)
+    })
+    expect(useActivityPanelStore.getState().isOpen(sessionId)).toBe(false)
+  })
+
+  it('cancels the pending close when activity reappears inside the grace period', () => {
+    vi.useFakeTimers()
+    seedActivitySession()
+    render(<ActiveSession />)
+    act(() => {
+      useActivityPanelStore.getState().open(sessionId)
+    })
+
+    act(() => {
+      patchSession({ backgroundAgentTasks: {}, messages: [], historyStatus: 'ready' })
+      vi.advanceTimersByTime(1000)
+    })
+    act(() => {
+      patchSession({
+        messages: [{ id: 'm2', type: 'assistant_text', content: 'back', timestamp: 2 }],
+        backgroundAgentTasks: {
+          'agent-task-1': {
+            taskId: 'agent-task-1',
+            taskType: 'agent',
+            status: 'running',
+            startedAt: 1,
+            updatedAt: 1,
+          },
+        },
+      })
+      vi.advanceTimersByTime(5000)
+    })
+
+    expect(useActivityPanelStore.getState().isOpen(sessionId)).toBe(true)
+  })
 })

@@ -35,6 +35,7 @@
 5. **`PENDING_PERMISSION_DISCONNECT_CLEANUP_MS`** → 保 fork 的 5 分钟。上游为自动回答把窗口提到 31 分钟,但自动回答默认 `enabled: false`,按 fork 语义取 5 分钟并留注释。
 6. **desktop 运行时选择 API** → 合并签名 `resolveActiveProviderRuntimeSelection` / `resolveDefaultRuntimeSelection`,参数放宽为 `ModelInfo | string | null | undefined`,吸收上游的 `configuredModelId` 优先级(`desktop/src/lib/runtimeSelection.ts`)。
 7. **`ModelSelector`** → 回植 fork 的 `lockedProviderChoices`(临时侧边对话锁定 provider 时过滤候选)。
+8. **`getMaxStreamTransientRetries`** → 取并集:默认保留 fork 的 **4**(relay provider 依赖更宽的恢复窗口,且 fork 另有 `CLAUDE_STREAM_TRANSIENT_RETRY_BUDGET_MS` 墙钟预算兜底),上限吸收上游的 **`Math.min(raw, 5)`**(防环境变量误配成无界重试)。
 
 ## fork 定制点保护清单(对照 CLAUDE.md,已逐项确认)
 
@@ -75,6 +76,16 @@
 
 **为什么这些逃过了所有门禁:** 第 6–9 处的覆盖测试(`sessionService.metadata.test.ts`、`sessionService.runtimeSelection.test.ts`、e2e `side-chat.test.ts`)都是上游 v0.6.7 **新增**的测试文件,因此既不在 `scripts/quality-gate/quarantine.json`、也不在 `docs/known-pre-existing-test-failures.md` 的任何基线清单里——「与基线一致」的判定对它们**天然为真**。而 `check:server` 在本机又因已登记的 `EBUSY` 整条中止(见「验证结果」),没能把这些新测试跑出来。两件事叠加,使这批回归在本地完全不可见。**教训:合并后必须显式运行「上游新增的测试文件」,不能只比对基线。** 修复后 `sessionService.metadata.test.ts` 4/4、`sessionService.runtimeSelection.test.ts` 7/7、`side-chat.test.ts` 主体全过(合并态分别是 0/4、4/7、0/1;在上游 `c37ab2da` 上均全绿或仅剩 EBUSY)。
 
+### 第四批(冲突面机械审计发现,提交 `f32f4cf3` / 见下)
+
+前三批靠「跑测试」发现,这一批靠**对 49 个冲突文件做机械审计**发现——方法是:用 `git merge-tree --write-tree` 复算两侧自动合并结果,再对每个冲突文件检查「相对 merge base 新增的行,在合并结果里是否还在」。这覆盖了独立审核代理明确标注的**未逐文件检查的 12 个冲突**(`ChatInput.tsx`、`AssistantMessage.tsx`、`ThinkingBlock.tsx`、`MessageList.tsx`、`ActiveSession.tsx`、`TabBar.tsx`、`WorkspaceFileTreePane.tsx`、`GeneralSettings.tsx`、`settingsStore.ts`、`types/settings.ts`、`api/settings.ts`、`providers.ts`)。
+
+10. **`docs/images/app/**` — 上游删除的截图把 fork README 的引用打断。** 上游 v0.6.7 删除了 10 张应用截图(`composer-mention`、`model-picker`、`pet-desktop`、`session-dark`、`session-permission` × en/zh-CN)。合并接受了删除(改文件名/删文件路径不冲突),但**按规则保留了 fork 的 `README.md` / `README.zh-CN.md`**,而这两个文件仍在引用 `docs/images/app/{zh-CN,en}/model-picker.webp`。后果:CI 的 docs lane(`pr-quality.yml` → `npm --prefix site run check`)在 `check-docs.mjs` 处报 `unresolved image`,**PR 门禁必红**。修复:按「fork 侧优先」恢复这 10 张图。验证:`npm --prefix site run check` 全绿(116 页 / 379 链接 / 26 组双语截图对 / 31 tests)。**教训:modify/delete 冲突里「保留 fork 的 README」蕴含「保留它引用的资源」,资源删除必须一并回退。**
+
+11. **`src/services/api/withRetry.ts` — 上游给 stream 重试上限加的封顶被丢。** 上游 v0.6.7 把 `getMaxStreamTransientRetries()` 的返回值封顶:`Math.min(raw, 5)`。合并取了 fork 侧那一行,只剩 `raw`(默认 4、无上限),于是 `CLAUDE_STREAM_TRANSIENT_RETRY_MAX=1000` 这类误配会变成近乎无界的重试循环。修复:取并集,保留 fork 默认 4、吸收 `Math.min(raw, 5)`(见「关键架构决策 8」)。
+
+12. **冲突测试文件普遍「整文件倒向一侧」,丢掉上游新增用例。** 多个冲突的 `*.test.ts(x)` 直接解析到 fork 侧,于是上游 v0.6.7 新增的用例被静默丢弃(它们不在任何基线清单里,因此红/绿都不会被察觉)。用「测试标题集合差」枚举出 **18 个**被丢用例,逐条判读后**回植 10 个、判为 fork 有意分歧或重复而放弃 8 个**(明细见「验证结果」的「上游新增用例回植」一栏)。**这类丢失不会让任何门禁变红,只会悄悄降低覆盖——正是第 6–9 处能逃过门禁的同一个盲区。**
+
 ## desktop 侧修复
 
 - **`chatStore.ts`**:
@@ -96,6 +107,8 @@
 | `vitest run`(desktop,排除 4 个已登记文件) | 2 failed / 6953 passed | 2 failed(`build-macos-arm64`、`electron/serverRuntime`) | 与基线逐条一致,无新增 |
 | `vitest run`(desktop,全量重跑) | 3 failed / 6952 passed | 同上 + `electron/services/shell.test.ts` | 第 3 个为负载抖动,隔离复跑 11/11 通过 |
 | `check:policy` | 7 failed / 340 passed | 7 failed | 与基线逐条一致,无新增 |
+| site docs lane(`npm --prefix site ci && run build && run check`) | 全绿(116 页 / 379 链接 / 26 组双语截图对 / 31 tests) | 合并态曾红:2 处 `unresolved image` | 修复后通过,见「真实功能回归」第 10 条 |
+| `tsc -b` + `vite build`(desktop 生产构建) | 通过(0 错误,build 12.0s) | — | 通过 |
 | `check:provider-contract` | 36 suites passed | 全绿 | 通过 |
 | `check:chat-contract` | 435 passed(3 files) | 全绿 | 通过 |
 | `check:agent-flow` | 8 passed / 0 failed | 全绿 | 通过 |
@@ -104,9 +117,30 @@
 | `sessionService.metadata.test.ts`(上游新增) | 4 passed | 上游全绿(合并态 0/4) | 修复后通过 |
 | `sessionService.runtimeSelection.test.ts`(上游新增) | 7 passed | 上游全绿(合并态 4/7) | 修复后通过 |
 | `sessionService.retention` / `local-index-session-parity` / `project-session-history` | 55 passed | 全绿 | 通过 |
-| `conversations.test.ts` | 148 passed / 2 failed | 2 failed(RE Pipeline) | 预存,无新增 |
+| `conversations.test.ts` | 149 passed / 2 failed | 2 failed(RE Pipeline) | 预存,无新增 |
 | `check:server`(逐文件跑,587 文件) | 56 非绿 + 1 合并回归(#9,已修) | 两侧 oracle 逐条复现 | 见下 |
 | e2e `side-chat.test.ts`(上游新增) | 主体通过(仅剩 EBUSY 清理) | 上游通过(合并态 0/1,404) | 修复后通过 |
+| 回植的上游用例(5 个文件) | 全绿:147 + 49 + 34 + 27 + 61 | 合并态曾静默丢弃 | 修复后通过,见下「上游新增用例回植」 |
+
+### 上游新增用例回植(#12 明细)
+
+用「上游与合并态的测试标题集合差」枚举出 18 个被丢用例,逐条判读并实测(每条都在最终态单独跑过):
+
+| 文件 | 用例 | 处置 | 实测 |
+| --- | --- | --- | --- |
+| `desktop/src/__tests__/generalSettings.test.tsx` | `offers all six palettes…`、`defaults Tool Search off…` | 回植 | 147/147 通过 |
+| `desktop/src/pages/ActiveSession.test.tsx` | `keeps the panel open through transient empty states…`、`cancels the pending close…` | 回植 | 49/49 通过 |
+| `src/server/__tests__/conversations.test.ts` | `should keep OpenAI-native reasoning controls out of Claude CLI args` | 回植 | 通过 |
+| `src/server/services/localIndex/database.test.ts` | `upgrades a frozen v4 cache additively…`、`reopens a frozen v5 cache…` | 回植 | 27/27 通过 |
+| `src/services/api/withRetry.test.ts` | `caps overrides so recovery cannot become an unbounded retry loop` | 回植 | 61/61 通过 |
+| `src/services/api/withRetry.test.ts` | `does not match a non-APIError` | 放弃(重复) | fork 已将其**改名**为 `does not match an arbitrary non-API error`(同断言),回植会造出重复用例 |
+| `src/services/api/withRetry.test.ts` | `defaults to 2 when unset`、`falls back to 2 on non-numeric input` | 放弃(fork 分歧) | fork 默认值有意为 **4**,合并态已有等价的 `defaults to 4…` / `falls back to default 4…` |
+| `src/server/__tests__/websocket-handler.test.ts` | 全部 3 个 | 放弃(fork 分歧) | 见下 |
+| `desktop/src/components/workbench/WorkspaceFileTreePane.test.tsx` | `closes an old session menu when switching sessions` | 放弃(fork 分歧) | fork main `601230e0` 把菜单抽成 `WorkspaceFileTreeMenu.tsx` 时**删掉了该用例**(merge base `2f8d819d` 尚有、`601230e0` 已无),同时丢了 `useEffect(closeMenu, [closeMenu, sessionId])` 守卫;要过需改非测试源码,超出合并范围 |
+| `desktop/src/components/workbench/WorkspaceFileTreePane.test.tsx` | `routes a tree context-menu preview through the pane activation callback` | 放弃(fork 分歧) | fork 的 `WorkspaceFileTreeMenu.tsx:99-104` 从不传 `onPreview`(merge base 也没有),故菜单里没有 `Workspace preview` 项;该文件还 `vi.mock` 掉了 `WorkspaceFileOpenWith`,结构上无法出现该项 |
+| `desktop/src/components/workbench/WorkspaceFileTreePane.test.tsx` | `adds a right-clicked file to its own session…`、`supports keyboard invocation…` | 回植 | 34/34 通过 |
+
+**websocket-handler 三个用例为何全放弃(fork 有意分歧):** 其一,fork 的 `isBackgroundTaskAlreadyGoneMessage`(`handler.ts:2732-2741`)把 `Task is not running` / `No task found with ID:` 视为 stop 的**目标状态**,收敛到 `background_task_stopped`,与上游「报失败」的取向相反,fork 自身另有锁定该行为的用例。其二,fork 用 `SESSION_TURN_ACTIVE` **串行化**回合(上游无此机制,改用 `activeUserTurns` 让新回合**取代**旧回合),上游那个「旧失败 handler 不得清掉新活动回合」的用例建立在取代模型上,采纳即需替换 fork 的串行模型。两者都超出合并范围。
 
 **基线对照法**:desktop 的 2 个失败是文档已登记的 Windows 环境限制(`scripts/build-macos-arm64.test.ts` 用 `spawnSync('/bin/bash')`,Windows 无 `/bin/bash` → `status: null`;`electron/services/serverRuntime.test.ts` 依赖 `SIGTERM` handler 延时清理,Windows `child.kill()` 直接终止进程)。adapters 的 1 个(`ImChatRuntime server stream > uploads an image ...`)在 fork main `601230e0` 上以完全相同的形式失败。
 
@@ -143,13 +177,15 @@ desktop 全量重跑时多出的第 3 个失败 `electron/services/shell.test.ts
 
 ## 残余风险
 
-- **手工混合的冲突文件没有等价三方 oracle。** 49 个冲突依赖人工判断;非冲突文件可用 `git merge-file` 复算,冲突文件不能。这是本次合并最大的不确定性来源。
-- **fork 行为丢失的模式会重复出现。** 本次 9 处丢失全是「某一侧在函数内多加了一个字段/比较/兜底/守卫分支,合并取了另一侧」。`sessionService.ts` 一个文件就占了 6 处(#5–#9),其中 #9 是上游在同文件内**批量新增 12 条同形 `isSideChatId` 分支、合并只留 10 条** —— 这类「一侧批量加分支、另一侧整体覆盖」的冲突最易漏。建议对 `ws/handler.ts`、`conversationService.ts`、`sessionService.ts`、`chatStore.ts` 做逐函数字段比对。
+- **冲突文件没有「合并结果」层面的等价 oracle,但有行级 oracle,且它确实管用。** 本轮补上了:`git merge-tree --write-tree` 复算两侧自动合并结果,再对每个冲突文件做「相对 merge base 的新增行在合并结果里是否还在」的行级比对。它**独立发现了第四批全部 3 类问题(#10–#12)**,其中 #10(README 图片)是**会让 CI 变红**的真回归。局限:该比对会报出「一侧删除、另一侧改写」造成的**假阳性**(两侧改同一行时,被合并选中的那一行会被记为另一侧的「丢失」)—— 本轮 49 个文件里绝大多数命中都是这类,需人工逐条判读。**建议把它固化为合并后的标准动作**,并配一份已知假阳性白名单。
+- **fork 行为丢失的模式会重复出现。** 本次 12 处丢失全是「某一侧在函数内多加了一个字段/比较/兜底/守卫分支,合并取了另一侧」。`sessionService.ts` 一个文件就占了 6 处(#5–#9),其中 #9 是上游在同文件内**批量新增 12 条同形 `isSideChatId` 分支、合并只留 10 条** —— 这类「一侧批量加分支、另一侧整体覆盖」的冲突最易漏。**新增模式(#12):整个测试文件倒向一侧,上游新增用例静默消失** —— 这类丢失**不会让任何门禁变红**,只是悄悄降低覆盖,必须靠上面的行级比对或「上游新增/改动测试文件逐个跑」才能发现。
+- **modify/delete 冲突的资源删除要跟着 fork 的引用走。** #10 的根因:上游删资源、fork 保留引用它的 README,而资源删除**不产生冲突标记**,只在 `git status` 里表现为一批 `D`。合并后凡「保留 fork 侧」的文件,都要检查它引用的资源是否被上游删掉了。
 - **「与基线一致」对上游新增测试天然为真。** #6–#9 全部藏在上游 v0.6.7 **新增**的测试文件里,而基线清单只登记既有失败,于是比对基线永远显示「无新增」。**下次合并的硬性动作:先 `git diff --name-status <base>..<upstream> -- '**/*.test.ts'` 列出上游新增/改动的测试文件,逐个单独跑,再谈基线对照。** 这一步本可提前把 #6–#9 全部暴露。
 - **root `src/` 仍无类型检查 lane。** `check:desktop` 只对 desktop 跑 `tsc`;root `src/` 的改动仅被测试验证。Bun 只剥离类型不检查。
 - **合并对象是 tag 而非 `upstream/main` HEAD。** HEAD 上另有 3 个提交未纳入。若其中含关键修复,需单独 cherry-pick。
 - **本地与 CI 失败集合不同。** 本地 desktop 2 / policy 7 / adapters 1 的失败在 CI 上不出现(或表现不同)。**以 CI 为准**,本地结果只用于快速定位。
 - **`check:server` 本机退出码不可用,但覆盖已补齐。** 退出码因脚手架 `EBUSY` 恒为 1(基线同);本轮改以「逐文件跑 + 两侧 oracle 归因」补齐了 587 个文件的覆盖,确认合并引入的新失败**只有 1 个**(#9,已修),其余 56 个非绿文件全部为预存(Windows 环境 / 上游自身红)。CI(Linux) 结果仍应作为最终权威。
+- **「跑测试」有结构性盲区,不能作为唯一手段。** #6–#9 靠跑测试发现,#10–#12 靠**行级机械比对**发现,两套手段互不覆盖:#10 会让 CI 变红但本机从未跑 docs lane;#11/#12 既不红也不绿(上限只影响极端配置;丢用例只是覆盖变薄)。**结论:合并收尾必须同时做「跑测试」与「对 49 个冲突做行级比对」,缺一不可。**
 
 ## 恢复工作方式
 

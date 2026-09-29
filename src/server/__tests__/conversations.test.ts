@@ -959,6 +959,19 @@ describe('ConversationService', () => {
     ])
   })
 
+  it('should keep OpenAI-native reasoning controls out of Claude CLI args', () => {
+    const svc = new ConversationService()
+    expect((svc as any).getRuntimeArgs({
+      providerId: 'openai-official',
+      model: 'gpt-5.6-sol',
+      effort: 'xhigh',
+      thinking: 'disabled',
+    })).toEqual([
+      '--model',
+      'gpt-5.6-sol',
+    ])
+  })
+
   /**
    * Compose the mode prompt + hand-off summary into a file and read it back.
    * The prompts travel by path, not inline text, so asserting on the argv needs

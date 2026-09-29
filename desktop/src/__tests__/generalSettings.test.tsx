@@ -534,6 +534,30 @@ describe('Settings > General tab', () => {
     expect(useSettingsStore.getState().setTheme).toHaveBeenCalledWith('ink-blue')
   })
 
+  it('offers all six palettes, paper grounds before ink ones', () => {
+    render(<Settings />)
+
+    fireEvent.click(screen.getByText('General'))
+    // The picker order is load-bearing: the four paper grounds come first, then
+    // the two ink ones, so the list reads light-to-dark rather than shuffled.
+    const order = ['Pure White', 'Paper', 'Warm Classic', 'Celadon', 'Ink Night', 'Ink Blue']
+      .map((name) => screen.getByRole('button', { name }))
+
+    for (const [index, chip] of order.slice(0, -1).entries()) {
+      const next = order[index + 1]!
+      expect(
+        (chip.compareDocumentPosition(next) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+        `${order[index + 1]} should follow ${order[index]}`,
+      ).toBe(true)
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: 'Pure White' }))
+    expect(useSettingsStore.getState().setTheme).toHaveBeenCalledWith('white')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Ink Blue' }))
+    expect(useSettingsStore.getState().setTheme).toHaveBeenCalledWith('ink-blue')
+  })
+
   it('gives the settings rail the handoff width and a rounded selected item', () => {
     useUIStore.setState({ activeSettingsTab: 'general', pendingSettingsTab: null })
     render(<Settings />)
@@ -3098,6 +3122,84 @@ describe('Settings > Providers tab', () => {
         toolSearchEnabled: true,
       }))
     })
+  })
+
+  it('defaults Tool Search off and requires confirmation before persisting an explicit enable', async () => {
+    MOCK_GET_SETTINGS.mockResolvedValue({ env: { EXISTING_ENV: '1' } })
+    providerStoreState.createProvider = vi.fn().mockResolvedValue({
+      id: 'provider-new',
+      presetId: 'custom',
+      name: 'Custom',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.example.com/anthropic',
+      apiFormat: 'anthropic',
+      toolSearchEnabled: true,
+      models: {
+        main: 'custom-main',
+        haiku: 'custom-main',
+        sonnet: 'custom-main',
+        opus: 'custom-main',
+      },
+    })
+    providerStoreState.presets = [
+      {
+        id: 'custom',
+        name: 'Custom',
+        baseUrl: 'https://api.example.com/anthropic',
+        apiFormat: 'anthropic',
+        defaultModels: {
+          main: 'custom-main',
+          haiku: '',
+          sonnet: '',
+          opus: '',
+        },
+        needsApiKey: true,
+        websiteUrl: '',
+      },
+    ]
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Model/i }))
+    const dialog = screen.getByRole('dialog')
+    const toolSearchCheckbox = within(dialog).getByRole('checkbox', { name: 'Enable Tool Search' })
+
+    expect(toolSearchCheckbox).not.toBeChecked()
+    await waitFor(() => {
+      expect(within(dialog).getByDisplayValue((value) => (
+        typeof value === 'string' && value.includes('"ENABLE_TOOL_SEARCH": "false"')
+      ))).toBeInTheDocument()
+    })
+
+    fireEvent.click(toolSearchCheckbox)
+    expect(toolSearchCheckbox).not.toBeChecked()
+
+    const confirmDialog = screen.getByRole('dialog', { name: 'Enable Tool Search?' })
+    expect(within(confirmDialog).getByText(/final LLM upstream or gateway explicitly supports/)).toBeInTheDocument()
+    expect(within(confirmDialog).getByText(/may return HTTP 400/)).toBeInTheDocument()
+    fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Enable anyway' }))
+
+    expect(toolSearchCheckbox).toBeChecked()
+    await waitFor(() => {
+      expect(within(dialog).getByDisplayValue((value) => (
+        typeof value === 'string' && value.includes('"ENABLE_TOOL_SEARCH": "true"')
+      ))).toBeInTheDocument()
+    })
+
+    fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: /Save|Add/i }))
+
+    await waitFor(() => {
+      expect(providerStoreState.createProvider).toHaveBeenCalledWith(expect.objectContaining({
+        toolSearchEnabled: true,
+      }))
+    })
+    expect(MOCK_UPDATE_SETTINGS).toHaveBeenCalledWith(expect.objectContaining({
+      env: expect.objectContaining({
+        EXISTING_ENV: '1',
+        ENABLE_TOOL_SEARCH: 'true',
+      }),
+    }))
   })
 
   it('defaults experimental beta headers on and persists a provider disable', async () => {

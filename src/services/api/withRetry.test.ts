@@ -713,6 +713,12 @@ describe('getMaxStreamTransientRetries', () => {
     delete process.env[ENV]
   })
 
+  test('caps overrides so recovery cannot become an unbounded retry loop', () => {
+    process.env[ENV] = '1000'
+    expect(getMaxStreamTransientRetries()).toBe(5)
+    delete process.env[ENV]
+  })
+
   test('falls back to default 4 on non-numeric input', () => {
     process.env[ENV] = 'abc'
     expect(getMaxStreamTransientRetries()).toBe(4)
