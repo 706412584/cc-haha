@@ -418,6 +418,12 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
     [activeId, availableModels, providers, roleLabels, t, claudeOAuthStatus, grokOAuthStatus, openAIOAuthStatus],
   )
   const selectableModels = isControlled && models ? models : availableModels
+  // Upstream v0.6.7: a locked provider (temporary side chat) must not offer
+  // another provider's models. The fork removed the search filter this used to
+  // live in, so the lock is applied here instead.
+  const lockedProviderChoices = lockedProviderId === undefined
+    ? providerChoices
+    : providerChoices.filter((choice) => choice.providerId === lockedProviderId)
 
   const selectedModel = isControlled
     ? selectableModels.find((model) => model.id === value) || null
@@ -622,7 +628,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
       <div className={`overflow-y-auto ${isMobileBrowser ? 'p-1' : 'min-h-0 flex-1 p-1.5'}`}>
         {isRuntimeScoped ? (
           <div className="space-y-3">
-            {providerChoices.map((choice) => (
+            {lockedProviderChoices.map((choice) => (
               <div key={choice.providerId ?? 'official'} className="space-y-1.5">
                 <div className="flex items-center justify-between gap-2 px-3 pt-1">
                   <span className="truncate text-xs font-semibold text-[var(--color-text-tertiary)]">

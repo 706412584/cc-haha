@@ -953,7 +953,9 @@ describe('AskUserQuestion', () => {
       } }} />)
 
       expect(screen.queryByPlaceholderText('Type your answer...')).toBeNull()
-      expect(substantiveSends()).toHaveLength(1)
+      // This path answers through a permission_response (the component is
+      // upstream's), not a chat message, so count that frame specifically.
+      expect(sendMock.mock.calls.filter(([, message]) => message.type === 'permission_response')).toHaveLength(1)
     })
 
     it('keeps the sent-as-message marker across a remount', () => {

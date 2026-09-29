@@ -8760,26 +8760,9 @@ function findCurrentTurnUserMessageIndex(
       break
     }
   }
-  // Fork: match the newest replayed image-only user message before falling back
-  // to upstream's awaitingReplay/optimisticQueued scan below.
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    if (message?.type !== 'user_text') continue
-    const imageAttachments = message.attachments?.filter(
-      (attachment) => attachment.type === 'image',
-    ) ?? []
-    const replayDisplay = extractRestoredUserDisplay(modelContent)
-    const hasMatchingText = (message.modelContent ?? message.content).trim() === modelContent
-    if (hasMatchingText && imageAttachments.length === 0) return index
-
-    if (replayMatchesCurrentUserMessage(message, replayDisplay, modelContent)) return index
-
-    const isSameImageReplay =
-      replayedImageSourcePaths.length > 0 &&
-      imageAttachmentsMatchReplay(imageAttachments, replayedImageSourcePaths) &&
-      message.content.trim() === displayContent
-    return isSameImageReplay ? index : -1
-  }
+  // Upstream v0.6.7 scans the outstanding sends first, so a replayed guide is
+  // matched to its own optimistic row before the fork's image-replay fallback
+  // (which returns early) can claim the turn.
   const replayDisplay = extractRestoredUserDisplay(modelContent)
   for (let index = turnStart; index < messages.length; index += 1) {
     const message = messages[index]
@@ -8794,6 +8777,24 @@ function findCurrentTurnUserMessageIndex(
     current?.type === 'user_text' &&
     replayMatchesCurrentUserMessage(current, replayDisplay, modelContent)
   ) return turnStart
+  // Fork: a replayed image-only message whose text the reader never saw.
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.type !== 'user_text') continue
+    const imageAttachments = message.attachments?.filter(
+      (attachment) => attachment.type === 'image',
+    ) ?? []
+    const hasMatchingText = (message.modelContent ?? message.content).trim() === modelContent
+    if (hasMatchingText && imageAttachments.length === 0) return index
+
+    if (replayMatchesCurrentUserMessage(message, replayDisplay, modelContent)) return index
+
+    const isSameImageReplay =
+      replayedImageSourcePaths.length > 0 &&
+      imageAttachmentsMatchReplay(imageAttachments, replayedImageSourcePaths) &&
+      message.content.trim() === displayContent
+    return isSameImageReplay ? index : -1
+  }
   return -1
 }
 

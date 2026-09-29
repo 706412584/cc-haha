@@ -5656,10 +5656,18 @@ describe('chatStore history mapping', () => {
       useChatStore.getState().sendMessage(TEST_SESSION_ID, 'continue')
     }
     const expected = { providerId: 'replacement', modelId: 'current-model', effortLevel: 'high' }
-    expect(sendMock.mock.calls[0]).toEqual([TEST_SESSION_ID, { type: 'set_runtime_config', ...expected }])
+    // Fork adds a requestId to every set_runtime_config frame; upstream's
+    // assertion predates that field.
+    expect(sendMock.mock.calls[0]).toEqual([
+      TEST_SESSION_ID,
+      { type: 'set_runtime_config', requestId: expect.any(String), ...expected },
+    ])
     expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(expected)
     if (action === 'send') {
-      expect(sendMock.mock.calls[1]).toEqual([TEST_SESSION_ID, { type: 'user_message', content: 'continue', attachments: undefined }])
+      // The fork emits coordinator/pipeline alignment frames before each real
+      // user turn, so the user_message is not necessarily call #1.
+      const userMessage = sendMock.mock.calls.find(([, message]) => message.type === 'user_message')
+      expect(userMessage).toEqual([TEST_SESSION_ID, { type: 'user_message', content: 'continue', attachments: undefined }])
     }
   })
 
@@ -5722,7 +5730,8 @@ describe('chatStore history mapping', () => {
     useSettingsStore.setState({ currentModel: { id: 'glm-5.3', name: 'GLM', context: '', description: '' }, effortLevel: 'high' })
     useChatStore.getState().sendMessage(TEST_SESSION_ID, 'continue')
     expect(sendMock.mock.calls[0]).toEqual([TEST_SESSION_ID, {
-      type: 'set_runtime_config', providerId: 'provider-1', modelId: 'glm-5.3', effortLevel: 'high',
+      type: 'set_runtime_config', requestId: expect.any(String),
+      providerId: 'provider-1', modelId: 'glm-5.3', effortLevel: 'high',
     }])
   })
 
