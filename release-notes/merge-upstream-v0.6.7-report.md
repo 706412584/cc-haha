@@ -94,6 +94,7 @@
 | --- | --- | --- | --- |
 | `tsc --noEmit`(desktop) | **0 错误** | 0 | 通过 |
 | `vitest run`(desktop,排除 4 个已登记文件) | 2 failed / 6953 passed | 2 failed(`build-macos-arm64`、`electron/serverRuntime`) | 与基线逐条一致,无新增 |
+| `vitest run`(desktop,全量重跑) | 3 failed / 6952 passed | 同上 + `electron/services/shell.test.ts` | 第 3 个为负载抖动,隔离复跑 11/11 通过 |
 | `check:policy` | 7 failed / 340 passed | 7 failed | 与基线逐条一致,无新增 |
 | `check:provider-contract` | 36 suites passed | 全绿 | 通过 |
 | `check:chat-contract` | 435 passed(3 files) | 全绿 | 通过 |
@@ -108,6 +109,8 @@
 | e2e `side-chat.test.ts`(上游新增) | 主体通过(仅剩 EBUSY 清理) | 上游通过(合并态 0/1,404) | 修复后通过 |
 
 **基线对照法**:desktop 的 2 个失败是文档已登记的 Windows 环境限制(`scripts/build-macos-arm64.test.ts` 用 `spawnSync('/bin/bash')`,Windows 无 `/bin/bash` → `status: null`;`electron/services/serverRuntime.test.ts` 依赖 `SIGTERM` handler 延时清理,Windows `child.kill()` 直接终止进程)。adapters 的 1 个(`ImChatRuntime server stream > uploads an image ...`)在 fork main `601230e0` 上以完全相同的形式失败。
+
+desktop 全量重跑时多出的第 3 个失败 `electron/services/shell.test.ts > reveals session and output files without allowing the system to open them`(`Test timed out in 5000ms`,`shell.test.ts:131`)是**负载抖动**,非回归:两次跑法的用例总数相同(6955),隔离复跑该文件 11/11 通过。CI(Linux)以登记基线为准。
 
 `check:policy` 的 7 个失败全部为已登记项:`computer-use live smoke path confinement`(2,`/tmp` 路径假设)、`final macOS helper cursor resource verification`(4,Windows 反斜杠 + symlink EPERM)、`change-policy plan-only`(1,Windows `Bun.spawn` 超 5s)。
 
