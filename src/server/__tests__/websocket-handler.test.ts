@@ -674,6 +674,9 @@ describe('WebSocket handler session isolation', () => {
     spyOn(conversationService, 'onOutput').mockImplementation((_id, callback) => { output = callback })
     spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
     spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([{ requestId: 'worker-request', toolName: 'Read', input: {}, displayName: 'researcher', agentId: 'researcher@team' }])
+    // The fork's leader-completion path sends an interrupt via the SDK; the
+    // upstream test never mocked it, which threw and swallowed the replay.
+    spyOn(conversationService, 'sendInterrupt').mockReturnValue(true)
     handleWebSocket.open(ws)
     output!({ type: 'control_request', request_id: 'worker-request', request: { subtype: 'can_use_tool', tool_name: 'Read', input: {}, display_name: 'researcher', agent_id: 'researcher@team' } })
     output!({ type: 'result', subtype: 'success', result: 'leader done', usage: {} })

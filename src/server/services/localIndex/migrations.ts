@@ -263,6 +263,12 @@ export function migrateLocalIndexDatabase(database: Database): void {
   if (currentVersion === LOCAL_INDEX_SCHEMA_VERSION) return
 
   database.transaction(() => {
+    // An upstream-lineage cache can report v4 without the fork's
+    // thinking_enabled column; repair it before the loop advances the version.
+    if (currentVersion === 4 && !hasColumn(database, 'sessions', 'thinking_enabled')) {
+      database.exec(SCHEMA_V4)
+    }
+
     for (const migration of MIGRATIONS) {
       if (migration.version <= currentVersion) continue
       // Fork and upstream both spent v4–v6 on different columns, so a cache can

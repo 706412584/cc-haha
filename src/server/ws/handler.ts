@@ -2827,22 +2827,34 @@ function handleStopGeneration(ws: SessionConnection) {
   }
 
   // Upstream v0.6.7: the leader can already be idle while approved process
-  // teammates still run or await readiness. A stop with no foreground turn
-  // must still revoke those workers, which the latch branch above does not
-  // cover. The foreground interrupt itself is sent by the block below.
-  if (!foregroundInFlight && !stoppedTurn && conversationService.hasSession(sessionId)) {
+  // teammates still run or await readiness, so a leaderless Stop revokes them
+  // here. Guarded by the latch so the second click of a repeated Stop — which
+  // arrives after the first click already cleared the active turn — does not
+  // send a second interrupt.
+  if (
+    !foregroundInFlight &&
+    !stoppedTurn &&
+    !sessionStopRequested.has(sessionId) &&
+    conversationService.hasSession(sessionId)
+  ) {
     conversationService.sendInterrupt(sessionId)
   }
 
   if (foregroundInFlight || agentsInFlight) {
     if (conversationService.hasSession(sessionId)) {
       // First try graceful interrupt via SDK control message for the foreground
-      // turn. Agent-only stops still arm the force-kill fallback below.
-      if (foregroundInFlight && stoppedTurn) {
+      // turn. Agent-only stops still arm the force-kill fallback below. Once an
+      // interrupt is pending its boundary, a repeated Stop must not send
+      // another one — the fork's latch is what makes the second click a no-op.
+      if (foregroundInFlight && stoppedTurn && !stoppedTurn.interruptBoundaryPending) {
         if (stoppedTurn.messageSent) addPendingInterruptedTurnResult(sessionId)
         const interruptSent = conversationService.sendInterrupt(sessionId)
-        if (stoppedTurn.messageSent && !interruptSent) {
-          removePendingInterruptedTurnResult(sessionId)
+        if (stoppedTurn.messageSent) {
+          if (interruptSent) {
+            stoppedTurn.interruptBoundaryPending = true
+          } else {
+            removePendingInterruptedTurnResult(sessionId)
+          }
         }
       }
 
@@ -5401,6 +5413,10 @@ function bindClientSessionOutput(
       handleCliPermissionModeBroadcast(sessionId, cliMsg)
       const serverMsgs = translateCliMessage(cliMsg, sessionId)
       for (const msg of serverMsgs) sendMessage(ws, msg)
+      // Upstream v0.6.7: completing the leader turn clears renderer prompts,
+      // but independent workers may still be awaiting an answer — restore them
+      // after that boundary.
+      if (serverMsgs.some(msg => msg.type === 'message_complete')) replayPendingPermissionRequests(ws, sessionId)
 
       // Provider-level compatibility detection: if any of the messages
       // we just translated is an `error` whose payload matches the
@@ -5770,6 +5786,11 @@ export async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSet
       if (!isOpenAIOfficialProviderId(runtimeOverride.providerId)) {
         const provider = providers.find((p) => p.id === runtimeOverride.providerId)
         if (provider) {
+          // Compare on the base id: the fork carries a runtime `[1m]` (or `:1m`)
+          // suffix that the provider's slot map never stores, so a raw compare
+          // would treat every 1M selection as a stale model.
+          const baseModelId = (value: string) =>
+            value.trim().replace(/\[1m\]$/i, '').replace(/:1m$/i, '').trim()
           const knownModels = new Set(
             [
               provider.models.main,
@@ -5777,10 +5798,10 @@ export async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSet
               provider.models.sonnet,
               provider.models.opus,
             ]
-              .map((value) => (typeof value === 'string' ? value.trim() : ''))
+              .map((value) => (typeof value === 'string' ? baseModelId(value) : ''))
               .filter(Boolean),
           )
-          if (knownModels.size > 0 && !knownModels.has(runtimeOverride.modelId)) {
+          if (knownModels.size > 0 && !knownModels.has(baseModelId(runtimeOverride.modelId))) {
             console.warn(
               `[WS] Persisted runtime modelId '${runtimeOverride.modelId}' is no longer in provider ${provider.id}'s model map; falling back to ${provider.models.main}`,
             )
