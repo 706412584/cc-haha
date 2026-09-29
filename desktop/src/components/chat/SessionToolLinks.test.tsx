@@ -4,7 +4,14 @@ import { ToolCallBlock } from './ToolCallBlock'
 import { SessionToolLinks, sessionToolTargets, SESSION_TOOL_NAMES } from './SessionToolLinks'
 import { useSessionStore } from '@/stores/sessionStore'
 const openTab = vi.fn()
-vi.mock('@/stores/tabStore', () => ({ useTabStore: { getState: () => ({ openTab }) } }))
+vi.mock('@/stores/tabStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/tabStore')>()
+  const getState = actual.useTabStore.getState
+  // Tool cards now transitively load workspace/side-chat state. Preserve the
+  // real Zustand subscription contract while spying only on navigation.
+  actual.useTabStore.getState = () => ({ ...getState(), openTab })
+  return actual
+})
 beforeEach(() => {
   openTab.mockReset()
   useSessionStore.setState({ sessions: [] })

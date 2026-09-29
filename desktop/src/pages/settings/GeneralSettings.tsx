@@ -19,6 +19,7 @@ import { Card } from '@/components/ui/Card'
 import { SettingsPill, SettingsSection } from '@/components/settings/SettingsSection'
 import { Dropdown } from '@/components/ui/Dropdown'
 import { Switch } from '@/components/ui/Switch'
+import { SelectField } from '@/components/ui/SelectField'
 import { PermissionModeSelector } from '../../components/controls/PermissionModeSelector'
 import { ReasoningEffortPopover } from '../../components/controls/ReasoningEffortPopover'
 import { isDarkThemeMode, isLightThemeMode } from '../../types/settings'
@@ -40,6 +41,8 @@ import {
 import { SETTINGS_CHECKBOX_INPUT_CLASS, SettingsCheckboxMark, isValidHttpProxyUrl } from './shared'
 import { isTouchH5Document } from '../../lib/touchH5'
 import { MODEL_REASONING_EFFORTS } from '../../../../src/shared/modelReasoning'
+import { AUTO_QUESTION_TIMEOUT_OPTIONS } from '../../../../src/shared/autoQuestionSettings'
+import { ChatAppearanceSettings } from './ChatAppearanceSettings'
 
 /**
  * The General settings panel — moved out of the Settings.tsx monolith.
@@ -87,6 +90,8 @@ export function GeneralSettings() {
     setKeepActiveInBackground,
     agentOfficeSurface,
     setAgentOfficeSurface,
+    autoQuestion,
+    setAutoQuestion,
     locale,
     setLocale,
     setTheme,
@@ -1290,7 +1295,42 @@ export function GeneralSettings() {
         </div>
       </SettingsSection>
 
-      <div className="mt-8">
+      <SettingsSection
+        className="mt-8"
+        title={t('settings.general.autoQuestionTitle')}
+        description={t('settings.general.autoQuestionDescription')}
+      >
+        <div className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3">
+          <Switch
+            checked={autoQuestion.enabled}
+            onChange={(enabled) => void setAutoQuestion({ ...autoQuestion, enabled }).catch(() => {
+              addToast({ type: 'error', message: t('settings.general.autoQuestionSaveFailed') })
+            })}
+            label={t('settings.general.autoQuestionEnabled')}
+            description={t('settings.general.autoQuestionHint')}
+          />
+          {autoQuestion.enabled && (
+            <div className="mt-4">
+              <SelectField
+                label={t('settings.general.autoQuestionTimeout')}
+                value={String(autoQuestion.timeoutMinutes)}
+                options={AUTO_QUESTION_TIMEOUT_OPTIONS.map((minutes) => ({
+                  value: String(minutes),
+                  label: t('settings.general.autoQuestionMinutes', { count: minutes }),
+                }))}
+                onChange={(value) => void setAutoQuestion({
+                  ...autoQuestion,
+                  timeoutMinutes: Number(value),
+                }).catch(() => {
+                  addToast({ type: 'error', message: t('settings.general.autoQuestionSaveFailed') })
+                })}
+              />
+            </div>
+          )}
+        </div>
+      </SettingsSection>
+
+      <div>
         <h2 className="text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)] mb-1" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.general.autoDreamTitle')}</h2>
         <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.autoDreamDescription')}</p>
         <label className="relative flex items-start gap-3 rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 cursor-pointer hover:border-[var(--color-border-focus)] transition-colors">
@@ -1416,6 +1456,8 @@ export function GeneralSettings() {
       </div>
 
       {uiZoomSection}
+
+      <ChatAppearanceSettings />
 
       <div className="mt-8">
         <h2 className="text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)] mb-1" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.general.networkTitle')}</h2>

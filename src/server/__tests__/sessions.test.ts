@@ -518,6 +518,20 @@ async function createThreeTurnCheckpointFixture(
 // ============================================================================
 
 describe('SessionService', () => {
+  it('hides only desktop team worker transcripts from the sidebar and keeps direct reads', async () => {
+    const workerId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const ordinaryId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    const siblingId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+    await writeSessionFile('-tmp-team-sidebar', workerId, [{ ...makeUserEntry('worker task'), entrypoint: 'claude-desktop-team-worker', teamName: 'team', agentName: 'worker' }])
+    await writeSessionFile('-tmp-team-sidebar', ordinaryId, [{ ...makeUserEntry('legacy teammate'), teamName: 'team', agentName: 'legacy' }])
+    await writeSessionFile('-tmp-team-sidebar', siblingId, [{ ...makeUserEntry('ordinary sidebar task'), entrypoint: 'claude-desktop' }])
+    const result = await service.listSessions({ project: '-tmp-team-sidebar', limit: 20 })
+    expect(result.sessions.map(item => item.id).sort()).toEqual([ordinaryId, siblingId].sort())
+    expect(result.total).toBe(2)
+    expect(await service.findSessionFile(workerId)).not.toBeNull()
+    expect((await service.getSessionMessages(workerId)).length).toBeGreaterThan(0)
+  })
+
   beforeEach(async () => {
     await setupTmpConfigDir()
     service = new SessionService()
@@ -587,6 +601,16 @@ describe('SessionService', () => {
     expect(await service.deletePlaceholderSessionFiles(collaborationSessionId, '/tmp/worktree')).toBe(1)
     await expect(fs.access(collaborationPlaceholder)).rejects.toThrow()
     await expect(fs.access(collaborationTranscript)).resolves.toBeNull()
+  })
+
+  it('prefers a transcript with an oversized turn over a newer metadata-only placeholder', async () => {
+    const sessionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    const transcript = await writeSessionFile('-tmp-large-transcript', sessionId, [
+      makeUserEntry('x'.repeat(9 * 1024 * 1024)),
+    ])
+    await writeSessionFile('-tmp-large-placeholder', sessionId, [makeSnapshotEntry()])
+
+    expect((await service.findSessionFile(sessionId))?.filePath).toBe(transcript)
   })
 
   it('should return empty list when no sessions exist', async () => {
@@ -2194,11 +2218,12 @@ describe('SessionService', () => {
     expect(before).not.toBe(after)
   })
 
-  it('should hide synthetic interruption, no-response, and malformed command breadcrumb transcript entries', async () => {
+  it('projects a synthetic interruption as stopped status while hiding no-response and malformed breadcrumbs', async () => {
     const sessionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     await writeSessionFile('-tmp-project', sessionId, [
       makeSnapshotEntry(),
       makeUserEntry('正常用户消息', crypto.randomUUID()),
+      makeAssistantEntry('0001–0100', crypto.randomUUID()),
       {
         type: 'user',
         message: {
@@ -2255,20 +2280,29 @@ describe('SessionService', () => {
 
     const messages = await service.getSessionMessages(sessionId)
 
-    expect(messages).toHaveLength(4)
+    expect(messages).toHaveLength(6)
     expect(messages[0]).toMatchObject({ type: 'user', content: '正常用户消息' })
     expect(messages[1]).toMatchObject({
+      type: 'assistant',
+      content: [{ type: 'text', text: '0001–0100' }],
+    })
+    expect(messages[2]).toMatchObject({
+      type: 'system',
+      content: { subtype: 'generation_stopped' },
+      timestamp: '2026-01-01T00:00:02.000Z',
+    })
+    expect(messages[3]).toMatchObject({
       type: 'user',
       content: '<command-name>/exit</command-name>\n<command-message>exit</command-message>\n<command-args></command-args>',
     })
-    expect(messages[2]).toMatchObject({
+    expect(messages[4]).toMatchObject({
       type: 'user',
       content: [{
         type: 'text',
         text: '<command-name>/agent</command-name>\n<command-message>agent</command-message>\n<command-args>Plan 222</command-args>',
       }],
     })
-    expect(messages[3]).toMatchObject({
+    expect(messages[5]).toMatchObject({
       type: 'assistant',
       content: [{ type: 'text', text: '正常助手消息' }],
     })

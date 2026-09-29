@@ -115,6 +115,18 @@ export function AskUserQuestion({
   // The question had no live request left, so the answers went out as a message.
   const [hasSentAsMessage, setHasSentAsMessage] = useState(storedDraft?.sentAsMessage === true)
   const composingRef = useRef(false)
+  const activitySentForRequest = useRef<string | null>(null)
+
+  // A choice can be made before the SDK permission request reaches the UI.
+  // Protect that draft as soon as the matching request arrives.
+  useEffect(() => {
+    if (!targetSessionId || !pendingRequest || hasSubmitted ||
+      activitySentForRequest.current === pendingRequest.requestId) return
+    if (!Object.values(selections).some((labels) => labels.length > 0) &&
+      !Object.values(freeTexts).some((value) => value.trim())) return
+    activitySentForRequest.current = pendingRequest.requestId
+    useChatStore.getState().recordAskUserQuestionActivity(targetSessionId, pendingRequest.requestId)
+  }, [freeTexts, hasSubmitted, pendingRequest, selections, targetSessionId])
 
   const resultAnswers = useMemo(() => {
     if (!result || typeof result !== 'object') return {}
@@ -124,6 +136,8 @@ export function AskUserQuestion({
       : {}
   }, [result])
   const resultText = typeof result === 'string' && result.trim().length > 0 ? result.trim() : ''
+  const automaticallyAnswered = Boolean(result && typeof result === 'object' &&
+    (result as { selectionSource?: unknown }).selectionSource === 'automatic')
   const hasStructuredAnswers = Object.keys(resultAnswers).length > 0
   const hasTerminalResult = hasStructuredAnswers || resultText.length > 0
 
@@ -243,8 +257,16 @@ export function AskUserQuestion({
     store.sendMessage(sessionId, content, undefined, { displayContent })
   }
 
+  const markUserActivity = () => {
+    if (!targetSessionId || !pendingRequest || submitted ||
+      activitySentForRequest.current === pendingRequest.requestId) return
+    activitySentForRequest.current = pendingRequest.requestId
+    useChatStore.getState().recordAskUserQuestionActivity(targetSessionId, pendingRequest.requestId)
+  }
+
   const handleSelect = (qIndex: number, label: string) => {
     if (submitted) return
+    markUserActivity()
     // Computed from the render snapshot rather than inside the updater: React
     // may run a state updater twice, and advancing the tab is a side effect.
     // Clicking an already-selected option deselects it — that is not a step
@@ -287,6 +309,7 @@ export function AskUserQuestion({
 
   const handleFreeTextChange = (qIndex: number, value: string) => {
     if (submitted) return
+    markUserActivity()
     setFreeTexts((prev) => {
       const next = { ...prev }
       if (value) {
@@ -340,10 +363,14 @@ export function AskUserQuestion({
     }, {})
 
     setHasSubmitted(true)
+    const metadata = inputObject.metadata
     respondToPermission(targetSessionId, pendingRequest.requestId, true, {
       updatedInput: {
         ...inputObject,
         answers,
+        ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+          ? { metadata: Object.fromEntries(Object.entries(metadata).filter(([key]) => key !== 'autoAnswered')) }
+          : {}),
       },
     })
   }
@@ -424,7 +451,9 @@ export function AskUserQuestion({
               {/* handing the question back is not an answer — saying "answered"
                   there misreports what the user did; and an expired question was
                   never answered at all, whatever happened to the answers */}
-              {t(hasSentAsMessage || expired
+              {t(automaticallyAnswered
+                ? 'question.autoAnswered'
+                : hasSentAsMessage || expired
                 ? 'question.expiredBadge'
                 : hasRequestedChat
                   ? 'question.chatBadge'

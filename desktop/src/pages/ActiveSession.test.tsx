@@ -1,8 +1,15 @@
+import { openSideChat } from '@/lib/workspace/openSideChat'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import { act } from 'react'
 import type { TeamWorkbenchSessionTimeline, TeamWorkbenchSnapshot } from '../types/team'
+
+vi.mock('../components/agentTeams/AgentTeamsPlanCard', () => ({
+  AgentTeamsPlanCard: ({ sessionId }: { sessionId: string }) => <div data-testid="durable-team-plan" data-session-id={sessionId} />,
+}))
+
+vi.mock('@/lib/workspace/openSideChat', () => ({ openSideChat: vi.fn(async () => 'tab-side') }))
 
 const viewportMocks = vi.hoisted(() => ({
   isMobile: false,
@@ -37,14 +44,14 @@ vi.mock('../hooks/useMobileViewport', () => ({
 }))
 
 vi.mock('../components/chat/MessageList', () => ({
-  MessageList: ({ compact }: { compact?: boolean }) => (
-    <div data-testid="message-list" data-compact={compact ? 'true' : 'false'} />
+  MessageList: ({ compact, sessionId }: { compact?: boolean; sessionId?: string }) => (
+    <div data-testid="message-list" data-compact={compact ? 'true' : 'false'} data-session-id={sessionId} />
   ),
 }))
 
 vi.mock('../components/chat/ChatInput', () => ({
-  ChatInput: ({ compact, variant }: { compact?: boolean; variant?: string }) => (
-    <div data-testid="chat-input" data-compact={compact ? 'true' : 'false'} data-variant={variant} />
+  ChatInput: ({ compact, variant, sessionId, visible }: { compact?: boolean; variant?: string; sessionId?: string; visible?: boolean }) => (
+    <div data-testid="chat-input" data-compact={compact ? 'true' : 'false'} data-variant={variant} data-session-id={sessionId} data-visible={visible ? 'true' : 'false'} />
   ),
 }))
 
@@ -109,6 +116,7 @@ import {
 } from '../stores/workspaceStore'
 
 beforeEach(() => {
+  vi.mocked(openSideChat).mockClear()
   sessionApiMocks.getGitInfo.mockReset()
   sessionApiMocks.getGitInfo.mockResolvedValue({
     branch: 'main',
@@ -286,6 +294,87 @@ describe('ActiveSession task polling', () => {
     expect(useTabStore.getState().activeTabId).toBe(sessionId)
   })
 
+  it('opens side chat through the workspace without replacing the main surface', () => {
+    const id = 'side-question-session'
+    useSettingsStore.setState({ locale: 'en' })
+    useTabStore.setState({ activeTabId: id, tabs: [{ sessionId: id, title: 'Main', type: 'session', status: 'idle' }] })
+    useSessionStore.setState({ sessions: [{ id, title: 'Main', messageCount: 1, createdAt: '', modifiedAt: '', projectPath: '/repo', workDir: '/repo', workDirExists: true }] })
+    useChatStore.setState({ sessions: { [id]: { ...createDefaultSessionState(), connectionState: 'connected', historyStatus: 'ready', historyHydrated: true, messages: [{ id: 'm', type: 'assistant_text', content: 'main', timestamp: 1 }] } } })
+    useWorkspaceStore.getState().setLayout(id, 'split')
+    render(<ActiveSession sessionId={id} />)
+    const workbench = screen.getByTestId('workbench-panel')
+    const main = screen.getByTestId('message-list')
+    fireEvent.click(screen.getAllByRole('button', { name: 'Side chat' })[0]!)
+    expect(openSideChat).toHaveBeenCalledWith(id)
+    expect(screen.getByTestId('workbench-panel')).toBe(workbench)
+    expect(workbench).not.toHaveClass('hidden')
+    expect(screen.getByTestId('message-list')).toBe(main)
+  })
+
+  it('can hide a mobile side chat without destroying its temporary tab', () => {
+    viewportMocks.isMobile = true
+    const id = 'mobile-side-parent'
+    useTabStore.setState({ activeTabId: id, tabs: [{ sessionId: id, title: 'Main', type: 'session', status: 'idle' }] })
+    useSessionStore.setState({ sessions: [{ id, title: 'Main', messageCount: 1, createdAt: '', modifiedAt: '', projectPath: '/repo', workDir: '/repo', workDirExists: true }] })
+    useChatStore.setState({ sessions: { [id]: { ...createDefaultSessionState(), connectionState: 'connected', historyStatus: 'ready', historyHydrated: true } } })
+    const tabId = useWorkspaceStore.getState().openTarget(id, { kind: 'side-chat', sideChatId: 'side-mobile' })!
+    render(<ActiveSession sessionId={id} />)
+    expect(screen.getByTestId('workbench-panel')).toHaveAttribute('data-workspace-layout', 'full')
+    fireEvent.click(screen.getByRole('button', { name: 'Hide Workspace' }))
+    expect(screen.queryByTestId('workbench-panel')).not.toBeInTheDocument()
+    expect(useWorkspaceStore.getState().getTab(id, tabId)).not.toBeNull()
+    expect(screen.getByTestId('active-session-chat-column')).not.toHaveClass('hidden')
+  })
+
+  it('keeps the same message list bound to its session while settings is selected', () => {
+    const sessionId = 'retained-session'
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Retained Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+    })
+    useTabStore.setState({
+      tabs: [
+        { sessionId, title: 'Retained Session', type: 'session', status: 'idle' },
+        { sessionId: '__settings__', title: 'Settings', type: 'settings', status: 'idle' },
+      ],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          ...createDefaultSessionState(),
+          connectionState: 'connected',
+          messages: [{ id: 'existing', type: 'assistant_text', content: 'ready', timestamp: 1 }],
+          historyStatus: 'ready',
+          historyHydrated: true,
+        },
+      },
+    })
+
+    const { rerender } = render(<ActiveSession sessionId={sessionId} active />)
+    const messageList = screen.getByTestId('message-list')
+    const chatInput = screen.getByTestId('chat-input')
+
+    act(() => useTabStore.getState().setActiveTab('__settings__'))
+    rerender(<ActiveSession sessionId={sessionId} active={false} />)
+
+    expect(screen.getByTestId('message-list')).toBe(messageList)
+    expect(screen.getByTestId('chat-input')).toBe(chatInput)
+    expect(messageList).toHaveAttribute('data-session-id', sessionId)
+    expect(chatInput).toHaveAttribute('data-session-id', sessionId)
+    expect(chatInput).toHaveAttribute('data-visible', 'false')
+    expect(useChatStore.getState().sessions['__settings__']).toBeUndefined()
+  })
+
   it('shows cleaned worktrees as retained history and uses the source project for tools', () => {
     const sessionId = 'cleaned-worktree-session'
     useSettingsStore.setState({ locale: 'en' })
@@ -401,6 +490,50 @@ describe('ActiveSession task polling', () => {
 
     render(<ActiveSession />)
 
+    expect(screen.getByTestId('message-list')).toBeInTheDocument()
+    expect(screen.getByTestId('chat-input')).toHaveAttribute('data-variant', 'default')
+  })
+
+  it('replaces the empty hero with the transcript as soon as first-turn preparation begins', () => {
+    const sessionId = 'preparing-first-turn-session'
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'New Session',
+        createdAt: '2026-08-07T00:00:00.000Z',
+        modifiedAt: '2026-08-07T00:00:00.000Z',
+        messageCount: 0,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'New Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          ...useChatStore.getState().getSession(sessionId),
+          connectionState: 'connected',
+          historyStatus: 'ready',
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+    expect(screen.getByTestId('empty-session-hero')).toBeInTheDocument()
+    expect(screen.getByTestId('durable-team-plan')).toBeInTheDocument()
+
+    act(() => {
+      useChatStore.getState().setPreparingTurn(sessionId, true)
+    })
+
+    expect(screen.queryByTestId('empty-session-hero')).not.toBeInTheDocument()
     expect(screen.getByTestId('message-list')).toBeInTheDocument()
     expect(screen.getByTestId('chat-input')).toHaveAttribute('data-variant', 'default')
   })
@@ -2335,49 +2468,6 @@ describe('ActiveSession task polling', () => {
   })
 })
 
-  it('replaces the empty hero with the transcript as soon as first-turn preparation begins', () => {
-    const sessionId = 'preparing-first-turn-session'
-    useSessionStore.setState({
-      sessions: [{
-        id: sessionId,
-        title: 'New Session',
-        createdAt: '2026-08-07T00:00:00.000Z',
-        modifiedAt: '2026-08-07T00:00:00.000Z',
-        messageCount: 0,
-        projectPath: '/workspace/project',
-        workDir: '/workspace/project',
-        workDirExists: true,
-      }],
-      activeSessionId: sessionId,
-      isLoading: false,
-      error: null,
-    })
-    useTabStore.setState({
-      tabs: [{ sessionId, title: 'New Session', type: 'session', status: 'idle' }],
-      activeTabId: sessionId,
-    })
-    useChatStore.setState({
-      sessions: {
-        [sessionId]: {
-          ...useChatStore.getState().getSession(sessionId),
-          connectionState: 'connected',
-          historyStatus: 'ready',
-        },
-      },
-    })
-
-    render(<ActiveSession />)
-    expect(screen.getByTestId('empty-session-hero')).toBeInTheDocument()
-
-    act(() => {
-      useChatStore.getState().setPreparingTurn(sessionId, true)
-    })
-
-    expect(screen.queryByTestId('empty-session-hero')).not.toBeInTheDocument()
-    expect(screen.getByTestId('message-list')).toBeInTheDocument()
-    expect(screen.getByTestId('chat-input')).toHaveAttribute('data-variant', 'default')
-  })
-
   it('shows the worktree name in the header and reveals its directory on focus', async () => {
     const worktreeSessionId = 'worktree-header-session'
     const regularSessionId = 'regular-header-session'
@@ -3705,4 +3795,4 @@ describe('ActiveSession header', () => {
     expect(meta.textContent?.trimStart().startsWith('·')).toBe(false)
     expect(meta.querySelectorAll('[aria-hidden="true"]')).toHaveLength(2)
   })
-})
+})

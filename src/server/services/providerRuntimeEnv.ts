@@ -26,6 +26,8 @@ import type {
 } from '../types/provider.js'
 import {
   BUILT_IN_PROVIDER_IDS,
+  GROK_OFFICIAL_PROVIDER_ID,
+  OPENAI_OFFICIAL_PROVIDER_ID,
   PROVIDER_TOOL_SEARCH_OPT_IN_SCHEMA_VERSION,
 } from '../types/provider.js'
 import {
@@ -193,11 +195,12 @@ function normalizeModel1mSupport(
   if (!model1mSupport) return undefined
   const normalized = {
     main: model1mSupport.main === true,
+    fable: model1mSupport.fable === true,
     haiku: model1mSupport.haiku === true,
     sonnet: model1mSupport.sonnet === true,
     opus: model1mSupport.opus === true,
   }
-  return MODEL_SLOTS.some((slot) => normalized[slot]) ? normalized : undefined
+  return Object.values(normalized).some(Boolean) ? normalized : undefined
 }
 
 export function normalizeImageGeneration(
@@ -226,7 +229,9 @@ function applyModel1mSupportMapping(
 ): SavedProvider['models'] {
   return {
     main: applyModel1mSupport(models.main, model1mSupport?.main),
-    ...(models.fable ? { fable: models.fable.trim() } : {}),
+    ...(models.fable !== undefined
+      ? { fable: applyModel1mSupport(models.fable, model1mSupport?.fable) }
+      : {}),
     haiku: applyModel1mSupport(models.haiku, model1mSupport?.haiku),
     sonnet: applyModel1mSupport(models.sonnet, model1mSupport?.sonnet),
     opus: applyModel1mSupport(models.opus, model1mSupport?.opus),
@@ -316,6 +321,7 @@ export function normalizeProvidersIndex(value: unknown): ProvidersIndex | null {
   const {
     activeProviderId: legacyActiveProviderId,
     providerOrder: rawProviderOrder,
+    officialProviderModels: rawOfficialProviderModels,
     ...rest
   } = value
   const schemaVersion = typeof value.schemaVersion === 'number' ? value.schemaVersion : 1
@@ -338,6 +344,16 @@ export function normalizeProvidersIndex(value: unknown): ProvidersIndex | null {
   )
     ? rawActiveId
     : null
+  const officialProviderModels: Record<string, unknown> = isRecord(rawOfficialProviderModels)
+    ? { ...rawOfficialProviderModels }
+    : {}
+  for (const id of BUILT_IN_PROVIDER_IDS) {
+    if (isProviderModels(officialProviderModels[id])) {
+      officialProviderModels[id] = normalizeModelMapping(officialProviderModels[id])
+    } else {
+      delete officialProviderModels[id]
+    }
+  }
 
   return {
     ...rest,
@@ -345,6 +361,7 @@ export function normalizeProvidersIndex(value: unknown): ProvidersIndex | null {
     activeId,
     providers,
     providerOrder: normalizeProviderOrder(rawProviderOrder, providers),
+    officialProviderModels,
   }
 }
 
@@ -584,10 +601,10 @@ export function buildProviderManagedEnv(
   options?: { proxyPath?: string; serverPort?: number },
 ): Record<string, string> {
   if (provider.runtimeKind === 'openai_oauth') {
-    return buildOpenAIOfficialRuntimeEnv()
+    return buildOpenAIOfficialRuntimeEnv(provider.models)
   }
   if (provider.runtimeKind === 'grok_oauth') {
-    return buildGrokOfficialRuntimeEnv()
+    return buildGrokOfficialRuntimeEnv(provider.models)
   }
 
   const apiFormat: ApiFormat = resolveProviderApiFormat(provider)
@@ -718,10 +735,10 @@ function buildActiveProviderManagedEnv(
   if (!index.activeId) return null
 
   if (isOpenAIOfficialProviderId(index.activeId)) {
-    return buildOpenAIOfficialRuntimeEnv()
+    return buildOpenAIOfficialRuntimeEnv(index.officialProviderModels[OPENAI_OFFICIAL_PROVIDER_ID])
   }
   if (isGrokOfficialProviderId(index.activeId)) {
-    return buildGrokOfficialRuntimeEnv()
+    return buildGrokOfficialRuntimeEnv(index.officialProviderModels[GROK_OFFICIAL_PROVIDER_ID])
   }
 
   const provider = index.providers.find((entry) => entry.id === index.activeId)

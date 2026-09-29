@@ -119,6 +119,33 @@ describe('MarkdownRenderer file references', () => {
     expect(onLinkClick).toHaveBeenCalledWith('src/app.ts:42:8')
   })
 
+  it.each([
+    ['file:///tmp/cc-haha-qa-checklist-v0.6.6.html', '/tmp/cc-haha-qa-checklist-v0.6.6.html'],
+    ['file:///tmp/%E6%B8%85%E5%8D%95.html', '/tmp/清单.html'],
+    ['/tmp/app.ts:42', '/tmp/app.ts:42'],
+  ])('preserves explicit local Markdown destination %s through sanitization', (href, expected) => {
+    const onLinkClick = vi.fn().mockReturnValue(true)
+    const container = renderMarkdown(`[打开文件](${href})`, { onLinkClick })
+    container.querySelector<HTMLAnchorElement>('a')!.click()
+    expect(onLinkClick).toHaveBeenCalledWith(expected)
+  })
+
+  it('does not show explicit local file links as actionable without a handler', () => {
+    const container = renderMarkdown('[打开文件](file:///tmp/report.html)', { onLinkClick: null })
+    expect(container.querySelector('a')).toBeNull()
+    expect(container.textContent?.trim()).toBe('打开文件')
+  })
+
+  it('keeps unsafe schemes out of the file click route', () => {
+    const onLinkClick = vi.fn().mockReturnValue(true)
+    const container = renderMarkdown('[unsafe](javascript:alert%281%29)', { onLinkClick })
+    const link = container.querySelector<HTMLAnchorElement>('a')!
+    expect(link.hasAttribute('href')).toBe(false)
+    expect(link.hasAttribute('data-file-path')).toBe(false)
+    link.click()
+    expect(onLinkClick).not.toHaveBeenCalled()
+  })
+
   it('links owner/repo#123 to GitHub', () => {
     // The second half of the prompt contract (prompts.ts:438), which also had no
     // implementation. Unlike a file link this is a real URL, so it keeps its href.

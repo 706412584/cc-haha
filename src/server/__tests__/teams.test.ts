@@ -1075,6 +1075,18 @@ describe('TeamService', () => {
     expect(worker.status).toBe('idle')
   })
 
+  it('keeps delivered reports visible after the leader reads its mailbox', async () => {
+    await writeTeamConfig('read-history-team', makeTeamConfig({ name: 'read-history-team' }))
+    const report = { id: 'report-1', from: 'Worker Agent', text: 'Analysis complete', timestamp: '2026-09-27T15:25:36.411Z' }
+    await writeTeamInbox('read-history-team', 'Lead Agent', [{ ...report, read: false }])
+    const before = await service.getWorkbench('read-history-team')
+    await writeTeamInbox('read-history-team', 'Lead Agent', [{ ...report, read: true }])
+    const after = await service.getWorkbench('read-history-team')
+    expect(after.messages).toEqual(before.messages)
+    expect(after.messages).toHaveLength(1)
+    expect(after.messages[0]).toMatchObject({ from: 'Worker Agent', text: 'Analysis complete', recipients: ['Lead Agent'] })
+  })
+
   it('joins team, task DAG, and mailbox history without collapsing legitimate repeats', async () => {
     await writeTeamConfig('workbench-team', makeTeamConfig({
       name: 'workbench-team',
@@ -1217,6 +1229,23 @@ describe('TeamService', () => {
       source: 'archive',
     })
     expect(reopened?.snapshots.at(-1)).toEqual(live)
+  })
+
+  it('preserves actual approved provider and effort through live and archived workbenches', async () => {
+    const config = makeTeamConfig({ name: 'runtime-team', leadSessionId: 'runtime-leader' })
+    config.members[1] = { ...config.members[1]!, providerId: 'fixture-provider', providerName: 'Fixture Provider', effortLevel: 'high' } as typeof config.members[number]
+    config.members[0] = { ...config.members[0]!, providerId: null, providerName: 'Claude' } as typeof config.members[number]
+    await writeTeamConfig('runtime-team', config)
+    const detail = await service.getTeam('runtime-team')
+    expect(detail.members[1]).toMatchObject({ providerId: 'fixture-provider', providerName: 'Fixture Provider', effortLevel: 'high' })
+    expect(detail.members[0]).toMatchObject({ providerId: null, providerName: 'Claude' })
+    expect(detail.members[0]).not.toHaveProperty('effortLevel')
+    const live = await service.getWorkbench('runtime-team')
+    await fs.rm(path.join(tmpDir, 'teams', 'runtime-team'), { recursive: true, force: true })
+    const archived = await service.getWorkbenchForSession('runtime-leader')
+    expect(archived?.source).toBe('archive')
+    expect(archived?.snapshots.at(-1)?.team.members).toEqual(live.team.members)
+    expect(archived?.snapshots.at(-1)?.team.members[1]).toMatchObject({ providerId: 'fixture-provider', providerName: 'Fixture Provider', effortLevel: 'high' })
   })
 
   it('uses the bounded incremental Team projection instead of canonical history during workbench polling', async () => {

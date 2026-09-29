@@ -51,6 +51,9 @@ export type TeamMember = {
   name: string
   agentType?: string
   model?: string
+  providerId?: string | null
+  providerName?: string
+  effortLevel?: string
   color?: string
   backendType?: string
   status: 'running' | 'completed' | 'idle' | 'failed'
@@ -269,7 +272,15 @@ function carryForwardArchivedMembers(
     const identity = memberArchiveIdentity(historicalMember)
     historicalIdentities.add(identity)
     const currentMember = currentByIdentity.get(identity)
-    if (currentMember) return { ...historicalMember, ...currentMember }
+    if (currentMember) {
+      return {
+        ...historicalMember,
+        ...currentMember,
+        ...(currentMember.model === undefined && historicalMember.model !== undefined
+          ? { model: historicalMember.model }
+          : {}),
+      }
+    }
     return {
       ...historicalMember,
       status: historicalMember.status === 'failed'
@@ -1398,6 +1409,9 @@ type TeamFileRaw = {
     name: string
     agentType?: string
     model?: string
+    providerId?: string | null
+    providerName?: string
+    effortLevel?: string
     prompt?: string
     color?: string
     joinedAt: number
@@ -1515,7 +1529,10 @@ export class TeamService {
       agentId: m.agentId,
       name: m.name,
       agentType: m.agentType,
-      model: m.model,
+      ...(m.model ? { model: m.model } : {}),
+      ...(m.providerId !== undefined ? { providerId: m.providerId } : {}),
+      ...(m.providerName !== undefined ? { providerName: m.providerName } : {}),
+      ...(m.effortLevel !== undefined ? { effortLevel: m.effortLevel } : {}),
       color: m.color,
       backendType: m.backendType,
       status: this.deriveStatus(m.isActive),

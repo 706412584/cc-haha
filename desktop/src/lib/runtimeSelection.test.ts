@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeRuntimeSelection, resolveDefaultRuntimeSelection, resolveProviderRuntimeModelId, resolveProviderSlotModelId } from './runtimeSelection'
+import { normalizeRuntimeSelection, reconcileRuntimeSelection, resolveDefaultRuntimeSelection, resolveProviderRuntimeModelId, resolveProviderSlotModelId } from './runtimeSelection'
 import type { SavedProvider } from '../types/provider'
 
 describe('normalizeRuntimeSelection', () => {
+  it('normalizes an old ChatGPT effort against its model without downgrading supported choices', () => {
+    expect(normalizeRuntimeSelection({ providerId: 'openai-official', modelId: 'gpt-5.5', effortLevel: 'max' }))
+      .toEqual({ providerId: 'openai-official', modelId: 'gpt-5.5', effortLevel: 'medium' })
+    const futureModel = { providerId: 'openai-official', modelId: 'future-catalog-model', effortLevel: 'max' as const }
+    expect(normalizeRuntimeSelection(futureModel)).toBe(futureModel)
+  })
   it.each([
     ['Claude Official', null],
     ['ChatGPT Official', 'openai-official'],
@@ -144,8 +150,39 @@ describe('provider 1M runtime selection', () => {
     id: 'provider', name: 'Provider', presetId: 'custom', apiKey: 'fixture',
     baseUrl: 'http://127.0.0.1:9999', apiFormat: 'anthropic',
     models: { main: ' main-model ', haiku: 'fast-model', sonnet: 'balanced-model', opus: 'large-model' },
-    model1mSupport: { main: true, haiku: false, sonnet: true, opus: false },
+    model1mSupport: { main: true, fable: false, haiku: false, sonnet: true, opus: false },
   }
+
+  it('waits for provider hydration before recovering a removed provider and preserves valid session choices', () => {
+    const selection = { providerId: 'deleted-provider', modelId: 'old-model', effortLevel: 'max' as const }
+    const context = { activeId: provider.id, providers: [provider], hasLoadedProviders: false }
+    expect(reconcileRuntimeSelection(selection, context)).toBe(selection)
+    expect(reconcileRuntimeSelection(selection, { ...context, hasLoadedProviders: true })).toEqual({
+      providerId: provider.id, modelId: 'main-model[1m]',
+    })
+    const explicit = { providerId: provider.id, modelId: 'balanced-model[1m]', effortLevel: 'high' as const }
+    expect(reconcileRuntimeSelection(explicit, { ...context, hasLoadedProviders: true })).toBe(explicit)
+    const official = { providerId: null, modelId: 'claude-opus-4-8', effortLevel: 'high' as const }
+    expect(reconcileRuntimeSelection(official, { ...context, hasLoadedProviders: true })).toBe(official)
+  })
+
+  it('reconciles effort after the provider protocol and preset become available', () => {
+    const selection = { providerId: provider.id, modelId: 'glm-5.3', effortLevel: 'medium' as const }
+    const context = {
+      activeId: provider.id, hasLoadedProviders: true,
+      providers: [{ ...provider, presetId: 'zhipuglm', apiFormat: 'anthropic' as const }],
+    }
+    expect(reconcileRuntimeSelection(selection, context)).toEqual({ ...selection, effortLevel: 'max' })
+  })
+
+  it('uses the current default effort rather than a removed provider effort or the new model default', () => {
+    const context = {
+      activeId: provider.id, hasLoadedProviders: true, defaultEffortLevel: 'high' as const,
+      providers: [{ ...provider, presetId: 'zhipuglm', models: { main: 'glm-5.3', haiku: '', sonnet: '', opus: '' } }],
+    }
+    expect(reconcileRuntimeSelection({ providerId: 'removed', modelId: 'old', effortLevel: 'medium' }, context))
+      .toEqual({ providerId: provider.id, modelId: 'glm-5.3[1m]', effortLevel: 'high' })
+  })
 
   it('materializes the active provider main slot by id and by legacy name', () => {
     for (const activeId of [provider.id, null]) {
@@ -153,6 +190,13 @@ describe('provider 1M runtime selection', () => {
         providerId: provider.id, modelId: 'main-model[1m]',
       })
     }
+  })
+
+  it('restores the model selected in settings even when it is not the provider main slot', () => {
+    const context = { providers: [provider], activeId: provider.id, hasLoadedProviders: true, currentModelId: 'balanced-model' }
+    const expected = { providerId: provider.id, modelId: 'balanced-model[1m]' }
+    expect(resolveDefaultRuntimeSelection(provider.id, provider.name, [provider], 'balanced-model')).toEqual(expected)
+    expect(reconcileRuntimeSelection({ providerId: 'removed', modelId: 'old-model' }, context)).toEqual(expected)
   })
 
   it('reconciles restored raw and marked IDs without losing a non-main model or effort', () => {

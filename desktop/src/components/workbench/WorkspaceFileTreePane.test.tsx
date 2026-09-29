@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   getWorkspaceTree: vi.fn(),
   searchWorkspace: vi.fn(),
   getWorkspaceStatus: vi.fn(),
+  openTarget: vi.fn().mockResolvedValue(undefined),
+  copyText: vi.fn().mockResolvedValue(true),
 }))
 
 vi.mock('../../api/sessions', () => ({
@@ -18,7 +20,7 @@ vi.mock('../../api/sessions', () => ({
 }))
 
 vi.mock('../../lib/clipboard', () => ({
-  copyTextToClipboard: vi.fn(async () => true),
+  copyTextToClipboard: mocks.copyText,
 }))
 
 // The open-with block discovers external applications over the server API; the

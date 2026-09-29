@@ -49,6 +49,18 @@ describe('AgentTeamsCommunicationFeed', () => {
     useSettingsStore.setState({ locale: 'en' })
   })
 
+  it('explains direct task delivery without inventing a message, then shows the first report', () => {
+    const view = render(<AgentTeamsCommunicationFeed snapshot={snapshot([])} />)
+    expect(screen.getByText(/Approved tasks are delivered directly to members/)).toBeTruthy()
+    expect(screen.getByTestId('agent-teams-message-count').textContent).toBe('0 messages')
+    view.rerender(<AgentTeamsCommunicationFeed snapshot={snapshot([
+      message({ id: 'first-report', from: 'builder', to: 'lead', recipients: ['lead'], text: 'Analysis complete.' }),
+    ])} />)
+    expect(screen.queryByText(/Approved tasks are delivered directly to members/)).toBeNull()
+    expect(screen.getByText('Analysis complete.')).toBeTruthy()
+    expect(categoryOf('first-report')).toBe('report')
+  })
+
   it('maps real CLI routes into assignment, peer, report, and system categories', () => {
     render(<AgentTeamsCommunicationFeed snapshot={snapshot([
       message({

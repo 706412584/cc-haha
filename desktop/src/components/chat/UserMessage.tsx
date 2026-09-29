@@ -124,13 +124,13 @@ export const UserMessage = memo(function UserMessage({
             {hasText && (
               <div
                 data-message-body="teammate"
-                className="min-w-0 max-w-full rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container)] px-[16px] py-[12px] text-[14px] leading-relaxed text-[var(--color-text-primary)]"
+                className="min-w-0 max-w-full rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container)] px-[16px] py-[12px] chat-reading-text leading-relaxed text-[var(--color-text-primary)]"
                 style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
               >
                 <MarkdownRenderer
                   content={content}
                   onLinkClick={sessionId ? handleLinkClick : undefined}
-                  className="[&>:first-child]:mt-0 [&>:last-child]:mb-0 [&_h1]:text-lg [&_h2]:text-base [&_h3]:text-sm [&_h4]:text-sm"
+                  className="chat-reading-markdown [&>:first-child]:mt-0 [&>:last-child]:mb-0 [&_h1]:text-lg [&_h2]:text-base [&_h3]:text-sm [&_h4]:text-sm"
                 />
               </div>
             )}
@@ -169,7 +169,7 @@ export const UserMessage = memo(function UserMessage({
           {hasText && (
             <div
               data-message-body="user"
-              className="min-w-0 max-w-full rounded-[var(--radius-lg)] bg-[var(--color-surface-user-msg)] px-[18px] py-[13px] text-[14.5px] leading-relaxed text-[var(--color-text-primary)] whitespace-pre-wrap break-words"
+              className="min-w-0 max-w-full rounded-[var(--radius-lg)] bg-[var(--color-surface-user-msg)] px-[18px] py-[13px] chat-reading-text leading-relaxed text-[var(--color-text-primary)] whitespace-pre-wrap break-words"
               style={{
                 overflowWrap: 'anywhere',
                 wordBreak: 'break-word',

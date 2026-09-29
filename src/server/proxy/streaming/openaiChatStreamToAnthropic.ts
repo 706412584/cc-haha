@@ -524,6 +524,8 @@ function handleFinishReason(
   if (finishReason !== 'length' && finishReason !== 'content_filter') {
     for (const block of state.toolBlocks.values()) {
       if (!block.id.trim() || !block.name.trim()) throw new Error('OpenAI Chat tool call is missing its id or function name')
+      // Syntax errors are tool input errors, not transport failures. Keep the
+      // original deltas so the CLI can return a matching error tool_result.
       parseCompleteChatToolArguments(block.argsBuffer)
     }
     if (stopReason === 'tool_use' && state.toolBlocks.size === 0) {

@@ -39,6 +39,7 @@ const startInProcessTeammateMock = mock((_config: unknown) => {})
 const execFileNoThrowModule = await import('../../utils/execFileNoThrow.js')
 const taskFrameworkModule = await import('../../utils/task/framework.js')
 const teamHelpersModule = await import('../../utils/swarm/teamHelpers.js')
+const originalTeamHelpers = { ...teamHelpersModule }
 const mutateTeamFileAsyncActual = teamHelpersModule.mutateTeamFileAsync
 const readTeamFileAsyncActual = teamHelpersModule.readTeamFileAsync
 
@@ -124,6 +125,7 @@ beforeEach(() => {
 })
 
 afterAll(() => {
+  mock.module('../../utils/swarm/teamHelpers.js', () => originalTeamHelpers)
   if (originalSubagentModel === undefined) {
     delete process.env.CLAUDE_CODE_SUBAGENT_MODEL
   } else {

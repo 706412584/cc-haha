@@ -55,6 +55,7 @@ const CONTAINERS: Record<string, Classification> = {
   prewarmIdleTimers: { kind: 'cleared' },
   prewarmPendingSessions: { kind: 'cleared' },
   prewarmedSessions: { kind: 'cleared' },
+  rejectedRuntimeConfigs: { kind: 'cleared' },
   runtimeExitStoppedSessions: { kind: 'cleared' },
   runtimeOverrides: { kind: 'cleared' },
   runtimeTransitionPromises: { kind: 'cleared' },

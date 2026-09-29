@@ -9,11 +9,13 @@ import { marked, type Tokens } from 'marked'
 import {
   cjkAwareAutolink,
   fileRefFromElement,
+  fileLinkAttributes,
   FILE_LINK_CLASS,
   linkifyFilePaths,
   renderCodespan,
   unwrapFileLinks,
 } from '@/lib/markdownAutolink'
+import { classifyPreviewLink } from '@/lib/previewLinkRouter'
 import { isSafeMarkdownImageSource } from '@/lib/markdownImages'
 import { CodeViewer } from '../chat/CodeViewer'
 import { MermaidRenderer } from '../chat/MermaidRenderer'
@@ -126,6 +128,17 @@ renderer.code = function ({ text, lang }: Tokens.Code) {
 }
 
 renderer.codespan = renderCodespan
+
+const renderDefaultLink = renderer.link
+renderer.link = function (token: Tokens.Link) {
+  // Explicit Markdown file URLs lose their href during sanitization. Preserve
+  // validated local destinations as data, just like automatic file references.
+  const target = classifyPreviewLink(token.href)
+  if (target.path) {
+    return `<a class="${FILE_LINK_CLASS}" ${fileLinkAttributes({ raw: token.href, path: target.path, line: target.line, column: target.column })}>${this.parser.parseInline(token.tokens)}</a>`
+  }
+  return renderDefaultLink.call(this, token)
+}
 
 marked.setOptions({
   breaks: true,

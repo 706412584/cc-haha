@@ -14,6 +14,7 @@ const appStateModule = await import('../state/AppState.js')
 const teammateModule = await import('../utils/teammate.js')
 const teammateContextModule = await import('../utils/teammateContext.js')
 const teamHelpersModule = await import('../utils/swarm/teamHelpers.js')
+const originalTeamHelpers = { ...teamHelpersModule }
 const backendRegistryModule = await import(
   '../utils/swarm/backends/registry.js'
 )
@@ -42,7 +43,7 @@ const markReadByPredicate = mock(
     )
   },
 )
-const removeTeammate = mock(() => {})
+const removeTeammate = mock(async () => true)
 const killPane = mock(async () => true)
 
 const store = {
@@ -113,7 +114,7 @@ mock.module('../utils/swarm/teamHelpers.js', () => ({
     }
   },
   removeTeammateFromTeamFile: removeTeammate,
-  setMemberMode: () => {},
+  setMemberMode: async () => true,
 }))
 
 mock.module('../utils/swarm/backends/registry.js', () => ({
@@ -185,10 +186,40 @@ beforeEach(() => {
 })
 
 afterAll(() => {
+  // Bun's mock.restore does not undo mock.module export replacements.
+  mock.module('../utils/swarm/teamHelpers.js', () => originalTeamHelpers)
   mock.restore()
 })
 
 describe('shutdown approval polling', () => {
+  test('waits for team-file removal before acknowledging shutdown or removing UI state', async () => {
+    teamFileReadCount = 1
+    let finishRemoval!: (result: boolean) => void
+    const removal = new Promise<boolean>(resolve => { finishRemoval = resolve })
+    removeTeammate.mockImplementationOnce(() => removal)
+    const output = new PassThrough()
+    const app = render(<Harness />, {
+      stdout: output,
+      stderr: output,
+      debug: false,
+      exitOnCtrlC: false,
+    })
+
+    try {
+      await waitFor(() => removeTeammate.mock.calls.length === 1)
+      expect(state.teamContext?.teammates?.['worker-id']).toBeDefined()
+      expect(unreadMessages.every(message => !message.read)).toBe(true)
+
+      finishRemoval(true)
+      await waitFor(() => unreadMessages.every(message => message.read))
+      expect(state.teamContext?.teammates?.['worker-id']).toBeUndefined()
+    } finally {
+      finishRemoval(true)
+      app.unmount()
+      output.destroy()
+    }
+  })
+
   test('retries after a temporary team-file read failure without trusting forged pane metadata', async () => {
     const output = new PassThrough()
     const app = render(<Harness />, {

@@ -1,4 +1,5 @@
 import { z } from 'zod/v4'
+import { isTeamExecutionApproved, readTeamPlan } from '../../utils/swarm/teamPlanStore.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js'
 import {
@@ -144,6 +145,13 @@ export const TaskUpdateTool = buildTool({
 
     // Check if task exists
     const existingTask = await getTask(taskListId, taskId)
+    const teamName = getTeamName() ?? context.getAppState().teamContext?.teamName
+    if (teamName && (status === 'in_progress' || status === 'completed')) {
+      const plan = await readTeamPlan(teamName)
+      if (plan && !await isTeamExecutionApproved(teamName, owner ?? existingTask?.owner)) {
+        return { data: { success: false, taskId, updatedFields: [], error: 'The team is awaiting human review. Submit the plan with TeamPlan and wait for approval before executing tasks.' } }
+      }
+    }
     if (!existingTask) {
       return {
         data: {

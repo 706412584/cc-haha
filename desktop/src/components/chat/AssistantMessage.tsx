@@ -18,6 +18,7 @@ import { FakeToolUseNotice } from './FakeToolUseNotice'
 import { openPreviewLink } from '../../lib/openPreviewLink'
 import { extractAssistantOutputTargets } from '../../lib/assistantOutputTargets'
 import { extractFakeToolUseBlocks } from '../../lib/fakeToolUseDetection'
+import { resolveAssistantFileHref } from '@/lib/assistantFileContext'
 import { useWorkspaceContentStore } from '../../stores/workspaceContentStore'
 import { useProviderStore } from '../../stores/providerStore'
 import { useProviderCompatStore } from '../../stores/providerCompatStore'
@@ -84,11 +85,11 @@ export const AssistantMessage = memo(function AssistantMessage({
   const handleLinkClick = useCallback(
     (href: string, event: ReactMouseEvent<HTMLDivElement>): boolean => {
       if (!sessionId) return false
-      const handled = openPreviewLink(href, sessionId)
+      const handled = openPreviewLink(resolveAssistantFileHref(href, content), sessionId)
       if (handled) event.preventDefault()
       return handled
     },
-    [sessionId],
+    [content, sessionId],
   )
 
   // Right-clicking a reference in the prose opens the same menu the output cards
@@ -105,7 +106,7 @@ export const AssistantMessage = memo(function AssistantMessage({
       event.preventDefault()
       const anchor = link!.getBoundingClientRect()
       void (async () => {
-        const items = await buildOpenWithMenuItemsForHref(href, {
+        const items = await buildOpenWithMenuItemsForHref(resolveAssistantFileHref(href, content), {
           sessionId,
           workDir,
           // Cast t: useTranslation takes TranslationKey, the builder takes string.
@@ -115,7 +116,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         if (items.length > 0) setOpenWith({ items, anchor })
       })()
     },
-    [sessionId, t, workDir],
+    [content, sessionId, t, workDir],
   )
 
   const outputTargets = useMemo(
@@ -171,10 +172,11 @@ export const AssistantMessage = memo(function AssistantMessage({
           // what says who is speaking (see the note above), so a border here
           // repeats that at the cost of ~50px per reply and makes prose look
           // like the tool rows it sits between. The turn rail groups it now.
-          className="w-full text-[14.5px] text-[var(--color-text-primary)]"
+          className="w-full text-[var(--color-text-primary)]"
         >
           <FakeToolUseNotice blocks={fakeBlocks} />
           <MarkdownRenderer
+            className="chat-reading-markdown"
             content={cleanContent}
             variant={documentLayout ? 'document' : 'default'}
             streaming={isStreaming}

@@ -713,6 +713,7 @@ async function captureQueryRequest({
   provider,
   responseFactory,
   continuationSystemPrompts,
+  thinkingBudget,
   localProxy = false,
   env,
 }: {
@@ -725,6 +726,7 @@ async function captureQueryRequest({
   provider?: SavedProvider
   responseFactory?: (model: string, body: Record<string, unknown>, headers: Headers) => Response
   continuationSystemPrompts?: string[][]
+  thinkingBudget?: number
   localProxy?: boolean
   env?: Readonly<Record<string, string | undefined>>
 }): Promise<{
@@ -816,15 +818,17 @@ async function captureQueryRequest({
       effortValue,
     }
     let result
-    if (continuationSystemPrompts) {
+    if (continuationSystemPrompts || thinkingBudget !== undefined) {
       const history: Message[] = []
-      for (const [index, systemPrompt] of [[], ...continuationSystemPrompts].entries()) {
+      for (const [index, systemPrompt] of [[], ...(continuationSystemPrompts ?? [])].entries()) {
         history.push(createUserMessage({ content: index === 0 ? 'Reply exactly OK' : 'Continue' }))
         const assistants = []
         for await (const message of queryModelWithStreaming({
           messages: history,
           systemPrompt: asSystemPrompt(systemPrompt),
-          thinkingConfig: { type: 'disabled' },
+          thinkingConfig: thinkingBudget === undefined
+            ? { type: 'disabled' }
+            : { type: 'enabled', budgetTokens: thinkingBudget },
           tools: [],
           signal: new AbortController().signal,
           options: {
@@ -1274,6 +1278,15 @@ test('does not attach internal budget provenance to direct provider requests', a
   expect(requestHeaders[0]?.has('x-cc-haha-output-budget-source')).toBe(false)
 }, 10_000)
 
+test('honors explicit provider output budget on direct requests without leaking provenance', async () => {
+  const { requests, requestHeaders } = await captureQueryRequest({ model: 'fixture-output-model',
+    configureCapabilityOverrides: false,
+    env: { CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS: '131072', CLAUDE_CODE_MAX_OUTPUT_TOKENS: undefined },
+  })
+  expect(requests[0]?.max_tokens).toBe(131_072)
+  expect(requestHeaders[0]?.has('x-cc-haha-output-budget-source')).toBe(false)
+}, 10_000)
+
 test('invalid global output overrides fall back to the configured provider budget', async () => {
   for (const globalBudget of ['0', 'NaN', 'garbage', '1.5', '123bad', '64']) {
     const result = await captureQueryRequest({ model: 'fixture-output-model', localProxy: true,
@@ -1310,3 +1323,66 @@ test('Opus 5 preserves max effort with adaptive thinking enabled', async () => {
   expect(requests[0]?.thinking).toEqual({ type: 'adaptive' })
   expect(requests[0]?.output_config).toEqual({ effort: 'max' })
 }, 10_000)
+
+for (const disableAdaptive of [false, true]) {
+  test(`Opus 5.5 requires adaptive thinking with optional adaptive disabled=${disableAdaptive}`, async () => {
+    const { content, requests, requestHeaders } = await captureQueryRequest({
+      model: 'claude-opus-5-5',
+      configureCapabilityOverrides: false,
+      globalThinkingEnabled: false,
+      env: {
+        CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: disableAdaptive ? '1' : undefined,
+        CLAUDE_CODE_ATTRIBUTION_HEADER: '1',
+        CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1',
+      },
+    })
+    expect(content).toContainEqual({ type: 'text', text: 'OK' })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.model).toBe('claude-opus-5-5')
+    expect(requests[0]?.thinking).toEqual({ type: 'adaptive' })
+    expect(requests[0]?.max_tokens).toBe(128_000)
+    expect(requests[0]?.output_config).toEqual({ effort: 'medium' })
+    expect(requestHeaders[0]?.get('anthropic-beta')).not.toContain('thinking-binding-controls-2026-08-01')
+    expect(requestHeaders[0]?.get('user-agent')).toContain('claude-cli/2.1.281')
+    expect(JSON.stringify(requests[0]?.system)).toContain('cc_version=2.1.281')
+  }, 10_000)
+}
+
+test('Opus 5.5 respects an explicit third-party capability opt-out', async () => {
+  const { requests } = await captureQueryRequest({
+    model: 'claude-opus-5-5',
+    capabilities: '',
+    globalThinkingEnabled: false,
+  })
+  expect(requests).toHaveLength(1)
+  expect(requests[0]?.thinking).toBeUndefined()
+  expect(requests[0]?.output_config).toBeUndefined()
+}, 10_000)
+
+for (const budget of [1, 100, 1000, 1024, 1025, 4096]) {
+  test(`keeps direct output budget ${budget} compatible with optional manual thinking`, async () => {
+    const { requests, requestHeaders, apiError } = await captureQueryRequest({
+      model: 'claude-sonnet-4-20250514',
+      configureCapabilityOverrides: false,
+      thinkingBudget: 2048,
+      env: { CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS: String(budget), CLAUDE_CODE_MAX_OUTPUT_TOKENS: undefined },
+    })
+    expect(apiError).toBeUndefined()
+    expect(requests[0]?.max_tokens).toBe(budget)
+    expect(requests[0]?.thinking).toEqual(budget <= 1024
+      ? { type: 'disabled' }
+      : { type: 'enabled', budget_tokens: Math.min(2048, budget - 1) })
+    expect(requests[0]?.temperature).toBe(budget <= 1024 ? 1 : undefined)
+    expect(requestHeaders[0]?.has('x-cc-haha-output-budget-source')).toBe(false)
+  })
+}
+
+test('retains required adaptive thinking with a small direct output budget', async () => {
+  const { requests } = await captureQueryRequest({
+    model: 'claude-opus-5-5',
+    configureCapabilityOverrides: false,
+    env: { CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS: '100', CLAUDE_CODE_MAX_OUTPUT_TOKENS: undefined },
+  })
+  expect(requests[0]?.max_tokens).toBe(100)
+  expect(requests[0]?.thinking).toMatchObject({ type: 'adaptive' })
+})

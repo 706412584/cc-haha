@@ -8,6 +8,7 @@ import {
   hasAnthropicCompatibleThirdPartyConfig,
   isFirstPartyAnthropicBaseUrl,
 } from './model/providers.js'
+import { getCanonicalName } from './model/model.js'
 import { get3PModelCapabilityOverride } from './model/modelSupportOverrides.js'
 import { isEnvTruthy } from './envUtils.js'
 import type { EffortLevel as RuntimeEffortLevel } from 'src/entrypoints/sdk/runtimeTypes.js'
@@ -433,6 +434,10 @@ export function getDefaultEffortForModel(
   // IMPORTANT: Do not change the default effort level without notifying
   // the model launch DRI and research. Default effort is a sensitive setting
   // that can greatly affect model quality and bashing.
+
+  if (getCanonicalName(model) === 'claude-opus-5-5') {
+    return 'medium'
+  }
 
   // Default effort on Opus 4.7 to medium for Pro.
   // Max/Team also get medium when the tengu_grey_step2 config is enabled.

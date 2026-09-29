@@ -58,6 +58,11 @@ vi.mock('../../lib/clipboard', () => ({ copyTextToClipboard }))
 
 vi.mock('@tauri-apps/plugin-shell', () => ({ open: vi.fn().mockResolvedValue(undefined) }))
 
+const openPath = vi.hoisted(() => vi.fn().mockResolvedValue(undefined))
+vi.mock('../../lib/desktopHost', () => ({
+  getDesktopHost: () => ({ shell: { openPath } }),
+}))
+
 vi.mock('../../i18n', () => ({
   useTranslation: () => (k: string, v?: Record<string, string>) => (v?.target ? `${k}:${v.target}` : k),
 }))
@@ -72,6 +77,7 @@ vi.mock('../../stores/settingsStore', () => ({
 import { AssistantMessage } from './AssistantMessage'
 
 afterEach(() => {
+  openPath.mockClear()
   openBrowser.mockReset()
   ensureTargets.mockReset().mockResolvedValue(undefined)
   getTargetsForPath.mockReset().mockResolvedValue(openTargets)
@@ -93,6 +99,48 @@ describe('AssistantMessage file references', () => {
     render(<AssistantMessage sessionId="s1" content={'改 `src/app.ts:7`'} isStreaming={false} />)
     fireEvent.click(screen.getByRole('link', { name: 'src/app.ts:7' }))
     expect(openPreviewFn).toHaveBeenCalledWith('s1', 'src/app.ts', { line: 7 })
+  })
+
+  it('opens a source reference under the explicitly declared project root', () => {
+    render(<AssistantMessage sessionId="s1" content={'项目根目录是 `/other/promo/`：\n- `src/lib/shots.ts:7`'} />)
+    fireEvent.click(screen.getByRole('link', { name: 'src/lib/shots.ts:7' }))
+    expect(openPreviewFn).toHaveBeenCalledWith('s1', '/other/promo/src/lib/shots.ts', { line: 7 })
+  })
+
+  it('uses the declared root for prose context menus and copy path', async () => {
+    render(<AssistantMessage sessionId="s1" content={'项目根目录是 `/other/promo/`：\n- `public/audio/track.wav`'} />)
+    fireEvent.contextMenu(screen.getByRole('link', { name: 'public/audio/track.wav' }))
+    await waitFor(() => expect(screen.getByRole('menu')).toBeInTheDocument())
+    expect(getTargetsForPath).toHaveBeenCalledWith('/other/promo/public/audio/track.wav')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'openWith.copyPath' }))
+    expect(copyTextToClipboard).toHaveBeenCalledWith('/other/promo/public/audio/track.wav')
+  })
+
+  it.each([undefined, [], ['/work/README.md']])('opens the screenshot audio from both card and prose with checkpoint %j', async (turnChangedFiles) => {
+    const content = [
+      '`/other/promo/out/movie.mp4`',
+      '项目根目录是 `/other/promo/`：',
+      '- `out/movie.mp4` — 成片',
+      '- `public/audio/track.wav` — 合成音轨',
+      '- `README.md` — 说明',
+    ].join('\n\n')
+    const { container } = render(<AssistantMessage sessionId="s1" content={content} turnChangedFiles={turnChangedFiles} />)
+    expect(container.querySelectorAll('video')).toHaveLength(1)
+    expect(container.querySelector('video')).toHaveAttribute('src', 'http://127.0.0.1:4321/local-file/other/promo/out/movie.mp4')
+    fireEvent.click(screen.getByText('track.wav').closest('button')!)
+    await waitFor(() => expect(openPath).toHaveBeenCalledWith('/other/promo/public/audio/track.wav'))
+    openPath.mockClear()
+    fireEvent.click(screen.getByRole('link', { name: 'public/audio/track.wav' }))
+    await waitFor(() => expect(openPath).toHaveBeenCalledWith('/other/promo/public/audio/track.wav'))
+  })
+
+  it('keeps prose and card destinations equal when the project root is stated later', async () => {
+    render(<AssistantMessage sessionId="s1" content={'`track.wav`\n\n项目根目录是 `/other/promo/`'} />)
+    fireEvent.click(screen.getByRole('link', { name: 'track.wav' }))
+    await waitFor(() => expect(openPath).toHaveBeenLastCalledWith('/other/promo/track.wav'))
+    openPath.mockClear()
+    fireEvent.click(screen.getByText('track.wav', { selector: 'span' }).closest('button')!)
+    await waitFor(() => expect(openPath).toHaveBeenLastCalledWith('/other/promo/track.wav'))
   })
 
   it('does not linkify a bare path mid-stream', () => {

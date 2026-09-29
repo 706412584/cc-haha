@@ -1,4 +1,5 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
+import { AssistantOutputTargetCard } from '@/components/chat/AssistantOutputTargetCard'
 import { extractAssistantOutputTargets } from '../../lib/assistantOutputTargets'
 import { isAbsoluteLocalPath, localFileUrl, previewFsUrl } from '../../lib/handlePreviewLink'
 import { getServerBaseUrl } from '../../lib/desktopRuntime'
@@ -32,6 +33,7 @@ function isMentionedAbsoluteVideo(text: string, filePath: string): boolean {
 type GalleryVideo = {
   src: string
   name: string
+  href: string
 }
 
 type Props = {
@@ -87,7 +89,7 @@ export function InlineVideoGallery({ text, sessionId, workDir, changedFiles }: P
       const src = localFileUrl(base, filePath)
       if (seenSrc.has(src)) continue
       seenSrc.add(src)
-      result.push({ src, name: filePath.split(/[\\/]/).pop() ?? '' })
+      result.push({ src, name: filePath.split(/[\\/]/).pop() ?? '', href: filePath })
     }
 
     for (const target of targets) {
@@ -99,7 +101,7 @@ export function InlineVideoGallery({ text, sessionId, workDir, changedFiles }: P
         continue
       }
       seenSrc.add(src)
-      result.push({ src, name: relPath.split('/').pop() ?? '' })
+      result.push({ src, name: relPath.split('/').pop() ?? '', href: relPath })
     }
 
     return result
@@ -110,28 +112,48 @@ export function InlineVideoGallery({ text, sessionId, workDir, changedFiles }: P
   return (
     <div className="mt-3 space-y-2">
       {videos.map((video) => (
-        <div
-          key={video.src}
-          className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] shadow-sm"
-        >
-          <video
-            src={video.src}
-            controls
-            preload="metadata"
-            playsInline
-            className="w-full rounded-t-xl bg-black"
-            style={{ maxHeight: 420 }}
-            onError={(e) => {
-              // Hide the whole container when the video can't be loaded.
-              (e.target as HTMLVideoElement).closest('div')!.style.display = 'none'
-            }}
-          />
-          <div className="flex items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-medium text-[var(--color-text-tertiary)]">
-            <span className="material-symbols-outlined text-[12px]">movie</span>
-            <span className="truncate">{video.name}</span>
-          </div>
-        </div>
+        <VideoPreview key={video.src} video={video} sessionId={sessionId!} workDir={workDir ?? undefined} />
       ))}
+    </div>
+  )
+}
+
+function VideoPreview({ video, sessionId, workDir }: { video: GalleryVideo; sessionId: string; workDir?: string }) {
+  const [failed, setFailed] = useState(false)
+
+  if (failed) {
+    return (
+      <AssistantOutputTargetCard
+        target={{
+          id: `file:${video.href}`,
+          kind: 'file',
+          title: video.name,
+          href: video.href,
+          normalizedPath: video.href,
+          confidence: 'high',
+          source: 'plain-path',
+        }}
+        sessionId={sessionId}
+        workDir={workDir}
+      />
+    )
+  }
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] shadow-sm">
+      <video
+        src={video.src}
+        controls
+        preload="metadata"
+        playsInline
+        className="w-full rounded-t-xl bg-black"
+        style={{ maxHeight: 420 }}
+        onError={() => setFailed(true)}
+      />
+      <div className="flex items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-medium text-[var(--color-text-tertiary)]">
+        <span className="material-symbols-outlined text-[12px]">movie</span>
+        <span className="truncate">{video.name}</span>
+      </div>
     </div>
   )
 }

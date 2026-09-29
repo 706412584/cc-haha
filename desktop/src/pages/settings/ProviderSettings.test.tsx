@@ -13,6 +13,7 @@ import { ProviderSettings } from './ProviderSettings'
 vi.mock('../../components/settings/ClaudeOfficialLogin', () => ({ ClaudeOfficialLogin: () => null }))
 vi.mock('../../components/settings/ChatGPTOfficialLogin', () => ({ ChatGPTOfficialLogin: () => null }))
 vi.mock('../../components/settings/GrokOfficialLogin', () => ({ GrokOfficialLogin: () => null }))
+vi.mock('../../components/settings/OfficialProviderModelSettings', () => ({ OfficialProviderModelSettings: () => null }))
 
 const savedProviders: SavedProvider[] = ([
   ['xuanshuapi', '玄枢API', 'https://www.xuanshuapi.com', 'claude-sonnet-5'],
@@ -341,10 +342,26 @@ describe('provider request compatibility', () => {
     expect(dialog.queryByRole('combobox', { name: 'Output token field' })).not.toBeInTheDocument()
     expect(dialog.getByRole('combobox', { name: 'Reasoning parameters' })).toBeInTheDocument()
   })
-  it('keeps compatibility controls hidden for Anthropic providers', async () => {
+  it('shows the reply output budget for Anthropic providers and saves it budget-only', async () => {
+    // The fixture carries OpenAI-compat knobs (sampling, futureOption) that do
+    // not apply to a native Anthropic endpoint. For Anthropic the editor keeps
+    // the budget visible and editable, hides the advanced controls, and strips
+    // any stale compat options on save so they cannot leak into the provider.
     vi.mocked(providersApi.list).mockResolvedValue({ providers: [{ ...provider, apiFormat: 'anthropic' }], activeId: null })
     const dialog = await open()
-    expect(dialog.queryByRole('textbox', { name: 'Reply output budget' })).not.toBeInTheDocument()
+    const budget = dialog.getByRole('textbox', { name: 'Reply output budget' })
+    expect(budget).toHaveValue('64000')
+    expect(dialog.queryByRole('button', { name: 'Advanced compatibility' })).not.toBeInTheDocument()
+    fireEvent.change(budget, { target: { value: '4096' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalledWith('compat-provider', expect.objectContaining({
+      apiFormat: 'anthropic',
+      // Exact object match: sampling/futureOption must be gone, not just omitted from the assertion.
+      requestCompatibility: { maxOutputTokens: 4096 },
+    })))
+    const settings = vi.mocked(providersApi.updateSettings).mock.calls.at(-1)?.[0]
+    expect(settings).not.toHaveProperty('requestCompatibility')
+    expect(settings).toMatchObject({ env: { CUSTOM_ENV: 'keep', CLAUDE_CODE_PROVIDER_MAX_OUTPUT_TOKENS: '4096' } })
   })
 })
 

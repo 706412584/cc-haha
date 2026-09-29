@@ -110,6 +110,7 @@ import { handleStopHooks } from './query/stopHooks.js'
 import { buildQueryConfig } from './query/config.js'
 import { productionDeps, type QueryDeps } from './query/deps.js'
 import type { Terminal, Continue } from './query/transitions.js'
+import { consumeTeamPlanTurnPause } from './utils/swarm/teamPlanTurnBoundary.js'
 import { feature } from 'bun:bundle'
 import {
   getCurrentTurnTokenBudget,
@@ -1517,6 +1518,12 @@ async function* queryLoop(
       }
     }
     queryCheckpoint('query_tool_execution_end')
+
+    // All tool results must be yielded before ending the planning turn. Do not
+    // ask the model (or a tool-summary model) to continue while humans review.
+    if (consumeTeamPlanTurnPause(toolUseContext.abortController)) {
+      return { reason: 'completed' }
+    }
 
     // Generate tool use summary after tool batch completes — passed to next recursive call
     let nextPendingToolUseSummary:

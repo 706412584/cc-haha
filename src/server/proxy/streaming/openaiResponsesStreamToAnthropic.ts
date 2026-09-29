@@ -596,7 +596,9 @@ function reconcileToolArguments(index: number, value: unknown, state: StreamStat
     // Compatible providers can serialize the same final object differently.
     // Keep the emitted representation when the parsed inputs are identical.
     try {
-      if (isDeepStrictEqual(parseResponsesToolArguments(text), parseResponsesToolArguments(tool.arguments))) return
+      const finalInput = asRecord(JSON.parse(text))
+      const streamedInput = asRecord(JSON.parse(tool.arguments))
+      if (finalInput && streamedInput && isDeepStrictEqual(finalInput, streamedInput)) return
     } catch {
       // Partial JSON cannot establish semantic equality.
     }

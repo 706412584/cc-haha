@@ -90,3 +90,77 @@ test('rebuilds scalar context after an in-place rewrite grows beyond the cached 
   expect(rebuilt.contexts.get(0)?.suppressed).toBe(false)
   expect(rebuilt.scannedBytes).toBe(Number((await stat(file)).size))
 })
+
+const classifyMessage = (entry: Record<string, unknown>) => {
+  const message = entry.message as { role?: string; content?: unknown }
+  const content = message?.content
+  const blocks = Array.isArray(content) ? content : []
+  const texts = typeof content === 'string' ? [content] : blocks.filter(block => block.type === 'text').map(block => block.text)
+  const user = message?.role === 'user' && !entry.isMeta
+  return {
+    notification: user && texts.length > 0 && texts.every(text => /<task-notification>/.test(text)),
+    reset: user && !blocks.some(block => block.type === 'tool_result'),
+    agentToolId: blocks.find(block => block.type === 'tool_use' && ['Agent', 'Task'].includes(block.name))?.id,
+  }
+}
+
+test('an oversized ordinary image resets notification suppression and preserves following replies', async () => {
+  const notice = row('notice', { type: 'user', message: { role: 'user', content: '<task-notification>done</task-notification>' } }) + '\n'
+  const image = row('image', { type: 'user', message: { role: 'user', content: [{ type: 'image', source: { type: 'base64', data: 'A'.repeat(9 * 1024 * 1024) } }] } }) + '\n'
+  const answer = row('answer', { type: 'assistant', message: { role: 'assistant', content: 'Visible reply' } }) + '\n'
+  await writeFile(file, notice + image + answer)
+  const answerOffset = Buffer.byteLength(notice + image)
+  const contexts = await readHistoryContexts({ filePath: file, sourceVersion: await version(), offsets: [0, Buffer.byteLength(notice), answerOffset], classify: classifyMessage })
+  expect(contexts.contexts.get(0)?.suppressed).toBe(true)
+  expect(contexts.contexts.get(Buffer.byteLength(notice))?.suppressed).toBe(false)
+  expect(contexts.contexts.get(answerOffset)?.suppressed).toBe(false)
+  expect((await readHistoryContexts({ filePath: file, sourceVersion: await version(), offsets: [answerOffset], classify: classifyMessage })).scannedBytes).toBe(0)
+})
+
+test('oversized Agent input preserves the sidechain owner for later small records', async () => {
+  const parent = row('parent', { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'agent-tool', name: 'Agent', input: { prompt: 'x'.repeat(9 * 1024 * 1024) } }] } }) + '\n'
+  const child = row('child', { type: 'assistant', parentUuid: 'parent', isSidechain: true, message: { role: 'assistant', content: 'Child result' } }) + '\n'
+  await writeFile(file, parent + child)
+  const offset = Buffer.byteLength(parent)
+  const contexts = await readHistoryContexts({ filePath: file, sourceVersion: await version(), offsets: [offset], classify: classifyMessage })
+  expect(contexts.contexts.get(offset)).toEqual({ owner: 'agent-tool', suppressed: false })
+})
+
+test('an oversized tool result does not reset preceding notification suppression', async () => {
+  const notice = row('notice', { type: 'user', message: { role: 'user', content: '<task-notification>done</task-notification>' } }) + '\n'
+  const result = row('result', { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool', content: 'x'.repeat(9 * 1024 * 1024) }] } }) + '\n'
+  const answer = row('answer', { type: 'assistant', message: { role: 'assistant', content: 'Hidden notification response' } }) + '\n'
+  await writeFile(file, notice + result + answer)
+  const offset = Buffer.byteLength(notice + result)
+  expect((await readHistoryContexts({ filePath: file, sourceVersion: await version(), offsets: [offset], classify: classifyMessage })).contexts.get(offset)?.suppressed).toBe(true)
+})
+
+test('a notification beyond a projected text prefix remains suppressed until an explicit user reset', async () => {
+  const longText = row('long', { type: 'user', message: { role: 'user', content: 'x'.repeat(9 * 1024 * 1024) + '<task-notification>done</task-notification>' } }) + '\n'
+  const hidden = row('hidden', { type: 'assistant', message: { role: 'assistant', content: 'Notification response' } }) + '\n'
+  const reset = row('reset', { type: 'user', message: { role: 'user', content: 'New request' } }) + '\n'
+  const visible = row('visible', { type: 'assistant', message: { role: 'assistant', content: 'Normal reply' } }) + '\n'
+  await writeFile(file, longText + hidden + reset + visible)
+  const hiddenOffset = Buffer.byteLength(longText)
+  const visibleOffset = Buffer.byteLength(longText + hidden + reset)
+  const contexts = await readHistoryContexts({ filePath: file, sourceVersion: await version(), offsets: [hiddenOffset, visibleOffset], classify: classifyMessage })
+  expect(contexts.contexts.get(hiddenOffset)?.suppressed).toBe(true)
+  expect(contexts.contexts.get(visibleOffset)?.suppressed).toBe(false)
+})
+
+test('malformed oversized records preserve uncertainty rather than exposing subsequent notification replies', async () => {
+  const malformed = '{"message":{"content":"' + 'x'.repeat(9 * 1024 * 1024) + '\n'
+  const reply = row('reply', { type: 'assistant', message: { role: 'assistant', content: 'Unknown context' } }) + '\n'
+  await writeFile(file, malformed + reply)
+  const contexts = await readHistoryContexts({ filePath: file, sourceVersion: await version(), offsets: [Buffer.byteLength(malformed)], classify: classifyMessage })
+  expect(contexts.contexts.get(Buffer.byteLength(malformed))?.suppressed).toBe(true)
+})
+
+test('ordinary long text inside the existing semantic limit remains a complete reset', async () => {
+  const notice = row('notice', { type: 'user', message: { role: 'user', content: '<task-notification>done</task-notification>' } }) + '\n'
+  const request = row('request', { type: 'user', message: { role: 'user', content: 'x'.repeat(60 * 1024) } }) + '\n'
+  const answer = row('answer', { type: 'assistant', message: { role: 'assistant', content: 'Visible reply' } }) + '\n'
+  await writeFile(file, notice + request + answer)
+  const offset = Buffer.byteLength(notice + request)
+  expect((await readHistoryContexts({ filePath: file, sourceVersion: await version(), offsets: [offset], classify: classifyMessage })).contexts.get(offset)?.suppressed).toBe(false)
+})

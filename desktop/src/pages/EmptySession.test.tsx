@@ -548,6 +548,18 @@ describe('EmptySession', () => {
     })
   })
 
+  it('finds /clear without recommending it in an empty session', async () => {
+    render(<EmptySession />)
+
+    setComposerText('/', 1)
+    expect(await screen.findByRole('listbox', { name: 'Slash commands' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: '/clear' })).not.toBeInTheDocument()
+
+    setComposerText('/clear', 6)
+    expect(await screen.findByRole('option', { name: '/clear' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: '/goal' })).not.toBeInTheDocument()
+  })
+
   it('prioritizes enabled plugin slash commands by command name when filtering', async () => {
     mocks.listSkills.mockResolvedValueOnce({
       skills: [
@@ -876,7 +888,7 @@ describe('EmptySession', () => {
           sonnet: 'MiniMax-M3',
           opus: 'MiniMax-M3',
         },
-        model1mSupport: { main: enabled, haiku: enabled, sonnet: enabled, opus: enabled },
+        model1mSupport: { main: enabled, fable: enabled, haiku: enabled, sonnet: enabled, opus: enabled },
         toolSearchEnabled: true,
       }],
       activeId: 'provider-minimax',

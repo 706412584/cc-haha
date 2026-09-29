@@ -202,6 +202,7 @@ export type UserSettings = {
   autoDreamEnabled?: boolean
   unifiedActivityPanelEnabled?: boolean
   agentOfficeSurface?: AgentOfficeSurface
+  autoQuestion?: import('../../../src/shared/autoQuestionSettings').AutoQuestionSettings
   skipAutoPermissionPrompt?: boolean
   permissionMode?: PermissionMode
   theme?: ThemeMode

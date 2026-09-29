@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { isSideChatSession } from '../lib/sideChatSessions'
 import type { RuntimeSelection } from '../types/runtime'
 import type { SessionListItem } from '../types/session'
 import {
@@ -139,6 +140,10 @@ function normalizeSelections(
   let changed = false
   const normalized: Record<string, RuntimeSelection> = {}
   for (const [key, selection] of Object.entries(selections)) {
+    if (isSideChatSession(key)) {
+      changed = true
+      continue
+    }
     const next = normalizeSelection(selection)
     if (!next) {
       changed = true
@@ -168,7 +173,9 @@ function loadSelections(): Record<string, RuntimeSelection> {
 function persistSelections(selections: Record<string, RuntimeSelection>) {
   if (typeof localStorage === 'undefined') return
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(selections))
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(Object.fromEntries(
+      Object.entries(selections).filter(([key]) => !isSideChatSession(key)),
+    )))
   } catch {
     // noop
   }

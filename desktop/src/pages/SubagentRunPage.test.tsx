@@ -134,7 +134,7 @@ function expectSharedSessionSurface(agentRunKind: 'subagent' | 'team-member') {
     agentRunKind,
   )
   expect(screen.getByTestId('agent-run-conversation-column')).toHaveClass('min-w-[360px]')
-  expect(screen.getByTestId('session-header').firstElementChild).toHaveClass('max-w-[900px]')
+  expect(screen.getByTestId('session-header').firstElementChild).toHaveClass('max-w-[var(--chat-content-max-width)]')
 }
 
 describe('SubagentRunPage', () => {

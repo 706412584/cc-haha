@@ -53,7 +53,8 @@ export function isNonCustomOpusModel(model: ModelName): boolean {
     model === getModelStrings().opus45 ||
     model === getModelStrings().opus46 ||
     model === getModelStrings().opus48 ||
-    model === getModelStrings().opus50
+    model === getModelStrings().opus50 ||
+    model === getModelStrings().opus55
   )
 }
 
@@ -274,6 +275,9 @@ export function firstPartyNameToCanonical(name: ModelName): ModelShortName {
   if (name.includes('claude-fable-5')) {
     return 'claude-fable-5'
   }
+  if (name.includes('claude-opus-5-5')) {
+    return 'claude-opus-5-5'
+  }
   if (name.includes('claude-opus-5')) {
     return 'claude-opus-5'
   }
@@ -431,6 +435,10 @@ export function getPublicModelDisplayName(model: ModelName): string | null {
       return 'Fable 5'
     case getModelStrings().fable5 + '[1m]':
       return 'Fable 5 (1M context)'
+    case getModelStrings().opus55:
+      return 'Opus 5.5'
+    case getModelStrings().opus55 + '[1m]':
+      return 'Opus 5.5 (1M context)'
     case getModelStrings().opus50:
       return 'Opus 5'
     case getModelStrings().opus50 + '[1m]':
@@ -682,6 +690,9 @@ export function getMarketingNameForModel(modelId: string): string | undefined {
   }
   if (canonical.includes('claude-fable-5')) {
     return has1m ? 'Fable 5 (with 1M context)' : 'Fable 5'
+  }
+  if (canonical.includes('claude-opus-5-5')) {
+    return has1m ? 'Opus 5.5 (with 1M context)' : 'Opus 5.5'
   }
   if (canonical.includes('claude-opus-5')) {
     return has1m ? 'Opus 5 (with 1M context)' : 'Opus 5'

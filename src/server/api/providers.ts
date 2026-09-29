@@ -14,6 +14,8 @@
  * PUT    /api/providers/:id              — update a provider
  * DELETE /api/providers/:id              — delete a provider
  * POST   /api/providers/:id/activate     — activate a saved provider
+ * GET    /api/providers/:id/models       — read built-in OAuth model mapping
+ * PUT    /api/providers/:id/models       — update built-in OAuth model mapping
  * POST   /api/providers/official         — activate official (clear env)
  * POST   /api/providers/:id/test         — test a saved provider
  * POST   /api/providers/test             — test unsaved config
@@ -24,6 +26,7 @@ import { ProviderService } from '../services/providerService.js'
 import { PROVIDER_PRESETS } from '../config/providerPresets.js'
 import {
   CreateProviderSchema,
+  ModelMappingSchema,
   UpdateProviderSchema,
   TestProviderSchema,
   FetchModelsSchema,
@@ -52,6 +55,12 @@ const FetchProviderModelsSchema = z.object({
   // supports the override for internal callers, but exposing a free-form
   // endpoint on an authenticated route only widens the request surface — no
   // client sends it.
+})
+
+const OfficialProviderModelsUpdateSchema = z.object({
+  models: ModelMappingSchema.extend({
+    main: z.string().trim().min(1),
+  }),
 })
 
 export async function handleProvidersApi(
@@ -146,6 +155,23 @@ export async function handleProvidersApi(
       if (req.method !== 'POST') throw methodNotAllowed(req.method)
       await providerService.activateProvider(id)
       return Response.json({ ok: true })
+    }
+
+    // /api/providers/:id/models — built-in OAuth provider model aliases
+    if (action === 'models') {
+      if (req.method === 'GET') {
+        const models = await providerService.getOfficialProviderModels(id)
+        return Response.json({ models })
+      }
+      if (req.method === 'PUT') {
+        const parsed = OfficialProviderModelsUpdateSchema.safeParse(await parseJsonBody(req))
+        if (!parsed.success) {
+          throw ApiError.badRequest(parsed.error.issues.map((issue) => issue.message).join('; '))
+        }
+        const models = await providerService.updateOfficialProviderModels(id, parsed.data.models)
+        return Response.json({ models })
+      }
+      throw methodNotAllowed(req.method)
     }
 
     // /api/providers/:id/test

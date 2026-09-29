@@ -508,11 +508,50 @@ export const sessionsApi = {
     return api.get<ProjectSessionHistoryResponse>(`/api/sessions/project-history?${query.toString()}`, options)
   },
 
-  // The timeline loads the whole transcript in one call. `mode=full` keeps the
-  // server's own byte budget but returns a single newest-first slice plus a
-  // `historyComplete` flag, so the UI never stitches page boundaries together.
-  getFullHistory(sessionId: string, options?: ApiRequestOptions) {
-    return api.get<SessionHistoryPage>(`/api/sessions/${sessionId}/messages?mode=full`, options)
+  // The timeline receives one assembled transcript. Ordinary sessions fit in
+  // `mode=full`; larger sessions continue within the server's request budgets.
+  async getFullHistory(sessionId: string, options?: ApiRequestOptions): Promise<SessionHistoryPage> {
+    const newest = await api.get<SessionHistoryPage>(`/api/sessions/${sessionId}/messages?mode=full`, options)
+    if (!newest.page?.nextCursor) return newest
+
+    // Transport budgets are page boundaries, not timeline boundaries. Join raw
+    // records before mapping so tool calls and results can pair across pages.
+    const pages = [newest]
+    const seen = new Set<string>()
+    let cursor: string | null = newest.page.nextCursor
+    let omitted = newest.page.omittedOversizedEntries
+    let truncated = Boolean(newest.page.contentTruncated)
+    let scannedBytes = newest.page.scannedBytes
+    while (cursor) {
+      if (options?.signal?.aborted) throw options.signal.reason ?? new DOMException('Aborted', 'AbortError')
+      if (seen.has(cursor)) throw new Error('Session history cursor did not advance')
+      seen.add(cursor)
+      const query: URLSearchParams = new URLSearchParams({ cursor })
+      const older: SessionHistoryPage = await api.get<SessionHistoryPage>(`/api/sessions/${sessionId}/messages?${query}`, options)
+      if (options?.signal?.aborted) throw options.signal.reason ?? new DOMException('Aborted', 'AbortError')
+      if (!older.page || older.page.sourceVersion !== newest.page.sourceVersion) {
+        throw new Error('Session history changed while loading')
+      }
+      pages.push(older)
+      omitted += older.page.omittedOversizedEntries
+      truncated ||= Boolean(older.page.contentTruncated)
+      scannedBytes += older.page.scannedBytes
+      cursor = older.page.nextCursor
+    }
+    pages.reverse()
+    return {
+      messages: pages.flatMap(page => page.messages),
+      taskNotifications: pages.flatMap(page => page.taskNotifications ?? []),
+      page: {
+        ...newest.page,
+        nextCursor: null,
+        hasMore: false,
+        historyComplete: omitted === 0 && !truncated && !newest.page.previousCursor,
+        contentTruncated: truncated,
+        omittedOversizedEntries: omitted,
+        scannedBytes,
+      },
+    }
   },
 
   getHistoryPage(sessionId: string, page?: { cursor?: string }, options?: ApiRequestOptions) {

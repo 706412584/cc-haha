@@ -1,3 +1,4 @@
+import { createUnparsedToolInput } from '../../../utils/unparsedToolInput.js'
 import { getOpenAIPolicyError } from '../../../services/openaiAuth/policyError.js'
 
 export function responsesRecord(value: unknown): Record<string, unknown> | null {
@@ -39,14 +40,14 @@ export function responsesTerminalStop(
   throw Object.assign(new Error(`OpenAI response has no valid terminal status: ${status ?? 'missing'}`), { type: 'api_error' })
 }
 
-/** Tool input is executable data: malformed JSON must never become {} or raw. */
+/** Preserve complete malformed calls as non-executable input for model correction. */
 export function parseResponsesToolArguments(value: unknown): Record<string, unknown> {
   let parsed = value
   if (typeof value === 'string' && value.trim()) {
     try {
       parsed = JSON.parse(value)
     } catch {
-      throw new Error('Invalid OpenAI Responses tool arguments: incomplete or malformed JSON')
+      return createUnparsedToolInput(value)
     }
   }
   const record = responsesRecord(parsed)

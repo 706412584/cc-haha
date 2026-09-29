@@ -214,6 +214,7 @@ export function TabBar() {
   const userScrolledRef = useRef(false)
   const [canScrollLeft, setCanScrollLeft] = useState(false)
   const [canScrollRight, setCanScrollRight] = useState(false)
+  const [tabHitWidth, setTabHitWidth] = useState(0)
   const [contextMenu, setContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null)
   const [pendingCloseRequest, setPendingCloseRequest] = useState<PendingCloseRequest | null>(null)
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
@@ -243,6 +244,12 @@ export function TabBar() {
     if (!el) return
     setCanScrollLeft(el.scrollLeft > 0)
     setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 1)
+    // scrollWidth is at least clientWidth even with only one tab. Measure
+    // layout offsets (not transformed drag previews) to preserve empty chrome.
+    const first = el.firstElementChild as HTMLElement | null
+    const last = el.lastElementChild as HTMLElement | null
+    const contentWidth = first && last ? last.offsetLeft + last.offsetWidth - first.offsetLeft : 0
+    setTabHitWidth(Math.max(0, Math.min(el.clientWidth, contentWidth - el.scrollLeft)))
   }, [])
 
   // Keeping the active tab whole is an invariant the strip has to re-establish
@@ -299,11 +306,12 @@ export function TabBar() {
       realignActiveTab()
     })
     ro.observe(el)
+    for (const tab of Array.from(el.children)) ro.observe(tab)
     return () => {
       el.removeEventListener('scroll', syncStripLayout)
       ro.disconnect()
     }
-  }, [realignActiveTab, updateScrollState, tabs.length])
+  }, [realignActiveTab, updateScrollState, tabs])
 
   useEffect(() => {
     if (!activeTabId) return
@@ -594,6 +602,7 @@ export function TabBar() {
         </button>
       )}
 
+      <div className="relative flex min-w-0 flex-1">
       <div
         ref={scrollRef}
         data-testid="tab-bar-scroll-region"
@@ -604,7 +613,7 @@ export function TabBar() {
           than as a corner clipped by the window frame. The strip, not the tab,
           owns the giveback, so it stays inside the window drag region.
         */
-        className="min-w-0 flex-1 flex items-stretch gap-[2px] overflow-x-auto pt-[6px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className="tab-strip-scroll min-w-0 flex-1 flex items-stretch gap-[2px] overflow-x-auto pt-[6px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         onDragOver={(e) => e.preventDefault()}
         onWheel={handleTabWheel}
       >
@@ -632,6 +641,17 @@ export function TabBar() {
             />
           )
         })}
+      </div>
+      {/* Electron does not clip app-region rectangles to overflow. Keep the
+          no-drag rectangle outside scrolling/transformed content (#1370). */}
+      {isDesktopRuntime && (
+        <div
+          data-testid="tab-bar-hit-region"
+          aria-hidden="true"
+          className="tab-strip-hit-region pointer-events-none absolute bottom-0 left-0 top-[6px]"
+          style={{ width: tabHitWidth }}
+        />
+      )}
       </div>
 
       {hasWorkspaceHeader ? rightScrollControl : null}

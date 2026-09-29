@@ -259,6 +259,8 @@ describe('ThinkingBlock', () => {
     expect(first.container.querySelector('[data-thinking-content]')).toBeNull()
     fireEvent.click(screen.getByRole('button'))
     expect(first.container.querySelector('[data-thinking-content="expanded"]')).not.toBeNull()
+    expect(first.container.querySelector('.markdown-prose')).toHaveClass('chat-reading-markdown')
+    expect(screen.getByRole('button')).not.toHaveClass('chat-reading-markdown', 'chat-reading-text')
     first.unmount()
     const second = render(<ThinkingBlock content={content} disclosureKey="think-1" />)
     expect(second.container.querySelector('[data-thinking-content="expanded"]')).not.toBeNull()
