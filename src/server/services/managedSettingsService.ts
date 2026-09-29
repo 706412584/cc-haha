@@ -1,10 +1,9 @@
-import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { randomBytes } from 'node:crypto'
 import { ApiError } from '../middleware/errorHandler.js'
 import { normalizeJsonObject, readRecoverableJsonFile } from './recoverableJsonFile.js'
 import { ensurePersistentStorageUpgraded } from './persistentStorageMigrations.js'
+import { writeJsonFileAtomic } from '../storage/atomicWrite.js'
 
 export class ManagedSettingsService {
   private static writeLocks = new Map<string, Promise<void>>()
@@ -38,17 +37,11 @@ export class ManagedSettingsService {
 
   private async writeSettings(settings: Record<string, unknown>): Promise<void> {
     const filePath = this.getSettingsPath()
-    const dir = path.dirname(filePath)
-    const contents = JSON.stringify(settings, null, 2) + '\n'
-    const tmpFile = `${filePath}.tmp.${process.pid}.${Date.now()}.${randomBytes(6).toString('hex')}`
-
-    await fs.mkdir(dir, { recursive: true })
-
     try {
-      await fs.writeFile(tmpFile, contents, 'utf-8')
-      await fs.rename(tmpFile, filePath)
+      // snapshot:true so a corrupt/zero-filled settings.json can be restored
+      // from the previous good copy on the next read.
+      await writeJsonFileAtomic(filePath, settings, { snapshot: true })
     } catch (error) {
-      await fs.unlink(tmpFile).catch(() => {})
       throw ApiError.internal(`Failed to write settings.json: ${error}`)
     }
   }

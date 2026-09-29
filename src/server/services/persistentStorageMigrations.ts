@@ -2,6 +2,8 @@ import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
 import { randomBytes } from 'node:crypto'
+import { writeFileAtomic } from '../storage/atomicWrite.js'
+import { normalizeJsonObject, restoreFromNewestBackup } from './recoverableJsonFile.js'
 import { normalizeLegacyDeepSeekManagedEnv } from '../../utils/providerManagedEnvCompat.js'
 import { isOpenAIOfficialProviderId } from './openaiOfficialProvider.js'
 import { isGrokOfficialProviderId } from './grokOfficialProvider.js'
@@ -152,15 +154,11 @@ async function backupFile(filePath: string, suffix: string): Promise<void> {
 }
 
 async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true })
-  const tmpPath = `${filePath}.tmp.${Date.now()}-${randomBytes(3).toString('hex')}`
-  try {
-    await fs.writeFile(tmpPath, stableStringify(value), 'utf-8')
-    await fs.rename(tmpPath, filePath)
-  } catch (error) {
-    await fs.unlink(tmpPath).catch(() => {})
-    throw error
-  }
+  // No snapshot here: the migration already took its own
+  // `bak-before-migration-*` copy before touching the file, and stacking a
+  // second backup on every migration write would double the on-disk churn.
+  // fsync (inside writeFileAtomic) is what this path was missing.
+  await writeFileAtomic(filePath, stableStringify(value))
 }
 
 async function quarantineMalformedFile(filePath: string): Promise<void> {
@@ -250,7 +248,17 @@ async function migrateJsonEntry(
     if (error instanceof SyntaxError) {
       try {
         await quarantineMalformedFile(filePath)
-        await writeJsonFile(filePath, {})
+        // The file is unreadable, which is exactly the power-loss signature: a
+        // correct-size file full of NULs. Prefer the newest backup over writing
+        // an empty object — `{}` is a valid shape, so nothing downstream would
+        // ever notice the data was gone. Re-serialize the restored value (not
+        // its raw bytes) so a pre-migration backup still gets upgraded.
+        const restored = await restoreFromNewestBackup(filePath, entryName, normalizeJsonObject)
+        if (restored) {
+          await writeJsonFile(filePath, migrate(restored.value))
+        } else {
+          await writeJsonFile(filePath, {})
+        }
         report.migratedEntries.push(entryName)
         return
       } catch (recoveryError) {

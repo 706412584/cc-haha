@@ -13,6 +13,7 @@ import { ApiError } from '../middleware/errorHandler.js'
 import { buildOpenaiEndpoint } from '../proxy/openaiEndpoint.js'
 import { normalizeAnthropicBaseUrl } from '../../services/api/anthropicBaseUrl.js'
 import { readRecoverableJsonFile } from './recoverableJsonFile.js'
+import { writeJsonFileAtomic } from '../storage/atomicWrite.js'
 import { ManagedSettingsService } from './managedSettingsService.js'
 import { anthropicToOpenaiChat } from '../proxy/transform/anthropicToOpenaiChat.js'
 import { anthropicToOpenaiResponses } from '../proxy/transform/anthropicToOpenaiResponses.js'
@@ -215,15 +216,11 @@ export class ProviderService {
 
   private async writeIndex(index: ProvidersIndex): Promise<void> {
     const filePath = this.getIndexPath()
-    const dir = path.dirname(filePath)
-    await fs.mkdir(dir, { recursive: true })
-
-    const tmpFile = `${filePath}.tmp.${Date.now()}`
     try {
-      await fs.writeFile(tmpFile, JSON.stringify(index, null, 2) + '\n', 'utf-8')
-      await fs.rename(tmpFile, filePath)
+      // snapshot:true keeps the previous index recoverable if this write is
+      // ever interrupted (power loss / hard reset) — see atomicWrite.ts.
+      await writeJsonFileAtomic(filePath, index, { snapshot: true })
     } catch (err) {
-      await fs.unlink(tmpFile).catch(() => {})
       throw ApiError.internal(`Failed to write providers index: ${err}`)
     }
   }

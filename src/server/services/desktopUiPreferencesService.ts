@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto'
 import { ApiError } from '../middleware/errorHandler.js'
 import { readRecoverableJsonFile } from './recoverableJsonFile.js'
 import { ensurePersistentStorageUpgraded } from './persistentStorageMigrations.js'
+import { writeFileAtomic } from '../storage/atomicWrite.js'
 
 const CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION = 5
 const MAX_PROJECT_PREFERENCE_ENTRIES = 2_000
@@ -406,17 +407,11 @@ export class DesktopUiPreferencesService {
 
   private async writePreferences(preferences: DesktopUiPreferences): Promise<void> {
     const filePath = this.getPreferencesPath()
-    const dir = path.dirname(filePath)
-    const contents = JSON.stringify(preferences, null, 2) + '\n'
-    const tmpFile = `${filePath}.tmp.${process.pid}.${Date.now()}.${randomBytes(6).toString('hex')}`
-
-    await fs.mkdir(dir, { recursive: true })
-
     try {
-      await fs.writeFile(tmpFile, contents, 'utf-8')
-      await fs.rename(tmpFile, filePath)
+      await writeFileAtomic(filePath, `${JSON.stringify(preferences, null, 2)}\n`, {
+        snapshot: true,
+      })
     } catch (error) {
-      await fs.unlink(tmpFile).catch(() => {})
       throw ApiError.internal(`Failed to write desktop-ui.json: ${error}`)
     }
   }
