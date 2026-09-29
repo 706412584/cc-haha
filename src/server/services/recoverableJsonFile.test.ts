@@ -192,24 +192,23 @@ describe('readRecoverableJsonFile — recovery does not overreach', () => {
     await expect(fs.access(target)).rejects.toThrow()
   })
 
-  test('leaves the corrupt file in place when no backup can be used', async () => {
+  test('quarantines a corrupt file whose only backup is unusable', async () => {
     const target = path.join(tempDir, 'providers.json')
     const corruptSnapshot = await writeSnapshot(target, 1000, 'broken {{{')
-    const corrupt = Buffer.alloc(32, 0)
-    await fs.writeFile(target, corrupt)
+    await fs.writeFile(target, Buffer.alloc(32, 0))
 
     expect(await readIndex(target)).toEqual({ providers: [], activeId: null })
 
-    // Copy, not move: the main path must still exist so a later read can retry
-    // recovery. If it were renamed away, the next read would see ENOENT and
-    // treat it as a deliberate deletion, never trying the backup again.
-    expect(await fs.readFile(target)).toEqual(corrupt)
+    // The corrupt bytes are moved aside as evidence, so the main path is gone —
+    // this is the same contract `desktopUiPreferencesService` reads `exists`
+    // from. Nothing is restored because the only candidate does not parse.
     expect(quarantinesOf(await fs.readdir(tempDir), 'providers.json')).toHaveLength(1)
+    await expect(fs.access(target)).rejects.toThrow()
     // The unusable candidate is left alone as evidence.
     expect(await fs.readFile(corruptSnapshot, 'utf-8')).toBe('broken {{{')
   })
 
-  test('retries recovery on the next read after a failed write-back', async () => {
+  test('recovers again after the file is re-corrupted', async () => {
     const target = path.join(tempDir, 'providers.json')
     await writeSnapshot(target, 1000, JSON.stringify({ providers: ['recovered'], activeId: null }))
     await fs.writeFile(target, Buffer.alloc(32, 0))

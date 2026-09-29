@@ -36,31 +36,34 @@ function errnoCode(error: unknown): string | undefined {
     : undefined
 }
 
-async function preserveInvalidJsonFile(
+/**
+ * Move the unusable file aside as `.invalid-*` evidence; returns the new path,
+ * or null if the move failed.
+ *
+ * Move, not copy: the main path is expected to be gone afterwards — either
+ * because recovered bytes are committed in its place, or because there is
+ * nothing to recover and callers must see the file as missing (that is the
+ * long-standing contract `desktopUiPreferencesService` reads `exists` from).
+ * `recoverCorruptFile` renames this path back over the main one if the
+ * write-back fails, so a failed recovery is still retried on the next read.
+ */
+async function quarantineInvalidJsonFile(
   filePath: string,
   label: string,
   reason: string,
-  { remove }: { remove: boolean },
-): Promise<void> {
+): Promise<string | null> {
   const backupPath = `${filePath}.invalid-${Date.now()}-${randomBytes(3).toString('hex')}`
   try {
-    if (remove) {
-      await fs.rename(filePath, backupPath)
-      console.warn(`[desktop] Recovered invalid ${label}; moved ${filePath} to ${backupPath}: ${reason}`)
-    } else {
-      // Copy, not move. The main path has to survive until restored bytes are
-      // committed: a rename here would leave nothing behind, and a failed
-      // write-back would then read as a deliberate deletion on the next pass,
-      // so the backup would never be retried.
-      await fs.copyFile(filePath, backupPath)
-      console.warn(`[desktop] Preserved invalid ${label} at ${backupPath}: ${reason}`)
-    }
+    await fs.rename(filePath, backupPath)
+    console.warn(`[desktop] Quarantined invalid ${label} at ${backupPath}: ${reason}`)
+    return backupPath
   } catch (error) {
     console.warn(
-      `[desktop] Recovered invalid ${label} from ${filePath}, but failed to quarantine it: ${
+      `[desktop] Failed to quarantine invalid ${label} from ${filePath}: ${
         error instanceof Error ? error.message : String(error)
       }`,
     )
+    return null
   }
 }
 
@@ -188,15 +191,14 @@ export async function readRecoverableJsonFile<T>({
     parsed = JSON.parse(raw)
   } catch (error) {
     // The power-loss case: a correct-size file full of NULs parses as garbage,
-    // and a backup is the only copy of the user's data left. Copy the bad bytes
-    // aside as evidence, then try to restore over them.
-    await preserveInvalidJsonFile(
+    // and a backup is the only copy of the user's data left.
+    return recoverCorruptFile(
       filePath,
       label,
       error instanceof Error ? error.message : String(error),
-      { remove: false },
+      normalize,
+      defaultValue,
     )
-    return restoreAndPersist(filePath, label, normalize, defaultValue)
   }
 
   const normalized = normalize(parsed)
@@ -204,23 +206,44 @@ export async function readRecoverableJsonFile<T>({
     // Parsed fine but the shape is unrecognised — e.g. a newer schema this
     // build predates. That is NOT corruption, and the file may be the freshest
     // data on disk, so it must never be overwritten with an older backup.
-    // Quarantine it (remove) and fall back to the default; the bytes survive in
-    // the `.invalid-` file for the newer build to reclaim.
-    await preserveInvalidJsonFile(filePath, label, 'unexpected JSON shape', { remove: true })
+    // Quarantine it and fall back to the default; the bytes survive in the
+    // `.invalid-` file for the newer build to reclaim.
+    await quarantineInvalidJsonFile(filePath, label, 'unexpected JSON shape')
     return cloneDefault(defaultValue)
   }
 
   return normalized
 }
 
-async function restoreAndPersist<T>(
+/**
+ * Recover a file that failed to parse.
+ *
+ * Order matters, and it is what keeps both invariants true at once:
+ *
+ *  1. Find a usable backup BEFORE touching the main file. If there is none,
+ *     nothing is renamed away — the corrupt file stays put as evidence, so a
+ *     later read can retry once a backup appears.
+ *  2. Move the corrupt file aside as `.invalid-*` evidence.
+ *  3. Commit the recovered bytes to the main path.
+ *
+ * If step 3 fails, the evidence is renamed BACK onto the main path. That
+ * restores the pre-read state, so the next read retries recovery instead of
+ * hitting ENOENT and mistaking the file for a deliberate deletion.
+ */
+async function recoverCorruptFile<T>(
   filePath: string,
   label: string,
+  reason: string,
   normalize: (value: unknown) => T | null,
   defaultValue: T,
 ): Promise<T> {
   const restored = await restoreFromNewestBackup(filePath, label, normalize)
-  if (!restored) return cloneDefault(defaultValue)
+  if (!restored) {
+    await quarantineInvalidJsonFile(filePath, label, reason)
+    return cloneDefault(defaultValue)
+  }
+
+  const quarantinedPath = await quarantineInvalidJsonFile(filePath, label, reason)
 
   try {
     // Write the backup's bytes back verbatim — a round-trip through
@@ -232,6 +255,12 @@ async function restoreAndPersist<T>(
         error instanceof Error ? error.message : String(error)
       }`,
     )
+    if (quarantinedPath) {
+      // Put the evidence back so the main path exists again and the next read
+      // retries recovery rather than reading the absence as a deletion.
+      await fs.rename(quarantinedPath, filePath).catch(() => {})
+    }
   }
+
   return restored.value
 }
