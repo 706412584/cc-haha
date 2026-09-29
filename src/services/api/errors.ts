@@ -324,6 +324,16 @@ export function getImageUnsupportedErrorMessage(): string {
     ? 'This model does not support images. Continue with text, or switch to a vision-capable model and send the image again.'
     : 'This model does not support images. Double press esc to go back, switch to a vision-capable model, or continue with text.'
 }
+// Used only by the request-context fallback in buildAssistantMessageFromError,
+// where the error text was not a recognised image-rejection wording. Unlike
+// getImageUnsupportedErrorMessage, this does not assert the model's capability:
+// a 400 that happens to land on an image-carrying request may be unrelated to
+// the image. The original reason is preserved in errorDetails.
+export function getImageRejectedErrorMessage(): string {
+  return getIsNonInteractiveSession()
+    ? 'The request was rejected while it carried an image. If the model does not accept images, remove the image or switch to a vision-capable model and try again.'
+    : 'The request was rejected while it carried an image. Double press esc to go back and remove the image, or switch to a vision-capable model and try again.'
+}
 export function getImageInvalidErrorMessage(): string {
   return getIsNonInteractiveSession()
     ? 'The image data was invalid. Re-create the image or continue with text.'
@@ -603,6 +613,50 @@ function isOpenAIImageUrlTextOnlySchemaError(raw: string): boolean {
     raw.includes('valid enumeration') ||
     raw.includes('only text')
   )
+}
+
+// Gate for the request-context fallback in buildAssistantMessageFromError.
+// That fallback exists because some providers reject non-text media with
+// wording we cannot enumerate. But "the failed request carried an image" is not
+// evidence that the error was about the image: a generic 400 (bad parameter,
+// proxy/format mismatch) on a session that ever sent an image would otherwise be
+// mislabelled as IMAGE_UNSUPPORTED and silently strip the image from history.
+// So require the error text itself to look like a media/block-type rejection.
+//
+// Deliberately does NOT require the literal word "image": real rejections are
+// often phrased as content-block-type/schema errors ("unsupported content block
+// type: only text is allowed for this model").
+export function errorTextImpliesMediaRejection(message: string): boolean {
+  const raw = message.toLowerCase()
+  // Content-block / schema rejections: the provider rejects a non-text block
+  // type without naming it.
+  if (
+    raw.includes('content block') ||
+    raw.includes('content_block') ||
+    raw.includes('block type') ||
+    raw.includes('block_type') ||
+    raw.includes('content part') ||
+    raw.includes('content type') ||
+    raw.includes('part type')
+  ) {
+    return true
+  }
+  // "only text is allowed" style wording.
+  if (
+    raw.includes('only text') ||
+    raw.includes('text only') ||
+    raw.includes('text-only') ||
+    raw.includes('only supports text') ||
+    raw.includes('only support text')
+  ) {
+    return true
+  }
+  // A media/attachment noun paired with a rejection verb. The noun is required
+  // so unrelated 400s ("invalid request", "unsupported format") do not match.
+  const mediaNoun = /(?:image|vision|multimodal|multi-modal|modality|media|document|pdf)/
+  const rejectionVerb =
+    /(?:not support|unsupported|not allowed|not permitted|disallow|forbidden|invalid|reject|unexpected|unknown variant|not one of|only)/
+  return mediaNoun.test(raw) && rejectionVerb.test(raw)
 }
 
 // Deep-walk a request payload looking for image blocks. Images can sit at the
@@ -1206,6 +1260,13 @@ function buildAssistantMessageFromError(
   // (context overflow, PDF, media size, auth, 404 all handled above), treat it
   // as a media rejection so the media is stripped from later turns.
   //
+  // "The request carried an image" alone is NOT evidence the error was about
+  // the image: a generic 400 (bad parameter, proxy/format mismatch) on a session
+  // that ever sent an image would be mislabelled and silently strip it. So the
+  // error text must itself look like a media/block-type rejection. Otherwise
+  // fall through to the generic APIError handling below, which reports the
+  // original message without asserting anything about the model's capability.
+  //
   // A request carrying both kinds is classified as REQUEST_TOO_LARGE, which
   // strips documents as well: reporting IMAGE_UNSUPPORTED would strip only the
   // images and leave an oversized document replaying on every turn — the same
@@ -1216,13 +1277,14 @@ function buildAssistantMessageFromError(
     error instanceof APIError &&
     (error.status === 400 || error.status === 422) &&
     options?.messagesForAPI &&
-    messagesContainImageBlock(options.messagesForAPI)
+    messagesContainImageBlock(options.messagesForAPI) &&
+    errorTextImpliesMediaRejection(error.message)
   ) {
     const carriesDocument = messagesContainDocumentBlock(options.messagesForAPI)
     return createAssistantAPIErrorMessage({
       content: carriesDocument
         ? getRequestTooLargeErrorMessage()
-        : getImageUnsupportedErrorMessage(),
+        : getImageRejectedErrorMessage(),
       error: 'invalid_request',
       errorDetails: error.message,
       businessErrorCode: carriesDocument

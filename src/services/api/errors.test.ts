@@ -2,9 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import { APIError } from '@anthropic-ai/sdk'
 import { BUSINESS_ERROR_CODES } from '../../constants/businessErrors.js'
 import {
+  API_ERROR_MESSAGE_PREFIX,
   getAssistantMessageFromError,
-  getPromptTooLongTokenGap,
+  getImageRejectedErrorMessage,
   getImageUnsupportedErrorMessage,
+  getPromptTooLongTokenGap,
   isContextOverflowErrorText,
   isSerializedSizeOverflowText,
   isUnsupportedImageInputErrorMessage,
@@ -131,6 +133,133 @@ describe('image unsupported API errors', () => {
 
     expect(msg.isApiErrorMessage).toBe(true)
     expect(msg.businessErrorCode).toBeUndefined()
+  })
+
+  test('positive: a genuine media-rejection wording still yields image_unsupported', () => {
+    // The wording alone must not match the text classifier, so this exercises
+    // the request-context fallback gate rather than the classifier branch.
+    const message = 'invalid request: content block type is not permitted for this model'
+    const error = new APIError(
+      400,
+      {
+        type: 'error',
+        error: { type: 'invalid_request_error', message },
+      },
+      message,
+      undefined,
+    )
+    const messagesForAPI = [
+      {
+        type: 'user' as const,
+        message: {
+          role: 'user' as const,
+          content: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: 'AAA' },
+            },
+          ],
+        },
+      },
+    ]
+
+    expect(isUnsupportedImageInputErrorMessage(message)).toBe(false)
+
+    const msg = getAssistantMessageFromError(error, 'deepseek-v4-pro', {
+      messagesForAPI: messagesForAPI as never,
+    })
+
+    expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.IMAGE_UNSUPPORTED)
+    expect(msg.errorDetails).toContain(message)
+    expect(msg.sourceModel).toBe('deepseek-v4-pro')
+    // The fallback must not assert the model's capability.
+    expect(msg.message.content[0]).toMatchObject({
+      type: 'text',
+      text: getImageRejectedErrorMessage(),
+    })
+  })
+
+  // Regression: a 400 unrelated to media used to be mislabelled as
+  // IMAGE_UNSUPPORTED purely because the session had ever carried an image,
+  // which then stripped the image from history (poisoning every later turn).
+  test('does not fall back when the 400 is a proxy/format mismatch on an image-carrying history', () => {
+    const message =
+      'Provider "f42d94bb-5e87-4d83-9f7a-da92e5592296" uses anthropic format — proxy not needed'
+    const error = new APIError(
+      400,
+      {
+        type: 'error',
+        error: { type: 'invalid_request_error', message },
+      },
+      message,
+      undefined,
+    )
+    const messagesForAPI = [
+      {
+        type: 'user' as const,
+        message: {
+          role: 'user' as const,
+          content: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: 'AAA' },
+            },
+          ],
+        },
+      },
+    ]
+
+    const msg = getAssistantMessageFromError(error, 'deepseek-v4-pro', {
+      messagesForAPI: messagesForAPI as never,
+    })
+
+    expect(msg.isApiErrorMessage).toBe(true)
+    // No media classification → no image-strip anchor.
+    expect(msg.businessErrorCode).toBeUndefined()
+    const text = (msg.message.content[0] as { text: string }).text
+    expect(text).toContain(API_ERROR_MESSAGE_PREFIX)
+    expect(text).toContain('proxy not needed')
+  })
+
+  test('does not fall back when the 400 is a generic upstream parameter rejection on an image-carrying history', () => {
+    const message =
+      'Upstream returned HTTP 400: {"error":{"code":"invalid_request_error","message":"请求参数不符合当前模型要求，请调整后重试。"}}'
+    const error = new APIError(
+      400,
+      {
+        type: 'error',
+        error: { type: 'invalid_request_error', message },
+      },
+      message,
+      undefined,
+    )
+    const messagesForAPI = [
+      {
+        type: 'user' as const,
+        message: {
+          role: 'user' as const,
+          content: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: 'AAA' },
+            },
+          ],
+        },
+      },
+    ]
+
+    const msg = getAssistantMessageFromError(error, 'deepseek-v4-pro', {
+      messagesForAPI: messagesForAPI as never,
+    })
+
+    expect(msg.isApiErrorMessage).toBe(true)
+    expect(msg.businessErrorCode).toBeUndefined()
+    const text = (msg.message.content[0] as { text: string }).text
+    expect(text).toContain(API_ERROR_MESSAGE_PREFIX)
+    expect(text).toContain('请求参数不符合当前模型要求')
   })
 
   test('does not fall back for non-400/422 API errors even when images were sent', () => {
@@ -374,7 +503,9 @@ describe('context overflow errors', () => {
   // oversized document replays on every turn, the same unrecoverable loop the
   // fallback exists to break.
   test('strips documents too when the unrecognized rejection carried one', () => {
-    const message = '400 something the classifier does not recognise'
+    // Wording the text classifier misses but that still reads as a media/block
+    // rejection, so the request-context fallback gate lets it through.
+    const message = 'invalid content block type for this model'
     const error = new APIError(
       400,
       { type: 'error', error: { type: 'api_error', message } },
@@ -403,7 +534,7 @@ describe('context overflow errors', () => {
   })
 
   test('keeps the image classification when no document is present', () => {
-    const message = '400 something the classifier does not recognise'
+    const message = 'invalid content block type for this model'
     const error = new APIError(
       400,
       { type: 'error', error: { type: 'api_error', message } },
