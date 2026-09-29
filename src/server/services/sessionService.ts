@@ -3576,7 +3576,7 @@ export class SessionService {
           const projectsRoot = indexedMatches.length > 0
             ? await fs.realpath(this.getProjectsDir())
             : null
-          const hydratedMatches: Array<SessionFileMatch & { mtimeMs: number; hasTranscript: boolean }> = []
+          const hydratedMatches: Array<SessionFileMatch & { mtimeMs: number }> = []
           let hydrationFailed = false
           for (const match of indexedMatches) {
             try {
@@ -3586,11 +3586,7 @@ export class SessionService {
                 sessionId,
                 projectsRoot!,
               )
-              hydratedMatches.push({
-                ...match,
-                mtimeMs: stat.mtimeMs,
-                hasTranscript: await this.fileHasConversationTranscript(match.filePath),
-              })
+              hydratedMatches.push({ ...match, mtimeMs: stat.mtimeMs })
             } catch (error) {
               if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
                 hydrationFailed = true
@@ -3609,9 +3605,12 @@ export class SessionService {
             if (hydratedMatches.length === 1) {
               return hydratedMatches.map(({ filePath, projectDir }) => ({ filePath, projectDir }))
             }
+            // Tie-break via fileHasConversationTranscript rather than readJsonlFile: the
+            // latter degrades to a tail window on an oversized transcript, so it could
+            // miss the only conversation turn and rank a metadata-only placeholder first.
             const withTranscript = await Promise.all(hydratedMatches.map(async (match) => ({
               ...match,
-              hasTranscript: this.hasConversationTranscript(await this.readJsonlFile(match.filePath)),
+              hasTranscript: await this.fileHasConversationTranscript(match.filePath),
             })))
             return withTranscript
               .sort((a, b) => Number(b.hasTranscript) - Number(a.hasTranscript) || b.mtimeMs - a.mtimeMs || a.filePath.localeCompare(b.filePath))
@@ -3641,25 +3640,30 @@ export class SessionService {
       return []
     }
 
-    const matches: Array<{ filePath: string; projectDir: string; mtimeMs: number; hasTranscript: boolean }> = []
+    const matches: Array<{ filePath: string; projectDir: string; mtimeMs: number }> = []
     for (const dir of projectDirs) {
       const filePath = path.join(projectsDir, dir, `${sessionId}.jsonl`)
       try {
         const stat = await fs.stat(filePath)
-        matches.push({
-          filePath,
-          projectDir: dir,
-          mtimeMs: stat.mtimeMs,
-          hasTranscript: await this.fileHasConversationTranscript(filePath),
-        })
+        matches.push({ filePath, projectDir: dir, mtimeMs: stat.mtimeMs })
       } catch {
         continue
       }
     }
 
+    // A single candidate needs no tie-break, and callers like the signature poll
+    // must not parse a transcript merely to locate it.
+    if (matches.length === 1) {
+      return matches.map(({ filePath, projectDir }) => ({ filePath, projectDir }))
+    }
+
     // Prefer the candidate that actually holds a conversation: a worktree move leaves a
     // placeholder behind, and a newer placeholder must not shadow the real transcript.
-    return matches
+    const withTranscript = await Promise.all(matches.map(async (match) => ({
+      ...match,
+      hasTranscript: await this.fileHasConversationTranscript(match.filePath),
+    })))
+    return withTranscript
       .sort((a, b) => Number(b.hasTranscript) - Number(a.hasTranscript) || b.mtimeMs - a.mtimeMs || a.filePath.localeCompare(b.filePath))
       .map(({ filePath, projectDir }) => ({ filePath, projectDir }))
   }
