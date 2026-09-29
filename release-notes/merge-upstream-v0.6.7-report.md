@@ -7,7 +7,7 @@
 - **merge base**: `2f8d819d` (upstream v0.6.6,上一轮已并入)
 - **上游增量**: 62 commits
 - **合并提交**: `8c290e60`
-- **后续修复提交**: `54954f5e`(desktop 类型错误)、`541d52bf`(desktop 回归)、`6b666b33`(server 回归)、`74748173`(dead-import + compact.test 括号)、`bacb1596`(sessionService 元数据折叠)、`373d0753`(sessionService 单候选短路)
+- **后续修复提交**: `54954f5e`(desktop 类型错误)、`541d52bf`(desktop 回归)、`6b666b33`(server 回归)、`74748173`(dead-import + compact.test 括号)、`bacb1596`(sessionService 元数据折叠)、`373d0753`(sessionService 单候选短路)、`2bc81c08`(sessionService side-chat 守卫)
 - **合并策略**: 以 fork 为主,吸收上游优化;大改子系统以上游为基底回植 fork 定制点
 
 > 为什么合并对象是 tag 而不是 `upstream/main` HEAD:HEAD 比 tag 多 3 个提交。本次按用户指定锁定 tag,保持发布点可复现。
@@ -49,9 +49,9 @@
 | Code Council wordmark | 保留 | `desktop/src/components/layout/Sidebar.tsx:1194`(`Code <span>Council</span>`)、`AppShell.tsx:426` |
 | GitHub 链接指向 706412584/cc-haha | 保留 | `README.md:158` / `README.zh-CN.md:157` 的 `anthropics/claude-code` 是上游项目署名,非本仓库链接 |
 
-## 真实功能回归(合并静默丢失 fork 逻辑,共 8 处,均已修复)
+## 真实功能回归(合并静默丢失 fork 逻辑,共 9 处,均已修复)
 
-这一节是本次合并最重要的部分。八处丢失**都没有产生冲突、没有类型错误**,与 v0.6.6 报告记录的失效模式完全一致。分两批发现:第 1–4 处在合并过程中由逐文件复查发现,第 5–8 处由独立审核代理复查发现(见下「独立审核结论」)。其中第 6、7、8 处本会表现为「上游新增测试失败」,但因基线清单不含这些新文件而完全隐形(详见本节末尾)。
+这一节是本次合并最重要的部分。九处丢失**都没有产生冲突、没有类型错误**,与 v0.6.6 报告记录的失效模式完全一致。分三批发现:第 1–4 处在合并过程中由逐文件复查发现,第 5–8 处由独立审核代理复查发现(见下「独立审核结论」),第 9 处由「跑完整 server lane」发现(见「验证结果 → check:server」)。其中第 6、7、8、9 处本会表现为「上游新增测试失败」,但因基线清单不含这些新文件而完全隐形(详见本节末尾)。
 
 ### 第一批(合并过程中发现)
 
@@ -69,7 +69,11 @@
 7. **`sessionService.ts` — effort 替换规则被丢弃。** 上游是 `state.effortLevel = resolveSessionEffortLevel(record, state.effortLevel)`;合并取了 fork 侧那行,`resolveSessionEffortLevel` 虽被 import 却在此处没被调用。后果:后续 `session-meta` 带完整运行时选择但无 `effortLevel` 时,上游会清掉继承来的 effort,合并版却永久保留旧值。由 `sessionService.runtimeSelection.test.ts` 的 `a complete built-in runtime selection also clears old effort` 捕获。
 8. **`sessionService.ts` — 会话查找退化成「上游成本 + fork 弱读」的坏混合。** 合并后 `findSessionFiles`/`findSessionFilesFromFiles` 的发现循环已经为每个候选读了**超限感知**的 `fileHasConversationTranscript`,随后多候选分支又用 `readJsonlFile` **重读一遍并覆盖**该值;而 `readJsonlFile` 在文件超过 `maxFullJsonlReadBytes` 时只读**尾部窗口**(`readAndParseJsonl` 的 tail 分支),可能整段错过唯一的会话轮次,从而让「worktree 移动留下的占位文件」排到真正的超大 transcript 前面。同时每一次查找都付出了 transcript 解析成本,即使只有一个候选。修复:在保留上游超限感知读取器的前提下,恢复 fork 的「仅在真正有歧义时才读」短路,并去掉冗余重读。由 `sessionService.metadata.test.ts` 的 `a sole oversized legacy turn ... cannot be mistaken for an empty placeholder` 覆盖。
 
-**为什么这 4 处逃过了所有门禁:** `sessionService.metadata.test.ts` 与 `sessionService.runtimeSelection.test.ts` 是上游 v0.6.7 **新增**的测试文件,因此既不在 `scripts/quality-gate/quarantine.json`、也不在 `docs/known-pre-existing-test-failures.md` 的任何基线清单里——「与基线一致」的判定对它们**天然为真**。而 `check:server` 在本机又因已登记的 `EBUSY` 中止(见「验证结果」),没能把这些新测试跑出来。两件事叠加,使这批回归在本地完全不可见。**教训:合并后必须显式运行「上游新增的测试文件」,不能只比对基线。** 修复后 `sessionService.metadata.test.ts` 4/4、`sessionService.runtimeSelection.test.ts` 7/7(两者在合并态分别是 0/4、4/7;在上游 `c37ab2da` 上均全绿)。
+### 第三批(跑完整 server lane 发现,提交 `2bc81c08`)
+
+9. **`sessionService.ts` — 两条 side-chat 守卫被丢。** 上游 v0.6.7 给 `sessionService` 加了 **12** 条 `isSideChatId()` 分支,合并只留了 **10** 条,静默丢掉 `getSessionHistoryPage` 与 `getSessionMessagesWithEvidence` 两条。临时侧边对话(`side-*`)没有 transcript、也不在 `memoryLaunchInfo`/`knownSessionKeys` 里,于是两者都落到 `findSessionFile`(对 `side-*` 直接返回 null)并抛 **404 `Session not found: side-…`**。后果:桌面端每次回复后读 `GET /api/sessions/:id/messages` 与 `turn-checkpoints` 都 404。由上游新增的 e2e `side-chat.test.ts` 在第一个 `GET .../messages` 处捕获(该测试在合并态 3/3 失败,在纯上游 `c37ab2da` 上通过)。修复:逐字回植两条分支;修复后测试主体全过,只剩测试自身 `finally` 的 Windows `EBUSY` 清理(与上游同形)。
+
+**为什么这些逃过了所有门禁:** 第 6–9 处的覆盖测试(`sessionService.metadata.test.ts`、`sessionService.runtimeSelection.test.ts`、e2e `side-chat.test.ts`)都是上游 v0.6.7 **新增**的测试文件,因此既不在 `scripts/quality-gate/quarantine.json`、也不在 `docs/known-pre-existing-test-failures.md` 的任何基线清单里——「与基线一致」的判定对它们**天然为真**。而 `check:server` 在本机又因已登记的 `EBUSY` 整条中止(见「验证结果」),没能把这些新测试跑出来。两件事叠加,使这批回归在本地完全不可见。**教训:合并后必须显式运行「上游新增的测试文件」,不能只比对基线。** 修复后 `sessionService.metadata.test.ts` 4/4、`sessionService.runtimeSelection.test.ts` 7/7、`side-chat.test.ts` 主体全过(合并态分别是 0/4、4/7、0/1;在上游 `c37ab2da` 上均全绿或仅剩 EBUSY)。
 
 ## desktop 侧修复
 
@@ -100,7 +104,8 @@
 | `sessionService.runtimeSelection.test.ts`(上游新增) | 7 passed | 上游全绿(合并态 4/7) | 修复后通过 |
 | `sessionService.retention` / `local-index-session-parity` / `project-session-history` | 55 passed | 全绿 | 通过 |
 | `conversations.test.ts` | 148 passed / 2 failed | 2 failed(RE Pipeline) | 预存,无新增 |
-| `check:server` | 见下 | 见下 | 见下 |
+| `check:server`(逐文件跑,587 文件) | 56 非绿 + 1 合并回归(#9,已修) | 两侧 oracle 逐条复现 | 见下 |
+| e2e `side-chat.test.ts`(上游新增) | 主体通过(仅剩 EBUSY 清理) | 上游通过(合并态 0/1,404) | 修复后通过 |
 
 **基线对照法**:desktop 的 2 个失败是文档已登记的 Windows 环境限制(`scripts/build-macos-arm64.test.ts` 用 `spawnSync('/bin/bash')`,Windows 无 `/bin/bash` → `status: null`;`electron/services/serverRuntime.test.ts` 依赖 `SIGTERM` handler 延时清理,Windows `child.kill()` 直接终止进程)。adapters 的 1 个(`ImChatRuntime server stream > uploads an image ...`)在 fork main `601230e0` 上以完全相同的形式失败。
 
@@ -112,7 +117,22 @@
 
 **基线对照(已实测)**:在 fork main `601230e0` 上跑同一条 `check:server`,**以完全相同的方式中止** —— 同一个文件 `claudeBetas.integration.test.ts`、同一个 `EBUSY`、同样 `error: script "check:server" exited with code 1`。故该中止**不是本次合并引入**,且该文件与 fork main 逐字节相同(合并未改动它)。风险最高的 server 用例已在开发过程中单独跑过并与基线对齐:`conversations.test.ts`、`websocket-handler.test.ts`、`localIndex/database.test.ts`、`compact.test.ts`(14 pass)、`dead-imports.test.ts`(28 pass)。
 
-**关键补验**:由于 `check:server` 本机跑不完,合并后的**上游新增测试文件**是单独逐个跑的——这一步正是发现「真实功能回归」第二批 4 处(全部在 `sessionService.ts`)的途径。`sessionService.metadata.test.ts` 在合并态 0/4、`sessionService.runtimeSelection.test.ts` 在合并态 4/7;修复后分别 4/4、7/7,与上游 `c37ab2da` 一致。
+**关键补验(本轮完成)**:`check:server` 的退出码在本机不可用(见上),但**其「逐文件隔离 + 汇总」的跑法本身可用**。本轮把 `scripts/pr/run-server-tests.ts` 复制成临时脚本、只把 `finally` 里的 `rmSync(sandboxHome)` 包一层 try/catch(绕开第二个 EBUSY 中止点),然后**对全部 587 个 `src/**/*.test.ts`(已扣除 quarantine 8 项)逐文件跑了一遍**。结果:
+
+| 范围 | 结果 |
+| --- | --- |
+| 合并改动的 server 测试文件(95 个) | 2010 tests,32 fail —— 逐条归因后**全部为预存** |
+| 其余 server 测试文件(492 个) | 24 个非绿文件 —— 逐条在 oracle 上复现,**全部为预存** |
+| 合并引入的新失败 | **1 个**:e2e `side-chat.test.ts`(回归 #9,已修) |
+
+**归因方法(两侧 oracle 实测)**:
+- **上游新增/改动文件** → 在纯上游 worktree(`c37ab2da`)上跑:`FileWriteTool.test.ts` 4/6、`opus55.test.ts` 2/1、`autoQuestionDecisionService.test.ts` 9/1、`constants/system.test.ts` 1/1,与合并态**逐字一致** → 预存。
+- **fork 侧改动文件** → 在 fork main(`601230e0`)上跑:`conversation-service` 80/1、`conversations` 139/2、`sessions` 323/4、`title-service` 16/1、`e2e/full-flow` 32/1,失败用例名与合并态**完全相同** → 预存。
+- **其余 24 个非绿文件**(`mac-installed-apps`、`macAppIcon`、`reviewService`、`claudemd`、`fileHistory.security`、`computerUse/*`、`workflows/save`、`userProvidedImages`、`skillAdapter`、`ImageGenTool/backend`、`workspaceWatch`、`open-target-service`、`skills`、`workflows-api`、`localFile`、`session-protocol-rollback` 等)→ 在 oracle 上**同样红或更红** → 预存(多为 Windows:macOS 专属、symlink EPERM、子进程探针无 stdout、EBUSY)。
+- **3 个超时文件**(`traceCapture.bounds`、`imageDownload`、`teleport/api`)→ 在两侧 oracle 上**同样超时**,且**均未被本次合并改动** → 预存(Windows 子进程等待)。
+- 唯一例外:`e2e/side-chat.test.ts` 在纯上游 `c37ab2da` 上 **通过**、在合并态 **3/3 失败**(且不是 EBUSY 而是 404)→ **合并回归 #9**,已修。
+
+> 附:`check:server` 之所以「一条 lane 全废」,是因为 orchestrator 的 `finally rmSync` 在 `claudeBetas` 撞 EBUSY 后直接 `process.exit`,**丢弃了其余 586 个文件的结果**。这是本机跑 `check:server` 的正确姿势:要么修那个 `rmSync`(不提交),要么像本轮一样逐文件跑。CI(Linux) 无此问题。
 
 ## 独立审核
 
@@ -121,12 +141,12 @@
 ## 残余风险
 
 - **手工混合的冲突文件没有等价三方 oracle。** 49 个冲突依赖人工判断;非冲突文件可用 `git merge-file` 复算,冲突文件不能。这是本次合并最大的不确定性来源。
-- **fork 行为丢失的模式会重复出现。** 本次 8 处丢失全是「某一侧在函数内多加了一个字段/比较/兜底,合并取了另一侧」。建议对 `ws/handler.ts`、`conversationService.ts`、`sessionService.ts`、`chatStore.ts` 做逐函数字段比对(见独立审核任务书第 2 项)。
-- **「与基线一致」对上游新增测试天然为真。** 第二批 4 处回归全部藏在上游 v0.6.7 **新增**的测试文件里,而基线清单只登记既有失败,于是比对基线永远显示「无新增」。**下次合并的硬性动作:先 `git diff --name-status <base>..<upstream> -- '**/*.test.ts'` 列出上游新增/改动的测试文件,逐个单独跑,再谈基线对照。** 这一步本可提前把第二批 4 处全部暴露。
+- **fork 行为丢失的模式会重复出现。** 本次 9 处丢失全是「某一侧在函数内多加了一个字段/比较/兜底/守卫分支,合并取了另一侧」。`sessionService.ts` 一个文件就占了 6 处(#5–#9),其中 #9 是上游在同文件内**批量新增 12 条同形 `isSideChatId` 分支、合并只留 10 条** —— 这类「一侧批量加分支、另一侧整体覆盖」的冲突最易漏。建议对 `ws/handler.ts`、`conversationService.ts`、`sessionService.ts`、`chatStore.ts` 做逐函数字段比对。
+- **「与基线一致」对上游新增测试天然为真。** #6–#9 全部藏在上游 v0.6.7 **新增**的测试文件里,而基线清单只登记既有失败,于是比对基线永远显示「无新增」。**下次合并的硬性动作:先 `git diff --name-status <base>..<upstream> -- '**/*.test.ts'` 列出上游新增/改动的测试文件,逐个单独跑,再谈基线对照。** 这一步本可提前把 #6–#9 全部暴露。
 - **root `src/` 仍无类型检查 lane。** `check:desktop` 只对 desktop 跑 `tsc`;root `src/` 的改动仅被测试验证。Bun 只剥离类型不检查。
 - **合并对象是 tag 而非 `upstream/main` HEAD。** HEAD 上另有 3 个提交未纳入。若其中含关键修复,需单独 cherry-pick。
 - **本地与 CI 失败集合不同。** 本地 desktop 2 / policy 7 / adapters 1 的失败在 CI 上不出现(或表现不同)。**以 CI 为准**,本地结果只用于快速定位。
-- **`check:server` 本轮未在本机跑完整。** 两次都因脚手架 `EBUSY` 中止,故 server 侧的全量通过数**未经本机确认**;风险最高的用例已单跑对齐(见上),但「没有别的文件因合并而红」这一点依赖 CI 验证。
+- **`check:server` 本机退出码不可用,但覆盖已补齐。** 退出码因脚手架 `EBUSY` 恒为 1(基线同);本轮改以「逐文件跑 + 两侧 oracle 归因」补齐了 587 个文件的覆盖,确认合并引入的新失败**只有 1 个**(#9,已修),其余 56 个非绿文件全部为预存(Windows 环境 / 上游自身红)。CI(Linux) 结果仍应作为最终权威。
 
 ## 恢复工作方式
 
