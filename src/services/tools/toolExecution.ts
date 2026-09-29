@@ -86,6 +86,7 @@ import {
   stopSessionActivity,
 } from '../../utils/sessionActivity.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
+import { isUnparsedToolInput } from '../../utils/unparsedToolInput.js'
 import { Stream } from '../../utils/stream.js'
 import { logOTelEvent } from '../../utils/telemetry/events.js'
 import {
@@ -341,6 +342,26 @@ export async function* runToolUse(
   toolUseContext: ToolUseContext,
 ): AsyncGenerator<MessageUpdateLazy, void> {
   const toolName = toolUse.name
+  if (isUnparsedToolInput(toolUse.input)) {
+    const { raw, len } = toolUse.input.__unparsedToolInput
+    const preview = raw.slice(0, 200)
+    const errorContent = `${toolName} was called with input that could not be parsed as JSON.\n` +
+      `You sent (first ${preview.length} of ${len} bytes): ${preview}\n` +
+      'Common causes: unescaped backslashes in file paths (use / or \\\\), unescaped control characters, or truncated output. Retry with valid JSON.'
+    yield {
+      message: createUserMessage({
+        content: [{
+          type: 'tool_result',
+          tool_use_id: toolUse.id,
+          is_error: true,
+          content: `<tool_use_error>InputValidationError: ${errorContent}</tool_use_error>`,
+        }],
+        toolUseResult: `InputValidationError: JSON parse failed (${len} bytes)`,
+        sourceToolAssistantUUID: assistantMessage.uuid,
+      }),
+    }
+    return
+  }
   // First try to find in the available tools (what the model sees)
   let tool = findToolByName(toolUseContext.options.tools, toolName)
 

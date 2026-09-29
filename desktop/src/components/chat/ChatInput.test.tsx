@@ -1,3 +1,7 @@
+import { getComposerViewForTesting } from './MentionComposer'
+import { useTeamPlanStore } from '@/stores/teamPlanStore'
+import type { TeamPlanRecord } from '../../../../src/shared/teamPlan'
+import { useSideChatStore } from '@/stores/sideChatStore'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom'
@@ -12,6 +16,7 @@ const originalRangeGetClientRects = Object.getOwnPropertyDescriptor(Range.protot
 const originalRangeGetBoundingClientRect = Object.getOwnPropertyDescriptor(Range.prototype, 'getBoundingClientRect')
 
 const mocks = vi.hoisted(() => ({
+  sideOpen: vi.fn(),
   create: vi.fn(),
   delete: vi.fn(),
   list: vi.fn(),
@@ -31,6 +36,8 @@ const mocks = vi.hoisted(() => ({
   webviewDragHandlers: [] as Array<(event: { payload: unknown }) => void>,
   webviewUnlisten: vi.fn(),
 }))
+
+vi.mock('@/lib/workspace/openSideChat', () => ({ openSideChat: mocks.sideOpen }))
 
 vi.mock('../../api/sessions', () => ({
   sessionsApi: {
@@ -100,8 +107,8 @@ vi.mock('../controls/PermissionModeSelector', () => ({
   // Surfaces `compact` because that prop is the difference between the labelled
   // pill and the bare icon the real selector renders, and the composer decides
   // it from the column width.
-  PermissionModeSelector: ({ compact }: { compact?: boolean }) => (
-    <button type="button" data-testid="permission-mode-selector" data-compact={compact ? 'true' : 'false'}>
+  PermissionModeSelector: ({ compact, sessionId }: { compact?: boolean; sessionId?: string }) => (
+    <button type="button" data-testid="permission-mode-selector" data-session={sessionId} data-compact={compact ? 'true' : 'false'}>
       Permissions
     </button>
   ),
@@ -110,11 +117,11 @@ vi.mock('../controls/PermissionModeSelector', () => ({
 vi.mock('../controls/ModelSelector', async () => {
   const React = await vi.importActual<typeof import('react')>('react')
   return {
-    ModelSelector: React.forwardRef<{ open: () => void }, { fluid?: boolean }>(({ fluid }, ref) => {
+    ModelSelector: React.forwardRef<{ open: () => void }, { fluid?: boolean; runtimeKey?: string }>(({ fluid, runtimeKey }, ref) => {
       const [open, setOpen] = React.useState(false)
       React.useImperativeHandle(ref, () => ({ open: () => setOpen(true) }), [])
       return (
-        <div data-testid="model-selector-shell" className={fluid ? 'min-w-0 flex-1' : 'shrink-0'}>
+        <div data-testid="model-selector-shell" data-session={runtimeKey} className={fluid ? 'min-w-0 flex-1' : 'shrink-0'}>
           <button type="button">Model</button>
           {open && <div data-testid="model-selector-dropdown">Model selector opened</div>}
         </div>
@@ -222,6 +229,9 @@ describe('ChatInput file mentions', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    useSideChatStore.setState({ entries: {} })
+    useTeamPlanStore.setState({ bySession: {} })
+    mocks.sideOpen.mockResolvedValue('side-tab')
     mocks.createRepositoryBranch.mockReset()
     act(() => {
       hydrateProjectDisplayNames({}, Number.MAX_SAFE_INTEGER)
@@ -391,6 +401,7 @@ describe('ChatInput file mentions', () => {
     render(<ChatInput />)
 
     const editor = screen.getByRole('textbox')
+    expect(editor).toHaveClass('chat-reading-text')
     expect(editor).toHaveAttribute(
       'data-placeholder',
       'This temporary workspace was cleaned up. Start a new session in the original project to continue.',
@@ -536,6 +547,27 @@ describe('ChatInput file mentions', () => {
     })
   })
 
+  it('keeps a retained conversation draft when settings becomes the selected tab', () => {
+    useTabStore.setState((state) => ({
+      tabs: [...state.tabs, { sessionId: '__settings__', title: 'Settings', type: 'settings', status: 'idle' }],
+    }))
+    const { rerender } = render(<ChatInput sessionId={sessionId} />)
+    setComposerText('keep this draft', 15)
+    act(() => getComposerElement().focus())
+    expect(getComposerElement()).toHaveFocus()
+
+    act(() => useTabStore.getState().setActiveTab('__settings__'))
+    rerender(<ChatInput sessionId={sessionId} visible={false} />)
+
+    expect(getComposerText()).toBe('keep this draft')
+    expect(getComposerElement()).not.toHaveFocus()
+    expect(useChatStore.getState().sessions['__settings__']).toBeUndefined()
+
+    act(() => useTabStore.getState().setActiveTab(sessionId))
+    rerender(<ChatInput sessionId={sessionId} visible />)
+    expect(getComposerText()).toBe('keep this draft')
+  })
+
   it('keeps the unsent draft when switching project on an empty active session', async () => {
     installElectronFileHost()
     mocks.dialogOpen.mockResolvedValueOnce('/other')
@@ -677,6 +709,68 @@ describe('ChatInput file mentions', () => {
     await waitFor(() => {
       expect(screen.queryByAltText('screenshot-full.png')).not.toBeInTheDocument()
     })
+  })
+
+  it('two composers isolate child send, references, controls and focus from the parent', async () => {
+    const child = 'side-scoped'
+    useSideChatStore.setState({ entries: { [child]: { sessionId: child, parentSessionId: sessionId, workDir: '/child', title: 'Side chat', ephemeral: true } } })
+    useChatStore.setState(state => ({ sessions: { ...state.sessions, [child]: useChatStore.getState().getSession(child) } }))
+    useWorkspaceChatContextStore.getState().addReference(child, { kind: 'chat-selection', path: '', name: 'Selection', quote: 'quoted parent text' })
+    const { container } = render(<><ChatInput sessionId={sessionId} compact /><ChatInput sessionId={child} compact /></>)
+    const shells = screen.getAllByTestId('chat-input-shell')
+    const parentEditor = shells[0]!.querySelector('[data-composer-editor]') as HTMLElement
+    const childEditor = shells[1]!.querySelector('[data-composer-editor]') as HTMLElement
+    const parentView = getComposerViewForTesting(parentEditor)!
+    const childView = getComposerViewForTesting(childEditor)!
+    act(() => parentView.dispatch(parentView.state.tr.insertText('parent draft')))
+    act(() => childView.dispatch(childView.state.tr.insertText('child question')))
+    childEditor.focus()
+    act(() => useChatStore.setState(state => ({ sessions: { ...state.sessions, [sessionId]: { ...state.sessions[sessionId]!, chatState: 'streaming' } } })))
+    expect(document.activeElement).toBe(childEditor)
+    expect(within(shells[1] as HTMLElement).getByTestId('permission-mode-selector')).toHaveAttribute('data-session', child)
+    expect(within(shells[1] as HTMLElement).getByTestId('model-selector-shell')).toHaveAttribute('data-session', child)
+    fireEvent.keyDown(childEditor, { key: 'Enter' })
+    await waitFor(() => expect(mocks.wsSend).toHaveBeenCalledWith(child, expect.objectContaining({ type: 'user_message', content: expect.stringContaining('quoted parent text') })))
+    expect(useChatStore.getState().sessions[child]?.messages.find(message => message.type === 'user_text')).toMatchObject({ attachments: [expect.objectContaining({ referenceKind: 'chat-selection', quote: 'quoted parent text' })] })
+    expect(parentEditor.textContent).toBe('parent draft')
+    expect(mocks.wsSend).not.toHaveBeenCalledWith(sessionId, expect.objectContaining({ type: 'user_message' }))
+    expect(container.querySelector('[data-session-id="side-scoped"]')).toBeInTheDocument()
+    expect(mocks.listReferences).toHaveBeenCalledWith('/child')
+  })
+
+  it('accepts asynchronous image paste in an explicit child while the global tab stays on its parent', async () => {
+    const child = 'side-paste'
+    useSideChatStore.setState({ entries: { [child]: { sessionId: child, parentSessionId: sessionId, workDir: '/child', title: 'Side chat', ephemeral: true } } })
+    render(<><ChatInput sessionId={sessionId} compact /><ChatInput sessionId={child} compact /></>)
+    const shells = screen.getAllByTestId('chat-input-shell')
+    const editor = shells[1]!.querySelector('[data-composer-editor]') as HTMLElement
+    const file = new File(['image'], 'child.png', { type: 'image/png' })
+    fireEvent.paste(editor, { clipboardData: { files: [], getData: () => '', items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] } })
+    await waitFor(() => expect(within(shells[1] as HTMLElement).getByRole('img')).toBeInTheDocument())
+    expect(within(shells[0] as HTMLElement).queryByRole('img')).not.toBeInTheDocument()
+  })
+
+  it.each(['idle', 'streaming'] as const)('routes /btw immediately while %s without main send or queue', async (chatState) => {
+    const initial = useChatStore.getState().sessions[sessionId]!
+    useChatStore.setState({ sessions: { [sessionId]: { ...initial, chatState } } })
+    const before = useChatStore.getState().sessions[sessionId]?.messages
+    render(<ChatInput compact />)
+    setComposerText('/btw Why this change?', 21)
+    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+    await waitFor(() => expect(mocks.sideOpen).toHaveBeenCalledTimes(1))
+    expect(mocks.sideOpen).toHaveBeenCalledWith(sessionId, { question: 'Why this change?', submit: true })
+    expect(useChatStore.getState().sessions[sessionId]?.queuedUserMessages ?? []).toEqual([])
+    expect(useChatStore.getState().sessions[sessionId]?.messages).toEqual(before)
+    expect(mocks.wsSend).not.toHaveBeenCalledWith(sessionId, expect.objectContaining({ type: 'user_message' }))
+    expect(getComposerText()).toBe('')
+  })
+
+  it('opens an empty full side chat with /btw without sending a main message', async () => {
+    render(<ChatInput compact />)
+    setComposerText('/btw', 4)
+    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+    await waitFor(() => expect(mocks.sideOpen).toHaveBeenCalledWith(sessionId, { question: undefined, submit: true }))
+    expect(useChatStore.getState().sessions[sessionId]?.queuedUserMessages ?? []).toEqual([])
   })
 
   it('queues prompts submitted while a turn is running until the user guides them', async () => {
@@ -1180,6 +1274,29 @@ describe('ChatInput file mentions', () => {
       content: 'continue while the agent runs',
       attachments: [],
     })
+  })
+
+  it.each(['launching', 'running'] as const)('offers Stop for an approved %s team with an idle lead and no background-agent notification', state => {
+    const plan: TeamPlanRecord = {
+      schemaVersion: 1, planId: 'approved-plan', sessionId, teamName: 'approved-team',
+      incarnationId: 'incarnation', revision: 2, state, workDir: '/repo', createdAt: 1, updatedAt: 2,
+      leaderRuntime: { providerId: 'fake-provider', modelId: 'fake-model' }, members: [], tasks: [],
+    }
+    const entry = { plan, loading: false, busy: false, error: null, conflict: false }
+    // Team process workers do not create local_agent/remote_agent notifications.
+    expect(useChatStore.getState().sessions[sessionId]!.chatState).toBe('idle')
+    expect(useChatStore.getState().sessions[sessionId]!.backgroundAgentTasks ?? {}).toEqual({})
+    useTeamPlanStore.setState({ bySession: { other: { ...entry, plan: { ...plan, sessionId: 'other' } } } })
+    render(<ChatInput compact />)
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
+
+    act(() => { useTeamPlanStore.setState({ bySession: { [sessionId]: entry } }) })
+    expect(screen.getByRole('button', { name: 'Run' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }))
+    expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, { type: 'stop_generation' })
+
+    act(() => { useTeamPlanStore.setState({ bySession: { [sessionId]: { ...entry, plan: { ...plan, state: 'interrupted' } } } }) })
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
   })
 
   it.each(['local_bash', 'dream'])('does not turn Run into Stop for a running %s task', (taskType) => {
@@ -2693,6 +2810,16 @@ describe('ChatInput file mentions', () => {
     const wrapper = getComposerElement().parentElement
     expect(wrapper).toHaveClass('flex-1')
     expect(wrapper).toHaveClass('min-w-0')
+    expect(getComposerElement()).toHaveClass('chat-reading-text')
+  })
+
+  it.each([false, true])('shares the transcript reading width with compact=%s', (compact) => {
+    const { container } = render(<ChatInput compact={compact} />)
+    const readingColumn = Array.from(container.querySelectorAll('div')).find((element) =>
+      element.classList.contains('max-w-[var(--chat-content-max-width)]'))
+    expect(readingColumn).toBeTruthy()
+    expect(readingColumn?.contains(getComposerElement())).toBe(true)
+    expect(getComposerElement()).toHaveClass('chat-reading-text')
   })
 
   it('uses Shift+Enter for a newline when Enter is the configured send shortcut', async () => {
@@ -2881,6 +3008,19 @@ describe('ChatInput file mentions', () => {
       sessionId,
       expect.objectContaining({ type: 'user_message' }),
     )
+  })
+
+  it('submits /clear from an active session instead of completing it to /goal', async () => {
+    render(<ChatInput />)
+
+    setComposerText('/clear', 6)
+    expect(await screen.findByRole('option', { name: '/clear' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: '/goal' })).not.toBeInTheDocument()
+
+    act(() => fireEvent.keyDown(getComposerElement(), { key: 'Enter' }))
+    expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
+      type: 'user_message', content: '/clear', attachments: [],
+    })
   })
 
   it('prioritizes active-session slash commands by command name when filtering', async () => {

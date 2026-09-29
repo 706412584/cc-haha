@@ -314,7 +314,7 @@ afterEach(async () => {
 })
 
 describe('remote H5 auth and CORS integration', () => {
-  test('allows only the configured dev renderer preflight with a desktop process token', async () => {
+  test('allows configured dev renderer H5 preflight but requires the process token for requests', async () => {
     process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'fixture-desktop-token'
     process.env.CC_HAHA_TRUSTED_RENDERER_ORIGIN = 'http://localhost:1420'
     await restartRemoteServer()
@@ -336,10 +336,70 @@ describe('remote H5 auth and CORS integration', () => {
       const response = await fetch(`${baseUrl}/api/settings`, { method: 'OPTIONS', headers: { ...headers, Origin: origin } })
       expect(response.status).toBe(403)
     }
-    for (const endpoint of ['/api/h5-access', '/api/h5-access/enable', '/api/settings/session-cleanup']) {
-      const response = await fetch(`${baseUrl}${endpoint}`, { method: 'OPTIONS', headers })
+    for (const [endpoint, method] of [
+      ['/api/h5-access', 'GET'],
+      ['/api/h5-access', 'PUT'],
+      ['/api/h5-access/enable', 'POST'],
+    ]) {
+      const response = await fetch(`${baseUrl}${endpoint}`, {
+        method: 'OPTIONS',
+        headers: { ...headers, 'Access-Control-Request-Method': method },
+      })
+      expect(response.status).toBe(204)
+      expect(response.headers.get('Access-Control-Allow-Origin')).toBe(headers.Origin)
+    }
+    for (const method of ['GET', 'PUT']) {
+      const response = await fetch(`${baseUrl}/api/h5-access`, {
+        method,
+        headers: { Origin: headers.Origin },
+      })
       expect(response.status).toBe(403)
     }
+    const desktopRead = await fetch(`${baseUrl}/api/h5-access`, {
+      headers: { Origin: headers.Origin, Authorization: 'Bearer fixture-desktop-token' },
+    })
+    expect(desktopRead.status).toBe(200)
+    const desktopUpdate = await fetch(`${baseUrl}/api/h5-access`, {
+      method: 'PUT',
+      headers: {
+        Origin: headers.Origin,
+        Authorization: 'Bearer fixture-desktop-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ allowedOrigins: [] }),
+    })
+    expect(desktopUpdate.status).toBe(200)
+    for (const origin of ['https://evil.example', 'http://localhost:1421']) {
+      const response = await fetch(`${baseUrl}/api/h5-access`, {
+        method: 'OPTIONS',
+        headers: { ...headers, Origin: origin },
+      })
+      expect(response.status).toBe(403)
+    }
+    const proxiedPreflight = await fetch(`${baseUrl}/api/h5-access`, {
+      method: 'OPTIONS',
+      headers: { ...headers, 'X-Forwarded-For': '192.168.0.44' },
+    })
+    expect(proxiedPreflight.status).toBe(403)
+    const cleanupPreflight = await fetch(`${baseUrl}/api/settings/session-cleanup`, { method: 'OPTIONS', headers })
+    expect(cleanupPreflight.status).toBe(403)
+  })
+
+  test('rejects loopback preflight when no renderer origin is trusted', async () => {
+    process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'fixture-desktop-token'
+    await restartRemoteServer()
+
+    const response = await fetch(`${baseUrl}/api/settings`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'http://localhost:1420',
+        'Access-Control-Request-Method': 'GET',
+        'Access-Control-Request-Headers': 'authorization',
+      },
+    })
+
+    expect(response.status).toBe(403)
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBeNull()
   })
 
   test('serves the packaged H5 shell and static assets from the remote server', async () => {

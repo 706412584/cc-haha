@@ -1,15 +1,18 @@
+import { openSideChat } from '@/lib/workspace/openSideChat'
 import { useRef, useEffect, useMemo, memo, useState, useCallback, useDeferredValue, useLayoutEffect, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { createPortal, flushSync } from 'react-dom'
-import { ArrowDown, BookMarked, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleStop, FileStack, LoaderCircle, MessageCircle, Settings, Target, Undo2, XCircle } from 'lucide-react'
+import { ArrowDown, BookMarked, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleStop, FileStack, LoaderCircle, Settings, Target, Undo2, XCircle } from 'lucide-react'
 import { ApiError } from '../../api/client'
 import { sessionsApi, type SessionRewindMode, type SessionTurnCheckpoint } from '../../api/sessions'
 import { listPendingPermissions, useChatStore } from '../../stores/chatStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
 import { useWorkspaceStore, type WorkspaceOrigin } from '../../stores/workspaceStore'
+import { useWorkspaceReviewStore } from '../../stores/workspaceReviewStore'
 import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
 import { teamTaskWindowsForSnapshot, useTeamStore } from '../../stores/teamStore'
 import { useUIStore } from '../../stores/uiStore'
+import { useChatAppearanceStore } from '../../stores/chatAppearanceStore'
 import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n'
 import { UserMessage } from './UserMessage'
@@ -142,7 +145,7 @@ type SelectionPointer = {
 }
 
 const CHAT_SELECTION_MENU_OFFSET = 10
-const CHAT_SELECTION_MENU_WIDTH = 158
+const CHAT_SELECTION_MENU_WIDTH = 360
 const CHAT_SELECTION_MENU_HEIGHT = 44
 
 function getElementForNode(node: Node | null): Element | null {
@@ -207,30 +210,24 @@ function isKeyboardSelectionKey(event: KeyboardEvent) {
 function ChatSelectionMenu({
   selection,
   onAdd,
+  onSideChat,
   popoverRef,
 }: {
   selection: ChatSelectionState | null
   onAdd: () => void
-  popoverRef: { current: HTMLButtonElement | null }
+  onSideChat: () => void
+  popoverRef: { current: HTMLDivElement | null }
 }) {
   const t = useTranslation()
   if (!selection) return null
-
   return createPortal(
-    <button
-      ref={popoverRef}
-      type="button"
-      onMouseDown={(event) => {
-        if (event.button === 0 && !event.ctrlKey) event.preventDefault()
-      }}
-      onClick={onAdd}
-      className="fixed z-[var(--z-popover)] inline-flex h-11 items-center gap-2 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-5 text-[15px] font-semibold text-[var(--color-text-primary)] shadow-[var(--shadow-overlay)] transition-colors hover:bg-[var(--color-surface)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
-      style={{ left: selection.x, top: selection.y }}
-    >
-      <MessageCircle size={21} strokeWidth={2.15} className="shrink-0 text-[var(--color-text-primary)]" aria-hidden="true" />
-      <span>{t('chat.addSelectionToChat')}</span>
-    </button>,
-    document.body,
+    <div ref={popoverRef} role="toolbar" aria-label={t('chat.selectionActions')}
+      onMouseDown={event => { if (event.button === 0 && !event.ctrlKey) event.preventDefault() }}
+      className="fixed z-[var(--z-popover)] inline-flex max-w-[calc(100vw-24px)] items-center rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-1 shadow-[var(--shadow-overlay)]"
+      style={{ left: selection.x, top: selection.y }}>
+      <Button variant="ghost" onClick={onAdd}>{t('chat.addSelectionToChat')}</Button>
+      <Button variant="ghost" onClick={onSideChat}>{t('chat.askSelectionInSideChat')}</Button>
+    </div>, document.body,
   )
 }
 
@@ -493,7 +490,7 @@ function SelectableChatMessage({
   children: ReactNode
 }) {
   const rootRef = useRef<HTMLDivElement>(null)
-  const selectionMenuRef = useRef<HTMLButtonElement>(null)
+  const selectionMenuRef = useRef<HTMLDivElement>(null)
   const lastSelectionPointerRef = useRef<SelectionPointer | null>(null)
   const selectionGestureEpochRef = useRef(0)
   const selectionStartedInsideRef = useRef(false)
@@ -637,6 +634,16 @@ function SelectableChatMessage({
     clearWindowSelection()
   }, [addReference, messageId, role, selectionMenu, sessionId, sourceName])
 
+  const askSelectionInSideChat = useCallback(() => {
+    if (!sessionId || !selectionMenu) return
+    void openSideChat(sessionId, { reference: {
+      kind: 'chat-selection', path: `chat://${role}/${messageId}`,
+      name: sourceName, quote: selectionMenu.text, sourceRole: role, messageId,
+    } })
+    setSelectionMenu(null)
+    clearWindowSelection()
+  }, [messageId, role, selectionMenu, sessionId, sourceName])
+
   return (
     <div
       ref={rootRef}
@@ -646,7 +653,7 @@ function SelectableChatMessage({
       }}
     >
       {children}
-      <ChatSelectionMenu selection={selectionMenu} onAdd={addCurrentSelectionToChat} popoverRef={selectionMenuRef} />
+      <ChatSelectionMenu selection={selectionMenu} onAdd={addCurrentSelectionToChat} onSideChat={askSelectionInSideChat} popoverRef={selectionMenuRef} />
     </div>
   )
 }
@@ -2365,12 +2372,18 @@ export function MessageList({
     chatState === 'tool_executing' ||
     hasPendingPermissionCard ||
     (chatState === 'thinking' && Boolean(activeThinkingId))
+  const appearanceSignature = useChatAppearanceStore((state) =>
+    `${state.appearance.font}:${state.appearance.fontSize}:${state.appearance.width}`,
+  )
+  const previousAppearanceSignature = useRef(appearanceSignature)
+  const pendingAppearanceScrollTop = useRef<number | null>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const scrollContentRef = useRef<HTMLDivElement>(null)
-  const virtualItemHeightsRef = useRef<Map<string, number>>(
-    resolvedSessionId ? getHeightsForSession(resolvedSessionId) : new Map<string, number>(),
+  const [initialVirtualItemHeights] = useState(() =>
+    resolvedSessionId ? getHeightsForSession(resolvedSessionId, appearanceSignature) : new Map<string, number>(),
   )
+  const virtualItemHeightsRef = useRef(initialVirtualItemHeights)
   const virtualItemMetricCacheRef = useRef<Map<string, VirtualRenderItemMetric>>(
     resolvedSessionId ? getMetricsForSession(resolvedSessionId) : new Map<string, VirtualRenderItemMetric>(),
   )
@@ -2773,7 +2786,7 @@ export function MessageList({
       lastSessionIdRef.current = resolvedSessionId
       setProgrammaticNavigationItemId(null)
       virtualItemHeightsRef.current = resolvedSessionId
-        ? getHeightsForSession(resolvedSessionId)
+        ? getHeightsForSession(resolvedSessionId, appearanceSignature)
         : new Map<string, number>()
       virtualItemMetricCacheRef.current = resolvedSessionId
         ? getMetricsForSession(resolvedSessionId)
@@ -2827,7 +2840,7 @@ export function MessageList({
         scrollToBottom()
       }
     }
-  }, [resolvedSessionId, scrollToBottom])
+  }, [appearanceSignature, resolvedSessionId, scrollToBottom])
 
   const tailMessage = messages[messages.length - 1] ?? null
   const tailMessageId = tailMessage?.id ?? null
@@ -3083,6 +3096,46 @@ export function MessageList({
     [measuredItemsVersion, renderItemKeys, renderItemMetrics, renderItems, virtualViewport],
   )
 
+  useLayoutEffect(() => {
+    if (previousAppearanceSignature.current === appearanceSignature) return
+    previousAppearanceSignature.current = appearanceSignature
+    const container = scrollContainerRef.current
+    if (resolvedSessionId) getHeightsForSession(resolvedSessionId, appearanceSignature)
+    if (!container || !virtualTranscriptWindow.enabled) return
+
+    // Off-screen rows retain no valid measurements after a font/measure change.
+    // Re-measure mounted rows before paint and preserve the reader's row plus
+    // its intra-row offset while the spacer above it returns to estimates.
+    const oldOffsets = virtualTranscriptWindow.offsets
+    const oldScrollTop = virtualViewport.scrollTop
+    let anchorIndex = 0
+    while (anchorIndex + 1 < renderItemKeys.length && oldOffsets[anchorIndex + 1]! <= oldScrollTop) anchorIndex += 1
+    virtualItemHeightsRef.current.clear()
+    for (const node of container.querySelectorAll<HTMLElement>('[data-virtual-message-item]')) {
+      const height = node.getBoundingClientRect().height
+      if (height > 0) virtualItemHeightsRef.current.set(node.dataset.virtualMessageItem!, clampNumber(height, VIRTUAL_MIN_ITEM_HEIGHT, VIRTUAL_MAX_ITEM_HEIGHT))
+    }
+    const offsets = buildVirtualItemOffsets(renderItemKeys, renderItemMetrics, virtualItemHeightsRef.current)
+    const intraRowOffset = Math.max(0, oldScrollTop - (oldOffsets[anchorIndex] ?? 0))
+    const rowHeight = (offsets[anchorIndex + 1] ?? 0) - (offsets[anchorIndex] ?? 0)
+    const nextScrollTop = shouldAutoScrollRef.current
+      ? SCROLL_BOTTOM_SENTINEL
+      : (offsets[anchorIndex] ?? 0) + Math.min(intraRowOffset, Math.max(0, rowHeight - 1))
+    ignoreProgrammaticScrollUntilRef.current = performance.now() + 250
+    ignoreProgrammaticScrollTopRef.current = nextScrollTop
+    pendingAppearanceScrollTop.current = nextScrollTop
+    setVirtualViewport((current) => ({ ...current, scrollTop: nextScrollTop }))
+    setMeasuredItemsVersion((version) => version + 1)
+  }, [appearanceSignature, renderItemKeys, renderItemMetrics, resolvedSessionId, virtualTranscriptWindow, virtualViewport.scrollTop])
+
+  useLayoutEffect(() => {
+    const target = pendingAppearanceScrollTop.current
+    if (target === null || !scrollContainerRef.current) return
+    pendingAppearanceScrollTop.current = null
+    setScrollTopWithoutLayoutRead(scrollContainerRef.current, target)
+    ignoreProgrammaticScrollTopRef.current = scrollContainerRef.current.scrollTop
+  }, [measuredItemsVersion])
+
   const activeConversationNavigationItemId = useMemo(
     () => isAwayFromLatest
       ? getActiveConversationNavigationItemId(
@@ -3266,6 +3319,9 @@ export function MessageList({
         expectedContent: target.expectedContent,
         mode,
       })
+
+      useWorkspaceStore.getState().pruneTurnReviewTabs(resolvedSessionId, checkpointTarget.userMessageIndex)
+      useWorkspaceReviewStore.getState().clearTurnReviews(resolvedSessionId, checkpointTarget.userMessageIndex)
 
       await reloadHistory(resolvedSessionId)
       queueComposerPrefill(resolvedSessionId, {
@@ -3780,7 +3836,7 @@ export function MessageList({
           // open — `compact` only tightens padding. Dropping to `max-w-full`
           // was what made the transcript lose its centred structure the moment
           // the agent-teams workbench appeared.
-          className="mx-auto max-w-[900px]"
+          className="mx-auto max-w-[var(--chat-content-max-width)]"
         >
           {sessionState?.historyWindowed && sessionState?.historyPage?.nextCursor ? (
             // The server's byte budget cut history short; this is the only
@@ -3866,7 +3922,7 @@ export function MessageList({
           )}
 
           {!isLoadingTurnChangeCards && visibleTurnChangeCards.length === 0 && turnChangeLoadError && (
-            <div className="mx-auto mb-5 w-full max-w-[900px] rounded-[var(--radius-lg)] border border-[var(--color-error)] bg-[var(--color-error-container)] px-4 py-3 text-xs text-[var(--color-on-error-container)]">
+            <div className="mx-auto mb-5 w-full max-w-[var(--chat-content-max-width)] rounded-[var(--radius-lg)] border border-[var(--color-error)] bg-[var(--color-error-container)] px-4 py-3 text-xs text-[var(--color-on-error-container)]">
               {turnChangeLoadError}
             </div>
           )}

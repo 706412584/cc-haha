@@ -122,6 +122,10 @@ vi.mock('../components/settings/GrokOfficialLogin', () => ({
   GrokOfficialLogin: () => <div data-testid="grok-official-login" />,
 }))
 
+vi.mock('../components/settings/OfficialProviderModelSettings', () => ({
+  OfficialProviderModelSettings: () => <div data-testid="official-provider-model-settings" />,
+}))
+
 vi.mock('../pages/AdapterSettings', () => ({
   AdapterSettings: () => <div>Adapter Settings Mock</div>,
 }))
@@ -527,6 +531,30 @@ describe('Settings > General tab', () => {
     act(() => {
       fireEvent.click(screen.getByRole('button', { name: 'Ink Blue' }))
     })
+    expect(useSettingsStore.getState().setTheme).toHaveBeenCalledWith('ink-blue')
+  })
+
+  it('offers all six palettes, paper grounds before ink ones', () => {
+    render(<Settings />)
+
+    fireEvent.click(screen.getByText('General'))
+    // The picker order is load-bearing: the four paper grounds come first, then
+    // the two ink ones, so the list reads light-to-dark rather than shuffled.
+    const order = ['Pure White', 'Paper', 'Warm Classic', 'Celadon', 'Ink Night', 'Ink Blue']
+      .map((name) => screen.getByRole('button', { name }))
+
+    for (const [index, chip] of order.slice(0, -1).entries()) {
+      const next = order[index + 1]!
+      expect(
+        (chip.compareDocumentPosition(next) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+        `${order[index + 1]} should follow ${order[index]}`,
+      ).toBe(true)
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: 'Pure White' }))
+    expect(useSettingsStore.getState().setTheme).toHaveBeenCalledWith('white')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Ink Blue' }))
     expect(useSettingsStore.getState().setTheme).toHaveBeenCalledWith('ink-blue')
   })
 
@@ -3096,6 +3124,84 @@ describe('Settings > Providers tab', () => {
     })
   })
 
+  it('defaults Tool Search off and requires confirmation before persisting an explicit enable', async () => {
+    MOCK_GET_SETTINGS.mockResolvedValue({ env: { EXISTING_ENV: '1' } })
+    providerStoreState.createProvider = vi.fn().mockResolvedValue({
+      id: 'provider-new',
+      presetId: 'custom',
+      name: 'Custom',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.example.com/anthropic',
+      apiFormat: 'anthropic',
+      toolSearchEnabled: true,
+      models: {
+        main: 'custom-main',
+        haiku: 'custom-main',
+        sonnet: 'custom-main',
+        opus: 'custom-main',
+      },
+    })
+    providerStoreState.presets = [
+      {
+        id: 'custom',
+        name: 'Custom',
+        baseUrl: 'https://api.example.com/anthropic',
+        apiFormat: 'anthropic',
+        defaultModels: {
+          main: 'custom-main',
+          haiku: '',
+          sonnet: '',
+          opus: '',
+        },
+        needsApiKey: true,
+        websiteUrl: '',
+      },
+    ]
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Model/i }))
+    const dialog = screen.getByRole('dialog')
+    const toolSearchCheckbox = within(dialog).getByRole('checkbox', { name: 'Enable Tool Search' })
+
+    expect(toolSearchCheckbox).not.toBeChecked()
+    await waitFor(() => {
+      expect(within(dialog).getByDisplayValue((value) => (
+        typeof value === 'string' && value.includes('"ENABLE_TOOL_SEARCH": "false"')
+      ))).toBeInTheDocument()
+    })
+
+    fireEvent.click(toolSearchCheckbox)
+    expect(toolSearchCheckbox).not.toBeChecked()
+
+    const confirmDialog = screen.getByRole('dialog', { name: 'Enable Tool Search?' })
+    expect(within(confirmDialog).getByText(/final LLM upstream or gateway explicitly supports/)).toBeInTheDocument()
+    expect(within(confirmDialog).getByText(/may return HTTP 400/)).toBeInTheDocument()
+    fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Enable anyway' }))
+
+    expect(toolSearchCheckbox).toBeChecked()
+    await waitFor(() => {
+      expect(within(dialog).getByDisplayValue((value) => (
+        typeof value === 'string' && value.includes('"ENABLE_TOOL_SEARCH": "true"')
+      ))).toBeInTheDocument()
+    })
+
+    fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: /Save|Add/i }))
+
+    await waitFor(() => {
+      expect(providerStoreState.createProvider).toHaveBeenCalledWith(expect.objectContaining({
+        toolSearchEnabled: true,
+      }))
+    })
+    expect(MOCK_UPDATE_SETTINGS).toHaveBeenCalledWith(expect.objectContaining({
+      env: expect.objectContaining({
+        EXISTING_ENV: '1',
+        ENABLE_TOOL_SEARCH: 'true',
+      }),
+    }))
+  })
+
   it('defaults experimental beta headers on and persists a provider disable', async () => {
     MOCK_GET_SETTINGS.mockResolvedValue({ env: { EXISTING_ENV: '1' } })
     providerStoreState.createProvider = vi.fn().mockResolvedValue({
@@ -3232,6 +3338,7 @@ describe('Settings > Providers tab', () => {
       expect(providerStoreState.createProvider).toHaveBeenCalledWith(expect.objectContaining({
         model1mSupport: {
           main: true,
+          fable: false,
           haiku: false,
           sonnet: true,
           opus: false,
@@ -3279,6 +3386,82 @@ describe('Settings > Providers tab', () => {
 
     expect(within(dialog).getByRole('button', { name: /Get API Key/ })).toBeInTheDocument()
     expect(within(dialog).getByText('Sign up with this promotional offer')).toBeInTheDocument()
+  })
+
+  it('persists the Fable slot to its own env var with its own 1M marker', async () => {
+    providerStoreState.createProvider = vi.fn().mockResolvedValue({
+      id: 'provider-fable',
+      presetId: 'custom',
+      name: 'Custom',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.example.com/anthropic',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'claude-sonnet-4-6',
+        fable: 'claude-fable-5',
+        haiku: 'claude-sonnet-4-6',
+        sonnet: 'claude-sonnet-4-6',
+        opus: 'claude-sonnet-4-6',
+      },
+      model1mSupport: {
+        main: false,
+        fable: true,
+        haiku: false,
+        sonnet: false,
+        opus: false,
+      },
+    })
+    providerStoreState.presets = [
+      {
+        id: 'custom',
+        name: 'Custom',
+        baseUrl: 'https://api.example.com/anthropic',
+        apiFormat: 'anthropic',
+        // Fable must be settable from the form, not only by hand-editing
+        // settings.json or importing a cc-switch profile.
+        defaultModels: {
+          main: 'claude-sonnet-4-6',
+          fable: 'claude-fable-5',
+          haiku: '',
+          sonnet: '',
+          opus: '',
+        },
+        needsApiKey: true,
+        websiteUrl: '',
+      },
+    ]
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Model|添加模型/i }))
+    const dialog = screen.getByRole('dialog')
+    await waitFor(() => {
+      const settingsTextarea = dialog.querySelector('textarea')
+      expect(settingsTextarea?.value).toContain('"ANTHROPIC_MODEL"')
+    })
+    fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
+
+    // The slot is editable from the form rather than being carried invisibly.
+    // Queried by label because the input only takes the `combobox` role once a
+    // model list has been fetched.
+    const fableInput = within(dialog).getByLabelText(/Fable Model/i)
+    expect(fableInput).toHaveValue('claude-fable-5')
+    // Fable is the one slot that does not fall back to the main model, so it
+    // must not advertise "Same as main" the way the tier slots do.
+    expect(fableInput).toHaveAttribute('placeholder', 'Leave blank to let Claude Code choose')
+    expect(within(dialog).getByLabelText(/Haiku Model/i))
+      .toHaveAttribute('placeholder', 'Same as main')
+
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /1M support: fable/i }))
+    fireEvent.click(within(dialog).getByRole('button', { name: /Save|Add|保存|添加/i }))
+
+    await waitFor(() => {
+      expect(MOCK_UPDATE_SETTINGS).toHaveBeenCalledWith(expect.objectContaining({
+        env: expect.objectContaining({
+          ANTHROPIC_DEFAULT_FABLE_MODEL: 'claude-fable-5[1m]',
+        }),
+      }))
+    })
   })
 
   it('hides the API key by default and reveals it from the eye button', () => {
@@ -3408,7 +3591,7 @@ describe('Settings > Providers tab', () => {
       })
     })
     expect(await within(dialog).findByText(/Model list loaded \(2\)/i)).toBeInTheDocument()
-    expect(within(dialog).getAllByRole('button', { name: /from the fetched list/i })).toHaveLength(4)
+    expect(within(dialog).getAllByRole('button', { name: /from the fetched list/i })).toHaveLength(5)
 
     // The picker supplements the field; a model id that is not on the list must
     // still be typeable. Queried by role because the picker's own accessible

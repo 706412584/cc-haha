@@ -41,6 +41,8 @@ import {
   unregisterAgent as unregisterPerfettoAgent,
 } from '../telemetry/perfettoTracing.js'
 import { removeMemberByAgentId } from './teamHelpers.js'
+import { isTeamReviewRequired } from './teamPlanPolicy.js'
+import { readTeamPlan } from './teamPlanStore.js'
 
 type SetAppStateFn = (updater: (prev: AppState) => AppState) => void
 
@@ -107,6 +109,9 @@ export async function spawnInProcessTeammate(
 ): Promise<InProcessSpawnOutput> {
   const { name, teamName, prompt, color, planModeRequired, model } = config
   const { setAppState } = context
+  if (isTeamReviewRequired() || await readTeamPlan(teamName)) {
+    return { success: false, agentId: formatAgentId(name, teamName), error: 'Reviewed teams must start from the approved server snapshot, never the in-process backend.' }
+  }
 
   // Generate deterministic agent ID
   const agentId = formatAgentId(name, teamName)
@@ -224,10 +229,10 @@ export async function spawnInProcessTeammate(
  * @param setAppState - AppState setter
  * @returns true if killed successfully
  */
-export function killInProcessTeammate(
+export async function killInProcessTeammate(
   taskId: string,
   setAppState: SetAppStateFn,
-): boolean {
+): Promise<boolean> {
   let killed = false
   let teamName: string | null = null
   let agentId: string | null = null
@@ -298,31 +303,35 @@ export function killInProcessTeammate(
     }
   })
 
-  // Remove from team file (outside state updater to avoid file I/O in callback)
-  if (teamName && agentId) {
-    removeMemberByAgentId(teamName, agentId)
-  }
+  try {
+    // Remove from team file (outside state updater to avoid file I/O in callback)
+    if (teamName && agentId) {
+      await removeMemberByAgentId(teamName, agentId)
+    }
+  } finally {
+    // The task is already stopped. Persistence failures must not suppress its
+    // terminal notification or resource cleanup; the original rejection propagates.
+    if (killed) {
+      void evictTaskOutput(taskId)
+      // notified:true was pre-set so no XML notification fires; close the SDK
+      // task_started bookend directly. The in-process runner's own
+      // completion/failure emit guards on status==='running' so it won't
+      // double-emit after seeing status:killed.
+      emitTaskTerminatedSdk(taskId, 'stopped', {
+        toolUseId,
+        summary: description,
+        ownerAgentId: agentId ?? undefined,
+      })
+      setTimeout(
+        evictTerminalTask.bind(null, taskId, setAppState),
+        STOPPED_DISPLAY_MS,
+      )
+    }
 
-  if (killed) {
-    void evictTaskOutput(taskId)
-    // notified:true was pre-set so no XML notification fires; close the SDK
-    // task_started bookend directly. The in-process runner's own
-    // completion/failure emit guards on status==='running' so it won't
-    // double-emit after seeing status:killed.
-    emitTaskTerminatedSdk(taskId, 'stopped', {
-      toolUseId,
-      summary: description,
-      ownerAgentId: agentId ?? undefined,
-    })
-    setTimeout(
-      evictTerminalTask.bind(null, taskId, setAppState),
-      STOPPED_DISPLAY_MS,
-    )
-  }
-
-  // Release perfetto agent registry entry
-  if (agentId) {
-    unregisterPerfettoAgent(agentId)
+    // Release perfetto agent registry entry
+    if (agentId) {
+      unregisterPerfettoAgent(agentId)
+    }
   }
 
   return killed

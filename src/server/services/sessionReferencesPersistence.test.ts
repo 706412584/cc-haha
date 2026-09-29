@@ -89,6 +89,34 @@ test('collaboration cursors traverse real bounded history pages without dropping
   expect(longestCursor).toBeLessThan(32_000)
 })
 
+// Upstream v0.6.7 addition, kept verbatim. The merge resolved this file to the
+// fork's side, which dropped it even though both lineages carry the
+// pageLimitReached flag the assertions cover.
+test('collaboration history identifies the page cap without claiming complete history', async () => {
+  await writeFile(file, Array.from({ length: 130 }, (_, index) => JSON.stringify(entry(`user-${index}`, `turn ${index}`))).join('\n') + '\n')
+  const sessions = historyService()
+  const collaboration = new SessionCollaborationService({
+    statePath: join(directory, 'collaboration.json'),
+    sessions: {
+      list: async () => ({ sessions: [] }), exists: async () => true,
+      create: async () => { throw new Error('Unused fixture operation') },
+      read: (sessionId, options) => sessions.getSessionHistoryPage(sessionId, options),
+    },
+    runtime: { start: async () => {}, enqueue: async () => {}, stop: async () => {} },
+  })
+  let cursor: string | undefined
+  let result: { messages: Array<{ id: string }>; page: { nextCursor: string | null }; pageLimitReached?: boolean; historyComplete: boolean }
+  const ids: string[] = []
+  do {
+    result = await collaboration.read(id, { cursor, limit: 10 }) as typeof result
+    ids.unshift(...result.messages.map(message => message.id))
+    cursor = result.page.nextCursor ?? undefined
+  } while (cursor)
+  expect(ids).toEqual(Array.from({ length: 80 }, (_, index) => `user-${index + 50}`))
+  expect(result!.pageLimitReached).toBe(true)
+  expect(result!.historyComplete).toBe(false)
+})
+
 test('a storage cursor stays small enough for a model tool schema', async () => {
   // The layer that embeds snapshot identity and the three fingerprints is the
   // storage cursor, so characterize its size here rather than through a

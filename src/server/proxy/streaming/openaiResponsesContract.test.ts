@@ -82,8 +82,8 @@ describe('Responses tool finalization and snapshots', () => {
     const events = await collect(startTool + event('response.function_call_arguments.delta', { item_id: 'fc_1', delta: '{"path":' }) + completed([tool]))
     expect(events.filter(item => item.delta?.type === 'input_json_delta').map(item => item.delta.partial_json).join('')).toBe(tool.arguments)
   })
-  test('completed malformed, missing and conflicting arguments are rejected', async () => {
-    for (const argumentsValue of ['{"path":', '[]', 'null']) {
+  test('completed non-object, missing and conflicting arguments are rejected', async () => {
+    for (const argumentsValue of ['[]', 'null']) {
       await expect(collect(startTool + event('response.function_call_arguments.delta', { item_id: 'fc_1', delta: argumentsValue }) + completed())).rejects.toThrow('tool arguments')
     }
     await expect(collect(startTool + completed())).rejects.toThrow('tool arguments')
@@ -105,8 +105,8 @@ describe('Responses non-streaming terminal validation', () => {
   test('content_filter is not labeled as a token limit', () => {
     expect(() => openaiResponsesToAnthropic(response({ status: 'incomplete', incomplete_details: { reason: 'content_filter' } }), 'fixture')).toThrow('content_filter')
   })
-  test('malformed completed tool input is not converted into raw or empty objects', () => {
-    for (const argumentsValue of ['{"path":', '', null, '[]']) {
+  test('missing and non-object completed tool input is rejected', () => {
+    for (const argumentsValue of ['', null, '[]']) {
       expect(() => openaiResponsesToAnthropic(response({ output: [{ ...tool, arguments: argumentsValue }] }), 'fixture')).toThrow('tool arguments')
     }
   })
@@ -190,4 +190,25 @@ test('corrupt SSE frames cannot be hidden by a later completed tool snapshot', a
     await expect(collect(input, oauth)).rejects.toThrow('Invalid OpenAI Responses SSE JSON')
     await expect(openaiResponsesStreamToAnthropicResponse(stream(input), 'fixture', { openAICodexOAuth: oauth })).rejects.toThrow('Invalid OpenAI Responses SSE JSON')
   }
+})
+
+for (const oauth of [false, true]) {
+  test(`completed malformed arguments survive for CLI correction (oauth=${oauth})`, async () => {
+    const raw = '{"path":"fixture","text":"broken\\escape"}'
+    const input = startTool + event('response.function_call_arguments.delta', { item_id: 'fc_1', delta: raw }) + completed([{ ...tool, arguments: raw }])
+    const events = await collect(input, oauth)
+    expect(events.filter(item => item.delta?.type === 'input_json_delta').map(item => item.delta.partial_json).join('')).toBe(raw)
+    expect(events.find(item => item.type === 'message_delta')?.delta.stop_reason).toBe('tool_use')
+    const result = await openaiResponsesStreamToAnthropicResponse(stream(input), 'fixture', { openAICodexOAuth: oauth })
+    expect(result.content.find(item => item.type === 'tool_use')).toMatchObject({ id: 'call_1', input: { __unparsedToolInput: { raw, len: raw.length } } })
+    const buffered = openaiResponsesToAnthropic(response({ output: [{ ...tool, arguments: raw }] }), 'fixture')
+    expect(buffered.content.find(item => item.type === 'tool_use')).toMatchObject({ id: 'call_1', input: { __unparsedToolInput: { raw, len: raw.length } } })
+  })
+}
+
+test('different malformed arguments with identical truncated markers remain a snapshot conflict', async () => {
+  const prefix = '{"text":"' + 'a'.repeat(2200)
+  const delta = prefix + 'X'
+  const final = prefix + 'Y'
+  await expect(collect(startTool + event('response.function_call_arguments.delta', { item_id: 'fc_1', delta }) + completed([{ ...tool, arguments: final }]))).rejects.toThrow('snapshot conflicts')
 })

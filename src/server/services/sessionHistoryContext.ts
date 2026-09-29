@@ -4,7 +4,8 @@ import { mkdtemp, open, rm, stat } from 'node:fs/promises'
 import { rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { HISTORY_SEMANTIC_RECORD_BYTES, streamBoundedHistory, withHistoryReadBudget } from './boundedSessionHistory.js'
+import { withHistoryReadBudget } from './boundedSessionHistory.js'
+import { isSessionMetadataTextTruncated, streamSessionMetadata } from './sessionMetadataReader.js'
 import { ApiError } from '../middleware/errorHandler.js'
 
 type Context = { owner?: string; suppressed: boolean }
@@ -88,20 +89,25 @@ export async function readHistoryContexts(options: {
     try {
       const fingerprint = await sourceAnchors(options.filePath, targetSize, signal)
       state.database.exec('BEGIN')
-      const result = await streamBoundedHistory(options.filePath, (entry, completeLine, offset) => {
+      const result = await streamSessionMetadata(options.filePath, (entry, completeLine, offset) => {
         const classification = options.classify(entry)
         const inherited = typeof entry.parentUuid === 'string' ? (getParent.get(entry.parentUuid) as { chain?: string } | null)?.chain : undefined
         const explicit = typeof entry.parent_tool_use_id === 'string' && entry.parent_tool_use_id ? entry.parent_tool_use_id : undefined
         const owner = explicit ?? (entry.isSidechain === true ? inherited : undefined)
         const chain = classification.agentToolId ?? inherited
         if (typeof entry.uuid === 'string') saveParent.run(entry.uuid, chain ?? null)
-        if (classification.notification) suppressed = true
+        const message = entry.message as { role?: unknown } | undefined
+        // A bounded text preview cannot prove whether a user record contains a
+        // task notification beyond its prefix. Keep uncertainty fail-closed;
+        // images and tool payloads do not affect this textual classification.
+        if (message?.role === 'user' && !entry.isMeta && isSessionMetadataTextTruncated(entry)) suppressed = null
+        else if (classification.notification) suppressed = true
         else if (classification.reset) suppressed = false
         // Keep root-only ownership filtering separate from notification state:
         // a dedicated child transcript legitimately lacks its parent's Agent call.
         saveContext.run(offset, owner ?? null, suppressed !== false ? 1 : 0, entry.isSidechain === true && !owner ? 1 : 0)
         if (completeLine) completeSuppression = suppressed
-      }, signal, { startOffset: originalOffset, endOffset: targetSize, maxRecordBytes: HISTORY_SEMANTIC_RECORD_BYTES, onSkipped: () => { suppressed = null; completeSuppression = null } })
+      }, signal, { startOffset: originalOffset, endOffset: targetSize, onSkipped: () => { suppressed = null; completeSuppression = null } })
       if (fingerprint !== await sourceAnchors(options.filePath, targetSize, signal)) throw new ApiError(409, 'History was rewritten during context scan', 'HISTORY_CHANGED')
       state.database.exec('COMMIT')
       state.fingerprint = fingerprint

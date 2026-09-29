@@ -62,6 +62,28 @@ describe('api diagnostics reporting', () => {
     ])
   })
 
+  it('times out a GET while desktop server recovery is still pending', async () => {
+    let releaseRecovery!: (url: string) => void
+    const getServerUrl = vi.fn(() => new Promise<string>(resolve => { releaseRecovery = resolve }))
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      runtime: { ...browserHost.runtime, getServerUrl },
+    }
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'))
+
+    try {
+      await expect(api.get('/api/scheduled-tasks', { timeout: 20 }))
+        .rejects.toThrow('Request timed out')
+      expect(getServerUrl).toHaveBeenCalledTimes(1)
+    } finally {
+      releaseRecovery('http://127.0.0.1:49232')
+      await Promise.resolve()
+      await Promise.resolve()
+    }
+  })
+
   it('does not replay a desktop mutation after a transport failure', async () => {
     const getServerUrl = vi.fn().mockResolvedValue('http://127.0.0.1:49232')
     window.desktopHost = {

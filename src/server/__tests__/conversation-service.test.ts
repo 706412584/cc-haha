@@ -1466,8 +1466,8 @@ describe('ConversationService', () => {
     expect(env.OPENAI_CODEX_OAUTH_FILE).toBe(
       path.join(tmpDir, 'cc-haha', 'openai-oauth.json'),
     )
-    expect(env.ANTHROPIC_MODEL).toBe('gpt-5.6-sol')
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('gpt-5.6-terra')
+    expect(env.ANTHROPIC_MODEL).toBe('gpt-6-sol')
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('gpt-6-sol')
     expect(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBe('1')
     expect(env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined()

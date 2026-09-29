@@ -31,6 +31,10 @@ import {
   GROK_OFFICIAL_PROVIDER,
   isGrokOfficialProviderId,
 } from './grokOfficialProvider.js'
+import {
+  CLAUDE_OFFICIAL_DEFAULT_MODELS,
+} from './claudeOfficialRuntime.js'
+import { SettingsService } from './settingsService.js'
 import { hahaGrokOAuthService } from './hahaGrokOAuthService.js'
 import {
   CURRENT_PROVIDER_INDEX_SCHEMA_VERSION,
@@ -70,11 +74,16 @@ import type {
   ProviderTestResult,
   ProviderTestStepResult,
   ApiFormat,
+  ModelMapping,
   ProviderAuthStrategy,
   RequestCompatibility,
 } from '../types/provider.js'
 import {
   BUILT_IN_PROVIDER_IDS,
+  CLAUDE_OFFICIAL_PROVIDER_ID,
+  GROK_OFFICIAL_PROVIDER_ID,
+  OPENAI_OFFICIAL_PROVIDER_ID,
+  isBuiltInProviderId,
 } from '../types/provider.js'
 
 const DEFAULT_INDEX: ProvidersIndex = {
@@ -82,6 +91,7 @@ const DEFAULT_INDEX: ProvidersIndex = {
   activeId: null,
   providers: [],
   providerOrder: [...BUILT_IN_PROVIDER_IDS],
+  officialProviderModels: {},
 }
 
 function isPermutation(candidateIds: string[], expectedIds: string[]): boolean {
@@ -172,6 +182,7 @@ function appendNewProviderToOrder(providerOrder: string[], providerId: string, e
 export class ProviderService {
   private static serverPort = 3456
   private managedSettingsService = new ManagedSettingsService()
+  private settingsService = new SettingsService()
 
   static setServerPort(port: number): void {
     ProviderService.serverPort = port
@@ -244,17 +255,76 @@ export class ProviderService {
   }
 
   async getProvider(id: string): Promise<SavedProvider> {
+    const index = await this.readIndex()
     if (isOpenAIOfficialProviderId(id)) {
-      return OPENAI_OFFICIAL_PROVIDER
+      return {
+        ...OPENAI_OFFICIAL_PROVIDER,
+        models: this.resolveOfficialProviderModels(index, OPENAI_OFFICIAL_PROVIDER_ID),
+      }
     }
     if (isGrokOfficialProviderId(id)) {
-      return GROK_OFFICIAL_PROVIDER
+      return {
+        ...GROK_OFFICIAL_PROVIDER,
+        models: this.resolveOfficialProviderModels(index, GROK_OFFICIAL_PROVIDER_ID),
+      }
     }
 
-    const index = await this.readIndex()
     const provider = index.providers.find((p) => p.id === id)
     if (!provider) throw ApiError.notFound(`Provider not found: ${id}`)
     return provider
+  }
+
+  private resolveOfficialProviderModels(
+    index: ProvidersIndex,
+    id: (typeof BUILT_IN_PROVIDER_IDS)[number],
+  ): ModelMapping {
+    const configured = index.officialProviderModels[id]
+    if (configured) return normalizeModelMapping(configured)
+    if (id === OPENAI_OFFICIAL_PROVIDER_ID) return OPENAI_OFFICIAL_PROVIDER.models
+    if (id === GROK_OFFICIAL_PROVIDER_ID) return GROK_OFFICIAL_PROVIDER.models
+    return CLAUDE_OFFICIAL_DEFAULT_MODELS
+  }
+
+  async getOfficialProviderModels(id: string): Promise<ModelMapping> {
+    if (!isBuiltInProviderId(id)) {
+      throw ApiError.notFound(`Official provider not found: ${id}`)
+    }
+    const index = await this.readIndex()
+    return this.resolveOfficialProviderModels(index, id)
+  }
+
+  async updateOfficialProviderModels(
+    id: string,
+    models: ModelMapping,
+  ): Promise<ModelMapping> {
+    if (!isBuiltInProviderId(id)) {
+      throw ApiError.notFound(`Official provider not found: ${id}`)
+    }
+
+    const index = await this.readIndex()
+    const normalized = normalizeModelMapping(models)
+    index.officialProviderModels = {
+      ...index.officialProviderModels,
+      [id]: normalized,
+    }
+    await this.writeIndex(index)
+
+    if (id === CLAUDE_OFFICIAL_PROVIDER_ID) {
+      if (index.activeId === null) {
+        await this.settingsService.updateOfficialModelMapping(normalized)
+      }
+      return normalized
+    }
+
+    if (index.activeId === id) {
+      const provider = id === OPENAI_OFFICIAL_PROVIDER_ID
+        ? { ...OPENAI_OFFICIAL_PROVIDER, models: normalized }
+        : { ...GROK_OFFICIAL_PROVIDER, models: normalized }
+      await this.syncToSettings(provider)
+      await this.updateManagedSettings({ model: normalized.main, modelContext: undefined })
+    }
+
+    return normalized
   }
 
   async addProvider(input: CreateProviderInput): Promise<SavedProvider> {
@@ -464,9 +534,15 @@ export class ProviderService {
   async activateProvider(id: string): Promise<void> {
     const index = await this.readIndex()
     const provider = isOpenAIOfficialProviderId(id)
-      ? OPENAI_OFFICIAL_PROVIDER
+      ? {
+          ...OPENAI_OFFICIAL_PROVIDER,
+          models: this.resolveOfficialProviderModels(index, OPENAI_OFFICIAL_PROVIDER_ID),
+        }
       : isGrokOfficialProviderId(id)
-        ? GROK_OFFICIAL_PROVIDER
+        ? {
+            ...GROK_OFFICIAL_PROVIDER,
+            models: this.resolveOfficialProviderModels(index, GROK_OFFICIAL_PROVIDER_ID),
+          }
         : index.providers.find((p) => p.id === id)
     if (!provider) throw ApiError.notFound(`Provider not found: ${id}`)
 
@@ -475,6 +551,7 @@ export class ProviderService {
 
     if (provider.runtimeKind === 'openai_oauth' || provider.runtimeKind === 'grok_oauth') {
       await this.syncToSettings(provider)
+      await this.updateManagedSettings({ model: provider.models.main, modelContext: undefined })
     } else if (provider.presetId === 'official') {
       await this.clearProviderFromSettings()
     } else {
@@ -487,6 +564,9 @@ export class ProviderService {
     index.activeId = null
     await this.writeIndex(index)
     await this.clearProviderFromSettings()
+    await this.settingsService.updateOfficialModelMapping(
+      this.resolveOfficialProviderModels(index, CLAUDE_OFFICIAL_PROVIDER_ID),
+    )
   }
 
   // --- Settings sync ---

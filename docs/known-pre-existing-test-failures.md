@@ -4,7 +4,29 @@
 
 > 验证方法：在 pre-merge 基线（合并 commit 的第一父，`git worktree add <tmp> <first-parent> --detach`）上重跑同一批测试。若基线同样红 → 预存。
 
-最后核对日期：2026-09-16（合并上游 v0.6.3）。
+最后核对日期：2026-09-29（合并上游 v0.6.7；`check:policy` / desktop / adapters 三处重新逐条对照 fork main `601230e0`，无新增）。
+
+---
+
+## `check:policy` 的 7 个失败（本地 Windows，基线同红）
+
+2026-09-29 在 fork main `601230e0` 与合并分支上分别跑 `bun run check:policy`，两侧**同为 7 fail / 340 pass**，逐条一致：
+
+- `computer-use live smoke path confinement`（2 个）— 断言运行目录必须直接位于 `/tmp` 之下；Windows 无 `/tmp`，`deriveLiveSmokePaths` 抛 `Unsafe live-smoke run directory`。文件与 fork main、上游 `c37ab2da` 均逐字节相同。
+- `final macOS helper cursor resource verification`（4 个）— 已在下方「根因 C」登记（反斜杠路径 + symlink EPERM）。
+- `evaluateChangePolicy > plan-only mode publishes a blocked scope without preventing product jobs`（1 个）— 已在下方「根因 C」登记（Windows `Bun.spawn` 超 5s）。
+
+## `check:server` 在本地 Windows 会**整条中止**（基线同红，不是某个用例红）
+
+- **现象**:`[server-tests] src/services/api/claudeBetas.integration.test.ts: failed or incomplete (1)`,随后 `EBUSY: resource busy or locked, rm 'C:\Users\...\Temp\cc-haha-server-test-XXXXXX'`,`check:server` 以 exit 1 结束 —— **整条 lane 不再产出后续文件的结论**。
+- **根因**:`claudeBetas.integration.test.ts:126` 与 `scripts/pr/run-server-tests.ts:126` 的 `finally` 里裸调 `rmSync(sandboxHome, { recursive: true, force: true })`,撞上刚被 `child.kill()` 终止的子进程仍持有的句柄(Windows 上进程终止与句柄释放不同步)。
+- **基线取证(2026-09-29)**:在 fork main `601230e0` 上跑 `bun run check:server`,**同一文件、同一 `EBUSY`、同一退出码**,逐字一致。该文件与 fork main 逐字节相同。
+- **处置**:属 Windows 本地限制,CI(Linux) 上不出现。**本地不要用 `check:server` 的退出码判断合并质量** —— 它在本机无论改动与否都会红。风险最高的 server 用例请单独跑。
+
+## `check:adapters` 的 1 个失败（本地 Windows，基线同红）
+
+- `adapters/... ImChatRuntime server stream > uploads an image referenced in the stream and skips one outside the work dir`
+  — 在 fork main `601230e0` 上以完全相同的形式失败（782 pass / 1 fail 对 749 pass / 1 fail）。合并版用例总数增加是上游新增用例所致，失败项不变。
 
 ---
 

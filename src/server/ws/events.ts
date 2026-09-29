@@ -53,6 +53,7 @@ export type ClientMessage =
   | { type: 'set_pipeline_mode'; flavor: 'solo' | 're' | 'normal' }
   | { type: 'set_handoff_summary'; previousSessionId: string; deep?: boolean }
   | { type: 'stop_generation' }
+  | { type: 'ask_user_question_activity'; requestId: string }
   | { type: 'stop_background_task'; taskId: string }
   | { type: 'ping' }
 
@@ -161,6 +162,7 @@ export type ServerMessage =
   | { type: 'status'; state: ChatState; verb?: string; attemptStart?: boolean }
   | {
       type: typeof RUNTIME_CONFIG_APPLIED_EVENT
+      requestedConfig?: { providerId: string | null; modelId: string; effortLevel?: string }
       providerId: string | null
       modelId: string
       effortLevel?: string
@@ -195,6 +197,7 @@ export type ServerMessage =
   | { type: 'system_notification'; subtype: string; message?: string; data?: unknown }
   | { type: 'pong' }
   | { type: 'team_update'; teamName: string; members: TeamMemberStatus[]; incarnationId?: string; leadSessionId?: string; createdAt?: number }
+  | { type: 'team_plan_updated'; teamName: string; sessionId: string; planId: string; incarnationId: string; revision: number; state: string }
   | { type: 'team_created'; teamName: string; incarnationId?: string; leadSessionId?: string; createdAt?: number }
   | { type: 'team_workbench_updated'; teamName: string; incarnationId?: string; leadSessionId?: string; createdAt?: number }
   | { type: 'team_deleted'; teamName: string; incarnationId?: string; leadSessionId?: string; createdAt?: number }

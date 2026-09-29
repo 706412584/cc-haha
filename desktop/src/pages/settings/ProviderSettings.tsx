@@ -27,10 +27,11 @@ import { normalizeProviderBaseUrl, presetMatchesBaseUrl, selectableProviderPrese
 import { ClaudeOfficialLogin } from '../../components/settings/ClaudeOfficialLogin'
 import { ChatGPTOfficialLogin } from '../../components/settings/ChatGPTOfficialLogin'
 import { GrokOfficialLogin } from '../../components/settings/GrokOfficialLogin'
+import { OfficialProviderModelSettings } from '../../components/settings/OfficialProviderModelSettings'
 import { CcSwitchImportModal } from '../../components/settings/CcSwitchImportModal'
 import { ModelIdCombobox } from '../../components/settings/ModelIdCombobox'
 import { ProviderRequestCompatibilityFields } from '@/components/settings/ProviderRequestCompatibilityFields'
-import { compatibilityForm, invalidCompatibilityNumber, parseCompatibilityForm, readCompatibilityEditorJson, writeCompatibilityJson, type RequestCompatibilityForm } from '../../lib/providerRequestCompatibility'
+import { compatibilityForm, invalidCompatibilityNumber, parseCompatibilityForm, parseAnthropicBudgetForm, pickOutputBudget, readCompatibilityEditorJson, writeCompatibilityJson, type RequestCompatibilityForm } from '../../lib/providerRequestCompatibility'
 import { ProviderImageGenerationFields, type ImageGenerationFormValue } from '../../components/settings/ProviderImageGenerationFields'
 import { BUILT_IN_PROVIDER_IDS, CLAUDE_OFFICIAL_PROVIDER_ID, OPENAI_OFFICIAL_PROVIDER_ID } from '../../constants/openaiOfficialProvider'
 import { GROK_OFFICIAL_PROVIDER_ID } from '../../constants/grokOfficialProvider'
@@ -58,6 +59,15 @@ type ProviderListItem =
   | { id: typeof OPENAI_OFFICIAL_PROVIDER_ID; kind: 'openai-official' }
   | { id: typeof GROK_OFFICIAL_PROVIDER_ID; kind: 'grok-official' }
   | { id: string; kind: 'saved'; provider: SavedProvider }
+
+/** Row labels for the model-mapping form, in `MODEL_SLOTS` order. */
+const MODEL_SLOT_LABEL_KEYS: Record<ModelSlot, TranslationKey> = {
+  main: 'settings.providers.mainModel',
+  fable: 'settings.providers.fableModel',
+  haiku: 'settings.providers.haikuModel',
+  sonnet: 'settings.providers.sonnetModel',
+  opus: 'settings.providers.opusModel',
+}
 
 function defaultProviderOrder(providers: SavedProvider[]): string[] {
   return [
@@ -294,6 +304,7 @@ export function ProviderSettings({ browserMode = false }: { browserMode?: boolea
                     details={!browserMode && isClaudeOfficialActive ? (
                       <div className="border-t border-[var(--color-border-separator)] px-4 pb-4 pt-3">
                         <ClaudeOfficialLogin />
+                        <OfficialProviderModelSettings providerId={CLAUDE_OFFICIAL_PROVIDER_ID} />
                       </div>
                     ) : null}
                   />
@@ -317,6 +328,7 @@ export function ProviderSettings({ browserMode = false }: { browserMode?: boolea
                     details={!browserMode && isOpenAIOfficialActive ? (
                       <div className="border-t border-[var(--color-border-separator)] px-4 pb-4 pt-3">
                         <ChatGPTOfficialLogin />
+                        <OfficialProviderModelSettings providerId={OPENAI_OFFICIAL_PROVIDER_ID} />
                       </div>
                     ) : null}
                   />
@@ -340,6 +352,7 @@ export function ProviderSettings({ browserMode = false }: { browserMode?: boolea
                     details={!browserMode && isGrokOfficialActive ? (
                       <div className="border-t border-[var(--color-border-separator)] px-4 pb-4 pt-3">
                         <GrokOfficialLogin />
+                        <OfficialProviderModelSettings providerId={GROK_OFFICIAL_PROVIDER_ID} />
                       </div>
                     ) : null}
                   />
@@ -592,6 +605,7 @@ const MODEL_CONTEXT_WINDOWS_ENV_KEY = 'CLAUDE_CODE_MODEL_CONTEXT_WINDOWS'
 const DISABLE_EXPERIMENTAL_BETAS_ENV_KEY = 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'
 const DEFAULT_MODEL_1M_SUPPORT: Model1mSupport = {
   main: false,
+  fable: false,
   haiku: false,
   sonnet: false,
   opus: false,
@@ -729,6 +743,7 @@ function getInitialModel1mSupport(
 ): Model1mSupport {
   return {
     main: provider?.model1mSupport?.main === true || hasModel1mMarker(models.main),
+    fable: provider?.model1mSupport?.fable === true || (models.fable ? hasModel1mMarker(models.fable) : false),
     haiku: provider?.model1mSupport?.haiku === true || hasModel1mMarker(models.haiku),
     sonnet: provider?.model1mSupport?.sonnet === true || hasModel1mMarker(models.sonnet),
     opus: provider?.model1mSupport?.opus === true || hasModel1mMarker(models.opus),
@@ -746,7 +761,7 @@ function applyModel1mSupportMapping(
 ): ModelMapping {
   return {
     main: applyModel1mSupport(models.main, model1mSupport.main),
-    ...(models.fable ? { fable: stripModel1mMarker(models.fable) } : {}),
+    ...(models.fable ? { fable: applyModel1mSupport(models.fable, model1mSupport.fable) } : {}),
     haiku: applyModel1mSupport(models.haiku, model1mSupport.haiku),
     sonnet: applyModel1mSupport(models.sonnet, model1mSupport.sonnet),
     opus: applyModel1mSupport(models.opus, model1mSupport.opus),
@@ -1219,7 +1234,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
         // (or whatever was last selected) and saving would write that back.
         delete merged.model
         delete merged.modelContext
-        setSettingsJson(JSON.stringify(writeCompatibilityJson(merged, apiFormat === 'anthropic' ? undefined : parseCompatibilityForm(compatibility)), null, 2))
+        setSettingsJson(JSON.stringify(writeCompatibilityJson(merged, apiFormat === 'anthropic' ? parseAnthropicBudgetForm(compatibility) : parseCompatibilityForm(compatibility)), null, 2))
       }).catch(() => {
         if (!cancelled && !settingsJsonUserEditedRef.current) {
           setSettingsJson((current) => current.trim() ? current : JSON.stringify({}, null, 2))
@@ -1281,7 +1296,8 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
   const requiresApiKey = selectedPreset.needsApiKey !== false
   const autoCompactWindowErrorKey = getAutoCompactWindowErrorKey(autoCompactWindow)
   const modelContextWindowErrorSlots = MODEL_SLOTS.filter((slot) => getModelContextWindowErrorKey(modelContextInputs[slot]))
-  const compatibilityInvalid = apiFormat !== 'anthropic' && (invalidCompatibilityNumber(compatibility.maxOutputTokens) || invalidCompatibilityNumber(compatibility.outputTokenLimit))
+  const compatibilityInvalid = invalidCompatibilityNumber(compatibility.maxOutputTokens)
+    || (apiFormat !== 'anthropic' && invalidCompatibilityNumber(compatibility.outputTokenLimit))
   const canSubmit = !compatibilityInvalid && name.trim() && baseUrl.trim() && (mode === 'edit' || !requiresApiKey || apiKey.trim()) && models.main.trim() && (!imageGeneration.enabled || imageGeneration.model.trim()) && !settingsJsonError && !autoCompactWindowErrorKey && modelContextWindowErrorSlots.length === 0
   const normalizedBaseUrl = normalizeProviderBaseUrl(baseUrl)
   const isPresetDefaultEndpoint = normalizedBaseUrl === normalizeProviderBaseUrl(selectedPreset.baseUrl)
@@ -1399,10 +1415,10 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
   }
   const handleCompatibilityChange = (value: RequestCompatibilityForm) => {
     setCompatibility(value)
-    if (invalidCompatibilityNumber(value.maxOutputTokens) || invalidCompatibilityNumber(value.outputTokenLimit)) return
+    if (invalidCompatibilityNumber(value.maxOutputTokens) || (apiFormat !== 'anthropic' && invalidCompatibilityNumber(value.outputTokenLimit))) return
     setSettingsJson((current) => {
       try {
-        return JSON.stringify(writeCompatibilityJson(JSON.parse(current || '{}'), parseCompatibilityForm(value)), null, 2)
+        return JSON.stringify(writeCompatibilityJson(JSON.parse(current || '{}'), apiFormat === 'anthropic' ? parseAnthropicBudgetForm(value) : parseCompatibilityForm(value)), null, 2)
       } catch {
         return current
       }
@@ -1413,7 +1429,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
     setSettingsJson((current) => {
       const connected = updateSettingsJsonProviderConnection(current, value, authStrategy, apiKey, selectedPreset, baseUrl, providerProxyBaseUrl, toolSearchEnabled, disableExperimentalBetas, supportsNestedToolResultMedia)
       try {
-        return JSON.stringify(writeCompatibilityJson(JSON.parse(connected), value === 'anthropic' ? undefined : parseCompatibilityForm(compatibility)), null, 2)
+        return JSON.stringify(writeCompatibilityJson(JSON.parse(connected), value === 'anthropic' ? parseAnthropicBudgetForm(compatibility) : parseCompatibilityForm(compatibility)), null, 2)
       } catch {
         return connected
       }
@@ -1604,7 +1620,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
 
   const handleSubmit = async () => {
     if (!canSubmit || isSubmitting) return
-    const storedCompatibility = apiFormat === 'anthropic' ? undefined : parseCompatibilityForm(compatibility)
+    const storedCompatibility = apiFormat === 'anthropic' ? parseAnthropicBudgetForm(compatibility) : parseCompatibilityForm(compatibility)
     const normalizedModels = normalizeModelMapping(models)
     const parsedAutoCompactWindow = parseAutoCompactWindowInput(autoCompactWindow)
     const parsedModelContextWindows = buildModelContextWindows(models, modelContextInputs)
@@ -1706,6 +1722,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
 
   const handleTest = async () => {
     if (!baseUrl.trim() || !models.main.trim() || compatibilityInvalid) return
+    const formCompatibility = apiFormat === 'anthropic' ? parseAnthropicBudgetForm(compatibility) : parseCompatibilityForm(compatibility)
     setIsTesting(true)
     setTestResult(null)
     try {
@@ -1715,7 +1732,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
         apiFormat === provider.apiFormat &&
         authStrategy === provider.authStrategy &&
         supportsNestedToolResultMedia === (provider.supportsNestedToolResultMedia ?? true) &&
-        JSON.stringify(parseCompatibilityForm(compatibility)) === JSON.stringify(provider.requestCompatibility)
+        JSON.stringify(formCompatibility) === JSON.stringify(provider.requestCompatibility)
       if (savedConfigUnchanged && provider) {
         result = await useProviderStore.getState().testProvider(provider.id, {
           modelId: models.main.trim(),
@@ -1730,7 +1747,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
           apiFormat,
           supportsNestedToolResultMedia,
           presetId: selectedPreset.id,
-          ...(apiFormat !== 'anthropic' ? { requestCompatibility: parseCompatibilityForm(compatibility) } : {}),
+          ...(formCompatibility ? { requestCompatibility: formCompatibility } : {}),
         })
       }
       setTestResult(result)
@@ -1916,23 +1933,26 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
           )}
           <div className={browserMode ? "grid grid-cols-1 sm:grid-cols-2 gap-2" : "grid grid-cols-2 gap-2"}>
             {MODEL_SLOTS.map((slot) => {
-              const labelKey = slot === 'main'
-                ? 'settings.providers.mainModel'
-                : slot === 'haiku'
-                  ? 'settings.providers.haikuModel'
-                  : slot === 'sonnet'
-                    ? 'settings.providers.sonnetModel'
-                    : 'settings.providers.opusModel'
-              const label = t(labelKey)
+              const label = t(MODEL_SLOT_LABEL_KEYS[slot])
               const pickLabel = t('settings.providers.fetchModelsPick', { label })
               return (
                 <div key={slot} className="min-w-0">
                   <ModelIdCombobox
                     label={label}
                     required={slot === 'main'}
-                    value={models[slot]}
+                    value={models[slot] ?? ''}
                     onChange={(value) => handleModelChange(slot, value)}
-                    placeholder={slot === 'main' ? t('settings.providers.modelIdPlaceholder') : t('settings.providers.sameAsMain')}
+                    placeholder={
+                      // Fable is the one slot that does not fall back to the
+                      // main model: an empty value leaves the choice to the
+                      // runtime, which resolves it to the provider's Opus-tier
+                      // model (third-party) or a real Fable model (official).
+                      slot === 'main'
+                        ? t('settings.providers.modelIdPlaceholder')
+                        : slot === 'fable'
+                          ? t('settings.providers.fableModelPlaceholder')
+                          : t('settings.providers.sameAsMain')
+                    }
                     groups={modelPickerGroups}
                     pickerLabel={pickLabel}
                     noMatchesLabel={t('model.noMatches')}
@@ -2174,7 +2194,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
                 const parsed = restoreSettingsJsonSecrets(JSON.parse(raw), settingsJson, apiKey)
                 const nextCompatibility = readCompatibilityEditorJson(parsed, settingsJson)
                 setCompatibility(compatibilityForm(nextCompatibility))
-                const synchronized = writeCompatibilityJson(parsed, apiFormat === 'anthropic' ? undefined : nextCompatibility)
+                const synchronized = writeCompatibilityJson(parsed, apiFormat === 'anthropic' ? pickOutputBudget(nextCompatibility) : nextCompatibility)
                 setSettingsJson(JSON.stringify(synchronized, null, 2))
                 setSettingsJsonError(null)
                 // Auto-fill form fields from parsed JSON env
@@ -2230,6 +2250,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
                       const mergedModels = { ...prev, ...newModels }
                       const nextModel1mSupport = {
                         main: hasModel1mMarker(mergedModels.main),
+                        fable: mergedModels.fable ? hasModel1mMarker(mergedModels.fable) : false,
                         haiku: hasModel1mMarker(mergedModels.haiku),
                         sonnet: hasModel1mMarker(mergedModels.sonnet),
                         opus: hasModel1mMarker(mergedModels.opus),

@@ -784,8 +784,8 @@ export function ActivitySettings() {
             }}
           />
         </div>
-        <div className="group/activity-profile mt-4 flex max-w-full items-center justify-center gap-2">
-          <h1 className="max-w-[min(720px,calc(100%-2.25rem))] truncate text-[26px] font-semibold text-[var(--color-text-primary)] sm:text-[31px]" style={{ fontFamily: 'var(--font-headline)' }}>{profile.displayName}</h1>
+        <div className="group/activity-profile mt-4 flex w-full max-w-[756px] items-start justify-center gap-2">
+          <h1 className="min-w-0 max-w-[720px] whitespace-normal break-words text-[26px] font-semibold text-[var(--color-text-primary)] sm:text-[31px]" style={{ fontFamily: 'var(--font-headline)' }}>{profile.displayName}</h1>
           <button
             type="button"
             aria-label={t('settings.activity.editProfile')}

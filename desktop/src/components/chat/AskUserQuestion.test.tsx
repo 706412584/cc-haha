@@ -104,6 +104,16 @@ describe('AskUserQuestion', () => {
     })
   })
 
+  it('labels a completed timeout answer as automatic', () => {
+    render(<AskUserQuestion
+      toolUseId="tool-1"
+      input={{ question: 'Ship it?', options: [{ label: 'Yes' }, { label: 'No' }] }}
+      result={{ answers: { 'Ship it?': 'Yes' }, selectionSource: 'automatic' }}
+    />)
+
+    expect(screen.getByText('Answered automatically')).toBeTruthy()
+  })
+
   // Regression: the "no questions" early return used to sit above two useMemo calls,
   // so a mounted instance whose question count crossed zero threw "Rendered fewer/more
   // hooks than expected" and took the surrounding message list down with it. `input` is
@@ -169,6 +179,57 @@ describe('AskUserQuestion', () => {
         },
       },
     })
+  })
+
+  it('reports the first user interaction once so the server cancels automatic answering', () => {
+    render(<AskUserQuestion
+      toolUseId="tool-1"
+      input={{ question: 'Ship it?', options: [{ label: 'Yes' }, { label: 'No' }] }}
+    />)
+
+    fireEvent.click(screen.getByRole('button', { name: /^Yes$/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^No$/ }))
+
+    expect(sendMock.mock.calls.filter(([, message]) => message.type === 'ask_user_question_activity'))
+      .toEqual([[ACTIVE_TAB, { type: 'ask_user_question_activity', requestId: 'perm-1' }]])
+  })
+
+  it('does not cancel the timeout when an empty custom response only receives focus', () => {
+    render(<AskUserQuestion
+      toolUseId="tool-1"
+      input={{ question: 'Ship it?', options: [{ label: 'Yes' }, { label: 'No' }] }}
+    />)
+    fireEvent.focus(screen.getByPlaceholderText(/type/i))
+    expect(sendMock.mock.calls.filter(([, message]) => message.type === 'ask_user_question_activity'))
+      .toHaveLength(0)
+  })
+
+  it('protects a draft selected before the permission request arrives', () => {
+    patchSession({ pendingPermission: null })
+    render(<AskUserQuestion
+      toolUseId="tool-1"
+      input={{ question: 'Ship it?', options: [{ label: 'Yes' }, { label: 'No' }] }}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: /^Yes$/ }))
+    expect(sendMock.mock.calls.filter(([, message]) => message.type === 'ask_user_question_activity'))
+      .toHaveLength(0)
+    act(() => patchSession({ pendingPermission: {
+      requestId: 'perm-1', toolName: 'AskUserQuestion', toolUseId: 'tool-1',
+      input: { questions: [{ question: 'Ship it?', options: [{ label: 'Yes' }, { label: 'No' }] }] },
+    } }))
+    expect(sendMock.mock.calls.filter(([, message]) => message.type === 'ask_user_question_activity'))
+      .toEqual([[ACTIVE_TAB, { type: 'ask_user_question_activity', requestId: 'perm-1' }]])
+  })
+
+  it('removes a forged automatic marker from a manual response', () => {
+    render(<AskUserQuestion
+      toolUseId="tool-1"
+      input={{ questions: [{ question: 'Should we persist data?', options: [{ label: 'No' }, { label: 'Yes' }] }], metadata: { autoAnswered: true, source: 'remember' } }}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: /^No$/ }))
+    fireEvent.click(screen.getByRole('button', { name: /submit/i }))
+    const response = sendMock.mock.calls.find(([, message]) => message.type === 'permission_response')?.[1]
+    expect(response.updatedInput.metadata).toEqual({ source: 'remember' })
   })
 
   it('allows multiple selections when a question is marked multiSelect', () => {
@@ -407,7 +468,7 @@ describe('AskUserQuestion', () => {
       target: { value: 'First restored context line\nSecond restored context line' },
     })
     fireEvent.keyDown(textarea, { key: 'Enter' })
-    expect(sendMock).not.toHaveBeenCalled()
+    expect(sendMock.mock.calls.filter(([, message]) => message.type === 'permission_response')).toHaveLength(0)
 
     fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
 
@@ -526,7 +587,7 @@ describe('AskUserQuestion', () => {
       fireEvent.click(screen.getByRole('button', { name: /^A1$/ }))
 
       expect(screen.getByText('Second question?')).toBeTruthy()
-      expect(sendMock).not.toHaveBeenCalled()
+      expect(sendMock.mock.calls.filter(([, message]) => message.type === 'permission_response')).toHaveLength(0)
     })
 
     it('stays put on a multi-select pick', () => {
@@ -892,7 +953,9 @@ describe('AskUserQuestion', () => {
       } }} />)
 
       expect(screen.queryByPlaceholderText('Type your answer...')).toBeNull()
-      expect(substantiveSends()).toHaveLength(1)
+      // This path answers through a permission_response (the component is
+      // upstream's), not a chat message, so count that frame specifically.
+      expect(sendMock.mock.calls.filter(([, message]) => message.type === 'permission_response')).toHaveLength(1)
     })
 
     it('keeps the sent-as-message marker across a remount', () => {

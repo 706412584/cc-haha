@@ -56,12 +56,18 @@ describe('composerUtils', () => {
     )
   })
 
+  it('keeps the desktop-owned /clear command searchable without recommending it by default', () => {
+    const commands = mergeSlashCommands([])
+    expect(filterSlashCommands(commands, '').map(command => command.name)).not.toContain('clear')
+    expect(filterSlashCommands(commands, 'clear').map(command => command.name)).toEqual(['clear'])
+  })
+
   it('never falls back to commands this desktop cannot run', () => {
     // The headless CLI answers these with "Unknown skill", so offering them in
     // the menu is a dead end. They regressing back in means the fallback list
     // drifted away from what the session can actually execute.
     const names = FALLBACK_SLASH_COMMANDS.map(command => command.name)
-    for (const dead of ['clear', 'vim', 'terminal-setup', 'permissions', 'commit', 'pr', 'bug', 'login', 'logout']) {
+    for (const dead of ['vim', 'terminal-setup', 'permissions', 'commit', 'pr', 'bug', 'login', 'logout']) {
       expect(names).not.toContain(dead)
     }
   })

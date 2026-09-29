@@ -1,3 +1,4 @@
+import { getSideChat, isSideChatId } from '../services/sideChatRegistry.js'
 /**
  * WebSocket connection handler
  *
@@ -9,6 +10,7 @@
 import type { ServerWebSocket } from 'bun'
 import { sessionMessageUuid } from '../../utils/sessionMessageInbox.js'
 import { parseSessionCollaborationEnvelope } from '../../utils/sessionCollaborationEnvelope.js'
+import { isShutdownTeamPrompt } from '../../utils/swarm/teamShutdownPrompt.js'
 import { admitSessionUserTurn, emitSessionTurnEvent } from '../services/sessionTurnEvents.js'
 import { ApiError } from '../middleware/errorHandler.js'
 import { resolveSessionReferenceContext, splitSessionReferenceContext } from '../services/sessionReferenceContext.js'
@@ -179,6 +181,13 @@ const sessionSlashCommands = new Map<string, SessionSlashCommand[]>()
  * renderer's heartbeat is throttled while the display is asleep, so the socket
  * drops every time). Five minutes still covers a reconnect or a quick Wi-Fi
  * flap while bounding what an abandoned prompt can hold.
+ *
+ * Merge note (upstream v0.6.7): upstream raised this to 31 minutes to leave room
+ * for its auto-answer feature, whose longest timeout is 30 minutes. That feature
+ * ships disabled by default (`DEFAULT_AUTO_QUESTION_SETTINGS.enabled === false`),
+ * so the 5-minute ceiling is kept: the resource problem it fixes is unconditional,
+ * while the auto-answer case only affects users who opt in. Revisit if the
+ * defaults ever flip.
  */
 const PENDING_PERMISSION_DISCONNECT_CLEANUP_MS = 5 * 60_000
 let disableDisconnectCleanupForTests = false
@@ -232,6 +241,7 @@ export type RuntimeOverride = {
    * provider.update bumps it past the captured value.
    */
   providerRevision?: number
+  requestedConfig?: { providerId: string | null; modelId: string; effortLevel?: string }
 }
 
 export type RuntimeTransitionClassification =
@@ -278,6 +288,9 @@ type StopSettlement = {
 
 
 const runtimeOverrides = new Map<string, RuntimeOverride>()
+// A rejected optimistic choice must not silently send later prompts to the
+// previous process. Keep the rejection until a valid selection or cleanup.
+const rejectedRuntimeConfigs = new Map<string, string>()
 const activeUserTurns = new Map<string, ActiveUserTurnState>()
 const stopSettlements = new Map<string, StopSettlement>()
 const settledStopTerminalFrames = new WeakSet<object>()
@@ -920,6 +933,10 @@ export const handleWebSocket = {
           })
           break
 
+        case 'ask_user_question_activity':
+          conversationService.cancelAutoQuestionAnswer(ws.data.sessionId, message.requestId)
+          break
+
         case 'computer_use_permission_response':
           handleComputerUsePermissionResponse(ws, message)
           break
@@ -1436,11 +1453,7 @@ function sessionTurnConnection(
 }
 
 export function stopSessionTurn(sessionId: string): void {
-  const hadActiveTurn = activeUserTurns.has(sessionId)
   handleStopGeneration(sessionTurnConnection(sessionId, { serverHost: '127.0.0.1', serverPort: 0 }))
-  // A result can clear the host turn while peer work still waits in the CLI
-  // inbox. Group Stop must revoke that queue even at the idle boundary.
-  if (!hadActiveTurn && conversationService.hasSession(sessionId)) conversationService.sendInterrupt(sessionId)
 }
 
 export function isSessionTurnStopped(sessionId: string): boolean {
@@ -1953,11 +1966,29 @@ function waitForTurnResultOrTimeout(sessionId: string, timeoutMs: number): Promi
   })
 }
 
+function rejectStartedSideChatProviderChange(
+  ws: SessionConnection,
+  requestedProviderId: string | null,
+): boolean {
+  const { sessionId } = ws.data
+  const side = getSideChat(sessionId)
+  if (!side?.started) return false
+  const providerId = runtimeOverrides.get(sessionId)?.providerId ?? side.launchInfo.runtimeProviderId ?? null
+  if (providerId === requestedProviderId) return false
+  sendMessage(ws, {
+    type: 'error',
+    code: 'SIDE_CHAT_RUNTIME_RESTART_UNAVAILABLE',
+    message: 'Open a new side chat to change provider or reasoning effort.',
+  })
+  return true
+}
+
 async function handlePlanApprovalWithRuntimeOverride(
   ws: SessionConnection,
   message: Extract<ClientMessage, { type: 'permission_response' }>,
 ): Promise<void> {
   const { sessionId } = ws.data
+  if (rejectStartedSideChatProviderChange(ws, message.runtimeOverride!.providerId)) return
   const normalized = await normalizeRuntimeOverrideInput(message.runtimeOverride!)
   if (!normalized.ok) {
     sendMessage(ws, {
@@ -1983,7 +2014,13 @@ async function handlePlanApprovalWithRuntimeOverride(
     currentModelId === nextOverride.modelId &&
     currentEffort === nextOverride.effort
   ) {
+    rejectedRuntimeConfigs.delete(sessionId)
     await finalizePermissionResponse(ws, message)
+    return
+  }
+
+  if (isSideChatId(sessionId) && (currentProviderId !== nextOverride.providerId || (nextOverride.effort !== undefined && nextOverride.effort !== currentEffort))) {
+    sendMessage(ws, { type: 'error', code: 'SIDE_CHAT_RUNTIME_RESTART_UNAVAILABLE', message: 'Open a new side chat to change provider or reasoning effort.' })
     return
   }
 
@@ -2000,12 +2037,16 @@ async function handlePlanApprovalWithRuntimeOverride(
     // reports it, and the permission stays pending (override untouched).
     await enqueueRuntimeTransition(sessionId, async () => {
       await conversationService.setModel(sessionId, nextOverride.modelId)
-      runtimeOverrides.set(sessionId, nextOverride)
+      const appliedOverride = nextOverride.effort === undefined && currentEffort
+        ? { ...nextOverride, effort: currentEffort, requestedConfig: nextOverride.requestedConfig ?? message.runtimeOverride }
+        : nextOverride
+      rejectedRuntimeConfigs.delete(sessionId)
+      runtimeOverrides.set(sessionId, appliedOverride)
       runtimeOverrideVersions.set(
         sessionId,
         (runtimeOverrideVersions.get(sessionId) ?? 0) + 1,
       )
-      await persistSessionRuntimeConfig(sessionId, nextOverride)
+      await persistSessionRuntimeConfig(sessionId, appliedOverride)
       broadcastAppliedRuntimeConfig(sessionId)
     })
     await finalizePermissionResponse(ws, message)
@@ -2017,6 +2058,7 @@ async function handlePlanApprovalWithRuntimeOverride(
   // flow. The interrupted turn may bill one partial request to the planning
   // model — same as the manual flow.
   await enqueueRuntimeTransition(sessionId, async () => {
+    rejectedRuntimeConfigs.delete(sessionId)
     runtimeOverrides.set(sessionId, nextOverride)
     runtimeOverrideVersions.set(
       sessionId,
@@ -2155,7 +2197,7 @@ async function applyPermissionModeToActiveSession(
     }
     await commitConfirmedPermissionMode(sessionId, mode, undefined, currentMode)
   } catch (err) {
-    if (shouldFallbackToPermissionRestart(mode, err)) {
+    if (!isSideChatId(sessionId) && shouldFallbackToPermissionRestart(mode, err)) {
       await restartSessionWithPermissionMode(ws, sessionId, mode)
       return
     }
@@ -2346,11 +2388,37 @@ async function normalizeRuntimeOverrideInput(
 > {
   let modelId = typeof input.modelId === 'string' ? input.modelId.trim() : ''
   if (!modelId) return { ok: false, reason: 'model' }
+  const requestedEffort =
+    typeof input.effortLevel === 'string' ? input.effortLevel.trim() : undefined
+  if (typeof input.providerId === 'string') {
+    const { providers } = await providerService.listProviders()
+    if (!isKnownRuntimeProviderId(input.providerId, providers)) {
+      // Reopened tabs can still hold a provider deleted in Settings. Resolve
+      // the complete replacement before validating effort or acknowledging it:
+      // an effort attached to the deleted provider cannot apply to the new one.
+      if (requestedEffort !== undefined && !isModelReasoningEffort(requestedEffort)) {
+        return { ok: false, reason: 'effort' }
+      }
+      const defaults = await getDefaultRuntimeSettings()
+      const defaultModel = await resolveDefaultRuntimeModel(defaults)
+      return {
+        ok: true,
+        override: {
+          providerId: defaults.providerId ?? null,
+          modelId: defaultModel,
+          ...(defaults.effort ? { effort: defaults.effort } : {}),
+          requestedConfig: {
+            providerId: input.providerId,
+            modelId,
+            ...(requestedEffort !== undefined ? { effortLevel: requestedEffort } : {}),
+          },
+        },
+      }
+    }
+  }
   if (isGrokOfficialProviderId(input.providerId)) {
     modelId = (await getGrokReasoningEfforts(modelId)).modelId
   }
-  const requestedEffort =
-    typeof input.effortLevel === 'string' ? input.effortLevel.trim() : undefined
   const effortResolution = requestedEffort === undefined
     ? { valid: true, effort: undefined }
     : await resolveRuntimeEffort(input.providerId, modelId, requestedEffort)
@@ -2370,34 +2438,41 @@ async function handleSetRuntimeConfig(
   message: Extract<ClientMessage, { type: 'set_runtime_config' }>
 ) {
   const { sessionId } = ws.data
-  const requestedModelId = typeof message.modelId === 'string' ? message.modelId.trim() : ''
-  if (!requestedModelId) {
-    sendMessage(ws, {
-      type: 'error',
-      message: 'Runtime model selection is invalid.',
-      code: 'RUNTIME_CONFIG_INVALID',
-    })
-    return
-  }
-
   // Register the transition before remote model-catalog or provider validation.
   // A user message arriving in that async admission window must wait for the
   // selected runtime instead of entering the previous provider's CLI process.
   await enqueueRuntimeTransition(sessionId, async () => {
+    // A missing provider may fall back to the active default for durable chats,
+    // but that must not disguise a forbidden provider change on a live side chat.
+    if (rejectStartedSideChatProviderChange(ws, message.providerId)) return
     const normalized = await normalizeRuntimeOverrideInput(message)
     if (!normalized.ok) {
-      sendMessage(ws, {
-        type: 'error',
-        message:
-          normalized.reason === 'model'
-            ? 'Runtime model selection is invalid.'
-            : 'Runtime effort selection is invalid.',
-        code: 'RUNTIME_CONFIG_INVALID',
-      })
+      const message = normalized.reason === 'model'
+        ? 'Runtime model selection is invalid.'
+        : 'Runtime effort selection is invalid.'
+      rejectedRuntimeConfigs.set(sessionId, message)
+      sendMessage(ws, { type: 'error', message, code: 'RUNTIME_CONFIG_INVALID' })
       return
     }
 
     const nextOverride = normalized.override
+    const side = getSideChat(sessionId)
+    if (side?.started) {
+      const current = runtimeOverrides.get(sessionId)
+      const provider = current?.providerId ?? side.launchInfo.runtimeProviderId ?? null
+      const effort = current?.effort ?? side.launchInfo.effortLevel
+      if (!conversationService.hasSession(sessionId) || provider !== nextOverride.providerId || (nextOverride.effort !== undefined && nextOverride.effort !== effort)) {
+        sendMessage(ws, { type: 'error', code: 'SIDE_CHAT_RUNTIME_RESTART_UNAVAILABLE', message: 'A temporary side chat cannot restart without losing its history. Open a new side chat to change provider or reasoning effort.' })
+        return
+      }
+      await conversationService.setModel(sessionId, nextOverride.modelId)
+      rejectedRuntimeConfigs.delete(sessionId)
+      runtimeOverrides.set(sessionId, { ...nextOverride, ...(effort ? { effort } : {}) })
+      await persistSessionRuntimeConfig(sessionId, runtimeOverrides.get(sessionId)!)
+      broadcastAppliedRuntimeConfig(sessionId)
+      return
+    }
+    rejectedRuntimeConfigs.delete(sessionId)
     const prevOverride = runtimeOverrides.get(sessionId)
     if (
       prevOverride &&
@@ -2405,6 +2480,10 @@ async function handleSetRuntimeConfig(
       prevOverride.modelId === nextOverride.modelId &&
       prevOverride.effort === nextOverride.effort
     ) {
+      // Replayed selections still need confirmation, including the original
+      // stale provider that this request resolved to the existing runtime.
+      runtimeOverrides.set(sessionId, nextOverride)
+      if (!deferredRuntimeRestarts.has(sessionId)) broadcastAppliedRuntimeConfig(sessionId)
       return
     }
 
@@ -2589,6 +2668,7 @@ function broadcastAppliedRuntimeConfig(sessionId: string): void {
   if (!runtime) return
   sendToSession(sessionId, {
     type: RUNTIME_CONFIG_APPLIED_EVENT,
+    ...(runtime.requestedConfig ? { requestedConfig: runtime.requestedConfig } : {}),
     providerId: runtime.providerId,
     modelId: runtime.modelId,
     ...(runtime.effort ? { effortLevel: runtime.effort } : {}),
@@ -2746,15 +2826,35 @@ function handleStopGeneration(ws: SessionConnection) {
     releaseStopSettlement(sessionId)
   }
 
+  // Upstream v0.6.7: the leader can already be idle while approved process
+  // teammates still run or await readiness, so a leaderless Stop revokes them
+  // here. Guarded by the latch so the second click of a repeated Stop — which
+  // arrives after the first click already cleared the active turn — does not
+  // send a second interrupt.
+  if (
+    !foregroundInFlight &&
+    !stoppedTurn &&
+    !sessionStopRequested.has(sessionId) &&
+    conversationService.hasSession(sessionId)
+  ) {
+    conversationService.sendInterrupt(sessionId)
+  }
+
   if (foregroundInFlight || agentsInFlight) {
     if (conversationService.hasSession(sessionId)) {
       // First try graceful interrupt via SDK control message for the foreground
-      // turn. Agent-only stops still arm the force-kill fallback below.
-      if (foregroundInFlight && stoppedTurn) {
+      // turn. Agent-only stops still arm the force-kill fallback below. Once an
+      // interrupt is pending its boundary, a repeated Stop must not send
+      // another one — the fork's latch is what makes the second click a no-op.
+      if (foregroundInFlight && stoppedTurn && !stoppedTurn.interruptBoundaryPending) {
         if (stoppedTurn.messageSent) addPendingInterruptedTurnResult(sessionId)
         const interruptSent = conversationService.sendInterrupt(sessionId)
-        if (stoppedTurn.messageSent && !interruptSent) {
-          removePendingInterruptedTurnResult(sessionId)
+        if (stoppedTurn.messageSent) {
+          if (interruptSent) {
+            stoppedTurn.interruptBoundaryPending = true
+          } else {
+            removePendingInterruptedTurnResult(sessionId)
+          }
         }
       }
 
@@ -3716,6 +3816,7 @@ function cleanupSessionRuntimeState(
   coordinatorModeSessions.delete(sessionId)
   pipelineModeSessions.delete(sessionId)
   handoffSummarySessions.delete(sessionId)
+  rejectedRuntimeConfigs.delete(sessionId)
   // Drop this session's composed --append-system-prompt-file. Only on real
   // teardown: a mode-switch restart goes stopSession → startSession, which
   // rewrites the file, so removing it on the restart path would delete the
@@ -4224,7 +4325,7 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
       }
 
       const replayText = extractReplayUserText(cliMsg)
-      if (replayText) {
+      if (replayText && !isShutdownTeamPrompt(cliMsg.message?.content) && (!cliMsg.isMeta || parseSessionCollaborationEnvelope(replayText))) {
         const collaborationEnvelope = parseSessionCollaborationEnvelope(replayText)
         messages.push(collaborationEnvelope
           ? {
@@ -5185,6 +5286,9 @@ function forwardCliMessageToClient(
   handleCliPermissionModeBroadcast(sessionId, cliMsg)
   const serverMsgs = translateCliMessage(cliMsg, sessionId)
   for (const msg of serverMsgs) sendMessage(ws, msg)
+  // Completing the leader turn clears renderer prompts; independent workers
+  // may still be awaiting an answer, so restore them after that boundary.
+  if (serverMsgs.some(msg => msg.type === 'message_complete')) replayPendingPermissionRequests(ws, sessionId)
 }
 
 function forwardCliMessageToSessionClients(sessionId: string, cliMsg: any): void {
@@ -5194,6 +5298,7 @@ function forwardCliMessageToSessionClients(sessionId: string, cliMsg: any): void
   const serverMsgs = translateCliMessage(cliMsg, sessionId)
   for (const ws of clients) {
     for (const msg of serverMsgs) sendMessage(ws, msg)
+    if (serverMsgs.some(msg => msg.type === 'message_complete')) replayPendingPermissionRequests(ws, sessionId)
   }
 }
 
@@ -5308,6 +5413,10 @@ function bindClientSessionOutput(
       handleCliPermissionModeBroadcast(sessionId, cliMsg)
       const serverMsgs = translateCliMessage(cliMsg, sessionId)
       for (const msg of serverMsgs) sendMessage(ws, msg)
+      // Upstream v0.6.7: completing the leader turn clears renderer prompts,
+      // but independent workers may still be awaiting an answer — restore them
+      // after that boundary.
+      if (serverMsgs.some(msg => msg.type === 'message_complete')) replayPendingPermissionRequests(ws, sessionId)
 
       // Provider-level compatibility detection: if any of the messages
       // we just translated is an `error` whose payload matches the
@@ -5657,6 +5766,7 @@ export async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSet
         const defaults = await getDefaultRuntimeSettings()
         return {
           ...defaults,
+          model: await resolveDefaultRuntimeModel(defaults),
           permissionMode: sessionPermissionMode ?? defaults.permissionMode,
           coordinatorMode,
           pipelineFlavor,
@@ -5676,6 +5786,11 @@ export async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSet
       if (!isOpenAIOfficialProviderId(runtimeOverride.providerId)) {
         const provider = providers.find((p) => p.id === runtimeOverride.providerId)
         if (provider) {
+          // Compare on the base id: the fork carries a runtime `[1m]` (or `:1m`)
+          // suffix that the provider's slot map never stores, so a raw compare
+          // would treat every 1M selection as a stale model.
+          const baseModelId = (value: string) =>
+            value.trim().replace(/\[1m\]$/i, '').replace(/:1m$/i, '').trim()
           const knownModels = new Set(
             [
               provider.models.main,
@@ -5683,10 +5798,10 @@ export async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSet
               provider.models.sonnet,
               provider.models.opus,
             ]
-              .map((value) => (typeof value === 'string' ? value.trim() : ''))
+              .map((value) => (typeof value === 'string' ? baseModelId(value) : ''))
               .filter(Boolean),
           )
-          if (knownModels.size > 0 && !knownModels.has(runtimeOverride.modelId)) {
+          if (knownModels.size > 0 && !knownModels.has(baseModelId(runtimeOverride.modelId))) {
             console.warn(
               `[WS] Persisted runtime modelId '${runtimeOverride.modelId}' is no longer in provider ${provider.id}'s model map; falling back to ${provider.models.main}`,
             )
@@ -5704,7 +5819,16 @@ export async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSet
     )
     let effort = runtimeOverride.effort
     if (isOpenAIOfficialProviderId(runtimeOverride.providerId)) {
-      effort = effort ?? await getDefaultOpenAIReasoningEffort(resolvedModelId)
+      // Fork fallback to the resolved model's default when no effort was given;
+      // upstream v0.6.7 validates a saved effort against the model catalog, since
+      // a saved selection may outlive a model's supported effort list. Both are
+      // kept, using the model id the fork may have just fallen back to.
+      const catalog = await getDesktopOpenAICodexModelCatalog()
+      const model = getOpenAIModelCatalogEntry(resolvedModelId, catalog)
+      effort = effort && isOpenAIReasoningEffort(effort) &&
+        (!model || model.supportedReasoningEfforts.includes(effort))
+        ? effort
+        : model?.defaultReasoningEffort ?? await getDefaultOpenAIReasoningEffort(resolvedModelId)
     } else if (isGrokOfficialProviderId(runtimeOverride.providerId)) {
       const grokEffort = await getGrokReasoningEfforts(resolvedModelId)
       resolvedModelId = grokEffort.modelId
@@ -5755,6 +5879,14 @@ export async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSet
 async function getSessionPermissionMode(sessionId: string): Promise<string | undefined> {
   const launchInfo = await sessionService.getSessionLaunchInfo(sessionId).catch(() => null)
   return launchInfo?.permissionMode
+}
+
+async function resolveDefaultRuntimeModel(runtime: RuntimeSettings): Promise<string> {
+  if (runtime.model) return runtime.model
+  if (runtime.providerId) {
+    return (await providerService.getProviderRuntimeEnv(runtime.providerId)).ANTHROPIC_MODEL
+  }
+  return (await providerService.getOfficialProviderModels('claude-official')).main
 }
 
 async function getDefaultRuntimeSettings(): Promise<RuntimeSettings> {
@@ -5948,6 +6080,16 @@ async function waitForRuntimeTransitionBeforeUserTurn(
         : undefined
   }
 
+  const rejectedConfig = rejectedRuntimeConfigs.get(sessionId)
+  if (rejectedConfig) {
+    const message = `The message was not sent. ${rejectedConfig} Select a valid model and reasoning effort, then retry.`
+    sendMessage(ws, { type: 'error', message, code: 'USER_TURN_FAILED', retryable: true })
+    sendMessage(ws, { type: 'status', state: 'idle' })
+    failSessionChatActivity(sessionId)
+    emitSessionTurnEvent({ type: 'output', sessionId, message: { type: 'result', is_error: true, result: message } })
+    return { ok: false, waited }
+  }
+
   return { ok: true, waited }
 }
 
@@ -6126,6 +6268,7 @@ export function __resetWebSocketHandlerStateForTests(): void {
   }
   sessionTurnObservers.clear()
   runtimeOverrides.clear()
+  rejectedRuntimeConfigs.clear()
   runtimeOverrideVersions.clear()
   deferredRuntimeRestarts.clear()
   deferredPermissionModes.clear()

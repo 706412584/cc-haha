@@ -1,6 +1,6 @@
 import type { Database } from 'bun:sqlite'
 
-export const LOCAL_INDEX_SCHEMA_VERSION = 6
+export const LOCAL_INDEX_SCHEMA_VERSION = 7
 export const LOCAL_INDEX_SCHEMA_UNSUPPORTED =
   'LOCAL_INDEX_SCHEMA_UNSUPPORTED' as const
 
@@ -194,6 +194,19 @@ const SCHEMA_V6 = `
 ALTER TABLE sessions ADD COLUMN session_api_format TEXT;
 `
 
+// Hide independently persisted team workers from the task sidebar without
+// removing their transcript lookup or entry locators. Older sessions remain visible.
+//
+// This column is version 7, not 6: fork and upstream lineages both spent v4–v6
+// on different columns (fork: thinking_enabled, active_duration_ms,
+// session_api_format; upstream: active_duration_ms, session_api_format,
+// is_team_worker), so a cache from either lineage can report v6 while lacking
+// this column. Version 7 is the first number free on both, and the per-column
+// guards below make applying it idempotent on either lineage.
+const SCHEMA_V7 = `
+ALTER TABLE sessions ADD COLUMN is_team_worker INTEGER NOT NULL DEFAULT 0 CHECK (is_team_worker IN (0, 1));
+`
+
 const MIGRATIONS = [
   { version: 1, sql: SCHEMA_V1 },
   { version: 2, sql: SCHEMA_V2 },
@@ -201,6 +214,7 @@ const MIGRATIONS = [
   { version: 4, sql: SCHEMA_V4 },
   { version: 5, sql: SCHEMA_V5 },
   { version: 6, sql: SCHEMA_V6 },
+  { version: 7, sql: SCHEMA_V7 },
 ] as const
 
 export class UnsupportedLocalIndexSchemaError extends Error {
@@ -249,24 +263,33 @@ export function migrateLocalIndexDatabase(database: Database): void {
   if (currentVersion === LOCAL_INDEX_SCHEMA_VERSION) return
 
   database.transaction(() => {
-    if (
-      currentVersion === 4 &&
-      !hasColumn(database, 'sessions', 'thinking_enabled')
-    ) {
+    // An upstream-lineage cache can report v4 without the fork's
+    // thinking_enabled column; repair it before the loop advances the version.
+    if (currentVersion === 4 && !hasColumn(database, 'sessions', 'thinking_enabled')) {
       database.exec(SCHEMA_V4)
     }
 
     for (const migration of MIGRATIONS) {
       if (migration.version <= currentVersion) continue
-      // Both branches used schema version 4 for different columns. A database
-      // created by the upstream branch may therefore report v4 while lacking
-      // the local thinking column; repair either side before advancing to v5.
+      // Fork and upstream both spent v4–v6 on different columns, so a cache can
+      // report any of those versions while missing a column the other lineage
+      // added at the same number. Guard each column by presence instead of
+      // trusting the version number, which makes applying any step idempotent
+      // on a database from either lineage.
       if (migration.version === 4) {
         if (!hasColumn(database, 'sessions', 'thinking_enabled')) {
           database.exec(migration.sql)
         }
       } else if (migration.version === 5) {
         if (!hasColumn(database, 'activity_sessions', 'active_duration_ms')) {
+          database.exec(migration.sql)
+        }
+      } else if (migration.version === 6) {
+        if (!hasColumn(database, 'sessions', 'session_api_format')) {
+          database.exec(migration.sql)
+        }
+      } else if (migration.version === 7) {
+        if (!hasColumn(database, 'sessions', 'is_team_worker')) {
           database.exec(migration.sql)
         }
       } else {

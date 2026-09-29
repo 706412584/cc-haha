@@ -192,7 +192,7 @@ async function request<T>(method: string, path: string, body?: unknown, options?
       // Recovery may include a sidecar restart. Measure
       // it separately from the retried HTTP request so diagnostics can tell a
       // slow handler from a slow Electron-host recovery.
-      const recovered = await recoverDesktopServerUrl()
+      const recovered = await waitForRecoveryOrAbort(recoverDesktopServerUrl(), controller.signal)
       timing.recoveryMs += monotonicNow() - recoveryStartedAt
       if (!recovered) throw error
       timing.recovered = true
@@ -230,6 +230,27 @@ async function request<T>(method: string, path: string, body?: unknown, options?
     clearTimeout(timeout)
     options?.signal?.removeEventListener('abort', abortFromCaller)
   }
+}
+
+function waitForRecoveryOrAbort<T>(recovery: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason)
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener('abort', onAbort)
+      reject(signal.reason)
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    void recovery.then(
+      value => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      error => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
 }
 
 function monotonicNow(): number {

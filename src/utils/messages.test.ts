@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
+import type { Tool } from '../Tool.js'
 import type { AssistantMessage } from '../types/message.js'
 import {
   createAssistantMessage,
   createUserMessage,
   normalizeMessagesForAPI,
+  normalizeContentFromAPI,
   stripSignatureBlocksAfterModelChange,
 } from './messages.js'
 
@@ -228,4 +230,47 @@ describe('stripSignatureBlocksAfterModelChange', () => {
       stripSignatureBlocksAfterModelChange(messages, 'deepseek-v4-flash'),
     ).toBe(messages)
   })
+})
+
+describe('malformed provider tool arguments', () => {
+  test('preserves invalid JSON as a bounded marker rather than executable empty input', () => {
+    const raw = '{"path":' + 'x'.repeat(3000)
+    const [block] = normalizeContentFromAPI([{ type: 'tool_use', id: 'bad-call', name: 'TaskList', input: raw }], [])
+    expect(block).toEqual({ type: 'tool_use', id: 'bad-call', name: 'TaskList', input: { __unparsedToolInput: { raw: raw.slice(0, 2048), len: raw.length } } })
+  })
+
+  test('retains existing history markers and still accepts genuine empty input', () => {
+    const marker = { __unparsedToolInput: { raw: '{broken', len: 7 } }
+    const normalized = normalizeContentFromAPI([
+      { type: 'tool_use', id: 'historical', name: 'Read', input: marker },
+      { type: 'tool_use', id: 'empty', name: 'TaskList', input: '' },
+      { type: 'tool_use', id: 'valid', name: 'TaskList', input: '{}' },
+      { type: 'tool_use', id: 'null', name: 'TaskList', input: ' null ' },
+    ], [])
+    expect(normalized.map(block => block.type === 'tool_use' ? block.input : null)).toEqual([marker, {}, {}, {}])
+  })
+})
+
+
+test('malformed and restored markers bypass TaskOutput default injection and survive API history normalization', () => {
+  const tool = { name: 'TaskOutput' } as Tool
+  const raw = '{truncated'
+  const marker = { __unparsedToolInput: { raw, len: raw.length } }
+  for (const input of [raw, marker]) {
+    const blocks = normalizeContentFromAPI([{ type: 'tool_use', id: 'task-output', name: tool.name, input }], [tool])
+    expect(blocks[0]).toMatchObject({ input: marker })
+    const restored = JSON.parse(JSON.stringify(createAssistantMessage({ content: blocks })))
+    const history = normalizeMessagesForAPI([restored, toolResult('task-output')], [tool])
+    expect(history[0]!.message.content).toEqual([{ type: 'tool_use', id: 'task-output', name: tool.name, input: marker }])
+  }
+})
+
+test('legacy ordinary tool-use JSON still round-trips without a migration', () => {
+  const tool = { name: 'Read' } as Tool
+  const historical = JSON.parse(JSON.stringify(assistant('legacy-response', [toolUse('legacy-read')])))
+  const blocks = normalizeContentFromAPI(historical.message.content, [tool])
+  expect(blocks).toEqual(historical.message.content)
+  historical.message.content = blocks
+  const replay = normalizeMessagesForAPI([historical, toolResult('legacy-read')], [tool])
+  expect(replay[0]!.message.content).toEqual(historical.message.content)
 })

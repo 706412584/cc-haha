@@ -3856,7 +3856,7 @@ async function getTeammateMailboxAttachments(
 
         if (teammateId) {
           // Remove from team file
-          removeTeammateFromTeamFile(teamName, {
+          await removeTeammateFromTeamFile(teamName, {
             agentId: teammateId,
             name: teammateToRemove,
           })

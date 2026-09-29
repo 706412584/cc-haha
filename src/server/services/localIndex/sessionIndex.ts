@@ -317,9 +317,9 @@ export function createSessionIndex(database: LocalIndexDatabase): SessionIndex {
 
       return database.read(operation => {
         const total = project === undefined
-          ? operation.get<{ total: number }>('SELECT COUNT(*) AS total FROM sessions')?.total ?? 0
+          ? operation.get<{ total: number }>('SELECT COUNT(*) AS total FROM sessions WHERE is_team_worker = 0')?.total ?? 0
           : operation.get<{ total: number }>(
-            'SELECT COUNT(*) AS total FROM sessions WHERE project_path = ?',
+            'SELECT COUNT(*) AS total FROM sessions WHERE is_team_worker = 0 AND project_path = ?',
             project,
           )?.total ?? 0
         const rows = project === undefined
@@ -330,6 +330,7 @@ export function createSessionIndex(database: LocalIndexDatabase): SessionIndex {
                 runtime_model_id, effort_level, thinking_enabled,
                 repository_json, worktree_session_json
               FROM sessions
+              WHERE is_team_worker = 0
               ORDER BY modified_at_ms DESC, session_id ASC, transcript_path ASC
               LIMIT ? OFFSET ?
             `, limit, offset)
@@ -340,7 +341,7 @@ export function createSessionIndex(database: LocalIndexDatabase): SessionIndex {
                 runtime_model_id, effort_level, thinking_enabled,
                 repository_json, worktree_session_json
               FROM sessions
-              WHERE project_path = ?
+              WHERE is_team_worker = 0 AND project_path = ?
               ORDER BY modified_at_ms DESC, session_id ASC, transcript_path ASC
               LIMIT ? OFFSET ?
             `, project, limit, offset)

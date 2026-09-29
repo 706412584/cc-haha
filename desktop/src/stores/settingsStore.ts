@@ -41,6 +41,11 @@ import {
 } from '../lib/appZoom'
 import { useUIStore } from './uiStore'
 import {
+  DEFAULT_AUTO_QUESTION_SETTINGS,
+  normalizeAutoQuestionSettings,
+  type AutoQuestionSettings,
+} from '../../../src/shared/autoQuestionSettings'
+import {
   applyDocumentLocale,
   getInitialLocale,
   LOCALE_STORAGE_KEY,
@@ -79,6 +84,7 @@ type SettingsStore = {
    */
   keepActiveInBackground: boolean
   agentOfficeSurface: AgentOfficeSurface
+  autoQuestion: AutoQuestionSettings
   autoModeOptInAccepted: boolean
   availableModels: ModelInfo[]
   activeProviderName: string | null
@@ -130,6 +136,7 @@ type SettingsStore = {
   setUnifiedActivityPanelEnabled: (enabled: boolean) => Promise<void>
   setKeepActiveInBackground: (keepActive: boolean) => Promise<void>
   setAgentOfficeSurface: (surface: AgentOfficeSurface) => Promise<void>
+  setAutoQuestion: (settings: AutoQuestionSettings) => Promise<void>
   acceptAutoModeOptIn: () => Promise<void>
   setLocale: (locale: Locale) => void
   setTheme: (theme: ThemeMode) => Promise<void>
@@ -220,6 +227,7 @@ const DEFAULT_TRACE_CAPTURE_SETTINGS: TraceCaptureSettings = {
 
 const initialLocale = getInitialLocale()
 applyDocumentLocale(initialLocale)
+let autoQuestionUpdateQueue: Promise<unknown> = Promise.resolve()
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
   permissionMode: 'default',
@@ -233,6 +241,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   unifiedActivityPanelEnabled: false,
   keepActiveInBackground: false,
   agentOfficeSurface: 'modal',
+  autoQuestion: DEFAULT_AUTO_QUESTION_SETTINGS,
   autoModeOptInAccepted: false,
   availableModels: [],
   activeProviderName: null,
@@ -322,6 +331,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         unifiedActivityPanelEnabled: userSettings.unifiedActivityPanelEnabled === true,
         keepActiveInBackground,
         agentOfficeSurface: userSettings.agentOfficeSurface === 'tab' ? 'tab' : 'modal',
+        autoQuestion: normalizeAutoQuestionSettings(userSettings.autoQuestion),
         autoModeOptInAccepted: userSettings.skipAutoPermissionPrompt === true,
         chatSendBehavior: normalizeChatSendBehavior(userSettings.chatSendBehavior),
         outputStyle: normalizeOutputStyle(userSettings.outputStyle),
@@ -469,6 +479,20 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       await settingsApi.updateUser({ agentOfficeSurface: surface })
     } catch (error) {
       set({ agentOfficeSurface: previous })
+      throw error
+    }
+  },
+
+  setAutoQuestion: async (settings) => {
+    const previous = get().autoQuestion
+    const next = normalizeAutoQuestionSettings(settings)
+    set({ autoQuestion: next })
+    const save = autoQuestionUpdateQueue.then(() => settingsApi.updateUser({ autoQuestion: next }))
+    autoQuestionUpdateQueue = save.catch(() => {})
+    try {
+      await save
+    } catch (error) {
+      if (get().autoQuestion === next) set({ autoQuestion: previous })
       throw error
     }
   },

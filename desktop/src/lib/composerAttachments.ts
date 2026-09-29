@@ -19,6 +19,7 @@ export type ComposerAttachment = {
   diffSide?: 'old' | 'new'
   hunkId?: string
   note?: string
+  referenceKind?: 'chat-selection'
   quote?: string
 }
 

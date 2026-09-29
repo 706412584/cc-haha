@@ -362,6 +362,8 @@ import {
   hasWorkingInProcessTeammates,
   waitForTeammatesToBecomeIdle,
 } from '../utils/teammate.js'
+import { TEAM_LEAD_NAME } from '../utils/swarm/constants.js'
+import { SHUTDOWN_TEAM_PROMPT } from '../utils/swarm/teamShutdownPrompt.js'
 import {
   readUnreadMessages,
   markMessagesAsRead,
@@ -371,7 +373,9 @@ import {
   partitionLeadMailboxMessages,
   resolveTeammatePermissionRequests,
 } from '../utils/swarm/printLeaderPermissionBridge.js'
-import { removeTeammateFromTeamFile } from '../utils/swarm/teamHelpers.js'
+import { removeTeammateFromTeamFile, readTeamFile, getTeamFilePath } from '../utils/swarm/teamHelpers.js'
+import { setLeaderTeamName } from '../utils/tasks.js'
+import { buildTeamRuntimeSnapshot } from '../utils/swarm/teamRuntimeSnapshot.js'
 import { unassignTeammateTasks } from '../utils/tasks.js'
 import { getRunningTasks } from '../utils/task/framework.js'
 import { isBackgroundTask } from '../tasks/types.js'
@@ -408,19 +412,25 @@ const extractMemoriesModule = feature('EXTRACT_MEMORIES')
   : null
 /* eslint-enable @typescript-eslint/no-require-imports */
 
-const SHUTDOWN_TEAM_PROMPT = `<system-reminder>
-You are running in non-interactive mode and cannot return a response to the user until your team is shut down.
+export function hasTeammatesRequiringShutdown(state: AppState): boolean {
+  if (hasActiveInProcessTeammates(state)) return true
+  const team = state.teamContext
+  if (!team) return false
+  for (const member of Object.values(team.teammates)) {
+    if (member.name === TEAM_LEAD_NAME) continue
+    return true
+  }
+  return false
+}
 
-You MUST shut down your team before preparing your final response:
-1. Use requestShutdown to ask each team member to shut down gracefully
-2. Wait for shutdown approvals
-3. Use the cleanup operation to clean up the team
-4. Only then provide your final response to the user
-
-The user cannot receive your response until the team is completely shut down.
-</system-reminder>
-
-Shut down your team and prepare your final response for the user.`
+export function createShutdownTeamPrompt(): QueuedCommand {
+  return {
+    mode: 'prompt',
+    value: SHUTDOWN_TEAM_PROMPT,
+    uuid: randomUUID(),
+    isMeta: true,
+  }
+}
 
 // Track message UUIDs received during the current session runtime
 const MAX_RECEIVED_UUIDS = 10_000
@@ -1284,6 +1294,7 @@ function runHeadlessStreaming(
   // include Assistant, User, Attachment, and Progress messages.
   // TODO: Clean up this code to avoid passing around a mutable array.
   const mutableMessages: Message[] = initialMessages
+  const sideQuestionControllers = new Map<string, AbortController>()
 
   // Seed the readFileState cache from the transcript (content the model saw,
   // with message timestamps) so getChangedFiles can detect external edits.
@@ -2645,10 +2656,7 @@ function runHeadlessStreaming(
         while (true) {
           // Check if teammates are still active
           const refreshedState = getAppState()
-          const hasActiveTeammates =
-            hasActiveInProcessTeammates(refreshedState) ||
-            (refreshedState.teamContext &&
-              Object.keys(refreshedState.teamContext.teammates).length > 0)
+          const hasActiveTeammates = hasTeammatesRequiringShutdown(refreshedState)
 
           if (!hasActiveTeammates) {
             logForDebugging(
@@ -2712,7 +2720,7 @@ function runHeadlessStreaming(
 
                 if (teammateId) {
                   // Remove from team file
-                  removeTeammateFromTeamFile(teamName, {
+                  await removeTeammateFromTeamFile(teamName, {
                     agentId: teammateId,
                     name: teammateToRemove,
                   })
@@ -2776,11 +2784,7 @@ function runHeadlessStreaming(
             logForDebugging(
               '[print.ts] Input closed with active teammates, injecting shutdown prompt',
             )
-            enqueue({
-              mode: 'prompt',
-              value: SHUTDOWN_TEAM_PROMPT,
-              uuid: randomUUID(),
-            })
+            enqueue(createShutdownTeamPrompt())
             void run()
             return // run() will come back here after processing
           }
@@ -2802,24 +2806,12 @@ function runHeadlessStreaming(
 
         // Re-fetch state after potential wait
         const refreshedAppState = getAppState()
-        const refreshedTeamContext = refreshedAppState.teamContext
-        const hasTeamMembersNotCleanedUp =
-          refreshedTeamContext &&
-          Object.keys(refreshedTeamContext.teammates).length > 0
-
-        return (
-          hasTeamMembersNotCleanedUp ||
-          hasActiveInProcessTeammates(refreshedAppState)
-        )
+        return hasTeammatesRequiringShutdown(refreshedAppState)
       })()
 
       if (hasActiveSwarm) {
         // Team members are idle or pane-based - inject prompt to shut down team
-        enqueue({
-          mode: 'prompt',
-          value: SHUTDOWN_TEAM_PROMPT,
-          uuid: randomUUID(),
-        })
+        enqueue(createShutdownTeamPrompt())
         void run()
       } else {
         // Wait for any in-flight push suggestion before closing the output stream.
@@ -3013,7 +3005,16 @@ function runHeadlessStreaming(
           } catch (error) {
             sendControlResponseError(message, error instanceof Error ? error.message : String(error))
           }
-        } else if (message.request.subtype === 'interrupt') {
+        } else if (message.request.subtype === 'team_runtime_snapshot') {
+          try {
+            const teamContext = buildTeamRuntimeSnapshot(readTeamFile(message.request.team_name), message.request.created_at, getSessionId(), getTeamFilePath(message.request.team_name))
+            setLeaderTeamName(teamContext.teamName)
+            setAppState(prev => ({ ...prev, teamContext }))
+            sendControlResponseSuccess(message)
+          } catch (error) {
+            sendControlResponseError(message, error instanceof Error ? error.message : String(error))
+          }
+        } else if (message.request.subtype === 'interrupt' || message.request.subtype === 'team_plan_pause') {
           sessionMessageInbox.cancelQueued(dequeueAllMatching)
           // Track escapes for attribution (ant-only feature)
           if (feature('COMMIT_ATTRIBUTION')) {
@@ -4143,40 +4144,27 @@ function runHeadlessStreaming(
               sendControlResponseError(message, errorMessage(e))
             }
           })()
+        } else if (message.request.subtype === 'cancel_side_question') {
+          const controller = sideQuestionControllers.get(message.request.question_id)
+          controller?.abort(new Error('Side question cancelled'))
+          sendControlResponseSuccess(message, { cancelled: Boolean(controller) })
         } else if (message.request.subtype === 'side_question') {
-          // Same fire-and-forget pattern as generate_session_title above —
-          // the forked agent's API roundtrip must not block the stdin loop.
-          //
-          // The snapshot captured by stopHooks (for querySource === 'sdk')
-          // holds the exact systemPrompt/userContext/systemContext/messages
-          // sent on the last main-thread turn. Reusing them gives a byte-
-          // identical prefix → prompt cache hit.
-          //
-          // Fallback (resume before first turn completes — no snapshot yet):
-          // rebuild from scratch. buildSideQuestionFallbackParams mirrors
-          // QueryEngine.ts:ask()'s system prompt assembly (including
-          // --system-prompt / --append-system-prompt) so the rebuilt prefix
-          // matches in the common case. May still miss the cache for
-          // coordinator mode or memory-mechanics extras — acceptable, the
-          // alternative is the side question failing entirely.
-          const { question } = message.request
+          // Register synchronously so a following cancel request can find the
+          // fork even while fallback context is being assembled.
+          const { question, history, question_id } = message.request
+          const questionId = question_id ?? message.request_id
+          if (sideQuestionControllers.has(questionId)) {
+            sendControlResponseError(message, 'Side question already running')
+            continue
+          }
+          const controller = createAbortController()
+          sideQuestionControllers.set(questionId, controller)
+          const currentMessages = mutableMessages.slice()
           void (async () => {
             try {
               const saved = getLastCacheSafeParams()
               const cacheSafeParams = saved
-                ? {
-                    ...saved,
-                    // If the last turn was interrupted, the snapshot holds an
-                    // already-aborted controller; createChildAbortController in
-                    // createSubagentContext would propagate it and the fork
-                    // would die before sending a request. The controller is
-                    // not part of the cache key — swapping in a fresh one is
-                    // safe. Same guard as generate_session_title above.
-                    toolUseContext: {
-                      ...saved.toolUseContext,
-                      abortController: createAbortController(),
-                    },
-                  }
+                ? { ...saved, forkContextMessages: currentMessages }
                 : await buildSideQuestionFallbackParams({
                     tools: buildAllTools(getAppState()),
                     commands: currentCommands,
@@ -4185,7 +4173,7 @@ function runHeadlessStreaming(
                       ...sdkClients,
                       ...dynamicMcpState.clients,
                     ],
-                    messages: mutableMessages,
+                    messages: currentMessages,
                     readFileState,
                     getAppState,
                     setAppState,
@@ -4194,13 +4182,12 @@ function runHeadlessStreaming(
                     thinkingConfig: options.thinkingConfig,
                     agents: currentAgents,
                   })
-              const result = await runSideQuestion({
-                question,
-                cacheSafeParams,
-              })
+              const result = await runSideQuestion({ question, history, cacheSafeParams, signal: controller.signal })
               sendControlResponseSuccess(message, { response: result.response })
             } catch (e) {
               sendControlResponseError(message, errorMessage(e))
+            } finally {
+              sideQuestionControllers.delete(questionId)
             }
           })()
         } else if (

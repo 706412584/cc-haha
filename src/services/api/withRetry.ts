@@ -360,10 +360,15 @@ export function shouldRetryStreamAfterTransportDisconnect(input: {
  * window instead of failing after one retry. Override with
  * CLAUDE_STREAM_TRANSIENT_RETRY_MAX (set 0 to disable for providers that
  * cannot tolerate a safe, pre-side-effect re-send).
+ *
+ * The override is capped at 5 (upstream v0.6.7) so a mistyped value cannot turn
+ * recovery into an unbounded retry loop. The default stays at the fork's 4: the
+ * fork's relay providers rely on the wider window, and upstream's cap bounds
+ * only the configured override, not that default.
  */
 export function getMaxStreamTransientRetries(): number {
   const raw = parseInt(process.env.CLAUDE_STREAM_TRANSIENT_RETRY_MAX || '', 10)
-  return Number.isFinite(raw) && raw >= 0 ? raw : 4
+  return Number.isFinite(raw) && raw >= 0 ? Math.min(raw, 5) : 4
 }
 
 /**
@@ -795,8 +800,9 @@ export function getRetryDelay(
 ): number {
   if (retryAfterHeader) {
     const seconds = parseInt(retryAfterHeader, 10)
-    if (!isNaN(seconds)) {
-      return seconds * 1000
+    if (Number.isFinite(seconds)) {
+      // A zero (or negative) hint must not turn capacity retries into a hot loop.
+      return Math.max(BASE_DELAY_MS, seconds * 1000)
     }
   }
 
@@ -1088,8 +1094,9 @@ function getRetryAfterMs(error: APIError): number | null {
   const retryAfter = getRetryAfter(error)
   if (retryAfter) {
     const seconds = parseInt(retryAfter, 10)
-    if (!isNaN(seconds)) {
-      return seconds * 1000
+    if (Number.isFinite(seconds)) {
+      // A zero (or negative) hint must not turn capacity retries into a hot loop.
+      return Math.max(BASE_DELAY_MS, seconds * 1000)
     }
   }
   return null

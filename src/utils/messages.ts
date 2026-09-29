@@ -162,6 +162,7 @@ import { TASK_OUTPUT_TOOL_NAME } from '../tools/TaskOutputTool/constants.js'
 import { TASK_UPDATE_TOOL_NAME } from '../tools/TaskUpdateTool/constants.js'
 import type { PermissionMode } from '../types/permissions.js'
 import { normalizeToolInput, normalizeToolInputForAPI } from './api.js'
+import { createUnparsedToolInput, isUnparsedToolInput } from './unparsedToolInput.js'
 import { getCurrentProjectConfig } from './config.js'
 import { logAntError, logForDebugging } from './debug.js'
 import { stripIdeContextTags } from './displayTags.js'
@@ -2302,7 +2303,7 @@ export function normalizeMessagesForAPI(
               content: message.message.content.map(block => {
                 if (block.type === 'tool_use') {
                   const tool = tools.find(t => toolMatchesName(t, block.name))
-                  const normalizedInput = tool
+                  const normalizedInput = tool && !isUnparsedToolInput(block.input)
                     ? normalizeToolInputForAPI(
                         tool,
                         block.input as Record<string, unknown>,
@@ -2881,11 +2882,8 @@ export function normalizeContentFromAPI(
         let normalizedInput: unknown
         if (typeof contentBlock.input === 'string') {
           const parsed = safeParseJSON(contentBlock.input)
-          if (parsed === null && contentBlock.input.length > 0) {
-            // TET/FC-v3 diagnostic: the streamed tool input JSON failed to
-            // parse. We fall back to {} which means downstream validation
-            // sees empty input. The raw prefix goes to debug log only — no
-            // PII-tagged proto column exists for it yet.
+          if (parsed === null && contentBlock.input.trim() !== 'null' && contentBlock.input.length > 0) {
+            normalizedInput = createUnparsedToolInput(contentBlock.input)
             logEvent('tengu_tool_input_json_parse_fail', {
               toolName: sanitizeToolNameForAnalytics(contentBlock.name),
               inputLen: contentBlock.input.length,
@@ -2896,14 +2894,15 @@ export function normalizeContentFromAPI(
                 { level: 'warn' },
               )
             }
+          } else {
+            normalizedInput = parsed ?? {}
           }
-          normalizedInput = parsed ?? {}
         } else {
           normalizedInput = contentBlock.input
         }
 
         // Then apply tool-specific corrections
-        if (typeof normalizedInput === 'object' && normalizedInput !== null) {
+        if (typeof normalizedInput === 'object' && normalizedInput !== null && !isUnparsedToolInput(normalizedInput)) {
           const tool = findToolByName(tools, contentBlock.name)
           if (tool) {
             try {

@@ -61,6 +61,7 @@ function docsManifestPlugin() {
 
 export default defineConfig({
   base: '/cc-haha/',
+  resolve: { alias: { '@': path.resolve(import.meta.dirname, 'src') } },
   plugins: [docsManifestPlugin()],
   build: {
     outDir: 'dist',

@@ -537,6 +537,22 @@ export const SDKControlSendAgentMessageRequestSchema = lazySchema(() =>
     .describe('Queues a follow-up message for an existing subagent, resuming it when necessary.'),
 )
 
+export const SDKControlSideQuestionRequestSchema = lazySchema(() =>
+  z.object({
+    subtype: z.literal('side_question'),
+    question_id: z.uuid().optional(),
+    question: z.string().trim().min(1).max(16_000),
+    history: z.array(z.object({
+      question: z.string().trim().min(1).max(16_000),
+      response: z.string().min(1).max(64_000),
+    })).max(20).optional(),
+  }),
+)
+
+export const SDKControlCancelSideQuestionRequestSchema = lazySchema(() =>
+  z.object({ subtype: z.literal('cancel_side_question'), question_id: z.uuid() }),
+)
+
 export const SDKControlApplyFlagSettingsRequestSchema = lazySchema(() =>
   z
     .object({
@@ -627,6 +643,8 @@ export const SDKControlElicitationResponseSchema = lazySchema(() =>
 
 export const SDKControlRequestInnerSchema = lazySchema(() =>
   z.union([
+    z.object({ subtype: z.literal('team_runtime_snapshot'), team_name: z.string().min(1), created_at: z.number() }),
+    z.object({ subtype: z.literal('team_plan_pause') }),
     sessionMessageInputSchema,
     SDKControlInterruptRequestSchema(),
     SDKControlPermissionRequestSchema(),
@@ -649,6 +667,8 @@ export const SDKControlRequestInnerSchema = lazySchema(() =>
     SDKControlMcpToggleRequestSchema(),
     SDKControlStopTaskRequestSchema(),
     SDKControlSendAgentMessageRequestSchema(),
+    SDKControlSideQuestionRequestSchema(),
+    SDKControlCancelSideQuestionRequestSchema(),
     SDKControlApplyFlagSettingsRequestSchema(),
     SDKControlGetSettingsRequestSchema(),
     SDKControlElicitationRequestSchema(),

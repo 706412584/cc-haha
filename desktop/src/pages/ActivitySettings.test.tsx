@@ -324,17 +324,21 @@ describe('ActivitySettings', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '编辑个人资料' }))
     const input = screen.getByLabelText('显示名称')
-    fireEvent.change(input, { target: { value: '本地舰长' } })
+    const displayName = '大厂程序员阿江的 Token 活动统计展示'
+    fireEvent.change(input, { target: { value: displayName } })
     fireEvent.change(screen.getByLabelText('第二行'), { target: { value: 'relakkes.dev' } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
 
     await flushActivityLoad()
 
     expect(updateProfilePreferencesMock).toHaveBeenCalledWith({
-      displayName: '本地舰长',
+      displayName,
       subtitle: 'relakkes.dev',
     })
-    expect(screen.getByText('本地舰长')).toBeInTheDocument()
+    const heading = screen.getByRole('heading', { name: displayName })
+    expect(heading).toHaveClass('break-words')
+    expect(heading).not.toHaveClass('truncate')
+    expect(heading.parentElement).toHaveClass('w-full')
     expect(screen.getByRole('link', { name: 'relakkes.dev' })).toHaveAttribute('href', 'https://relakkes.dev')
   })
 

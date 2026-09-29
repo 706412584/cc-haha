@@ -1,3 +1,4 @@
+import { handleSideChatsRoute } from './sideChats.js'
 /**
  * Session REST API Routes
  *
@@ -25,6 +26,7 @@
  */
 
 import * as path from 'node:path'
+import { handleSideQuestionRoute } from './sideQuestions.js'
 import { sessionService } from '../services/sessionService.js'
 import { conversationService } from '../services/conversationService.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
@@ -290,6 +292,16 @@ export async function handleSessionsApi(
         )
       }
       return await branchSession(req, sessionId)
+    }
+
+    if (subResource === 'side-chats') {
+      if (segments.length > 5) throw ApiError.notFound('Side chat route not found')
+      return await handleSideChatsRoute(req, sessionId, segments[4])
+    }
+
+    if (subResource === 'side-question') {
+      if (segments.length > 5) throw ApiError.notFound('Side question route not found')
+      return await handleSideQuestionRoute(req, url, sessionId, segments[4])
     }
 
     if (subResource === 'turn-checkpoints') {

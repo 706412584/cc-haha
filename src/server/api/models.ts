@@ -67,6 +67,14 @@ const DEFAULT_MODELS = [
     context: '1m',
   },
   {
+    id: 'claude-opus-5-5',
+    name: 'Opus 5.5',
+    description: 'Best for complex agentic coding and enterprise work',
+    context: '1m',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+  },
+  {
     id: 'claude-opus-5',
     name: 'Opus 5',
     description: 'Best for complex agentic coding and enterprise work',

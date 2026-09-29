@@ -57,6 +57,24 @@ function assistant(timestamp: string, extra: Record<string, unknown> = {}) {
 }
 
 describe('reduceTranscript', () => {
+  it('clears inherited effort on full runtime replacements in complete and incremental projections', () => {
+    const oldSelection = { type: 'session-meta', runtimeProviderId: 'old-provider', runtimeModelId: 'old-model', effortLevel: 'high' }
+    const replacement = { type: 'session-meta', runtimeProviderId: 'new-provider', runtimeModelId: 'new-model' }
+    const first = reduceTranscript(completeChunks([oldSelection]), initialProjection())
+    expect(first.summary.effortLevel).toBe('high')
+    const incremental = reduceTranscript(completeChunks([replacement], first.indexedBytes), first)
+    const complete = reduceTranscript(completeChunks([oldSelection, replacement]), initialProjection())
+    for (const projection of [incremental, complete]) {
+      expect(projection.summary).toMatchObject({ runtimeProviderId: 'new-provider', runtimeModelId: 'new-model' })
+      expect(projection.summary.effortLevel).toBeUndefined()
+    }
+    const partial = reduceTranscript(completeChunks([
+      { type: 'session-meta', permissionMode: 'plan' },
+      { type: 'session-meta', runtimeModelId: 'historical-model' },
+    ], first.indexedBytes), first)
+    expect(partial.summary.effortLevel).toBe('high')
+  })
+
   it('projects the existing summary fields and title precedence from complete lines', () => {
     const repository = {
       requestedWorkDir: '/repo',

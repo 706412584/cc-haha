@@ -145,7 +145,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({
               content={displayContent}
               variant="compact"
               cache
-              className="thinking-markdown text-[var(--color-text-secondary)]"
+              className="thinking-markdown chat-reading-markdown text-[var(--color-text-secondary)]"
             />
           )}
         </div>

@@ -682,3 +682,29 @@ it('reads only the subagent name prefix of a large transcript', async () => {
     await fs.rm(directory, { recursive: true, force: true })
   }
 })
+
+it('broadcasts plan-only CLI writes to the owning leader without duplicate events', async () => {
+  await setupTmpConfigDir()
+  const deliveries: Array<{ message: ServerMessage; sessionId?: string }> = []
+  const watcher = new TeamWatcher((message, sessionId) => deliveries.push({ message, sessionId }), {
+    getWorkbench: async () => { throw new Error('not needed for plan event') },
+    markWorkbenchArchiveDeleted: async () => undefined,
+  })
+  try {
+    const { ensureTeamDraft, stageMember } = await import('../../utils/swarm/teamPlanStore.js')
+    await writeTeamConfig('plan-fixture', makeTeamConfig({ name: 'plan-fixture', leadSessionId: 'plan-owner' }))
+    const runtime = { providerId: 'fake', modelId: 'fixture' }
+    await ensureTeamDraft('plan-fixture', 'plan-owner', runtime)
+    await watcher.checkNow()
+    await watcher.checkNow()
+    expect(deliveries.filter(item => item.message.type === 'team_plan_updated')).toHaveLength(1)
+    await stageMember('plan-fixture', { id: 'worker', name: 'worker', agentType: 'general-purpose', prompt: 'fixture', runtime })
+    await watcher.checkNow()
+    const updates = deliveries.filter(item => item.message.type === 'team_plan_updated')
+    expect(updates).toHaveLength(2)
+    expect(updates.every(item => item.sessionId === 'plan-owner')).toBe(true)
+  } finally {
+    watcher.stop()
+    await cleanupTmpDir()
+  }
+})

@@ -81,10 +81,10 @@ describe('extractAssistantOutputTargets', () => {
     expect(targets.some((target) => target.normalizedPath === 'src/main.ts')).toBe(false)
   })
 
-  it('rejects a video path outside the active workspace (sandbox)', () => {
+  it('preserves explicit video identity outside the workspace for the backend route', () => {
     const targets = extractAssistantOutputTargets('[bad](/etc/x.mp4)', { workDir })
 
-    expect(targets).toEqual([])
+    expect(targets).toMatchObject([{ href: '/etc/x.mp4', normalizedPath: '/etc/x.mp4' }])
   })
 
   it('normalizes markdown destinations with angle brackets, spaces, and line suffixes', () => {
@@ -197,14 +197,15 @@ describe('extractAssistantOutputTargets', () => {
     expect(targets).toHaveLength(1)
   })
 
-  it('rejects paths outside the active workspace', () => {
+  it('preserves paths outside the active workspace', () => {
     const targets = extractAssistantOutputTargets(
       '[secret](/Users/nanmi/private/secret.html) [ok](/Users/nanmi/project/demo/public/index.html)',
       { workDir },
     )
 
-    expect(targets).toHaveLength(1)
-    expect(targets[0]).toMatchObject({
+    expect(targets).toHaveLength(2)
+    expect(targets[0]?.normalizedPath).toBe('/Users/nanmi/private/secret.html')
+    expect(targets[1]).toMatchObject({
       kind: 'local-html',
       normalizedPath: 'public/index.html',
     })
@@ -526,5 +527,38 @@ describe('extractAssistantOutputTargets with changedFiles reconciliation', () =>
 
     // Ambiguous basename match → no unique target, mention dropped rather than guessed.
     expect(targets).toHaveLength(0)
+  })
+})
+
+describe('explicit output path identity', () => {
+  const root = '/Users/nanmi/workspace/myself_code/cchaha-promo'
+  const content = `\`${root}/out/cc-haha-promo.mp4\`
+顺带，项目根目录是 \`${root}/\`：
+- \`out/cc-haha-promo.mp4\` — 成片
+- \`public/audio/track.wav\` — 合成音轨
+- \`src/lib/shots.ts\` — 分镜
+- \`README.md\` — 说明`
+
+  it.each([undefined, [], ['/session/README.md']])('preserves screenshot deliverables with checkpoint %j', (changedFiles) => {
+    const targets = extractAssistantOutputTargets(content, { workDir: '/session', changedFiles })
+    expect(targets.map((target) => target.href)).toEqual([
+      `${root}/out/cc-haha-promo.mp4`, `${root}/public/audio/track.wav`, `${root}/README.md`,
+      ...(changedFiles?.length ? ['README.md'] : []),
+    ])
+  })
+
+  it('does not replace an explicit absolute file with another same-named checkpoint file', () => {
+    const targets = extractAssistantOutputTargets('报告 `/external/report.pdf`', {
+      workDir: '/session', changedFiles: ['/session/report.pdf'], includeChangedFileFallback: false,
+    })
+    expect(targets.map((target) => target.href)).toEqual(['/external/report.pdf'])
+  })
+})
+
+describe('canonical output deduplication', () => {
+  it.each([undefined, [], ['/work/report.pdf']])('deduplicates absolute and relative identity with checkpoint %j', (changedFiles) => {
+    const targets = extractAssistantOutputTargets('`/work/report.pdf` and `report.pdf`', { workDir: '/work', changedFiles })
+    expect(targets).toHaveLength(1)
+    expect(targets[0]?.href).toBe('/work/report.pdf')
   })
 })

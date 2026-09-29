@@ -1,11 +1,15 @@
 import '@testing-library/jest-dom'
-import { render } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 // getServerBaseUrl backs the relative-path src (/preview-fs/<sessionId>/...).
 vi.mock('../../lib/desktopRuntime', () => ({
   getServerBaseUrl: () => 'http://127.0.0.1:4321',
 }))
+
+const openPreviewLink = vi.hoisted(() => vi.fn())
+vi.mock('../../lib/openPreviewLink', () => ({ openPreviewLink }))
+vi.mock('../../i18n', () => ({ useTranslation: () => (key: string) => key }))
 
 import { InlineVideoGallery } from './InlineVideoGallery'
 
@@ -79,8 +83,27 @@ describe('InlineVideoGallery', () => {
     )
 
     expect(videoSrcs(container)).toEqual([
-      'http://127.0.0.1:4321/preview-fs/s1/out/demo.mp4',
+      'http://127.0.0.1:4321/local-file/w/out/demo.mp4',
     ])
+  })
+
+  it.each([undefined, []])('renders an external shell video without checkpoint evidence (%j)', (changedFiles) => {
+    const { container } = render(
+      <InlineVideoGallery text={'Saved to `/outside/render.mp4`'} sessionId="s1" workDir="/w" changedFiles={changedFiles} />,
+    )
+    expect(videoSrcs(container)).toEqual(['http://127.0.0.1:4321/local-file/outside/render.mp4'])
+  })
+
+  it.each(['outputs/render.mp4', '/outside/render.mp4'])('keeps a failed preview available as an actionable file card (%s)', (path) => {
+    const { container } = render(
+      <InlineVideoGallery text={`Saved to ${path}`} sessionId="s1" workDir="/w" />,
+    )
+    fireEvent.error(container.querySelector('video')!)
+    expect(container.querySelector('video')).toBeNull()
+    expect(screen.getByText('render.mp4')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'assistantOutputs.openAria' }))
+    expect(openPreviewLink).toHaveBeenCalledWith(path, 's1')
+    expect(screen.getByRole('button', { name: 'openWith.title' })).toBeVisible()
   })
 
   it('uses preload="metadata" and never autoplays', () => {

@@ -1,3 +1,4 @@
+import { resolveAssistantFileHref } from './assistantFileContext'
 import { trimTrailingPunctuation } from './urlBoundary'
 import { isLinkableFilePath, splitTextByFilePaths } from './filePathBoundary'
 import { isGeneratedArtifactFile, isOutputResourceFile, isShellProducedDeliverable } from './fileCapabilities'
@@ -39,7 +40,7 @@ export type ExtractAssistantOutputTargetOptions = {
    * path. A mentioned *document deliverable* survives an unmatched lookup, because
    * the checkpoint cannot see files a shell command wrote.
    * Localhost URLs are unaffected. Omitted → fall back to text-only behavior;
-   * an empty array confirms the turn changed no files, so file targets are dropped.
+   * an empty array provides no evidence for source-like mentions, but cannot disprove shell outputs.
    */
   changedFiles?: string[]
   /**
@@ -117,7 +118,7 @@ export function extractAssistantOutputTargets(
 
   for (const match of markdownLinks) {
     const authoredTitle = match.title
-    const href = match.href
+    const href = resolveAssistantFileHref(match.href, content)
     const localhostTarget = toLocalhostTarget(href)
     const fileTarget = toWorkspaceFileTarget(href, workDir)
 
@@ -222,7 +223,7 @@ export function extractAssistantOutputTargets(
       continue
     }
 
-    const href = segment.ref.path
+    const href = resolveAssistantFileHref(segment.ref.path, content)
     const fileTarget = toWorkspaceFileTarget(href, workDir)
 
     if (!fileTarget) {
@@ -320,9 +321,9 @@ function correctedChangedFilePath(changedFile: string, workDir: string | null): 
 /**
  * Re-anchor file chips onto the turn's real changed files. A mentioned file that
  * matches a changed file (by exact relative-path suffix, else by basename) is
- * rewritten to that real path; a mentioned source file with no match is dropped
- * so we never render a chip that opens "file does not exist". A document
- * deliverable is the documented exception — see the comment at the drop.
+ * rewritten to that real path. Uncorroborated source-like relative mentions are
+ * omitted; explicit absolute identities and document/media outputs are retained
+ * because shell writes are invisible to the checkpoint.
  * Localhost URLs pass through untouched.
  */
 function reconcileTargetsWithChangedFiles(
@@ -345,30 +346,25 @@ function reconcileTargetsWithChangedFiles(
     }
 
     const mentioned = target.normalizedPath ?? target.href
-    const match = matchChangedFile(mentioned, changedFiles)
-    // A deliverable produced by a shell command is never in `changedFiles` — the
-    // checkpoint only records the file-editing tools. When the turn *also* edited
-    // a tracked file, that list is non-empty and every unmatched mention was being
-    // dropped, so `Write plan.md` plus `python make_report.py` lost the report.
-    //
-    // Two things keep this from resurrecting the mentions reconciliation exists to
-    // drop. It needs a non-empty list, which is this function's documented "the
-    // turn changed nothing" signal; and it needs a format nothing reads as source,
-    // so "I'm about to look at notes.md" stays a mention rather than becoming a
-    // deliverable.
-    //
-    // The trade: an unmatched path cannot be corrected, so such a card may point
-    // at a file that is not there. Bounded to a closed set of document formats.
-    // Source files keep the old behavior, which is what this was written for.
-    if (!match && !(changedFiles.length > 0 && isShellProducedDeliverable(mentioned))) {
+    // An authored absolute path (including an explicit prose root) is identity,
+    // not a basename hint. A checkpoint cannot disprove a shell-created output.
+    const explicitPath = isAbsoluteFilePath(target.href)
+    const match = explicitPath ? null : matchChangedFile(mentioned, changedFiles)
+    // Checkpoints record editing tools, not arbitrary shell output. Explicit
+    // identities and document/media deliverables survive absent evidence; bare
+    // source-like mentions still need corroboration to avoid resource-strip noise.
+    if (!match && !explicitPath && !isShellProducedDeliverable(mentioned)
+      && target.kind !== 'video' && !/\.(?:mp3|wav|m4a|flac|aac|ogg|opus)$/i.test(mentioned)) {
       continue
     }
 
-    const corrected = match
-      ? correctedChangedFilePath(match, workDir)
-      : correctedChangedFilePath(anchorToChangedDirectory(mentioned, changedFiles), workDir)
+    const corrected = explicitPath
+      ? resolveFilePath(target.href)
+      : match
+        ? correctedChangedFilePath(match, workDir)
+        : correctedChangedFilePath(anchorToChangedDirectory(mentioned, changedFiles), workDir)
 
-    const key = `${target.kind}:${corrected}`
+    const key = `${target.kind}:${resolveFilePath(corrected, workDir ?? '/')}`
     if (seen.has(key)) {
       continue
     }
@@ -376,6 +372,7 @@ function reconcileTargetsWithChangedFiles(
 
     out.push({
       ...target,
+      id: createId(target.kind, corrected),
       href: corrected,
       normalizedPath: corrected,
       subtitle: corrected,
@@ -394,7 +391,7 @@ function reconcileTargetsWithChangedFiles(
 
     const corrected = correctedChangedFilePath(changedFile, workDir)
     const kind = classifyFileTarget(corrected) ?? 'file'
-    const key = `${kind}:${corrected}`
+    const key = `${kind}:${resolveFilePath(corrected, workDir ?? '/')}`
     if (seen.has(key)) continue
     seen.add(key)
 
@@ -459,19 +456,12 @@ function toWorkspaceFileTarget(candidate: string, workDir: string | null): FileT
   }
 
   if (isAbsoluteFilePath(candidate)) {
-    if (!workDir) {
-      return null
-    }
-
     const absoluteCandidate = resolveFilePath(candidate)
-
-    if (!isWithinWorkDir(absoluteCandidate, workDir)) {
-      return null
-    }
-
     return {
       kind,
-      normalizedPath: relativeFilePath(workDir, absoluteCandidate),
+      normalizedPath: workDir && isWithinWorkDir(absoluteCandidate, workDir)
+        ? relativeFilePath(workDir, absoluteCandidate)
+        : absoluteCandidate,
     }
   }
 

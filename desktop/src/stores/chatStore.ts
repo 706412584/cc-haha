@@ -1,4 +1,5 @@
 import { isInlineImagePath } from '@/lib/attachmentImages'
+import { isSideChatSession } from '@/lib/sideChatSessions'
 import { CHAT_HISTORY_CACHE_BYTES, historyCacheBytes } from '../lib/chatHistoryCache'
 import { normalizeSessionReferences, splitSessionReferenceContext } from '@/lib/sessionReferences'
 import { create } from 'zustand'
@@ -7,6 +8,7 @@ import { wsManager } from '../api/websocket'
 import { sessionsApi, type SessionHistoryPage } from '../api/sessions'
 import { ApiResponseParseError } from '../api/client'
 import { subagentsApi } from '../api/subagents'
+import { useTeamPlanStore } from './teamPlanStore'
 import { useTeamStore } from './teamStore'
 import { useSessionStore } from './sessionStore'
 import { useCLITaskStore } from './cliTaskStore'
@@ -14,7 +16,9 @@ import { useWorkspaceEditorStore } from './workspaceEditorStore'
 import { useWorkflowStore } from './workflowStore'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 import { useProviderStore } from './providerStore'
-import { resolveActiveProviderRuntimeSelection, resolveProviderRuntimeModelId } from '../lib/runtimeSelection'
+import { reconcileRuntimeSelection, resolveActiveProviderRuntimeSelection } from '../lib/runtimeSelection'
+import { useSettingsStore } from './settingsStore'
+import { isModelReasoningEffort } from '../../../src/shared/modelReasoning'
 import { useTabStore } from './tabStore'
 import { useProviderCompatStore } from './providerCompatStore'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
@@ -63,11 +67,15 @@ import type {
 
 type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting'
 
-function reconcileProviderRuntimeSelection(selection: RuntimeSelection): RuntimeSelection {
-  const provider = useProviderStore.getState().providers.find((entry) => entry.id === selection.providerId)
-  if (!provider) return selection
-  const modelId = resolveProviderRuntimeModelId(provider, selection.modelId)
-  return modelId === selection.modelId ? selection : { ...selection, modelId }
+function reconcileProviderRuntimeSelection(sessionId: string, selection: RuntimeSelection): RuntimeSelection {
+  const providers = useProviderStore.getState()
+  const settings = useSettingsStore.getState()
+  return reconcileRuntimeSelection(selection, {
+    ...providers,
+    hasLoadedProviders: providers.hasLoadedProviders && !isSideChatSession(sessionId),
+    currentModelId: settings.currentModel?.id,
+    defaultEffortLevel: settings.effortLevel,
+  })
 }
 type ToolCall = Extract<UIMessage, { type: 'tool_use' }>
 type CompactSummaryMessage = Extract<UIMessage, { type: 'compact_summary' }>
@@ -149,6 +157,7 @@ export type RuntimeConfigError = {
 export type PerSessionState = {
   messages: UIMessage[]
   chatState: ChatState
+  permissionMode?: PermissionMode
   /**
    * The first prompt is waiting for an empty placeholder session to be
    * replaced with its selected branch/worktree session. This is UI-only turn
@@ -447,6 +456,7 @@ type ChatStore = {
       runtimeOverride?: RuntimeSelection
     },
   ) => void
+  recordAskUserQuestionActivity: (sessionId: string, requestId: string) => void
   respondToComputerUsePermission: (
     sessionId: string,
     requestId: string,
@@ -1848,6 +1858,24 @@ function dropDuplicateTranscriptTextMessages(messages: UIMessage[]): UIMessage[]
   return changed ? deduped : messages
 }
 
+function collapseDuplicateStoppedStatuses(messages: UIMessage[]): UIMessage[] {
+  let changed = false
+  const collapsed: UIMessage[] = []
+  for (const message of messages) {
+    const previous = collapsed.at(-1)
+    if (message.type === 'system' && message.generationStopped &&
+      previous?.type === 'system' && previous.generationStopped) {
+      changed = true
+      if (message.transcriptMessageId && !previous.transcriptMessageId) {
+        collapsed[collapsed.length - 1] = message
+      }
+      continue
+    }
+    collapsed.push(message)
+  }
+  return changed ? collapsed : messages
+}
+
 type ParentLinkedToolMessage = Extract<
   UIMessage,
   { type: 'tool_use' | 'tool_result' }
@@ -1978,7 +2006,7 @@ function mergeRestoredHistoryIntoLiveMessages(
   messages: UIMessage[],
   restoredMessages: UIMessage[],
 ): UIMessage[] {
-  return mergeRestoredTerminalGoalEvents(
+  return collapseDuplicateStoppedStatuses(mergeRestoredTerminalGoalEvents(
     mergeRestoredParentToolMessages(
       dropDuplicateTranscriptTextMessages(
         mergeRestoredTranscriptMessageIds(messages, restoredMessages),
@@ -1986,7 +2014,7 @@ function mergeRestoredHistoryIntoLiveMessages(
       restoredMessages,
     ),
     restoredMessages,
-  )
+  ))
 }
 
 function nonEmptyHistoryIdentityPart(value: string | undefined): string | undefined {
@@ -2371,7 +2399,7 @@ function mergeColdRestoredHistoryIntoLiveMessages(
     ordered.push(...(beforeRows.get(index)?.reverse() ?? []))
     if (index < restoredCount) ordered.push(merged[index]!)
   }
-  return ordered
+  return collapseDuplicateStoppedStatuses(ordered)
 }
 
 function needsTranscriptIdHydrationRetry(session: PerSessionState | undefined): boolean {
@@ -3272,6 +3300,12 @@ function shouldPrewarmSession(sessionId: string): boolean {
 }
 
 export const useChatStore = create<ChatStore>((setState, get) => {
+  let lastViewedSessionId: string | null = null
+  useTabStore.subscribe((tabState, previousTabState) => {
+    if (tabState.activeTabId === previousTabState.activeTabId) return
+    const previousTab = previousTabState.tabs.find(tab => tab.sessionId === previousTabState.activeTabId)
+    if (previousTab?.type === 'session') lastViewedSessionId = previousTab.sessionId
+  })
   const set = (update: Partial<ChatStore> | ((state: ChatStore) => Partial<ChatStore>)) => {
     setState((previous) => {
       const patch = typeof update === 'function' ? update(previous) : update
@@ -3297,6 +3331,11 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       const tabState = useTabStore.getState()
       const activeTab = tabState.tabs.find(tab => tab.sessionId === tabState.activeTabId)
       const activeIds = new Set([tabState.activeTabId, activeTab?.sourceSessionId, activeTab?.workbenchSessionId, activeTab?.teamLeadSessionId])
+      // Keep the chat the user just left warm while a non-chat page is open.
+      // Other idle tabs remain eligible, and closing this tab releases it.
+      if (activeTab?.type !== 'session' && tabState.tabs.some(tab => tab.type === 'session' && tab.sessionId === lastViewedSessionId)) {
+        activeIds.add(lastViewedSessionId)
+      }
       const cacheSizes = new Map(Object.entries(sessions).map(([id, session]) => [id, historyCacheBytes(session)]))
       let retainedBytes = [...cacheSizes.values()].reduce((total, bytes) => total + bytes, 0)
       if (retainedBytes > CHAT_HISTORY_CACHE_BYTES) {
@@ -3373,6 +3412,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
   getSession: (sessionId) => get().sessions[sessionId] ?? createDefaultSessionState(),
 
   connectToSession: (sessionId, options) => {
+    if (isSideChatSession(sessionId)) options = { ...options, minimalBootstrap: true }
     if (!options?.minimalBootstrap) {
       void useCLITaskStore.getState().fetchSessionTasks(sessionId)
     }
@@ -3420,7 +3460,8 @@ export const useChatStore = create<ChatStore>((setState, get) => {
           // A new connection lifecycle may have durable transcript rows that
           // were persisted while this renderer was offline. Keep the visible
           // cache, but require one lossless durable backfill for this lifecycle.
-          historyHydrated: false,
+          historyHydrated: isSideChatSession(sessionId),
+          ...(isSideChatSession(sessionId) ? { historyStatus: 'ready' as const } : {}),
           awaitingReconnectSync: false,
           preHydrationSocketGapPending: false,
           historyBootstrapDisabled: options?.minimalBootstrap === true,
@@ -3631,8 +3672,8 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       wsManager.send(sessionId, { type: 'prewarm_session' })
     }
 
-    if (!options?.minimalBootstrap) {
-      get().loadHistory(sessionId)
+    if (!options?.minimalBootstrap || isSideChatSession(sessionId)) {
+      if (!options?.minimalBootstrap) get().loadHistory(sessionId)
       sessionsApi.getSlashCommands(sessionId)
         .then(({ commands }) => {
           if (get().sessions[sessionId]) {
@@ -3708,6 +3749,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
             hunkId: a.hunkId,
             note: a.note,
             quote: a.quote,
+            referenceKind: a.referenceKind,
             selectionNumber: a.selectionNumber,
           }))
         : undefined
@@ -3757,7 +3799,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
         ...(userFacingContent !== modelFacingContent ? { modelContent: modelFacingContent } : {}),
         attachments: isDirectAgentSession ? undefined : uiAttachments,
         timestamp: now,
-        ...(isDirectAgentSession ? { pending: true } : {}),
+        ...(isDirectAgentSession ? { pending: true } : { awaitingReplay: true }),
       })
 
       if (!isDirectAgentSession && session.elapsedTimer) clearInterval(session.elapsedTimer)
@@ -3861,14 +3903,18 @@ export const useChatStore = create<ChatStore>((setState, get) => {
     // Align runtime selection before each real user turn (upstream v0.6.1).
     const selection = useSessionRuntimeStore.getState().selections[sessionId]
     if (selection) {
-      const reconciled = reconcileProviderRuntimeSelection(selection)
+      const reconciled = reconcileProviderRuntimeSelection(sessionId, selection)
       if (reconciled !== selection) get().setSessionRuntime(sessionId, selection)
     } else {
       const providers = useProviderStore.getState()
-      const defaultSelection = resolveActiveProviderRuntimeSelection(
-        providers.activeId, null, providers.providers, null,
+      const settings = useSettingsStore.getState()
+      const configuredDefault = resolveActiveProviderRuntimeSelection(
+        providers.activeId, settings.activeProviderName, providers.providers, settings.currentModel?.id,
       )
-      if (defaultSelection) {
+      if (configuredDefault) {
+        const defaultSelection = reconcileProviderRuntimeSelection(sessionId, {
+          ...configuredDefault, effortLevel: settings.effortLevel,
+        })
         useSessionRuntimeStore.getState().setSelection(sessionId, defaultSelection)
         get().setSessionRuntime(sessionId, defaultSelection)
       }
@@ -3921,6 +3967,10 @@ export const useChatStore = create<ChatStore>((setState, get) => {
     }))
   },
 
+  recordAskUserQuestionActivity: (sessionId, requestId) => {
+    wsManager.send(sessionId, { type: 'ask_user_question_activity', requestId })
+  },
+
   respondToComputerUsePermission: (sessionId, requestId, response) => {
     wsManager.send(sessionId, {
       type: 'computer_use_permission_response',
@@ -3949,7 +3999,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
   },
 
   setSessionRuntime: (sessionId, selection) => {
-    const reconciled = reconcileProviderRuntimeSelection(selection)
+    const reconciled = reconcileProviderRuntimeSelection(sessionId, selection)
     if (reconciled !== selection) {
       useSessionRuntimeStore.getState().setSelection(sessionId, reconciled)
     }
@@ -4106,20 +4156,29 @@ export const useChatStore = create<ChatStore>((setState, get) => {
           stoppingBackgroundTaskIds[task.taskId] = true
         }
       }
+      // The fork flushes the throttled delta (`stoppedDelta`) and appends the
+      // partial answer; upstream additionally appends a persistent "Stopped"
+      // system marker so the stop is still visible after a history reload.
+      // Both are kept: the marker is what the reload tests assert on.
+      const pendingAssistantText = `${session.streamingText}${stoppedDelta}`
+      const messagesWithFlushedText = pendingAssistantText.trim()
+        ? appendAssistantTextMessage(session.messages, pendingAssistantText, Date.now())
+        : session.messages
+      const stoppedMessages = pendingAssistantText.trim()
+        ? [...messagesWithFlushedText, {
+            id: nextId(),
+            type: 'system' as const,
+            content: t('chat.generationStopped'),
+            generationStopped: true,
+            timestamp: Date.now(),
+          }]
+        : messagesWithFlushedText
       return {
         sessions: {
           ...s.sessions,
           [sessionId]: {
             ...session,
-            messages: markPendingToolUseMessagesStopped(
-              `${session.streamingText}${stoppedDelta}`.trim()
-                ? appendAssistantTextMessage(
-                    session.messages,
-                    `${session.streamingText}${stoppedDelta}`,
-                    Date.now(),
-                  )
-                : session.messages,
-            ),
+            messages: markPendingToolUseMessagesStopped(stoppedMessages),
             streamingText: '',
             streamingToolInput: '',
             activeToolUseId: null,
@@ -4179,6 +4238,10 @@ export const useChatStore = create<ChatStore>((setState, get) => {
   },
 
   loadHistory: async (sessionId, options) => {
+    if (isSideChatSession(sessionId)) {
+      set((state) => ({ sessions: updateSessionIn(state.sessions, sessionId, () => ({ historyStatus: 'ready', historyHydrated: true })) }))
+      return
+    }
     if (historyPageControllers.has(sessionId)) {
       historyPageControllers.get(sessionId)?.abort()
       historyPageControllers.delete(sessionId)
@@ -4666,10 +4729,12 @@ export const useChatStore = create<ChatStore>((setState, get) => {
   },
 
   loadOlderHistory: async (sessionId) => {
+    if (isSideChatSession(sessionId)) return
     await loadOlderHistoryPage(sessionId, get, set)
   },
 
   reloadHistory: async (sessionId, guard) => {
+    if (isSideChatSession(sessionId)) return
     if (historyPageControllers.has(sessionId)) {
       historyPageControllers.get(sessionId)?.abort()
       historyPageControllers.delete(sessionId)
@@ -4760,7 +4825,19 @@ export const useChatStore = create<ChatStore>((setState, get) => {
           !requestedGoalEventIds.has(message.id))
         const tokenUsageChangedWhileLoading =
           session.tokenUsage !== requestedTokenUsage
-        const reloadedMessages = liveGoalEventsWhileLoading.length > 0
+        // A bounded read may omit oversized records (including tool calls).
+        // It cannot authoritatively delete rows already received over the live
+        // connection when a stopped turn is reconciled with its transcript.
+        const reloadedMessages = !historyComplete
+          ? mergeColdRestoredHistoryIntoLiveMessages(
+              uiMessages,
+              session.messages === sessionAtFetchStart?.messages
+                ? dropDuplicateTranscriptTextMessages(
+                    mergeRestoredTranscriptMessageIds(session.messages, uiMessages),
+                  )
+                : session.messages,
+            )
+          : liveGoalEventsWhileLoading.length > 0
           ? mergeColdRestoredHistoryIntoLiveMessages(
               uiMessages,
               liveGoalEventsWhileLoading,
@@ -5289,6 +5366,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
 
     switch (msg.type) {
       case 'connected':
+        void useTeamPlanStore.getState().refresh(sessionId)
         // Team lifecycle broadcasts are transition-only. A reconnect must
         // reconcile against the durable workbench so missed update/delete or
         // same-name recreate events cannot leave a live cache authoritative.
@@ -5643,14 +5721,22 @@ export const useChatStore = create<ChatStore>((setState, get) => {
 
       case 'runtime_config_applied': {
         const selected = useSessionRuntimeStore.getState().selections[sessionId]
-        const matchesCurrentSelection = Boolean(selected) &&
-          (selected?.providerId ?? null) === msg.providerId &&
-          selected?.modelId === msg.modelId &&
-          selected?.effortLevel === msg.effortLevel
-        if (matchesCurrentSelection) {
+        const matchesSelection = (runtime: { providerId: string | null; modelId: string; effortLevel?: string }) =>
+          Boolean(selected) && selected?.providerId === runtime.providerId &&
+          selected?.modelId === runtime.modelId && selected?.effortLevel === runtime.effortLevel
+        const matchesCurrentSelection = matchesSelection(msg)
+        const correctsCurrentSelection = msg.requestedConfig && matchesSelection(msg.requestedConfig)
+        if (matchesCurrentSelection || correctsCurrentSelection) {
+          if (correctsCurrentSelection && !matchesCurrentSelection) {
+            useSessionRuntimeStore.getState().setSelection(sessionId, {
+              providerId: msg.providerId, modelId: msg.modelId,
+              ...(msg.effortLevel && isModelReasoningEffort(msg.effortLevel) ? { effortLevel: msg.effortLevel } : {}),
+            })
+          }
           useSessionRuntimeStore.getState().settleSelection(sessionId)
           update((session) => ({
             runtimeConfigReadyCount: (session.runtimeConfigReadyCount ?? 0) + 1,
+            messages: session.messages.filter((message) => message.type !== 'error' || message.code !== 'RUNTIME_CONFIG_INVALID'),
           }))
         }
         break
@@ -5663,6 +5749,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
         // 选择器拿到无法渲染的值。
         const KNOWN_MODES: PermissionMode[] = ['default', 'acceptEdits', 'auto', 'plan', 'bypassPermissions', 'dontAsk']
         if (KNOWN_MODES.includes(msg.mode)) {
+          update(() => ({ permissionMode: msg.mode }))
           useSessionStore.getState().updateSessionPermissionMode(sessionId, msg.mode)
         }
         break
@@ -6474,6 +6561,10 @@ export const useChatStore = create<ChatStore>((setState, get) => {
         break
       }
 
+      case 'team_plan_updated':
+        if (msg.sessionId === sessionId) void useTeamPlanStore.getState().refresh(sessionId)
+        break
+
       case 'team_created':
         useTeamStore.getState().handleTeamCreated(
           msg.teamName,
@@ -7222,6 +7313,7 @@ function normalizeHistoryToolResultContent(content: unknown, toolUseResult: unkn
   return {
     questions: result.questions,
     answers,
+    ...(result.selectionSource === 'automatic' ? { selectionSource: 'automatic' } : {}),
   }
 }
 
@@ -8580,8 +8672,8 @@ export function appendReplayedUserMessage(
   )
   if (currentTurnUserIndex >= 0) {
     const optimisticMessage = messages[currentTurnUserIndex]
-    if (optimisticMessage?.type === 'user_text' && optimisticMessage.optimisticQueued) {
-      const { optimisticQueued: _optimisticQueued, ...confirmedMessage } = optimisticMessage
+    if (optimisticMessage?.type === 'user_text' && (optimisticMessage.optimisticQueued || optimisticMessage.awaitingReplay)) {
+      const { optimisticQueued: _optimisticQueued, awaitingReplay: _awaitingReplay, ...confirmedMessage } = optimisticMessage
       return [
         ...messages.slice(0, currentTurnUserIndex),
         confirmedMessage,
@@ -8646,6 +8738,7 @@ function mapQueuedDisplayAttachments(attachments?: AttachmentRef[]): UIAttachmen
     hunkId: attachment.hunkId,
     note: attachment.note,
     quote: attachment.quote,
+    referenceKind: attachment.referenceKind,
     selectionNumber: attachment.selectionNumber,
   }))
 }
@@ -8656,15 +8749,41 @@ function findCurrentTurnUserMessageIndex(
   displayContent?: string,
   replayedImageSourcePaths: string[] = [],
 ): number {
+  // Guides are rendered before the CLI consumes them. The initial prompt's
+  // ACK can arrive after several guides, so match outstanding input in send
+  // order (including identical prompts), bounded by the current user turn.
+  let turnStart = 0
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
-    if (message?.type !== 'user_text') {
-      continue
+    if (message?.type === 'user_text' && !message.optimisticQueued) {
+      turnStart = index
+      break
     }
+  }
+  // Upstream v0.6.7 scans the outstanding sends first, so a replayed guide is
+  // matched to its own optimistic row before the fork's image-replay fallback
+  // (which returns early) can claim the turn.
+  const replayDisplay = extractRestoredUserDisplay(modelContent)
+  for (let index = turnStart; index < messages.length; index += 1) {
+    const message = messages[index]
+    if (
+      message?.type === 'user_text' &&
+      (message.awaitingReplay || message.optimisticQueued) &&
+      replayMatchesCurrentUserMessage(message, replayDisplay, modelContent)
+    ) return index
+  }
+  const current = messages[turnStart]
+  if (
+    current?.type === 'user_text' &&
+    replayMatchesCurrentUserMessage(current, replayDisplay, modelContent)
+  ) return turnStart
+  // Fork: a replayed image-only message whose text the reader never saw.
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.type !== 'user_text') continue
     const imageAttachments = message.attachments?.filter(
       (attachment) => attachment.type === 'image',
     ) ?? []
-    const replayDisplay = extractRestoredUserDisplay(modelContent)
     const hasMatchingText = (message.modelContent ?? message.content).trim() === modelContent
     if (hasMatchingText && imageAttachments.length === 0) return index
 
@@ -8833,6 +8952,21 @@ export function mapHistoryMessagesToUiMessages(
           timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
         })
       }
+      continue
+    }
+    if (
+      msg.type === 'system' &&
+      msg.content && typeof msg.content === 'object' &&
+      (msg.content as { subtype?: unknown }).subtype === 'generation_stopped'
+    ) {
+      uiMessages.push({
+        id: msg.id || nextId(),
+        type: 'system',
+        content: t('chat.generationStopped'),
+        generationStopped: true,
+        ...(msg.id ? { transcriptMessageId: msg.id } : {}),
+        timestamp,
+      })
       continue
     }
     if (msg.type === 'system' && typeof msg.content === 'string') {

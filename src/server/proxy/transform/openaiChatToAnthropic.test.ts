@@ -7,11 +7,20 @@ function response(tool: Record<string, unknown>, reason = 'tool_calls'): OpenAIC
 }
 
 describe('Chat non-streaming response integrity', () => {
-  for (const args of ['{"path":', '[]', 'null', '42']) {
+  for (const args of ['[]', 'null', '42']) {
     test(`completed malformed/non-object arguments reject: ${args}`, () => {
       expect(() => openaiChatToAnthropic(response({ id: 'call', function: { name: 'Read', arguments: args } }), 'fixture')).toThrow()
     })
   }
+  test('completed malformed arguments retain identity and a bounded non-executable marker', () => {
+    const raw = '{"path":"' + 'x'.repeat(3000)
+    const result = openaiChatToAnthropic(response({ id: 'call', function: { name: 'Read', arguments: raw } }), 'fixture')
+    expect(result.stop_reason).toBe('tool_use')
+    expect(result.content[0]).toEqual({
+      type: 'tool_use', id: 'call', name: 'Read',
+      input: { __unparsedToolInput: { raw: raw.slice(0, 2048), len: raw.length } },
+    })
+  })
   test('error envelope rejects rather than returning empty success', () => {
     expect(() => openaiChatToAnthropic({ error: { message: 'Fixture failure' } } as unknown as OpenAIChatResponse, 'fixture')).toThrow('Fixture failure')
   })

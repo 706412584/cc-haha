@@ -119,6 +119,9 @@ async function handleUserSettings(req: Request): Promise<Response> {
         await searchContentCoordinator.stop()
       }
     }
+    if (Object.prototype.hasOwnProperty.call(body, 'autoQuestion')) {
+      conversationService.refreshAutoQuestionSettings()
+    }
     return Response.json({ ok: true })
   }
 

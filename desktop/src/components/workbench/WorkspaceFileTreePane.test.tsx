@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   getWorkspaceTree: vi.fn(),
   searchWorkspace: vi.fn(),
   getWorkspaceStatus: vi.fn(),
+  openTarget: vi.fn().mockResolvedValue(undefined),
+  copyText: vi.fn().mockResolvedValue(true),
 }))
 
 vi.mock('../../api/sessions', () => ({
@@ -18,7 +20,7 @@ vi.mock('../../api/sessions', () => ({
 }))
 
 vi.mock('../../lib/clipboard', () => ({
-  copyTextToClipboard: vi.fn(async () => true),
+  copyTextToClipboard: mocks.copyText,
 }))
 
 // The open-with block discovers external applications over the server API; the
@@ -537,6 +539,44 @@ describe('file tree context menu', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Copy absolute path' }))
     expect(copyTextToClipboard).toHaveBeenCalledWith('/repo/README.md')
   })
+})
+
+// #1322: a whole file must be attachable without opening it and selecting lines.
+describe('file chat references', () => {
+  // The sibling "adds the referenced row to the chat" case installs a mock
+  // `addReference` into the shared store and never restores it, so this block
+  // reinstates the real action before each case rather than relying on order.
+  beforeEach(() => useWorkspaceChatContextStore.setState(useWorkspaceChatContextStore.getInitialState(), true))
+
+  it('adds a right-clicked file to its own session without opening it', async () => {
+    const { onOpen } = await renderPane()
+    fireEvent.contextMenu(screen.getByTestId('workspace-tree-row-README.md'), { clientX: 30, clientY: 40 })
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Add to chat' }))
+    expect(useWorkspaceChatContextStore.getState().referencesBySession[SESSION]).toEqual([
+      expect.objectContaining({ kind: 'file', path: 'README.md', name: 'README.md' }),
+    ])
+    expect(onOpen).not.toHaveBeenCalled()
+    expect(screen.queryByRole('menu')).toBeNull()
+  })
+
+  it('supports keyboard invocation and dismisses without adding', async () => {
+    await renderPane()
+    const file = screen.getByTestId('workspace-tree-row-README.md')
+    fireEvent.keyDown(file, { key: 'F10', shiftKey: true })
+    expect(screen.getByRole('menuitem', { name: 'Add to chat' })).toHaveFocus()
+    fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Add to chat' }), { key: 'Escape' })
+    expect(screen.queryByRole('menu')).toBeNull()
+    expect(useWorkspaceChatContextStore.getState().referencesBySession[SESSION]).toBeUndefined()
+  })
+
+  // Upstream's "closes an old session menu when switching sessions" and "routes a
+  // tree context-menu preview through the pane activation callback" are NOT
+  // restored here: both cover behavior the fork lineage deliberately lacks.
+  // Fork main (601230e0) extracted the menu into WorkspaceFileTreeMenu.tsx and
+  // dropped the `useEffect(closeMenu, [closeMenu, sessionId])` guard along with
+  // the test, and it never wired `onPreview` (absent at the merge base 2f8d819d
+  // too). Passing them would require source changes outside the merge's scope,
+  // so the fork's own behavior stands.
 })
 
 describe('filter field', () => {

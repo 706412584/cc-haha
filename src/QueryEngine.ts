@@ -6,6 +6,7 @@ import last from 'lodash-es/last.js'
 import {
   addToTotalGenerationDuration,
   getSessionId,
+  getMainThreadAgentType,
   isSessionPersistenceDisabled,
 } from 'src/bootstrap/state.js'
 import { isGoalLocalCommandOutputContent } from './goals/goalState.js'
@@ -188,6 +189,10 @@ export type QueryEngineConfig = {
  * turn within the same conversation. State (messages, file cache, usage, etc.)
  * persists across turns.
  */
+type WorkerPresetState = { runtime?: Awaited<ReturnType<typeof import('./utils/swarm/teamWorkerPreset.js')['prepareTeamWorkerPreset']>>; activated: boolean }
+// ask() creates an engine per turn; SDK state accessors live for the worker session.
+const workerPresetSessions = new WeakMap<QueryEngineConfig['getAppState'], WorkerPresetState>()
+
 export class QueryEngine {
   private config: QueryEngineConfig
   private mutableMessages: Message[]
@@ -225,8 +230,8 @@ export class QueryEngine {
     const {
       cwd,
       commands,
-      tools,
-      mcpClients,
+      tools: baseTools,
+      mcpClients: baseMcpClients,
       verbose = false,
       thinkingConfig,
       maxTurns,
@@ -247,8 +252,25 @@ export class QueryEngine {
       orphanedPermission,
     } = this.config
 
-    this.discoveredSkillNames.clear()
     setCwd(cwd)
+    const selectedWorkerAgent = process.env.CC_HAHA_TEAM_WORKER === '1'
+      ? agents.find(agent => agent.agentType === (getMainThreadAgentType() ?? getAppState().agent))
+      : undefined
+    const workerAgent = selectedWorkerAgent ? { ...selectedWorkerAgent, agentType: process.env.CC_HAHA_TEAM_WORKER_PRESET_TYPE || selectedWorkerAgent.agentType, source: (process.env.CC_HAHA_TEAM_WORKER_PRESET_SOURCE || selectedWorkerAgent.source) as AgentDefinition['source'] } : undefined
+    if (process.env.CC_HAHA_TEAM_WORKER === '1' && !workerAgent) throw new Error('Approved team worker preset is unavailable')
+    let workerPreset = workerPresetSessions.get(getAppState)
+    if (workerAgent && !workerPreset) {
+      workerPreset = { activated: false }
+      workerPresetSessions.set(getAppState, workerPreset)
+    }
+    if (workerAgent && workerPreset && !workerPreset.runtime) {
+      const { prepareTeamWorkerPreset } = await import('./utils/swarm/teamWorkerPreset.js')
+      workerPreset.runtime = await prepareTeamWorkerPreset(workerAgent, baseTools, baseMcpClients)
+    }
+    const tools = workerPreset?.runtime?.tools ?? baseTools
+    const mcpClients = workerPreset?.runtime?.clients ?? baseMcpClients
+
+    this.discoveredSkillNames.clear()
     const persistSession = !isSessionPersistenceDisabled()
     const startTime = Date.now()
 
@@ -318,6 +340,8 @@ export class QueryEngine {
         isScratchpadEnabled() ? getScratchpadDir() : undefined,
       ),
     }
+
+    if (workerAgent && process.env.CC_HAHA_TEAM_WORKER_OMIT_CLAUDE_MD === '1') delete userContext.claudeMd
 
     // When an SDK caller provides a custom system prompt AND has set
     // CLAUDE_COWORK_MEMORY_PATH_OVERRIDE, inject the memory-mechanics prompt.
@@ -404,6 +428,12 @@ export class QueryEngine {
         })
       },
       setSDKStatus,
+    }
+
+    if (workerAgent && workerPreset && !workerPreset.activated) {
+      const { activateTeamWorkerPreset } = await import('./utils/swarm/teamWorkerPreset.js')
+      this.mutableMessages.push(...await activateTeamWorkerPreset(workerAgent, processUserInputContext))
+      workerPreset.activated = true
     }
 
     // Handle orphaned permission (only once per engine lifetime)

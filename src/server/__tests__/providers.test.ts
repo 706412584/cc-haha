@@ -7,6 +7,7 @@ import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as os from 'os'
 import { ProviderService } from '../services/providerService.js'
+import { readActiveProviderManagedEnv } from '../services/providerRuntimeEnv.js'
 import { handleProvidersApi } from '../api/providers.js'
 import { handleProxyRequest } from '../proxy/handler.js'
 import {
@@ -423,6 +424,40 @@ describe('ProviderService', () => {
       expect(runtimeEnv.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('claude-opus-4-7[1m]')
     })
 
+    test('preserves a Fable-only 1M setting after saving and reloading a provider', async () => {
+      const svc = new ProviderService()
+      const provider = await svc.addProvider(sampleInput({
+        models: {
+          main: 'claude-sonnet-4-6',
+          fable: 'claude-opus-4-7',
+          haiku: 'claude-haiku-4-5',
+          sonnet: 'claude-sonnet-4-6',
+          opus: 'claude-opus-4-7',
+        },
+        model1mSupport: {
+          main: false,
+          fable: true,
+          haiku: false,
+          sonnet: false,
+          opus: false,
+        },
+      }))
+
+      const initiallySaved = await readProvidersConfig()
+      const initialProvider = (initiallySaved.providers as Array<{ model1mSupport?: { fable?: boolean } }>)[0]
+      expect(initialProvider.model1mSupport?.fable).toBe(true)
+      await svc.activateProvider(provider.id)
+
+      const saved = await readProvidersConfig()
+      const savedProvider = (saved.providers as Array<{ model1mSupport?: { fable?: boolean } }>)[0]
+      expect(savedProvider.model1mSupport?.fable).toBe(true)
+
+      const reloaded = await new ProviderService().getProvider(provider.id)
+      expect(reloaded.model1mSupport?.fable).toBe(true)
+      expect(readActiveProviderManagedEnv(tmpDir)?.ANTHROPIC_DEFAULT_FABLE_MODEL)
+        .toBe('claude-opus-4-7[1m]')
+    })
+
     test('DeepSeek preset follows the global thinking toggle instead of forcing disabled thinking', async () => {
       const svc = new ProviderService()
       const provider = await svc.addProvider(sampleInput({
@@ -554,10 +589,72 @@ describe('ProviderService', () => {
           apiFormat: 'openai_responses',
           runtimeKind: 'openai_oauth',
           models: {
-            main: 'gpt-5.6-sol',
-            haiku: 'gpt-5.6-luna',
-            sonnet: 'gpt-5.6-terra',
-            opus: 'gpt-5.6-sol',
+            main: 'gpt-6-sol',
+            haiku: 'gpt-6-luna',
+            sonnet: 'gpt-6-sol',
+            opus: 'gpt-6-astra',
+          },
+        })
+      })
+
+      test('persists OAuth model mappings and restores them when the provider is activated again', async () => {
+        const svc = new ProviderService()
+        const configured = {
+          main: 'gpt-6-astra',
+          fable: 'gpt-6-luna',
+          haiku: 'gpt-6-luna',
+          sonnet: 'gpt-6-astra',
+          opus: 'gpt-6-astra',
+        }
+
+        await svc.updateOfficialProviderModels('openai-official', configured)
+        await svc.activateProvider('openai-official')
+
+        expect(await svc.getOfficialProviderModels('openai-official')).toEqual(configured)
+        expect((await readProvidersConfig()).officialProviderModels).toEqual({
+          'openai-official': configured,
+        })
+        const settings = await readSettings()
+        expect(settings.model).toBe('gpt-6-astra')
+        expect(settings.env).toMatchObject({
+          ANTHROPIC_MODEL: 'gpt-6-astra',
+          ANTHROPIC_DEFAULT_FABLE_MODEL: 'gpt-6-luna',
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: 'gpt-6-luna',
+          ANTHROPIC_DEFAULT_SONNET_MODEL: 'gpt-6-astra',
+          ANTHROPIC_DEFAULT_OPUS_MODEL: 'gpt-6-astra',
+        })
+        expect(readActiveProviderManagedEnv(tmpDir)).toMatchObject({
+          ANTHROPIC_MODEL: 'gpt-6-astra',
+          ANTHROPIC_DEFAULT_OPUS_MODEL: 'gpt-6-astra',
+        })
+      })
+
+      test('updates Claude OAuth aliases without replacing unrelated user env', async () => {
+        await fs.writeFile(
+          path.join(tmpDir, 'settings.json'),
+          JSON.stringify({ env: { USER_CUSTOM_ENV: 'keep-me' }, futureSetting: true }),
+        )
+        const svc = new ProviderService()
+
+        await svc.updateOfficialProviderModels('claude-official', {
+          main: 'claude-sonnet-5',
+          fable: 'claude-fable-5-1',
+          haiku: 'claude-haiku-4-5',
+          sonnet: 'claude-sonnet-5',
+          opus: 'claude-opus-5-5',
+        })
+
+        const userSettings = JSON.parse(
+          await fs.readFile(path.join(tmpDir, 'settings.json'), 'utf8'),
+        ) as Record<string, unknown>
+        expect(userSettings).toMatchObject({
+          model: 'claude-sonnet-5',
+          futureSetting: true,
+          env: {
+            USER_CUSTOM_ENV: 'keep-me',
+            ANTHROPIC_MODEL: 'claude-sonnet-5',
+            ANTHROPIC_DEFAULT_FABLE_MODEL: 'claude-fable-5-1',
+            ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-5-5',
           },
         })
       })
@@ -575,12 +672,14 @@ describe('ProviderService', () => {
         expect(env.OPENAI_CODEX_OAUTH_FILE).toBe(
           path.join(tmpDir, 'cc-haha', 'openai-oauth.json'),
         )
-        expect(env.ANTHROPIC_MODEL).toBe('gpt-5.6-sol')
-        expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('gpt-5.6-luna')
-        expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('gpt-5.6-terra')
-        expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('gpt-5.6-sol')
+        expect(env.ANTHROPIC_MODEL).toBe('gpt-6-sol')
+        expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('gpt-6-luna')
+        expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('gpt-6-sol')
+        expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('gpt-6-astra')
         expect(typeof env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS).toBe('string')
         expect(JSON.parse(env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toEqual({
+          'gpt-6-sol': 258_400,
+          'gpt-6-luna': 258_400,
           'gpt-5.6-sol': 353_400,
           'gpt-5.6-terra': 353_400,
           'gpt-5.6-luna': 353_400,
@@ -588,7 +687,7 @@ describe('ProviderService', () => {
           'gpt-5.4': 950_000,
           'gpt-5.5': 258_400,
           'gpt-5.4-mini': 258_400,
-          'gpt-6-astra': 997_500,
+          'gpt-6-astra': 258_400,
         })
         expect(env.ANTHROPIC_BASE_URL).toBeUndefined()
         expect(env.ANTHROPIC_API_KEY).toBeUndefined()
@@ -2355,6 +2454,37 @@ describe('ProviderService', () => {
       expect(JSON.stringify(body)).not.toContain('Image omitted:')
     })
 
+    test.each([
+      { model: 'kimi-k3', contentSource: 'user' },
+      { model: 'kimi-k3', contentSource: 'tool' },
+      { model: 'space-bunny-free', contentSource: 'user' },
+      { model: 'space-bunny-free', contentSource: 'tool' },
+      { model: 'space-bunny-free[1m]', contentSource: 'user' },
+      { model: 'space-bunny-free[1m]', contentSource: 'tool' },
+    ] as const)('forwards OpenCode Go images for $model from $contentSource content', async ({ model, contentSource }) => {
+      const body = await captureOpenAIChatRequest({
+        baseUrl: 'https://opencode.ai/zen/go/v1',
+        model,
+        contentSource,
+        content: [
+          { type: 'text', text: 'Describe these pictures.' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'k3-picture-one' } },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'k3-picture-two' } },
+        ],
+      })
+
+      const images = ['one', 'two'].map(suffix => ({
+        type: 'image_url', image_url: { url: `data:image/png;base64,k3-picture-${suffix}` },
+      }))
+      expect(body.model).toBe(model.replace(/\[1m\]$/, ''))
+      expect(body.messages).toEqual(contentSource === 'user'
+        ? [{ role: 'user', content: [{ type: 'text', text: 'Describe these pictures.' }, ...images] }]
+        : [
+            { role: 'tool', tool_call_id: 'computer_1', content: 'Describe these pictures.' },
+            { role: 'user', content: [{ type: 'text', text: '[Media content for tool call computer_1]' }, ...images] },
+          ])
+    })
+
     test('keeps generic OpenAI Chat providers vision-capable by default', async () => {
       const body = await captureOpenAIChatRequest({
         baseUrl: 'https://chat.example.test',
@@ -3498,6 +3628,61 @@ describe('Providers API', () => {
     const res = await handleProvidersApi(req, url, segments)
 
     expect(res.status).toBe(200)
+  })
+
+  test('GET and PUT /api/providers/:id/models configure a built-in OAuth provider', async () => {
+    const getRequest = makeRequest('GET', '/api/providers/openai-official/models')
+    const initial = await handleProvidersApi(
+      getRequest.req,
+      getRequest.url,
+      getRequest.segments,
+    )
+    expect(initial.status).toBe(200)
+    expect(await initial.json()).toMatchObject({
+      models: { main: 'gpt-6-sol', opus: 'gpt-6-astra' },
+    })
+
+    const configured = {
+      main: 'gpt-6-astra',
+      haiku: 'gpt-6-luna',
+      sonnet: 'gpt-6-astra',
+      opus: 'gpt-6-astra',
+    }
+    const putRequest = makeRequest('PUT', '/api/providers/openai-official/models', {
+      models: configured,
+    })
+    const updated = await handleProvidersApi(
+      putRequest.req,
+      putRequest.url,
+      putRequest.segments,
+    )
+    expect(updated.status).toBe(200)
+    expect(await updated.json()).toEqual({ models: configured })
+  })
+
+  test('PUT /api/providers/:id/models rejects saved providers', async () => {
+    const svc = new ProviderService()
+    const provider = await svc.addProvider(sampleInput())
+    const request = makeRequest('PUT', `/api/providers/${provider.id}/models`, {
+      models: provider.models,
+    })
+
+    const response = await handleProvidersApi(request.req, request.url, request.segments)
+    expect(response.status).toBe(404)
+  })
+
+  test('PUT /api/providers/:id/models rejects an empty main model', async () => {
+    const request = makeRequest('PUT', '/api/providers/openai-official/models', {
+      models: {
+        main: '   ',
+        haiku: '',
+        sonnet: '',
+        opus: '',
+      },
+    })
+
+    const response = await handleProvidersApi(request.req, request.url, request.segments)
+    expect(response.status).toBe(400)
   })
 
   // ─── Method not allowed ──────────────────────────────────────────────────

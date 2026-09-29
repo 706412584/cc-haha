@@ -63,6 +63,7 @@ describe('Task tool execution ordering', () => {
       inbox: { messages: [] },
     }
     const context = {
+      options: { mainLoopModel: 'fixture-model' },
       abortController: new AbortController(),
       getAppState: () => appState,
       setAppState: (update: (prev: Record<string, unknown>) => Record<string, unknown>) => {
@@ -111,7 +112,7 @@ describe('Task tool execution ordering', () => {
         message: expect.stringContaining('registered teammate'),
       })
       expect((await readTaskListLifecycleState('my-tool-team')).deleted).toBe(false)
-      expect(removeTeammateFromTeamFile('My Tool Team', {
+      expect(await removeTeammateFromTeamFile('My Tool Team', {
         agentId: 'idle-worker@My Tool Team',
       })).toBe(true)
 
@@ -166,6 +167,7 @@ describe('Task tool execution ordering', () => {
       { expandedView: undefined, inbox: { messages: [] } },
     ]
     const contextFor = (index: number) => ({
+      options: { mainLoopModel: 'fixture-model' },
       abortController: new AbortController(),
       getAppState: () => states[index],
       setAppState: (
@@ -238,6 +240,7 @@ describe('Task tool execution ordering', () => {
       inbox: { messages: [] },
     }
     const context = {
+      options: { mainLoopModel: 'fixture-model' },
       abortController: new AbortController(),
       getAppState: () => appState,
       setAppState: (update: (prev: Record<string, unknown>) => Record<string, unknown>) => {
