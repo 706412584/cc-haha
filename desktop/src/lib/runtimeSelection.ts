@@ -53,7 +53,7 @@ export function resolveActiveProviderRuntimeSelection(
   activeId: string | null,
   activeProviderName: string | null,
   providers: SavedProvider[],
-  currentModel: ModelInfo | string | null,
+  currentModel: ModelInfo | string | null | undefined,
   effortLevel?: ReasoningEffortLevel,
 ): RuntimeSelection | null {
   const activeProvider = activeId
@@ -102,7 +102,7 @@ export function resolveDefaultRuntimeSelection(
   activeId: string | null,
   activeProviderName: string | null,
   providers: SavedProvider[],
-  currentModel: ModelInfo | string | null,
+  currentModel: ModelInfo | string | null | undefined,
   effortLevel?: ReasoningEffortLevel,
 ): RuntimeSelection {
   const activeSelection = resolveActiveProviderRuntimeSelection(
@@ -114,10 +114,12 @@ export function resolveDefaultRuntimeSelection(
   )
   if (activeSelection) return activeSelection
 
-  const selectedEffort = resolveModelEffort(currentModel, effortLevel)
+  const currentModelInfo = typeof currentModel === 'string' ? null : currentModel ?? null
+  const currentModelId = typeof currentModel === 'string' ? currentModel : currentModel?.id
+  const selectedEffort = resolveModelEffort(currentModelInfo, effortLevel)
   return {
     providerId: null,
-    modelId: currentModel?.id || OFFICIAL_DEFAULT_MODEL_ID,
+    modelId: currentModelId || OFFICIAL_DEFAULT_MODEL_ID,
     ...(selectedEffort ? { effortLevel: selectedEffort } : {}),
   }
 }

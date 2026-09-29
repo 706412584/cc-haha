@@ -23,7 +23,6 @@ import {
 import { relativizeWorkspacePath } from './CurrentTurnChangeCard'
 import { ApiError } from '../../api/client'
 import { sessionsApi } from '../../api/sessions'
-import { ApiError } from '../../api/client'
 import { subagentsApi, type SubagentRunResponse } from '../../api/subagents'
 import { teamsApi } from '../../api/teams'
 import { resetAgentRunActivityCache } from './useAgentRunActivity'

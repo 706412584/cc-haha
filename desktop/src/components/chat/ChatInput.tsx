@@ -947,7 +947,7 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
       ...workspaceReferences.map((reference) => ({
         type: 'file' as const,
         name: reference.name,
-        referenceKind: reference.kind === 'chat-selection' ? 'chat-selection' : undefined,
+        referenceKind: reference.kind === 'chat-selection' ? ('chat-selection' as const) : undefined,
         path: reference.kind === 'chat-selection' ? undefined : reference.path,
         isDirectory: reference.isDirectory,
         lineStart: reference.lineStart,

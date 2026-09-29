@@ -8759,8 +8759,14 @@ function findCurrentTurnUserMessageIndex(
       turnStart = index
       break
     }
+  }
+  // Fork: match the newest replayed image-only user message before falling back
+  // to upstream's awaitingReplay/optimisticQueued scan below.
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.type !== 'user_text') continue
     const imageAttachments = message.attachments?.filter(
-      (attachment) => attachment.type === "image",
+      (attachment) => attachment.type === 'image',
     ) ?? []
     const replayDisplay = extractRestoredUserDisplay(modelContent)
     const hasMatchingText = (message.modelContent ?? message.content).trim() === modelContent
@@ -8774,6 +8780,7 @@ function findCurrentTurnUserMessageIndex(
       message.content.trim() === displayContent
     return isSameImageReplay ? index : -1
   }
+  const replayDisplay = extractRestoredUserDisplay(modelContent)
   for (let index = turnStart; index < messages.length; index += 1) {
     const message = messages[index]
     if (
@@ -8944,6 +8951,8 @@ export function mapHistoryMessagesToUiMessages(
           timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
         })
       }
+      continue
+    }
     if (
       msg.type === 'system' &&
       msg.content && typeof msg.content === 'object' &&
