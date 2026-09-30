@@ -2885,6 +2885,17 @@ export class SessionService {
     )
   }
 
+  private isToolUseContent(content: unknown): boolean {
+    return (
+      Array.isArray(content) &&
+      content.some((block) =>
+        block &&
+        typeof block === 'object' &&
+        (block as Record<string, unknown>).type === 'tool_use'
+      )
+    )
+  }
+
   private isTaskNotificationContent(content: unknown): boolean {
     const textBlocks = this.extractTextBlocks(content)
     return (
@@ -5114,9 +5125,13 @@ export class SessionService {
       classify: raw => {
         const entry = raw as RawEntry
         const user = entry.message?.role === 'user' && !entry.isMeta
+        const assistant = entry.message?.role === 'assistant' && !entry.isMeta
         return {
           notification: user && this.isTaskNotificationContent(entry.message?.content),
-          reset: user && !this.isToolResultContent(entry.message?.content),
+          // A notification acknowledgement ends at the first real user prompt or
+          // at the first assistant tool call that resumes the interrupted work.
+          reset: (user && !this.isToolResultContent(entry.message?.content)) ||
+            (assistant && this.isToolUseContent(entry.message?.content)),
           agentToolId: this.extractAgentToolUseId(entry),
         }
       },
@@ -5247,6 +5262,9 @@ export class SessionService {
         if (!entry.isMeta && message?.role === 'user') {
           if (this.isTaskNotificationContent(message.content)) suppressTaskNotificationResponse = true
           else if (!this.isToolResultContent(message.content)) suppressTaskNotificationResponse = false
+        } else if (message?.role === 'assistant' && this.isToolUseContent(message.content)) {
+          // Mirror `entriesToMessages`: resumed tool work ends the acknowledgement.
+          suppressTaskNotificationResponse = false
         }
         const content = Array.isArray(message?.content) ? message.content.filter((block: any) =>
           block?.type === 'tool_use' ? ids.has(block.id) : block?.type === 'tool_result' && ids.has(block.tool_use_id)) : []
@@ -6621,9 +6639,18 @@ export class SessionService {
         continue
       }
 
+      // A task notification is injected *during* a turn, not as the start of a
+      // new one: the assistant acknowledges it and then keeps working. Only the
+      // direct acknowledgement (thinking + text, no tool call) is synthetic. The
+      // first assistant record that carries a tool_use resumes real work, so
+      // suppression ends there. Waiting for the next real user prompt instead
+      // swallowed every assistant/tool record in between — the whole run that
+      // followed the notification disappeared from history.
       if (
-        entry.message.role === 'user' &&
-        !this.isToolResultContent(entry.message.content)
+        (entry.message.role === 'user' &&
+          !this.isToolResultContent(entry.message.content)) ||
+        (entry.message.role === 'assistant' &&
+          this.isToolUseContent(entry.message.content))
       ) {
         suppressTaskNotificationResponse = false
       } else if (suppressTaskNotificationResponse) {
