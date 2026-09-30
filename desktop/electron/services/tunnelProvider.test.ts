@@ -150,6 +150,9 @@ describe('ensurePinggyIdentity', () => {
     let generated = false
     const identity = ensurePinggyIdentity('/cache/pinggy', {
       existsSyncFn: ((p: string) => generated && p.endsWith(PINGGY_IDENTITY_FILENAME)) as never,
+      // The cache dir does not exist on a clean CI runner and `/cache` is not
+      // writable there; stub the real mkdir so the test never touches disk.
+      mkdirSyncFn: (() => undefined) as never,
       spawnSyncFn: ((command: string, args: string[], options: unknown) => {
         generated = true
         return spawnSyncFn(command, args, options)
@@ -166,6 +169,7 @@ describe('ensurePinggyIdentity', () => {
   it('raises a clear error when ssh-keygen fails', () => {
     expect(() => ensurePinggyIdentity('/cache/pinggy', {
       existsSyncFn: (() => false) as never,
+      mkdirSyncFn: (() => undefined) as never,
       spawnSyncFn: (() => ({ status: 1 })) as never,
     })).toThrow(/ssh-keygen exited with code 1/)
   })

@@ -230,6 +230,7 @@ export type PinggyIdentity = {
 export type EnsurePinggyIdentityDeps = {
   spawnSyncFn?: typeof spawnSync
   existsSyncFn?: typeof existsSync
+  mkdirSyncFn?: typeof mkdirSync
 }
 
 /**
@@ -241,12 +242,13 @@ export type EnsurePinggyIdentityDeps = {
 export function ensurePinggyIdentity(directory: string, deps: EnsurePinggyIdentityDeps = {}): PinggyIdentity {
   const exists = deps.existsSyncFn ?? existsSync
   const spawnSyncFn = deps.spawnSyncFn ?? spawnSync
+  const mkdirSyncFn = deps.mkdirSyncFn ?? mkdirSync
   const identityPath = path.join(directory, PINGGY_IDENTITY_FILENAME)
   const knownHostsPath = path.join(directory, PINGGY_KNOWN_HOSTS_FILENAME)
 
   if (exists(identityPath)) return { identityPath, knownHostsPath, generated: false }
 
-  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  mkdirSyncFn(directory, { recursive: true, mode: 0o700 })
   const result = spawnSyncFn(
     'ssh-keygen',
     ['-t', 'ed25519', '-N', '', '-q', '-f', identityPath],
