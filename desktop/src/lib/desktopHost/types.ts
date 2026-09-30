@@ -377,17 +377,49 @@ export type PortableDirDetection = {
 
 export type DesktopTunnelMode = 'quick' | 'named'
 
+/** Which provider drives the tunnel. Mirrors the main process's union. */
+export type DesktopTunnelProvider = 'cloudflare' | 'pinggy'
+
+/**
+ * cloudflared auto-download progress. Present only while a download is in
+ * flight, or after one failed; a cached binary never reports it.
+ *
+ * `totalBytes` is null when the mirror sends no Content-Length, which the
+ * settings page renders as an indeterminate bar.
+ */
+export type DesktopTunnelDownloadStatus = {
+  state: 'downloading' | 'failed'
+  receivedBytes: number
+  totalBytes: number | null
+  error: string | null
+}
+
 export type DesktopTunnelStatus = {
   status: 'idle' | 'starting' | 'running' | 'error'
   url: string | null
   mode: DesktopTunnelMode | null
   error: string | null
+  /**
+   * Optional so a host older than the cloudflared/Pinggy change stays valid:
+   * treat a missing value as unknown rather than assuming Cloudflare.
+   */
+  provider?: DesktopTunnelProvider | null
+  /**
+   * Optional for the same reason. Read host-direct by the settings page — it is
+   * never mirrored to the server, whose tunnel state has no download concept.
+   */
+  download?: DesktopTunnelDownloadStatus | null
 }
 
 export type DesktopTunnelStartOptions = {
   mode: DesktopTunnelMode
   token?: string | null
   namedUrl?: string | null
+  /**
+   * Pin the tunnel to one provider instead of the default Cloudflare→Pinggy
+   * fallback order. Used by the settings page's "switch route" action.
+   */
+  provider?: DesktopTunnelProvider
 }
 
 export type DesktopPublicAccessStatus = {

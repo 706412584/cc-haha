@@ -140,6 +140,7 @@ export type H5HostStaleness = 'ok' | 'unreachable' | 'proxy' | 'unset'
 
 export type H5TunnelMode = 'quick' | 'named'
 export type H5TunnelStatus = 'idle' | 'starting' | 'running' | 'error'
+export type H5TunnelProvider = 'cloudflare' | 'pinggy'
 
 export type H5TunnelDiagnostics = {
   status: H5TunnelStatus
@@ -147,6 +148,12 @@ export type H5TunnelDiagnostics = {
   mode: H5TunnelMode | null
   error: string | null
   hasToken: boolean
+  /**
+   * Which provider currently drives the tunnel. Optional so older server
+   * payloads and existing fixtures stay valid; treat a missing value as
+   * unknown rather than assuming Cloudflare.
+   */
+  provider?: H5TunnelProvider | null
 }
 
 export type H5AccessDiagnostics = {

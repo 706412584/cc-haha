@@ -2,10 +2,10 @@ import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import {
   appendHostDiagnostic,
+  claudeConfigDir,
   clearProxyEnv,
   createAdapterPlan,
   createServerPlan,
-  createTunnelPlan,
   ELECTRON_DIAGNOSTICS_FILE_ENV,
   formatStartupError,
   killSidecar,
@@ -13,15 +13,12 @@ import {
   preferredServerPorts,
   pushStartupLog,
   reserveServerPort,
-  resolveCloudflaredPath,
   sanitizeHostDiagnostic,
   SERVER_BIND_HOST,
   SERVER_CONTROL_HOST,
   SERVER_STARTUP_TIMEOUT_MS,
   spawnSidecar,
-  spawnTunnel,
   waitForServer,
-  waitForTunnelUrl,
   withAdapterProxyBridgeEnv,
   withSystemProxyBridgeEnv,
   withSystemProxyErrorEnv,
@@ -30,6 +27,13 @@ import {
   type H5TunnelMode,
   type SidecarChild,
 } from './sidecarManager'
+import { ensureCloudflaredBinary } from './cloudflaredBinary'
+import {
+  createCloudflareTunnel,
+  createPinggyTunnel,
+  type H5TunnelProvider,
+  type TunnelProviderInstance,
+} from './tunnelProvider'
 import { readDesktopTerminalConfig, resolveDesktopTerminalShell } from './terminal'
 import {
   SystemProxyBridge,
@@ -41,6 +45,25 @@ export type TunnelStartOptions = {
   token?: string | null
   /** Public base URL to report for a named tunnel (the user's bound domain). */
   namedUrl?: string | null
+  /**
+   * Preferred provider. Omitted keeps the default Cloudflare→Pinggy fallback
+   * order; an explicit value pins the tunnel to that provider (used by the
+   * manual "switch route" action).
+   */
+  provider?: H5TunnelProvider
+}
+
+/**
+ * Progress of the cloudflared auto-download, surfaced to the settings page so a
+ * first-run user sees why "start tunnel" is taking a while. Null unless a
+ * download is (or just was) in flight.
+ */
+export type TunnelDownloadStatus = {
+  state: 'downloading' | 'failed'
+  receivedBytes: number
+  /** Null when the mirror/server sends no Content-Length (indeterminate bar). */
+  totalBytes: number | null
+  error: string | null
 }
 
 export type TunnelStatus = {
@@ -48,7 +71,16 @@ export type TunnelStatus = {
   url: string | null
   mode: H5TunnelMode | null
   error: string | null
+  provider: H5TunnelProvider | null
+  /**
+   * Read host-direct by the settings page (it polls getTunnelStatus), never
+   * mirrored to the server: the server's tunnel state has no download concept.
+   */
+  download: TunnelDownloadStatus | null
 }
+
+/** How long a single provider may take to produce a public URL. */
+const TUNNEL_URL_TIMEOUT_MS = 30_000
 
 const TUNNEL_HEALTH_INITIAL_DELAY_MS = 15_000
 const TUNNEL_HEALTH_INTERVAL_MS = 30_000
@@ -81,6 +113,9 @@ type ServerRuntimeDeps = {
   waitForServer: typeof waitForServer
   writeLastServerPort: typeof writeLastServerPort
   createSystemProxyBridge: (resolveSystemProxy: (url: string) => Promise<string>) => SystemProxyBridgeLike
+  ensureCloudflaredBinary: typeof ensureCloudflaredBinary
+  createCloudflareTunnel: typeof createCloudflareTunnel
+  createPinggyTunnel: typeof createPinggyTunnel
 }
 
 const DEFAULT_SERVER_RUNTIME_DEPS: ServerRuntimeDeps = {
@@ -93,6 +128,9 @@ const DEFAULT_SERVER_RUNTIME_DEPS: ServerRuntimeDeps = {
   waitForServer,
   writeLastServerPort,
   createSystemProxyBridge: resolveSystemProxy => new SystemProxyBridge(resolveSystemProxy),
+  ensureCloudflaredBinary,
+  createCloudflareTunnel,
+  createPinggyTunnel,
 }
 
 const AUTOMATIC_RESTART_LIMIT = 3
@@ -185,8 +223,8 @@ export class ElectronServerRuntime {
   private systemProxyBridge: SystemProxyBridgeLike | null = null
   private server: ActiveServer | null = null
   private adapters: SidecarChild[] = []
-  private tunnel: { child: SidecarChild, mode: H5TunnelMode } | null = null
-  private tunnelState: TunnelStatus = { status: 'idle', url: null, mode: null, error: null }
+  private tunnel: { instance: TunnelProviderInstance, mode: H5TunnelMode } | null = null
+  private tunnelState: TunnelStatus = { status: 'idle', url: null, mode: null, error: null, provider: null, download: null }
   private tunnelGeneration = 0
   private tunnelHealthTimer: ReturnType<typeof setTimeout> | null = null
   private tunnelHealthFailures = 0
@@ -300,10 +338,17 @@ export class ElectronServerRuntime {
   }
 
   /**
-   * Start a Cloudflare tunnel and report the resulting public URL to the running
-   * H5 server so it becomes the effective publicBaseUrl. Quick mode scrapes the
-   * trycloudflare URL from cloudflared's output; named mode uses the user's
-   * configured domain (namedUrl) since cloudflared does not print it.
+   * Start a public tunnel and report the resulting URL to the running H5 server
+   * so it becomes the effective publicBaseUrl.
+   *
+   * Cloudflare (cloudflared) is tried first; any failure — binary unavailable,
+   * download failure, spawn failure, no URL within 30s, or an early exit —
+   * transparently falls back to Pinggy over the system ssh client. Both
+   * providers failing raises an aggregated `Cloudflare: …; Pinggy: …` error and
+   * leaves the tunnel in the error state.
+   *
+   * Quick mode scrapes the public URL from the provider's output; named mode is
+   * Cloudflare-only and uses the user's configured domain (namedUrl).
    */
   async startTunnel(options: TunnelStartOptions): Promise<TunnelStatus> {
     const serverUrl = await this.getServerUrl()
@@ -312,78 +357,212 @@ export class ElectronServerRuntime {
     // Replace any existing tunnel so a mode switch / restart is clean.
     this.stopTunnelProcess()
     const generation = this.tunnelGeneration
-    this.tunnelState = { status: 'starting', url: null, mode: options.mode, error: null }
+    this.tunnelState = { status: 'starting', url: null, mode: options.mode, error: null, provider: null, download: null }
 
-    const cloudflaredPath = resolveCloudflaredPath()
-    if (!cloudflaredPath) {
-      this.tunnelState = {
-        status: 'error',
-        url: null,
-        mode: options.mode,
-        error: 'cloudflared not found. Install it from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/',
+    const env = await this.resolveSidecarBaseEnv()
+    if (generation !== this.tunnelGeneration) return this.getTunnelStatus()
+
+    // The fallback helper owns the running/error state transitions; it publishes
+    // the server report before returning, so reading our own state is enough.
+    await this.startTunnelWithFallback({ options, generation, port, serverUrl, env })
+    return this.getTunnelStatus()
+  }
+
+  /**
+   * Try the preferred provider, then the fallback. Returns the started instance
+   * on success, or null when the attempt was superseded by a newer generation.
+   * Throws the aggregated error when every provider fails.
+   */
+  private async startTunnelWithFallback(context: {
+    options: TunnelStartOptions
+    generation: number
+    port: number
+    serverUrl: string
+    env: NodeJS.ProcessEnv
+  }): Promise<TunnelProviderInstance | null> {
+    const { options, generation, port, serverUrl, env } = context
+    const providers: H5TunnelProvider[] = options.provider
+      ? [options.provider]
+      : ['cloudflare', 'pinggy']
+    const failures: string[] = []
+    // Carried out of the loop so a failed Cloudflare download stays visible in
+    // the terminal error state instead of being swallowed by the fallback.
+    const downloadRef: { value: TunnelDownloadStatus | null } = { value: null }
+
+    for (const provider of providers) {
+      if (generation !== this.tunnelGeneration) return null
+      try {
+        const instance = await this.startTunnelForProvider(provider, {
+          options,
+          generation,
+          port,
+          serverUrl,
+          env,
+          downloadRef,
+        })
+        if (generation !== this.tunnelGeneration) {
+          await instance.stop().catch(() => {})
+          return null
+        }
+        this.tunnel = { instance, mode: options.mode }
+        this.tunnelState = {
+          status: 'running',
+          url: instance.url,
+          mode: options.mode,
+          error: null,
+          provider: instance.provider,
+          download: null,
+        }
+        await this.reportTunnel(serverUrl)
+        if (options.mode === 'quick') {
+          this.scheduleTunnelHealthCheck({
+            generation,
+            child: instance.child,
+            serverUrl,
+            tunnelUrl: instance.url,
+          })
+        }
+        return instance
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        failures.push(`${provider === 'cloudflare' ? 'Cloudflare' : 'Pinggy'}: ${message}`)
       }
-      await this.reportTunnel(serverUrl)
-      return this.getTunnelStatus()
     }
 
-    try {
-      const env = await this.resolveSidecarBaseEnv()
-      if (generation !== this.tunnelGeneration) return this.getTunnelStatus()
-      const plan = createTunnelPlan({
-        cloudflaredPath,
+    if (generation !== this.tunnelGeneration) return null
+    this.stopTunnelProcess()
+    this.tunnelState = {
+      status: 'error',
+      url: null,
+      mode: options.mode,
+      error: failures.join('; '),
+      provider: null,
+      // Keep the download failure (if that is what Cloudflare hit) so the
+      // settings page can show the actionable "install manually / use a mirror"
+      // hint instead of a bare aggregated error.
+      download: downloadRef.value,
+    }
+    await this.reportTunnel(serverUrl)
+    return null
+  }
+
+  /**
+   * Start a single provider's tunnel. Named mode is Cloudflare-only: the domain
+   * is bound in Cloudflare, so Pinggy has nothing to report for it.
+   */
+  private async startTunnelForProvider(provider: H5TunnelProvider, context: {
+    options: TunnelStartOptions
+    generation: number
+    port: number
+    serverUrl: string
+    env: NodeJS.ProcessEnv
+    downloadRef: { value: TunnelDownloadStatus | null }
+  }): Promise<TunnelProviderInstance> {
+    const { options, generation, port, env } = context
+    if (options.mode === 'named' && provider === 'pinggy') {
+      throw new Error('Named tunnels require Cloudflare; Pinggy only supports quick tunnels.')
+    }
+
+    // Attach log capture at spawn time (the factory consumes the URL line before
+    // returning, so a later attach would miss it).
+    const onChild = (child: SidecarChild) => this.captureLogs(child, `${provider}:${options.mode}`)
+
+    let instance: TunnelProviderInstance
+    if (provider === 'pinggy') {
+      instance = await this.deps.createPinggyTunnel({
+        port,
+        directory: this.pinggyDirectory(),
+        env,
+        timeoutMs: TUNNEL_URL_TIMEOUT_MS,
+        onChild,
+      })
+    } else {
+      const recordDownload = (status: TunnelDownloadStatus | null) => {
+        context.downloadRef.value = status
+        if (generation === this.tunnelGeneration) {
+          this.tunnelState = { ...this.tunnelState, download: status }
+        }
+      }
+      // Only the first-run download is slow enough to be worth a progress bar;
+      // a cached binary resolves without ever touching `onProgress`.
+      const onProgress = (progress: { receivedBytes: number, totalBytes: number | null }) => {
+        if (generation !== this.tunnelGeneration) return
+        recordDownload({
+          state: 'downloading',
+          receivedBytes: progress.receivedBytes,
+          totalBytes: progress.totalBytes,
+          error: null,
+        })
+      }
+      // Scope the failure flag to the download itself: a later spawn failure must
+      // not be mislabelled as "cloudflared download failed" in the settings UI.
+      const resolveBinary = async () => {
+        try {
+          return await this.deps.ensureCloudflaredBinary({
+            cacheDir: claudeConfigDir(this.baseEnv),
+            env: this.baseEnv,
+            onProgress,
+          })
+        } catch (error) {
+          recordDownload({
+            state: 'failed',
+            receivedBytes: context.downloadRef.value?.receivedBytes ?? 0,
+            totalBytes: context.downloadRef.value?.totalBytes ?? null,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          throw error
+        }
+      }
+      instance = await this.deps.createCloudflareTunnel({
         port,
         mode: options.mode,
         token: options.token,
+        namedUrl: options.namedUrl,
         env,
+        timeoutMs: TUNNEL_URL_TIMEOUT_MS,
+        onChild,
+        resolveBinary,
       })
-      const child = spawnTunnel(plan)
-      this.tunnel = { child, mode: options.mode }
-      this.captureLogs(child, `cloudflared:${options.mode}`)
-      child.on('exit', (code, signal) => {
-        if (generation !== this.tunnelGeneration || this.tunnel?.child !== child) return
-        this.clearTunnelHealthTimer()
-        this.tunnel = null
-        this.tunnelState = {
-          status: 'error',
-          url: null,
-          mode: options.mode,
-          error: `cloudflared exited unexpectedly (code=${code}, signal=${signal})`,
-        }
-        void this.clearTunnelOnServer(serverUrl).then(() => this.reportTunnel(serverUrl))
-      })
-
-      let url: string
-      if (options.mode === 'named') {
-        if (!options.namedUrl) {
-          throw new Error('A bound domain (public URL) is required for the named tunnel mode.')
-        }
-        url = options.namedUrl
-      } else {
-        url = await waitForTunnelUrl(child)
-      }
-
-      if (generation !== this.tunnelGeneration || this.tunnel?.child !== child) {
-        if (this.tunnel?.child !== child) killSidecar(child)
-        return this.getTunnelStatus()
-      }
-      this.tunnelState = { status: 'running', url, mode: options.mode, error: null }
-      await this.reportTunnel(serverUrl)
-      if (options.mode === 'quick') {
-        this.scheduleTunnelHealthCheck({ generation, child, serverUrl, tunnelUrl: url })
-      }
-      return this.getTunnelStatus()
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      this.stopTunnelProcess()
-      this.tunnelState = { status: 'error', url: null, mode: options.mode, error: message }
-      await this.reportTunnel(serverUrl)
-      return this.getTunnelStatus()
     }
+    // A provider that dies after we publish it must not be reported as running:
+    // the exit handler clears the server URL and flips to the error state.
+    this.watchProviderExit(instance, { generation, mode: options.mode, serverUrl: context.serverUrl })
+    return instance
+  }
+
+  /**
+   * Attach the unexpected-exit handler to a running provider process. Guarded by
+   * generation + instance identity so a stale exit cannot clobber a newer tunnel.
+   */
+  private watchProviderExit(instance: TunnelProviderInstance, context: {
+    generation: number
+    mode: H5TunnelMode
+    serverUrl: string
+  }) {
+    instance.child.on('exit', (code, signal) => {
+      if (context.generation !== this.tunnelGeneration || this.tunnel?.instance !== instance) return
+      this.clearTunnelHealthTimer()
+      this.tunnel = null
+      this.tunnelState = {
+        status: 'error',
+        url: null,
+        mode: context.mode,
+        error: `${instance.provider} exited unexpectedly (code=${code}, signal=${signal})`,
+        provider: null,
+        download: null,
+      }
+      void this.clearTunnelOnServer(context.serverUrl).then(() => this.reportTunnel(context.serverUrl))
+    })
+  }
+
+  /** Directory holding the Pinggy identity key + known-hosts, beside the cloudflared cache. */
+  private pinggyDirectory(): string {
+    return path.join(claudeConfigDir(this.baseEnv), 'pinggy')
   }
 
   async stopTunnel(): Promise<TunnelStatus> {
     this.stopTunnelProcess()
-    this.tunnelState = { status: 'idle', url: null, mode: null, error: null }
+    this.tunnelState = { status: 'idle', url: null, mode: null, error: null, provider: null, download: null }
     if (this.server) {
       // Use /tunnel/clear, NOT /tunnel/report — the report handler treats a
       // missing/null url as "don't touch" (so a status-only heartbeat can't
@@ -400,9 +579,10 @@ export class ElectronServerRuntime {
     this.tunnelGeneration += 1
     this.clearTunnelHealthTimer()
     if (this.tunnel) {
-      const child = this.tunnel.child
+      const instance = this.tunnel.instance
       this.tunnel = null
-      killSidecar(child, sync)
+      if (sync) killSidecar(instance.child, true)
+      else void instance.stop().catch(() => {})
     }
   }
 
@@ -433,7 +613,7 @@ export class ElectronServerRuntime {
     serverUrl: string
     tunnelUrl: string
   }): Promise<void> {
-    if (context.generation !== this.tunnelGeneration || this.tunnel?.child !== context.child) return
+    if (context.generation !== this.tunnelGeneration || this.tunnel?.instance.child !== context.child) return
 
     let failureReason: string | null = null
     try {
@@ -448,13 +628,13 @@ export class ElectronServerRuntime {
       // The main-process fetch may not share Electron's system/PAC proxy while
       // cloudflared does. A network error is therefore inconclusive: retry it,
       // but only an actual non-2xx response may tear down a running tunnel.
-      if (context.generation === this.tunnelGeneration && this.tunnel?.child === context.child) {
+      if (context.generation === this.tunnelGeneration && this.tunnel?.instance.child === context.child) {
         this.scheduleTunnelHealthCheck(context, TUNNEL_HEALTH_INTERVAL_MS)
       }
       return
     }
 
-    if (context.generation !== this.tunnelGeneration || this.tunnel?.child !== context.child) return
+    if (context.generation !== this.tunnelGeneration || this.tunnel?.instance.child !== context.child) return
     if (failureReason === null) {
       this.tunnelHealthFailures = 0
     } else {
@@ -474,6 +654,8 @@ export class ElectronServerRuntime {
       url: null,
       mode: 'quick',
       error: `Cloudflare tunnel became unreachable after ${TUNNEL_HEALTH_FAILURE_THRESHOLD} consecutive health check failures (${failureReason}).`,
+      provider: null,
+      download: null,
     }
     await this.clearTunnelOnServer(context.serverUrl)
     await this.reportTunnel(context.serverUrl)
@@ -501,6 +683,7 @@ export class ElectronServerRuntime {
           url: this.tunnelState.url,
           status: this.tunnelState.status,
           mode: this.tunnelState.mode ?? undefined,
+          provider: this.tunnelState.provider ?? undefined,
           error: this.tunnelState.error,
         }),
       })

@@ -287,6 +287,52 @@ describe('/api/h5-access', () => {
     expect(clearBody.settings.publicBaseUrl).toBe('https://chat.example.com/app')
   })
 
+  test('tunnel/report accepts a valid provider and rejects an invalid one', async () => {
+    await api('POST', '/api/h5-access/enable')
+
+    const pinggyResponse = await api('POST', '/api/h5-access/tunnel/report', {
+      body: { url: 'https://x.a.pinggy.io', status: 'running', provider: 'pinggy' },
+    })
+    expect(pinggyResponse.status).toBe(200)
+    const pinggyBody = await pinggyResponse.json() as {
+      tunnel: { provider: string | null }
+    }
+    expect(pinggyBody.tunnel.provider).toBe('pinggy')
+
+    // An invalid provider value must be ignored, keeping the last good value.
+    const invalidResponse = await api('POST', '/api/h5-access/tunnel/report', {
+      body: { status: 'running', provider: 'ngrok' },
+    })
+    const invalidBody = await invalidResponse.json() as {
+      tunnel: { provider: string | null }
+    }
+    expect(invalidBody.tunnel.provider).toBe('pinggy')
+
+    // A missing provider on a heartbeat also preserves the value.
+    const heartbeatResponse = await api('POST', '/api/h5-access/tunnel/report', {
+      body: { status: 'running' },
+    })
+    const heartbeatBody = await heartbeatResponse.json() as {
+      tunnel: { provider: string | null }
+    }
+    expect(heartbeatBody.tunnel.provider).toBe('pinggy')
+  })
+
+  test('tunnel/clear resets the provider to null', async () => {
+    await api('POST', '/api/h5-access/enable')
+    await api('POST', '/api/h5-access/tunnel/report', {
+      body: { url: 'https://x.a.pinggy.io', status: 'running', provider: 'pinggy' },
+    })
+
+    const clearResponse = await api('POST', '/api/h5-access/tunnel/clear')
+    expect(clearResponse.status).toBe(200)
+    const clearBody = await clearResponse.json() as {
+      tunnel: { status: string; provider: string | null }
+    }
+    expect(clearBody.tunnel.status).toBe('idle')
+    expect(clearBody.tunnel.provider).toBeNull()
+  })
+
   test('PUT stores the tunnel token without returning it in settings', async () => {
     const response = await api('PUT', '/api/h5-access', {
       body: { tunnelToken: 'cf-secret-token', tunnelMode: 'named' },

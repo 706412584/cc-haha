@@ -53,18 +53,41 @@ const harness = String.raw`
   const state = {
     serverChild: null,
     tunnelChildren: [],
+    pinggyChildren: [],
     reportPayloads: [],
     serverPlans: [],
     fetchCalls: [],
     fetchMock: null,
     killedTunnelChildren: [],
+    cloudflareFails: false,
+    pinggyFails: false,
+    downloadFails: false,
+    downloadError: 'cloudflared download failed: HTTP 403',
+    downloadSteps: null,
   }
+
+  const CF_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i
+  const PINGGY_URL_RE = /https:\/\/[a-z0-9][a-z0-9.-]*\.(?:pinggy\.link|pinggy-free\.link|pinggy\.online)/i
 
   function makeChild(pid) {
     return Object.assign(new EventEmitter(), {
       stdout: new EventEmitter(),
       stderr: new EventEmitter(),
       pid,
+    })
+  }
+
+  function awaitUrl(child, regex, exitMessage) {
+    return new Promise((resolve, reject) => {
+      const onData = (chunk) => {
+        const match = String(chunk).match(regex)
+        if (match) {
+          child.stderr.off('data', onData)
+          resolve(match[0])
+        }
+      }
+      child.stderr.on('data', onData)
+      child.on('exit', () => reject(new Error(exitMessage)))
     })
   }
 
@@ -77,8 +100,18 @@ const harness = String.raw`
     return state.tunnelChildren[index]
   }
 
+  async function waitForPinggyChild(index, timeoutMs = 1000) {
+    const deadline = Date.now() + timeoutMs
+    while (state.pinggyChildren.length <= index) {
+      if (Date.now() > deadline) throw new Error('pinggy child ' + index + ' never spawned')
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    return state.pinggyChildren[index]
+  }
+
   mock.module('./electron/services/sidecarManager.ts', () => ({
     appendHostDiagnostic: () => {},
+    claudeConfigDir: () => '/fake/config',
     ELECTRON_DIAGNOSTICS_FILE_ENV: 'CC_HAHA_ELECTRON_DIAGNOSTICS_FILE',
     SERVER_BIND_HOST: '0.0.0.0',
     SERVER_CONTROL_HOST: '127.0.0.1',
@@ -145,9 +178,14 @@ const harness = String.raw`
   async function withRuntime(fn, options = {}) {
     state.serverChild = null
     state.tunnelChildren = []
+    state.pinggyChildren = []
     state.reportPayloads = []
     state.serverPlans = []
     state.killedTunnelChildren = []
+    state.cloudflareFails = false
+    state.pinggyFails = false
+    state.downloadFails = false
+    state.downloadSteps = null
     state.fetchCalls = []
     state.fetchMock = async (url, init) => {
       state.fetchCalls.push({ url: String(url), init })
@@ -157,9 +195,62 @@ const harness = String.raw`
       return new Response(null, { status: 200 })
     }
     globalThis.fetch = state.fetchMock
+
+    const providerDeps = {
+      // A plain resolve unless the test opts into a simulated download.
+      ensureCloudflaredBinary: async (opts) => {
+        if (state.downloadFails) {
+          opts?.onProgress?.({ receivedBytes: 100, totalBytes: 500 })
+          throw new Error(state.downloadError)
+        }
+        if (state.downloadSteps) {
+          for (const step of state.downloadSteps) {
+            opts?.onProgress?.(step)
+            await new Promise((r) => setTimeout(r, 1))
+          }
+        }
+        return '/fake/cloudflared'
+      },
+      createCloudflareTunnel: async (options) => {
+        if (state.cloudflareFails) throw new Error('cloudflared unavailable')
+        // Faithful to the real factory: it resolves the binary (which is where
+        // the auto-download happens) before it spawns anything.
+        if (options.resolveBinary) await options.resolveBinary()
+        const pid = 2000 + state.tunnelChildren.length
+        const child = makeChild(pid)
+        child.emitUrl = (url) => child.stderr.emit('data', 'INF Your quick Tunnel: ' + url + '\n')
+        state.tunnelChildren.push(child)
+        const url = await awaitUrl(child, CF_URL_RE, 'cloudflared exited before URL')
+        return {
+          provider: 'cloudflare',
+          url,
+          child,
+          stop: async () => { state.killedTunnelChildren.push(child) },
+        }
+      },
+      createPinggyTunnel: async () => {
+        if (state.pinggyFails) throw new Error('ssh unavailable')
+        const pid = 3000 + state.pinggyChildren.length
+        const child = makeChild(pid)
+        child.emitUrl = (url) => child.stderr.emit('data', url + '\n')
+        state.pinggyChildren.push(child)
+        const url = await awaitUrl(child, PINGGY_URL_RE, 'ssh exited before URL')
+        return {
+          provider: 'pinggy',
+          url,
+          child,
+          stop: async () => { state.killedTunnelChildren.push(child) },
+        }
+      },
+    }
+    const { deps, ...rest } = options
     try {
       const { ElectronServerRuntime } = await import('./electron/services/serverRuntime.ts')
-      const runtime = new ElectronServerRuntime({ desktopRoot: '/fake/desktop', ...options })
+      const runtime = new ElectronServerRuntime({
+        desktopRoot: '/fake/desktop',
+        ...rest,
+        deps: { ...providerDeps, ...(deps ?? {}) },
+      })
       await runtime.startServer()
       await fn(runtime)
     } finally {
@@ -195,12 +286,14 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
           url: 'https://owner-standards-answered-staff.trycloudflare.com',
           mode: 'quick',
           error: null,
+          provider: 'cloudflare',
+          download: null,
         }, 'first tunnel status mismatch')
 
         const stop = runtime.stopTunnel()
         state.tunnelChildren[0].emit('exit', 0, null)
         await stop
-        assertEqual(runtime.getTunnelStatus(), { status: 'idle', url: null, mode: null, error: null }, 'stop status mismatch')
+        assertEqual(runtime.getTunnelStatus(), { status: 'idle', url: null, mode: null, error: null, provider: null, download: null }, 'stop status mismatch')
 
         const second = runtime.startTunnel({ mode: 'quick' })
         const child1 = await waitForTunnelChild(1)
@@ -267,7 +360,9 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
           status: 'error',
           url: null,
           mode: 'quick',
-          error: 'cloudflared exited unexpectedly (code=1, signal=null)',
+          error: 'cloudflare exited unexpectedly (code=1, signal=null)',
+          provider: null,
+          download: null,
         }, 'unexpected exit status mismatch')
       })
     `)
@@ -311,6 +406,8 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
           url: null,
           mode: 'quick',
           error: 'Cloudflare tunnel became unreachable after 3 consecutive health check failures (HTTP 524).',
+          provider: null,
+          download: null,
         }, 'health failure status mismatch')
         assert(state.killedTunnelChildren.includes(child), 'unhealthy tunnel child was not stopped')
         assert(urlsHit.some((url) => url.endsWith('/api/h5-access/tunnel/clear')), 'unhealthy tunnel did not clear the server URL')
@@ -357,6 +454,8 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
           url: 'https://health-reset.trycloudflare.com',
           mode: 'quick',
           error: null,
+          provider: 'cloudflare',
+          download: null,
         }, 'a successful health check should reset the consecutive failure count')
         assert(!state.killedTunnelChildren.includes(child), 'tunnel was stopped even though failures were not consecutive')
         assert(!urlsHit.some((url) => url.endsWith('/api/h5-access/tunnel/clear')), 'non-consecutive failures cleared the server URL')
@@ -406,6 +505,8 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
           url: 'https://new-health.trycloudflare.com',
           mode: 'quick',
           error: null,
+          provider: 'cloudflare',
+          download: null,
         }, 'stale health callback clobbered the new tunnel')
       }, { setTimeoutFn, clearTimeoutFn })
     `)
@@ -429,6 +530,199 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
         await new Promise((resolve) => setTimeout(resolve, 10))
         assert(runtime.getTunnelStatus().url === 'https://new.trycloudflare.com', 'old exit clobbered new URL')
         assert(runtime.getTunnelStatus().status === 'running', 'old exit clobbered running status')
+      })
+    `)
+  })
+
+  it('keeps Cloudflare and never starts Pinggy when the primary provider succeeds', async () => {
+    await expectIsolatedPass(String.raw`
+      await withRuntime(async (runtime) => {
+        const started = runtime.startTunnel({ mode: 'quick' })
+        const child = await waitForTunnelChild(0)
+        child.emitUrl('https://cloudflare-ok.trycloudflare.com')
+        const status = await started
+
+        assertEqual(status, {
+          status: 'running',
+          url: 'https://cloudflare-ok.trycloudflare.com',
+          mode: 'quick',
+          error: null,
+          provider: 'cloudflare',
+          download: null,
+        }, 'cloudflare success status mismatch')
+        assert(state.pinggyChildren.length === 0, 'pinggy must not start when cloudflare succeeds')
+        const lastRunning = [...state.reportPayloads].reverse().find((p) => p.status === 'running')
+        assert(lastRunning?.provider === 'cloudflare', 'report should carry the cloudflare provider')
+      })
+    `)
+  })
+
+  it('falls back to Pinggy when Cloudflare fails to start', async () => {
+    await expectIsolatedPass(String.raw`
+      await withRuntime(async (runtime) => {
+        state.cloudflareFails = true
+        const started = runtime.startTunnel({ mode: 'quick' })
+        const child = await waitForPinggyChild(0)
+        child.emitUrl('https://abc-1-2-3-4.a.free.pinggy.link')
+        const status = await started
+
+        assertEqual(status, {
+          status: 'running',
+          url: 'https://abc-1-2-3-4.a.free.pinggy.link',
+          mode: 'quick',
+          error: null,
+          provider: 'pinggy',
+          download: null,
+        }, 'pinggy fallback status mismatch')
+        assert(state.tunnelChildren.length === 0, 'cloudflare should not have spawned a process')
+        const lastRunning = [...state.reportPayloads].reverse().find((p) => p.status === 'running')
+        assert(lastRunning?.provider === 'pinggy', 'report should carry the pinggy provider')
+      })
+    `)
+  })
+
+  it('raises an aggregated error when both providers fail', async () => {
+    await expectIsolatedPass(String.raw`
+      await withRuntime(async (runtime) => {
+        state.cloudflareFails = true
+        state.pinggyFails = true
+        const status = await runtime.startTunnel({ mode: 'quick' })
+
+        assertEqual(status, {
+          status: 'error',
+          url: null,
+          mode: 'quick',
+          error: 'Cloudflare: cloudflared unavailable; Pinggy: ssh unavailable',
+          provider: null,
+          download: null,
+        }, 'aggregated failure status mismatch')
+        const lastReport = state.reportPayloads[state.reportPayloads.length - 1]
+        assert(lastReport?.status === 'error', 'the aggregated failure should be reported to the server')
+        assert(lastReport?.provider === undefined, 'a failed start should not declare a provider')
+      })
+    `)
+  })
+
+  it('pins the tunnel to an explicitly requested provider without falling back', async () => {
+    await expectIsolatedPass(String.raw`
+      await withRuntime(async (runtime) => {
+        state.cloudflareFails = true
+        const started = runtime.startTunnel({ mode: 'quick', provider: 'pinggy' })
+        const child = await waitForPinggyChild(0)
+        child.emitUrl('https://pinned-1.pinggy.online')
+        const status = await started
+
+        assertEqual(status.provider, 'pinggy', 'explicit provider should be honored')
+        assert(status.url === 'https://pinned-1.pinggy.online', 'pinned tunnel URL mismatch')
+      })
+    `)
+  })
+
+  it('reports the pinggy provider when a fallback tunnel exits unexpectedly', async () => {
+    await expectIsolatedPass(String.raw`
+      await withRuntime(async (runtime) => {
+        state.cloudflareFails = true
+        const started = runtime.startTunnel({ mode: 'quick' })
+        const child = await waitForPinggyChild(0)
+        child.emitUrl('https://abc-1-2-3-4.a.free.pinggy.link')
+        await started
+
+        child.emit('exit', 1, null)
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        assertEqual(runtime.getTunnelStatus(), {
+          status: 'error',
+          url: null,
+          mode: 'quick',
+          error: 'pinggy exited unexpectedly (code=1, signal=null)',
+          provider: null,
+          download: null,
+        }, 'pinggy unexpected exit status mismatch')
+      })
+    `)
+  })
+
+  it('surfaces cloudflared download progress on the host status while it resolves', async () => {
+    await expectIsolatedPass(String.raw`
+      await withRuntime(async (runtime) => {
+        // Two progress ticks, then a long-lived quick tunnel so the start
+        // promise stays pending long enough to observe the download state.
+        state.downloadSteps = [
+          { receivedBytes: 100, totalBytes: 400 },
+          { receivedBytes: 250, totalBytes: 400 },
+        ]
+        const started = runtime.startTunnel({ mode: 'quick' })
+        const child = await waitForTunnelChild(0)
+
+        const downloading = runtime.getTunnelStatus().download
+        assert(downloading?.state === 'downloading', 'download state should be visible while resolving')
+        assert(downloading.receivedBytes === 250, 'download progress should reflect the latest tick')
+        assert(downloading.totalBytes === 400, 'download total should be reported')
+        // The server has no download concept; it must never be mirrored there.
+        assert(
+          state.reportPayloads.every((p) => p.download === undefined),
+          'download progress must not be reported to the server',
+        )
+
+        child.emitUrl('https://progress-observed.trycloudflare.com')
+        const status = await started
+        assert(status.download === null, 'a running tunnel should clear the download state')
+      })
+    `)
+  })
+
+  it('does not show a stale download failure once Pinggy takes over', async () => {
+    await expectIsolatedPass(String.raw`
+      await withRuntime(async (runtime) => {
+        state.downloadFails = true
+        const started = runtime.startTunnel({ mode: 'quick' })
+        const child = await waitForPinggyChild(0)
+        child.emitUrl('https://download-failed.pinggy.online')
+        const status = await started
+
+        // Pinggy took over, so the tunnel is healthy: a "download failed" banner
+        // would be misleading even though the download really did fail.
+        assert(status.provider === 'pinggy', 'pinggy should take over after a download failure')
+        assert(status.download === null, 'a healthy fallback tunnel must not show a download failure')
+      })
+    `)
+  })
+
+  it('preserves the download failure when every provider fails', async () => {
+    await expectIsolatedPass(String.raw`
+      await withRuntime(async (runtime) => {
+        state.downloadFails = true
+        state.pinggyFails = true
+        const status = await runtime.startTunnel({ mode: 'quick' })
+
+        // Nothing is running, so the download failure is the most actionable
+        // clue and must survive into the terminal error state.
+        assert(status.status === 'error', 'both providers failing should be an error state')
+        assert(status.download?.state === 'failed', 'the download failure should survive')
+        assert(
+          status.download.error === state.downloadError,
+          'the download error should be preserved verbatim',
+        )
+        assert(
+          typeof status.error === 'string' && status.error.includes('Pinggy'),
+          'the aggregated error should still mention both providers',
+        )
+      })
+    `)
+  })
+
+  it('does not report a download failure when the binary resolved but the spawn failed', async () => {
+    await expectIsolatedPass(String.raw`
+      await withRuntime(async (runtime) => {
+        // The binary resolves fine; only the spawn blows up. The settings page
+        // must not be told "cloudflared download failed".
+        state.cloudflareFails = true
+        const started = runtime.startTunnel({ mode: 'quick' })
+        const child = await waitForPinggyChild(0)
+        child.emitUrl('https://spawn-failed.pinggy.online')
+        const status = await started
+
+        assert(status.provider === 'pinggy', 'pinggy should take over after a spawn failure')
+        assert(status.download === null, 'a spawn failure is not a download failure')
       })
     `)
   })

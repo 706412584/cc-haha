@@ -309,6 +309,9 @@ const tunnelStartPayload: Validator = value =>
   && (value.mode === 'quick' || value.mode === 'named')
   && (value.token === undefined || value.token === null || typeof value.token === 'string')
   && (value.namedUrl === undefined || value.namedUrl === null || typeof value.namedUrl === 'string')
+  // Only the two real providers: an unrecognized string would otherwise fall
+  // through the main process's `else` branch and silently start Cloudflare.
+  && (value.provider === undefined || value.provider === 'cloudflare' || value.provider === 'pinggy')
 
 const localePreference: Validator = value =>
   value === 'en'
