@@ -57,7 +57,6 @@ import {
   type OpenSubagentPayload,
 } from '../components/activity/SessionActivityPanel'
 import { buildMainSessionActivityModel, hasVisibleSessionActivity } from '../components/activity/sessionActivityModel'
-import { TeamStatusBar } from '../components/teams/TeamStatusBar'
 import { runsForSession, useWorkflowStore } from '../stores/workflowStore'
 import type { SessionListItem } from '../types/session'
 import type { ActiveGoalState, TokenUsage } from '../types/chat'
@@ -1245,7 +1244,6 @@ export function ActiveSession({ sessionId, active = true }: { sessionId?: string
           )}
 
           {showLegacyActivity && !isMemberSession && <SessionTaskBar />}
-          {showLegacyActivity && <TeamStatusBar />}
           {showLegacyActivity && !isMemberSession ? (
             <BackgroundTasksBar
               key={activeTabId}
