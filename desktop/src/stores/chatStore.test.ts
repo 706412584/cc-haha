@@ -4092,6 +4092,49 @@ describe('chatStore history mapping', () => {
     expect(JSON.stringify(mapped)).not.toContain('旧后台任务通知')
   })
 
+  it('resumes notification suppression at the tool call that follows the acknowledgement', () => {
+    const messages: MessageEntry[] = [
+      {
+        id: 'user-real-1',
+        type: 'user',
+        timestamp: '2026-04-06T00:00:00.000Z',
+        content: '用浏览器继续验证',
+      },
+      {
+        id: 'task-notification',
+        type: 'user',
+        timestamp: '2026-04-06T00:00:01.000Z',
+        content: '<task-notification>\n<task-id>bg-1</task-id>\n<tool-use-id>toolu_bg</tool-use-id>\n<status>completed</status>\n<summary>Background command completed</summary>\n</task-notification>',
+      },
+      {
+        id: 'ack-text',
+        type: 'assistant',
+        timestamp: '2026-04-06T00:00:02.000Z',
+        content: [{ type: 'text', text: '后台命令完成了，我继续推进。' }],
+      },
+      {
+        id: 'ack-tool',
+        type: 'tool_use',
+        timestamp: '2026-04-06T00:00:03.000Z',
+        content: [{ type: 'tool_use', id: 'toolu_read', name: 'Read', input: { file_path: '/tmp/main.lua' } }],
+      },
+      {
+        id: 'work-text',
+        type: 'assistant',
+        timestamp: '2026-04-06T00:00:04.000Z',
+        content: [{ type: 'text', text: '找到根因了：服务端入口缺两行初始化。' }],
+      },
+    ]
+
+    const mapped = mapHistoryMessagesToUiMessages(messages)
+    const serialized = JSON.stringify(mapped)
+
+    expect(serialized).not.toContain('<task-notification>')
+    expect(serialized).not.toContain('后台命令完成了，我继续推进')
+    // The resumed work after the tool call must survive the mapping.
+    expect(serialized).toContain('找到根因了')
+  })
+
   it('reconstructs task notifications from transcript XML before filtering it from UI', () => {
     const restored = reconstructAgentNotifications([
       {

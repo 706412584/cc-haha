@@ -1,7 +1,7 @@
 import { PublicAccessSettings } from './PublicAccessSettings'
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import QRCode from 'qrcode'
-import { Copy, Eye, EyeOff, PowerOff, QrCode, RotateCw } from 'lucide-react'
+import { Copy, Eye, EyeOff, PowerOff, QrCode, RotateCw, Shuffle } from 'lucide-react'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useTranslation } from '../../i18n'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -12,7 +12,8 @@ import { Card } from '@/components/ui/Card'
 import { useUIStore } from '../../stores/uiStore'
 import { isBrowserSafePort } from '../../lib/browserSafePort'
 import { copyTextToClipboard } from '@/lib/clipboard'
-import { h5AccessApi } from '../../api/h5Access'
+import { h5AccessApi, type H5TunnelStatusView } from '../../api/h5Access'
+import type { H5TunnelProvider } from '../../types/settings'
 
 /**
  * The H5 access panel — current monolith implementation including tunnel controls.
@@ -115,6 +116,27 @@ function buildH5PublicBaseUrlFromHostDraft(draft: string, currentBaseUrl: string
   }
 }
 
+/** Which provider the live tunnel is using; `undefined` = not reported yet. */
+function readTunnelProvider(state: H5TunnelStatusView | null | undefined): H5TunnelProvider | null {
+  const provider = state?.provider
+  return provider === 'cloudflare' || provider === 'pinggy' ? provider : null
+}
+
+/**
+ * Integer percent for the cloudflared download bar, or null when the host has
+ * not reported a total (indeterminate). Clamped so a stale/odd host value
+ * cannot render "-3%" or "140%".
+ */
+function readDownloadPercent(state: H5TunnelStatusView | null | undefined): number | null {
+  const download = state?.download
+  if (!download || download.state !== 'downloading') return null
+  const total = download.totalBytes
+  const received = download.receivedBytes
+  if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) return null
+  if (typeof received !== 'number' || !Number.isFinite(received)) return null
+  return Math.min(100, Math.max(0, Math.round((received / total) * 100)))
+}
+
 export function H5AccessSettings() {
   const {
     h5Access,
@@ -140,11 +162,29 @@ export function H5AccessSettings() {
   const [h5TunnelMode, setH5TunnelMode] = useState<'quick' | 'named'>('quick')
   const [h5TunnelTokenDraft, setH5TunnelTokenDraft] = useState('')
   const [h5TunnelTokenVisible, setH5TunnelTokenVisible] = useState(false)
+  // Host-direct tunnel status. The server's diagnostics mirror the same state
+  // but lag by one poll, so the host read gives the download progress and
+  // provider without waiting for the next /api/h5-access refresh.
+  const [h5HostTunnelStatus, setH5HostTunnelStatus] = useState<H5TunnelStatusView | null>(null)
   // One-click tunnelling spawns cloudflared in the desktop main process, so it
   // is only available inside the Electron shell, not a browser H5 session.
   const h5TunnelAvailable = h5AccessApi.tunnelAvailable()
   const h5TunnelState = h5AccessDiagnostics?.tunnel
   const h5TunnelRunning = h5TunnelState?.status === 'running'
+  // Provider: prefer the host-direct report, fall back to the server mirror.
+  // A missing value on both is "unknown", never assumed to be Cloudflare.
+  const h5TunnelProvider = readTunnelProvider(h5HostTunnelStatus) ?? readTunnelProvider(h5TunnelState)
+  const h5TunnelDownload = h5HostTunnelStatus?.download ?? null
+  const h5TunnelDownloading = h5TunnelDownload?.state === 'downloading'
+  const h5TunnelDownloadFailed = h5TunnelDownload?.state === 'failed'
+  const h5TunnelDownloadPercent = readDownloadPercent(h5HostTunnelStatus)
+  // "Switch route" is offered while a tunnel is up on Cloudflare and has not
+  // already fallen back to Pinggy. Quick mode only: the main process refuses
+  // Pinggy for a named tunnel (the domain is bound in Cloudflare), so offering
+  // the button there would guarantee a failure toast.
+  const h5TunnelCanSwitchRoute = h5TunnelRunning
+    && h5TunnelProvider === 'cloudflare'
+    && h5TunnelState?.mode !== 'named'
   const h5AccessUrl = h5Access.publicBaseUrl
   // The token is persisted server-side, so the QR code and copy actions stay
   // available across desktop restarts (issue #767).
@@ -168,6 +208,14 @@ export function H5AccessSettings() {
     h5ActivePort != null &&
     String(h5Access.fixedPort) !== h5ActivePort
 
+  const refreshH5HostTunnelStatus = useCallback(() => {
+    const pending = h5AccessApi.getTunnelStatus()
+    if (!pending) return
+    void pending.then(setH5HostTunnelStatus).catch(() => {
+      // The server diagnostics refresh below owns the user-visible error.
+    })
+  }, [])
+
   useEffect(() => {
     if (!h5TunnelAvailable || (h5TunnelState?.status !== 'starting' && h5TunnelState?.status !== 'running')) return
     const interval = window.setInterval(() => {
@@ -175,6 +223,35 @@ export function H5AccessSettings() {
     }, 10_000)
     return () => window.clearInterval(interval)
   }, [fetchH5Access, h5TunnelAvailable, h5TunnelState?.status])
+
+  // Host-direct poll. The server mirror refreshes every 10s above, but a
+  // cloudflared download is short-lived and needs a faster cadence — and it can
+  // start before the server knows anything is happening at all. `h5ActionRunning`
+  // is the trigger that matters: the `start` IPC promise stays pending for the
+  // whole download, so the host status is the only way to see its progress.
+  //
+  // The first read runs unconditionally: a mount that lands *after* the
+  // download already failed (settings reopened, window reloaded) still needs
+  // the terminal `failed` state, which the server's error string alone cannot
+  // distinguish from any other tunnel failure.
+  useEffect(() => {
+    if (!h5TunnelAvailable) return
+    refreshH5HostTunnelStatus()
+    const active = h5ActionRunning ||
+      h5TunnelDownloading ||
+      h5TunnelState?.status === 'starting' ||
+      h5TunnelState?.status === 'running'
+    if (!active) return
+    const intervalMs = h5ActionRunning || h5TunnelDownloading ? 2_000 : 10_000
+    const interval = window.setInterval(refreshH5HostTunnelStatus, intervalMs)
+    return () => window.clearInterval(interval)
+  }, [
+    h5TunnelAvailable,
+    h5ActionRunning,
+    h5TunnelDownloading,
+    h5TunnelState?.status,
+    refreshH5HostTunnelStatus,
+  ])
 
   useEffect(() => {
     setH5PublicBaseUrlDraft(extractH5AccessAddressDraft(h5Access.publicBaseUrl))
@@ -265,6 +342,25 @@ export function H5AccessSettings() {
         })
       } else {
         await startH5Tunnel({ mode: 'quick' })
+      }
+    })
+  }
+
+  // Manual downgrade: pin the tunnel to Pinggy. The desktop main process
+  // replaces the running tunnel on start, so no explicit stop is needed.
+  //
+  // Quick only — the button is hidden for a named tunnel, and the main process
+  // would reject Pinggy there anyway (the domain is bound in Cloudflare).
+  const handleH5SwitchTunnelRoute = async () => {
+    await runH5Action(async () => {
+      try {
+        await h5AccessApi.switchTunnelProvider('pinggy', { mode: 'quick' })
+      } catch {
+        addToast({ type: 'error', message: t('settings.general.h5AccessTunnelError') })
+      } finally {
+        // Pick up the new URL / provider from the server mirror, then the host.
+        await fetchH5Access()
+        refreshH5HostTunnelStatus()
       }
     })
   }
@@ -469,8 +565,21 @@ export function H5AccessSettings() {
                 data-testid="h5-access-tunnel"
                 className="mt-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3 py-3"
               >
-                <div className="text-sm font-medium text-[var(--color-text-primary)]">
-                  {t('settings.general.h5AccessTunnelTitle')}
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-medium text-[var(--color-text-primary)]">
+                    {t('settings.general.h5AccessTunnelTitle')}
+                  </span>
+                  {h5TunnelRunning && (
+                    <Badge tone="neutral" size="sm" bordered data-testid="h5-access-tunnel-provider">
+                      {t('settings.general.h5AccessTunnelProvider')}
+                      {': '}
+                      {h5TunnelProvider === 'cloudflare'
+                        ? t('settings.general.h5AccessTunnelProviderCloudflare')
+                        : h5TunnelProvider === 'pinggy'
+                          ? t('settings.general.h5AccessTunnelProviderPinggy')
+                          : t('settings.general.h5AccessTunnelProviderUnknown')}
+                    </Badge>
+                  )}
                 </div>
                 <p className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
                   {t('settings.general.h5AccessTunnelHint')}
@@ -500,6 +609,24 @@ export function H5AccessSettings() {
                   </Button>
                 </div>
 
+                {h5TunnelCanSwitchRoute && (
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      icon={<Shuffle className="h-3.5 w-3.5" aria-hidden="true" />}
+                      disabled={h5ActionRunning}
+                      onClick={() => void handleH5SwitchTunnelRoute()}
+                      data-testid="h5-access-tunnel-switch-route"
+                    >
+                      {t('settings.general.h5AccessTunnelSwitchRoute')}
+                    </Button>
+                    <span className="text-xs leading-5 text-[var(--color-text-tertiary)]">
+                      {t('settings.general.h5AccessTunnelSwitchRouteHint')}
+                    </span>
+                  </div>
+                )}
+
                 {h5TunnelMode === 'named' && !h5TunnelRunning && (
                   <div className="mt-3">
                     <Input
@@ -521,6 +648,51 @@ export function H5AccessSettings() {
                         ? t('settings.general.h5AccessHideToken')
                         : t('settings.general.h5AccessShowToken')}
                     </button>
+                  </div>
+                )}
+
+                {h5TunnelDownloading && (
+                  <div
+                    data-testid="h5-access-tunnel-download"
+                    data-state="downloading"
+                    role="status"
+                    className="mt-3 text-xs leading-5 text-[var(--color-text-secondary)]"
+                  >
+                    {h5TunnelDownloadPercent === null
+                      ? t('settings.general.h5AccessTunnelDownloading')
+                      : t('settings.general.h5AccessTunnelDownloadingProgress', {
+                          percent: String(h5TunnelDownloadPercent),
+                        })}
+                    {h5TunnelDownloadPercent !== null && (
+                      <div
+                        role="progressbar"
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={h5TunnelDownloadPercent}
+                        className="mt-1 h-1 w-full overflow-hidden rounded-full bg-[var(--color-surface-container)]"
+                      >
+                        <div
+                          className="h-full rounded-full bg-[var(--color-brand)] transition-[width] duration-300"
+                          style={{ width: `${h5TunnelDownloadPercent}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {h5TunnelDownloadFailed && (
+                  <div
+                    data-testid="h5-access-tunnel-download-error"
+                    data-state="failed"
+                    role="alert"
+                    className="mt-3 rounded-[var(--radius-lg)] border border-[var(--color-error)] bg-[var(--color-error-container)] px-3 py-2 text-xs leading-5 text-[var(--color-on-error-container)]"
+                  >
+                    <div className="font-semibold">
+                      {t('settings.general.h5AccessTunnelDownloadFailed')}
+                    </div>
+                    <div className="mt-1">
+                      {t('settings.general.h5AccessTunnelDownloadFailedHint')}
+                    </div>
                   </div>
                 )}
 

@@ -38,6 +38,19 @@ describe('Electron IPC capabilities', () => {
     ]) expect(validateElectronIpcPayload(channel, { ...payload, ...patch })).toBe(false)
   })
 
+  it('pins the tunnel provider to the two real backends', () => {
+    const channel = ELECTRON_IPC_CHANNELS.tunnelStart
+    expect(validateElectronIpcPayload(channel, { mode: 'quick' })).toBe(true)
+    expect(validateElectronIpcPayload(channel, { mode: 'quick', provider: 'cloudflare' })).toBe(true)
+    expect(validateElectronIpcPayload(channel, { mode: 'quick', provider: 'pinggy' })).toBe(true)
+    expect(validateElectronIpcPayload(channel, { mode: 'named', token: 'tok', namedUrl: 'https://x.example' })).toBe(true)
+    // An unrecognized string would otherwise fall through the main process's
+    // `else` branch and silently start Cloudflare.
+    for (const provider of ['bogus', 'Cloudflare', 'cloudflared', '', 0, null, {}, ['pinggy']]) {
+      expect(validateElectronIpcPayload(channel, { mode: 'quick', provider })).toBe(false)
+    }
+  })
+
   it('accepts optional initial browser visibility without widening the create payload', () => {
     const channel = ELECTRON_IPC_CHANNELS.workspaceBrowserCreate
     const identity = { tabId: 'wb-1', storageId: 'store-1' }

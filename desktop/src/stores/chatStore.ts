@@ -8934,7 +8934,12 @@ export function mapHistoryMessagesToUiMessages(
         continue
       }
     }
-    if (msg.type === 'user') {
+    if (
+      msg.type === 'user' ||
+      (msg.type === 'tool_use' && suppressTaskNotificationResponse)
+    ) {
+      // Mirror the server projection: a notification acknowledgement ends at the
+      // next real user prompt or at the assistant tool call that resumes work.
       suppressTaskNotificationResponse = false
     } else if (suppressTaskNotificationResponse) {
       continue

@@ -55,10 +55,6 @@ vi.mock('../components/chat/ChatInput', () => ({
   ),
 }))
 
-vi.mock('../components/teams/TeamStatusBar', () => ({
-  TeamStatusBar: () => <div data-testid="team-status-bar" />,
-}))
-
 vi.mock('../components/chat/SessionTaskBar', () => ({
   SessionTaskBar: () => <div data-testid="session-task-bar" />,
 }))
@@ -832,7 +828,6 @@ describe('ActiveSession task polling', () => {
     })
 
     expect(screen.queryByTestId('session-task-bar')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('team-status-bar')).not.toBeInTheDocument()
     expect(screen.queryByTestId('background-tasks-button')).not.toBeInTheDocument()
     expect(screen.getByRole('dialog', { name: 'Activity' })).toHaveAttribute('data-placement', 'rail')
     expect(screen.getByTestId('session-coordinator-chip')).toBeInTheDocument()
@@ -2651,7 +2646,6 @@ describe('ActiveSession task polling', () => {
     expect(chatColumn).toContainElement(screen.getByTestId('chat-input'))
     expect(chatColumn).toHaveClass('relative')
     expect(screen.queryByTestId('session-task-bar')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('team-status-bar')).not.toBeInTheDocument()
     expect(screen.queryByTestId('background-tasks-bar')).not.toBeInTheDocument()
     expect(screen.queryByTestId('background-tasks-button')).not.toBeInTheDocument()
   })

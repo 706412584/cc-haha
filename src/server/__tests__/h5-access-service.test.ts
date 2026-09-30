@@ -427,6 +427,45 @@ describe('H5AccessService', () => {
     expect(getRuntimeTunnelState()).toMatchObject({ status: 'running', url: 'https://x.trycloudflare.com' })
   })
 
+  test('setRuntimeTunnelState sets the provider and a status-only heartbeat preserves it', () => {
+    resetRuntimeTunnelState()
+    setRuntimeTunnelState({ status: 'running', url: 'https://x.a.pinggy.io', provider: 'pinggy' })
+    expect(getRuntimeTunnelState()).toMatchObject({
+      status: 'running',
+      url: 'https://x.a.pinggy.io',
+      provider: 'pinggy',
+    })
+
+    // Heartbeat without a provider key must not wipe the reported provider.
+    setRuntimeTunnelState({ status: 'running' })
+    expect(getRuntimeTunnelState().provider).toBe('pinggy')
+
+    // Explicit provider switch is honored.
+    setRuntimeTunnelState({ provider: 'cloudflare' })
+    expect(getRuntimeTunnelState().provider).toBe('cloudflare')
+
+    // Explicit null clears it (used by tunnel/clear).
+    setRuntimeTunnelState({ provider: null })
+    expect(getRuntimeTunnelState().provider).toBeNull()
+  })
+
+  test('resetRuntimeTunnelState clears the provider', () => {
+    setRuntimeTunnelState({ status: 'running', provider: 'pinggy' })
+    expect(getRuntimeTunnelState().provider).toBe('pinggy')
+
+    resetRuntimeTunnelState()
+    expect(getRuntimeTunnelState()).toMatchObject({ status: 'idle', provider: null })
+  })
+
+  test('diagnostics expose the runtime provider without changing other fields', async () => {
+    const service = new H5AccessService()
+    setRuntimeTunnelState({ status: 'running', provider: 'pinggy' })
+
+    const diag = await service.getDiagnostics()
+    expect(diag.tunnel.provider).toBe('pinggy')
+    expect(diag.tunnel.status).toBe('running')
+  })
+
   test('auto LAN mode fills blank or loopback URLs and refreshes manual LAN ports', () => {
     expect(resolveEffectiveH5PublicBaseUrl({
       enabled: true,

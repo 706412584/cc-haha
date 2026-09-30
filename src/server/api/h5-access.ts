@@ -4,6 +4,7 @@ import {
   H5AccessService,
   setRuntimeTunnelState,
   type H5TunnelMode,
+  type H5TunnelProvider,
 } from '../services/h5AccessService.js'
 import { refreshDisconnectGraceMs } from '../ws/disconnectGraceConfig.js'
 
@@ -134,8 +135,14 @@ export async function handleH5AccessApi(
           const mode = body.mode === 'quick' || body.mode === 'named'
             ? (body.mode as H5TunnelMode)
             : undefined
+          // Only 'cloudflare' | 'pinggy' are accepted; anything else (including a
+          // missing field) stays undefined so an invalid report cannot overwrite
+          // the provider the desktop main process already declared.
+          const provider = body.provider === 'cloudflare' || body.provider === 'pinggy'
+            ? (body.provider as H5TunnelProvider)
+            : undefined
           const error = typeof body.error === 'string' ? body.error : null
-          setRuntimeTunnelState({ url, status, mode, error })
+          setRuntimeTunnelState({ url, status, mode, error, provider })
           const settings = await h5AccessService.getSettings()
           return Response.json({ settings, tunnel: getRuntimeTunnelState() })
         }
@@ -144,7 +151,7 @@ export async function handleH5AccessApi(
           if (req.method !== 'POST') {
             throw methodNotAllowed(req.method, '/api/h5-access/tunnel/clear')
           }
-          setRuntimeTunnelState({ status: 'idle', url: null, error: null })
+          setRuntimeTunnelState({ status: 'idle', url: null, error: null, provider: null })
           const settings = await h5AccessService.getSettings()
           return Response.json({ settings, tunnel: getRuntimeTunnelState() })
         }

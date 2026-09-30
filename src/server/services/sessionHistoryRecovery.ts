@@ -106,8 +106,12 @@ export async function recoverBoundedSessionHistory(options: {
         const rawMessage = entry.message as { role?: string; content?: unknown } | undefined
         const notificationUser = rawMessage?.role === 'user' && notifications.length > 0
         const hasToolResult = Array.isArray(rawMessage?.content) && rawMessage.content.some((block: any) => block?.type === 'tool_result')
+        // The acknowledgement ends where the interrupted work resumes, not at the
+        // next real user prompt; otherwise the whole post-notification run is lost.
+        const hasToolUse = Array.isArray(rawMessage?.content) && rawMessage.content.some((block: any) => block?.type === 'tool_use')
         if (notificationUser) { suppressTaskNotificationResponse = true; return }
         if (rawMessage?.role === 'user' && !hasToolResult) suppressTaskNotificationResponse = false
+        else if (rawMessage?.role === 'assistant' && hasToolUse) suppressTaskNotificationResponse = false
         else if (suppressTaskNotificationResponse) return
         const message = options.toMessage(entry, owner)
         if (!message) return

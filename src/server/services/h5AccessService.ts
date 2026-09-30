@@ -63,6 +63,8 @@ export type H5AccessDiagnostics = {
     mode: H5TunnelMode | null
     error: string | null
     hasToken: boolean
+    /** Which provider is currently driving the tunnel (cloudflare / pinggy). */
+    provider: H5TunnelProvider | null
   }
 }
 
@@ -176,6 +178,7 @@ function describeH5AccessDiagnostics(stored: StoredH5AccessSettings): H5AccessDi
       mode: tunnelRuntime.mode ?? stored.tunnelMode,
       error: tunnelRuntime.error,
       hasToken: !!stored.tunnelToken,
+      provider: tunnelRuntime.provider,
     },
   }
 }
@@ -260,12 +263,19 @@ function normalizePublicBaseUrl(input: unknown): string | null {
 
 export type H5TunnelMode = 'quick' | 'named'
 export type H5TunnelStatus = 'idle' | 'starting' | 'running' | 'error'
+export type H5TunnelProvider = 'cloudflare' | 'pinggy'
 
 export type H5TunnelRuntimeState = {
   status: H5TunnelStatus
   url: string | null
   mode: H5TunnelMode | null
   error: string | null
+  /**
+   * Which tunnel provider the desktop main process is currently driving. null
+   * means "unknown / not reported yet" — a status-only heartbeat never clears
+   * an already-reported provider.
+   */
+  provider: H5TunnelProvider | null
 }
 
 // Process-local tunnel state. The desktop main process spawns cloudflared and
@@ -277,6 +287,7 @@ const tunnelRuntime: H5TunnelRuntimeState = {
   url: null,
   mode: null,
   error: null,
+  provider: null,
 }
 
 /**
@@ -307,6 +318,9 @@ export function setRuntimeTunnelState(next: Partial<H5TunnelRuntimeState>): void
   if (next.status !== undefined) tunnelRuntime.status = next.status
   if (next.mode !== undefined) tunnelRuntime.mode = next.mode
   if (next.error !== undefined) tunnelRuntime.error = next.error
+  // Only an explicit provider key updates it, so a status-only heartbeat (which
+  // omits provider) cannot wipe an already-reported provider.
+  if (next.provider !== undefined) tunnelRuntime.provider = next.provider
   if (next.url !== undefined) setRuntimeTunnelUrl(next.url, next.mode ?? undefined)
 }
 
@@ -319,6 +333,7 @@ export function resetRuntimeTunnelState(): void {
   tunnelRuntime.url = null
   tunnelRuntime.mode = null
   tunnelRuntime.error = null
+  tunnelRuntime.provider = null
 }
 
 function resolveConfiguredPublicBaseUrl(): string | null {

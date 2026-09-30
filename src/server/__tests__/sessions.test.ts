@@ -2394,7 +2394,7 @@ describe('SessionService', () => {
     ])
   })
 
-  it('should hide task-notification turns and their automatic responses from history', async () => {
+  it('hides a task-notification and its direct acknowledgement, but keeps the work that follows', async () => {
     const sessionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     const firstUserId = crypto.randomUUID()
     const firstAssistantId = crypto.randomUUID()
@@ -2466,16 +2466,23 @@ describe('SessionService', () => {
     const messages = await service.getSessionMessages(sessionId)
     const taskNotifications = await service.getSessionTaskNotifications(sessionId)
 
+    // The notification record and the acknowledgement that directly follows it
+    // (thinking + text, no tool call) stay hidden. The first assistant tool call
+    // resumes the interrupted work, so everything from there on is visible: a
+    // task notification is injected mid-turn, not as the start of a new turn.
     expect(messages.map((message) => message.id)).toEqual([
       firstUserId,
       firstAssistantId,
+      taskToolUseMessageId,
+      taskToolResultId,
+      taskAfterToolId,
       realFollowUpId,
       realAssistantId,
     ])
     expect(JSON.stringify(messages)).not.toContain('<task-notification>')
     expect(JSON.stringify(messages)).not.toContain('旧后台任务通知')
-    expect(JSON.stringify(messages)).not.toContain('server restarted')
-    expect(JSON.stringify(messages)).not.toContain('后台任务触发的工具调用完成')
+    expect(JSON.stringify(messages)).toContain('server restarted')
+    expect(JSON.stringify(messages)).toContain('后台任务触发的工具调用完成')
     expect(taskNotifications).toEqual([
       {
         taskId: 'bg-1',
@@ -2485,6 +2492,89 @@ describe('SessionService', () => {
         timestamp: '2026-01-01T00:01:00.000Z',
       },
     ])
+  })
+
+  it('keeps a mid-turn notification acknowledgement from swallowing the run that follows it', async () => {
+    // Regression: a background-task notification injected while the assistant was
+    // still working used to suppress every record until the next real user prompt,
+    // erasing minutes of assistant text, tool calls and results from history.
+    const sessionId = 'aaaaaaa1-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    const startId = crypto.randomUUID()
+    const startAssistantId = crypto.randomUUID()
+    const notificationId = crypto.randomUUID()
+    const ackThinkingId = crypto.randomUUID()
+    const ackTextId = crypto.randomUUID()
+    const ackToolUseId = crypto.randomUUID()
+    const ackToolResultId = crypto.randomUUID()
+    const workThinkingId = crypto.randomUUID()
+    const workTextId = crypto.randomUUID()
+    const workToolUseId = crypto.randomUUID()
+    const workToolResultId = crypto.randomUUID()
+    const conclusionId = crypto.randomUUID()
+
+    // Streaming shape from the real transcript: the acknowledgement and the tool
+    // call that resumes the interrupted work are records of one assistant message.
+    const assistantPart = (content: unknown, parentUuid: string, uuid: string, id: string) => ({
+      parentUuid,
+      isSidechain: false,
+      type: 'assistant',
+      message: { model: 'claude-opus-4-7', id, type: 'message', role: 'assistant', content },
+      uuid,
+      timestamp: '2026-01-01T00:02:00.000Z',
+    })
+    const toolResult = (toolUseId: string, content: string, parentUuid: string, uuid: string) => ({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content }] },
+      uuid,
+      parentUuid,
+      timestamp: '2026-01-01T00:03:00.000Z',
+    })
+
+    await writeSessionFile('-tmp-notification-midturn', sessionId, [
+      makeSnapshotEntry(),
+      { ...makeUserEntry('用浏览器继续验证农场项目', startId), parentUuid: null },
+      { ...makeAssistantEntry('先看 MCP 是否恢复', startId), uuid: startAssistantId },
+      {
+        ...makeUserEntry(
+          '<task-notification>\n<task-id>bg-1</task-id>\n<tool-use-id>toolu_bg</tool-use-id>\n<status>completed</status>\n<summary>Background command completed</summary>\n</task-notification>',
+          notificationId,
+        ),
+        parentUuid: startAssistantId,
+      },
+      assistantPart([{ type: 'thinking', thinking: '后台命令完成了，已无影响。' }], notificationId, ackThinkingId, 'msg-ack'),
+      assistantPart([{ type: 'text', text: '后台命令完成了，我继续推进。' }], ackThinkingId, ackTextId, 'msg-ack'),
+      assistantPart([{ type: 'tool_use', id: 'toolu_mcp', name: 'mcp__farm__status', input: {} }], ackTextId, ackToolUseId, 'msg-ack'),
+      toolResult('toolu_mcp', 'mcp ready', ackToolUseId, ackToolResultId),
+      assistantPart([{ type: 'thinking', thinking: '现在跑真机验证。' }], ackToolResultId, workThinkingId, 'msg-work'),
+      assistantPart([{ type: 'text', text: '找到根因了：服务端入口缺两行初始化。' }], workThinkingId, workTextId, 'msg-work'),
+      assistantPart([{ type: 'tool_use', id: 'toolu_read', name: 'Read', input: { file_path: '/tmp/main.lua' } }], workTextId, workToolUseId, 'msg-work'),
+      toolResult('toolu_read', 'lua source', workToolUseId, workToolResultId),
+      assistantPart([{ type: 'text', text: '结论：需要补上 require Sample 与 Mock graphics。' }], workToolResultId, conclusionId, 'msg-work'),
+    ])
+
+    const messages = await service.getSessionMessages(sessionId)
+    const ids = messages.map((message) => message.id)
+
+    expect(ids).toContain(startId)
+    expect(ids).toContain(startAssistantId)
+    // The notification and the acknowledgement it triggered stay hidden...
+    expect(ids).not.toContain(notificationId)
+    expect(ids).not.toContain(ackThinkingId)
+    expect(ids).not.toContain(ackTextId)
+    // ...but the tool call that resumes work, and everything after it, is kept.
+    expect(ids).toContain(ackToolUseId)
+    expect(ids).toContain(ackToolResultId)
+    expect(ids).toContain(workThinkingId)
+    expect(ids).toContain(workTextId)
+    expect(ids).toContain(workToolUseId)
+    expect(ids).toContain(workToolResultId)
+    expect(ids).toContain(conclusionId)
+
+    const serialized = JSON.stringify(messages)
+    expect(serialized).not.toContain('<task-notification>')
+    expect(serialized).not.toContain('后台命令完成了，我继续推进')
+    expect(serialized).toContain('找到根因了')
+    expect(serialized).toContain('结论：需要补上')
   })
 
   it('uses bounded locators for snapshots and task notifications with safe fallback', async () => {

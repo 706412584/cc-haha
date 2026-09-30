@@ -128,6 +128,22 @@ test('history pages preserve cross-page notification suppression and sidechain o
   expect(appended.page.contextScanBytes).toBe(Buffer.byteLength(suffix))
 })
 
+test('recovery keeps the run that resumes after a mid-turn notification acknowledgement', async () => {
+  const notice = '<task-notification><task-id>bg</task-id><tool-use-id>agent</tool-use-id><status>completed</status></task-notification>'
+  await writeFile(file, [
+    entry('user', 'start', 'keep working'),
+    entry('user', 'notice', notice),
+    entry('assistant', 'ack', [{ type: 'text', text: 'notification received, no action needed' }]),
+    entry('assistant', 'resumed-call', [{ type: 'tool_use', id: 'todo-after-notice', name: 'TodoWrite', input: { todos: [{ content: 'resumed work', status: 'pending' }] } }]),
+  ].map(value => JSON.stringify(value)).join('\n') + '\n')
+  const recovery = await service.getSessionHistoryRecovery(id)
+  // The resumed todo write is the last task evidence; if the whole post-notification
+  // run were still suppressed the recovery snapshot would be empty here.
+  expect(recovery.status).toBe('ready')
+  expect(recovery.messages.map(message => message.id)).toContain('resumed-call')
+  expect(recovery.messages.map(message => message.id)).not.toContain('ack')
+})
+
 test('recovery resolves sidechain ancestry through Agent calls without attaching ordinary root descendants', async () => {
   await writeFile(file, [
     entry('assistant', 'owner', [{ type: 'tool_use', id: 'agent', name: 'Agent', input: {} }]),
