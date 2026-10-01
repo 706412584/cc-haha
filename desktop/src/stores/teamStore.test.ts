@@ -33,6 +33,7 @@ vi.mock('../api/teams', () => ({
     get: getTeamMock,
     sendMemberMessage: sendMemberMessageMock,
     delete: vi.fn(),
+    disband: vi.fn(),
   },
 }))
 
@@ -1953,5 +1954,40 @@ describe('teamStore execution provider snapshots', () => {
     expect(useTeamStore.getState().activeTeam?.members[0]).toMatchObject({
       model: 'same-model-id', providerId: 'second-provider', providerName: 'Execution provider',
     })
+  })
+})
+
+describe('teamStore disband and strip visibility', () => {
+  beforeEach(() => {
+    useTeamStore.getState().clearTeam()
+  })
+
+  it('scopes strip hiding to one session and incarnation', () => {
+    const { hideTeamStrip, isTeamStripHidden } = useTeamStore.getState()
+    expect(isTeamStripHidden('session-a', 'inc-1')).toBe(false)
+    hideTeamStrip('session-a', 'inc-1')
+    expect(isTeamStripHidden('session-a', 'inc-1')).toBe(true)
+    // Another tab, and a new team reusing the name, both stay visible.
+    expect(isTeamStripHidden('session-b', 'inc-1')).toBe(false)
+    expect(isTeamStripHidden('session-a', 'inc-2')).toBe(false)
+  })
+
+  it('disbands a team and hides its strip on success', async () => {
+    const { teamsApi } = await import('../api/teams')
+    vi.mocked(teamsApi.disband).mockResolvedValue({ ok: true })
+    const ok = await useTeamStore.getState().disbandTeam('Test team', 'session-a', 'inc-1')
+    expect(ok).toBe(true)
+    expect(teamsApi.disband).toHaveBeenCalledWith('Test team')
+    expect(useTeamStore.getState().isTeamStripHidden('session-a', 'inc-1')).toBe(true)
+  })
+
+  it('reports failure and does not hide the strip when disband is rejected', async () => {
+    const { teamsApi } = await import('../api/teams')
+    vi.mocked(teamsApi.disband).mockRejectedValue(new Error('Cannot delete team'))
+    getWorkbenchForSessionMock.mockResolvedValue(undefined)
+    const ok = await useTeamStore.getState().disbandTeam('Test team', 'session-a', 'inc-1')
+    expect(ok).toBe(false)
+    expect(useTeamStore.getState().isTeamStripHidden('session-a', 'inc-1')).toBe(false)
+    expect(useTeamStore.getState().error).toContain('Cannot delete team')
   })
 })

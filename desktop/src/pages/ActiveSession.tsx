@@ -411,6 +411,11 @@ export function ActiveSession({ sessionId, active = true }: { sessionId?: string
   const activeTeamStartedAt = useTeamStore((s) => activeTabId
     ? s.activeTeamStartedAtBySession[activeTabId]
     : undefined)
+  // Subscribed to the same slice the strip reads, so hiding the strip re-runs
+  // this selector and drops it from the header.
+  const teamStripHidden = useTeamStore((s) => activeTabId && s.workbenchesBySession[activeTabId]
+    ? s.isTeamStripHidden(activeTabId, s.workbenchesBySession[activeTabId]?.snapshots.at(-1)?.team.incarnationId)
+    : false)
   const fetchTeamForSession = useTeamStore((s) => s.fetchTeamForSession)
   const [sessionGitInfo, setSessionGitInfo] = useState<{
     sessionId: string
@@ -1210,10 +1215,14 @@ export function ActiveSession({ sessionId, active = true }: { sessionId?: string
                     isRunning={isActive}
                     compact={showRightPanel}
                   />
-                  {agentTeamsSnapshot ? (
+                  {agentTeamsSnapshot && !teamStripHidden ? (
                     <AgentTeamsStrip
                       snapshot={agentTeamsSnapshot}
                       compact={showRightPanel}
+                      onHide={() => useTeamStore.getState().hideTeamStrip(
+                        activeTabId,
+                        agentTeamsSnapshot.team.incarnationId,
+                      )}
                       onOpen={() => useTabStore.getState().openTeamWorkbenchTab(
                         activeTabId,
                         agentTeamsSnapshot.team.name,

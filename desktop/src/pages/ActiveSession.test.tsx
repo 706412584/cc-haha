@@ -3262,6 +3262,62 @@ describe('ActiveSession task polling', () => {
     expect(useTeamStore.getState().workbenchesBySession[sessionId]?.snapshots).toHaveLength(1)
   })
 
+  it('hides the header strip from its own control, and leaves other sessions alone', () => {
+    const sessionId = 'team-strip-hide-session'
+    useTeamStore.setState({
+      teams: [],
+      activeTeam: null,
+      memberColors: new Map(),
+      error: null,
+      workbenchesBySession: {
+        [sessionId]: {
+          teamName: 'hide-me',
+          loading: false,
+          error: null,
+          snapshots: [{
+            version: 'v1',
+            generatedAt: '2026-08-08T00:00:00.000Z',
+            team: {
+              name: 'hide-me',
+              incarnationId: 'inc-1',
+              leadAgentId: 'team-lead@hide-me',
+              leadSessionId: sessionId,
+              members: [{ agentId: 'team-lead@hide-me', role: 'team-lead', status: 'running' }],
+            },
+            tasks: [],
+            messages: [],
+          }],
+        },
+      },
+    })
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId, title: 'Hide Strip Session', createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z', messageCount: 1,
+        projectPath: '/workspace/project', workDir: '/workspace/project', workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Hide Strip Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+
+    render(<ActiveSession />)
+
+    expect(screen.getByTestId('agent-teams-strip')).toBeInTheDocument()
+    act(() => {
+      fireEvent.click(screen.getByTestId('agent-teams-strip-hide'))
+    })
+    expect(screen.queryByTestId('agent-teams-strip')).not.toBeInTheDocument()
+    // The hide is per-session and per-incarnation: another tab and a future
+    // team reusing the name both keep their strip.
+    expect(useTeamStore.getState().isTeamStripHidden('other-session', 'inc-1')).toBe(false)
+    expect(useTeamStore.getState().isTeamStripHidden(sessionId, 'inc-2')).toBe(false)
+  })
+
   it('updates the Team workbench without leaking its DAG, roster, or transcript spawns into main Activity', async () => {
     const sessionId = 'team-activity-runtime-state-session'
     useSettingsStore.setState({ unifiedActivityPanelEnabled: true })

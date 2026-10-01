@@ -6,6 +6,8 @@ export const kr: Record<TranslationKey, string> = {
   "teamPlan.savePreset": "프리셋 변경을 먼저 저장하고 적용된 모델을 확인한 후 승인하세요。",
   "teamPlan.unspecified": "미제공",
   "teamPlan.stop": "팀과 기본 작업 중지",
+  "teamPlan.disband": "팀 해산",
+  "teamPlan.hide": "숨기기",
   "teamPlan.stopping": "팀과 기본 작업 중지 중…",
   "teamPlan.configureMember": "{name} 설정",
   "teamPlan.roster": "팀 구성원",
@@ -3899,6 +3901,7 @@ export const kr: Record<TranslationKey, string> = {
   'agentTeams.inline.tasks': '작업 {completed}/{total}',
   'agentTeams.strip.label': '팀',
 
+  'agentTeams.strip.hide': '팀 상태 숨기기',
   // ─── Session Activity ──────────────────────────────────────
   'session.activity.tasksProgress': '작업 진행률 {completed}/{total}',
   'session.activity.section.team': '팀',

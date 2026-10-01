@@ -78,6 +78,17 @@ const deletedTeamLifecycles = new Map<string, {
 const teamRetryTimers = new Map<string, Array<ReturnType<typeof setTimeout>>>()
 let teamStoreGeneration = 0
 
+/**
+ * Team strips the user hid, keyed by `sessionId:incarnationId`. Session-scoped
+ * so hiding a team in one tab never hides it in another, and incarnation-scoped
+ * so a *new* team reusing the name still shows up. Module-local on purpose: the
+ * hide is a view convenience, and persisting it would need its own migration
+ * for a state the next workbench update can always re-derive.
+ */
+const hiddenTeamStrips = new Set<string>()
+const hiddenTeamStripKey = (sessionId: string, incarnationId: string | undefined) =>
+  `${sessionId}:${incarnationId ?? ''}`
+
 function clearTeamRetryTimers(teamName?: string) {
   const entries = teamName
     ? [[teamName, teamRetryTimers.get(teamName) ?? []] as const]
@@ -990,6 +1001,11 @@ type TeamStore = {
   startMemberPolling: (sessionId: string, force?: boolean) => void
   stopMemberPolling: () => void
   clearTeam: () => void
+  /** Hide a team's header strip for one session. Purely a view convenience. */
+  hideTeamStrip: (sessionId: string, incarnationId?: string) => void
+  isTeamStripHidden: (sessionId: string, incarnationId?: string) => boolean
+  /** Stop the team's workers and remove the team. Returns false on failure. */
+  disbandTeam: (teamName: string, sessionId: string, incarnationId?: string) => Promise<boolean>
 
   // WebSocket handlers
   handleTeamCreated: (
@@ -1698,6 +1714,7 @@ export const useTeamStore = create<TeamStore>((set, get) => ({
     deletedTeamNames.clear()
     deletedTeamIncarnations.clear()
     deletedTeamLifecycles.clear()
+    hiddenTeamStrips.clear()
     clearTeamRetryTimers()
     set({
       activeTeam: null,
@@ -1711,6 +1728,35 @@ export const useTeamStore = create<TeamStore>((set, get) => ({
       memberOwnerAgentIdsBySession: {},
       memberTaskAnchorsBySession: {},
     })
+  },
+
+  hideTeamStrip: (sessionId, incarnationId) => {
+    hiddenTeamStrips.add(hiddenTeamStripKey(sessionId, incarnationId))
+    // Force the selector to re-run: the Set is module-local, so zustand has no
+    // other way to know a subscribed component's answer changed.
+    set(state => ({ workbenchesBySession: { ...state.workbenchesBySession } }))
+  },
+
+  isTeamStripHidden: (sessionId, incarnationId) =>
+    hiddenTeamStrips.has(hiddenTeamStripKey(sessionId, incarnationId)),
+
+  disbandTeam: async (teamName, sessionId, incarnationId) => {
+    try {
+      // Stop the workers first: a team that is still running cannot be removed,
+      // and the stop is what flips the plan out of `running` so the removal can
+      // succeed on the very next call.
+      await teamsApi.disband(teamName)
+      // Optimistic local teardown so the strip and card disappear immediately,
+      // even if the watcher's `team_deleted` broadcast is delayed.
+      get().handleTeamDeleted(teamName, sessionId, { incarnationId })
+      hiddenTeamStrips.add(hiddenTeamStripKey(sessionId, incarnationId))
+      return true
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) })
+      // A failed disband usually means the team was already gone; resync.
+      await get().fetchTeamForSession(sessionId, { force: true }).catch(() => {})
+      return false
+    }
   },
 
   handleTeamCreated: (teamName, leadSessionId, identity) => {

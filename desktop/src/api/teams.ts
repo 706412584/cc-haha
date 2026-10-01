@@ -111,4 +111,13 @@ export const teamsApi = {
   delete(name: string) {
     return api.delete<{ ok: true }>(`/api/teams/${encodeURIComponent(name)}`)
   },
+
+  /**
+   * Explicit disband: stop the team's workers, deregister its members and
+   * remove its directories. Distinct from `delete`, which only removes a team
+   * that is already empty and refuses otherwise.
+   */
+  disband(name: string) {
+    return api.delete<{ ok: true }>(`/api/teams/${encodeURIComponent(name)}?force=true`)
+  },
 }
