@@ -4451,6 +4451,24 @@ describe('TeamService', () => {
   it('should throw 404 when deleting non-existent team', async () => {
     expect(service.deleteTeam('ghost')).rejects.toThrow('Team not found')
   })
+
+  // A team whose workers had already exited kept its members registered in
+  // config.json, and nothing in the UI could remove them — so the guarded
+  // delete refused forever and the team was undeletable.
+  it('force-disbands a team whose teammates are still registered', async () => {
+    const config = makeTeamConfig({ name: 'stuck-team' })
+    for (const member of config.members) member.isActive = false
+    await writeTeamConfig('stuck-team', config)
+
+    await expect(service.deleteTeam('stuck-team')).rejects.toThrow(
+      'teammates remain registered',
+    )
+
+    await service.deleteTeam('stuck-team', { force: true })
+
+    const teamDir = path.join(tmpDir, 'teams', 'stuck-team')
+    await expect(fs.access(teamDir)).rejects.toThrow()
+  })
 })
 
 // ============================================================================

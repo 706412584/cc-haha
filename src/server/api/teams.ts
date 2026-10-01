@@ -146,8 +146,12 @@ export async function handleTeamsApi(
     }
 
     // ── DELETE /api/teams/:name ───────────────────────────────────────────
+    // `?force=true` is the explicit user disband: stop the workers, deregister
+    // the members, then remove the team. Without it the call keeps the
+    // conservative "only delete an already-empty team" contract.
     if (method === 'DELETE' && teamName) {
-      await teamService.deleteTeam(teamName)
+      const force = new URL(req.url).searchParams.get('force') === 'true'
+      await teamService.deleteTeam(teamName, { force })
       return Response.json({ ok: true })
     }
 
