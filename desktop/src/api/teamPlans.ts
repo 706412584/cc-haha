@@ -1,7 +1,7 @@
 import { api } from '@/api/client'
 import type { TeamPlanRecord, TeamPlanMember, TeamPlanTask } from '../../../src/shared/teamPlan'
 
-export type TeamPlanAction = 'approve' | 'return' | 'cancel' | 'retry'
+export type TeamPlanAction = 'approve' | 'return' | 'cancel' | 'retry' | 'resume'
 export type TeamPlanEdits = { members: TeamPlanMember[]; tasks: TeamPlanTask[] }
 
 function identity(plan: TeamPlanRecord) {
@@ -30,9 +30,10 @@ export const teamPlansApi = {
         .map(({ id, ownerId }) => ({ id, ownerId })),
     })
   },
-  act(plan: TeamPlanRecord, action: TeamPlanAction, requestId: string, feedback?: string) {
+  act(plan: TeamPlanRecord, action: TeamPlanAction, requestId: string, feedback?: string, confirmTaskIds?: string[]) {
     return api.post<{ plan: TeamPlanRecord }>(`/api/teams/${encodeURIComponent(plan.teamName)}/plan/${action}`, {
       ...identity(plan), requestId, ...(feedback ? { feedback } : {}),
+      ...(confirmTaskIds && confirmTaskIds.length > 0 ? { confirmTaskIds } : {}),
     })
   },
 }

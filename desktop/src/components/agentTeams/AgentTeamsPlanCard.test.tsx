@@ -234,6 +234,43 @@ describe('AgentTeamsPlanCard', () => {
     expect(screen.queryByRole('button', { name: 'Disband team' })).not.toBeInTheDocument()
   })
 
+  it('resumes an interrupted team in one click when nothing was mid-flight', async () => {
+    vi.mocked(teamPlansApi.get).mockResolvedValue({
+      plan: {
+        ...fixture(), state: 'interrupted',
+        tasks: [{ id: 'task', subject: 'Implement task', ownerId: 'build', dependencies: [] }, { id: 'task2', subject: 'Second task', ownerId: 'review', dependencies: [] }],
+        taskOutcomes: { task: { status: 'completed', capturedAt: 1 } },
+      },
+    })
+    vi.mocked(teamPlansApi.act).mockResolvedValue({ plan: { ...fixture(), state: 'launching' } })
+    render(<AgentTeamsPlanCard sessionId="session" />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Resume unfinished tasks' }))
+    await waitFor(() => expect(teamPlansApi.act).toHaveBeenCalled())
+    expect(vi.mocked(teamPlansApi.act).mock.calls[0]!.slice(1, 2)).toEqual(['resume'])
+  })
+
+  it('asks before re-running a task that was mid-flight', async () => {
+    vi.mocked(teamPlansApi.get).mockResolvedValue({
+      plan: {
+        ...fixture(), state: 'interrupted',
+        tasks: [{ id: 'task', subject: 'Implement task', ownerId: 'build', dependencies: [] }, { id: 'task2', subject: 'Second task', ownerId: 'review', dependencies: [] }],
+        taskOutcomes: { task: { status: 'in_progress', interrupted: true, capturedAt: 1 } },
+      },
+    })
+    vi.mocked(teamPlansApi.act).mockResolvedValue({ plan: { ...fixture(), state: 'launching' } })
+    render(<AgentTeamsPlanCard sessionId="session" />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Resume unfinished tasks' }))
+    // Nothing is released until the mid-flight task is explicitly confirmed.
+    expect(teamPlansApi.act).not.toHaveBeenCalled()
+    const confirm = screen.getByTestId('team-plan-resume-confirm')
+    fireEvent.click(screen.getByTestId('team-plan-resume-task-task'))
+    fireEvent.click(confirm)
+    await waitFor(() => expect(teamPlansApi.act).toHaveBeenCalled())
+    const call = vi.mocked(teamPlansApi.act).mock.calls[0]!
+    expect(call.slice(1, 2)).toEqual(['resume'])
+    expect(call[4]).toEqual(['task'])
+  })
+
   it('restores review access after a launch failure or new review without reopening the approved dialog', async () => {
     await open()
     vi.mocked(teamPlansApi.act).mockResolvedValue({ plan: { ...fixture(), revision: 2, state: 'launching' } })

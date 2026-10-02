@@ -40,7 +40,7 @@ type TeamPlanState = {
   discard: (sessionId: string) => void
   reapply: (sessionId: string) => void
   save: (sessionId: string) => Promise<boolean>
-  act: (sessionId: string, action: TeamPlanAction, feedback?: string) => Promise<boolean>
+  act: (sessionId: string, action: TeamPlanAction, feedback?: string, confirmTaskIds?: string[]) => Promise<boolean>
 }
 
 export const useTeamPlanStore = create<TeamPlanState>((set, get) => {
@@ -123,7 +123,7 @@ export const useTeamPlanStore = create<TeamPlanState>((set, get) => {
         return false
       }
     },
-    act: async (id, action, feedback) => {
+    act: async (id, action, feedback, confirmTaskIds) => {
       let entry = get().bySession[id]
       if (!entry?.plan || entry.busy || entry.conflict) return false
       if ((action === 'approve' || action === 'retry') && entry.draft?.dirty) {
@@ -138,7 +138,7 @@ export const useTeamPlanStore = create<TeamPlanState>((set, get) => {
       epochs.set(id, (epochs.get(id) ?? 0) + 1)
       update(id, current => ({ ...current, busy: true, error: null }))
       try {
-        const { plan: next } = await teamPlansApi.act(plan, action, requestId, feedback)
+        const { plan: next } = await teamPlansApi.act(plan, action, requestId, feedback, ...(confirmTaskIds ? [confirmTaskIds] : []))
         actionRequests.delete(key)
         epochs.set(id, (epochs.get(id) ?? 0) + 1)
         update(id, current => ({ ...current, plan: next, draft: draftFor(next), busy: false, loading: false, conflict: false }))

@@ -18,22 +18,23 @@ import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 import { ensureCliSessionStartedForControl } from '../ws/handler.js'
 
 /**
- * The plan card is durable and can be approved long after the conversation
- * that proposed it — after an app restart, or once an idle session's CLI has
- * been reclaimed. Worker launch needs a live leader (it receives the runtime
- * snapshot and coordinates the members), so start it before approving rather
- * than failing with "Team leader must be connected before launching", a dead
- * end the card has no way out of. Only a plan genuinely awaiting review for
- * the requesting session may spawn a process; anything else is left for
- * approve() to reject with its own error.
+ * The plan card is durable and can be approved or resumed long after the
+ * conversation that proposed it — after an app restart, or once an idle
+ * session's CLI has been reclaimed. Worker launch needs a live leader (it
+ * receives the runtime snapshot and coordinates the members), so start it
+ * before the action rather than failing with "Team leader must be connected
+ * before launching", a dead end the card has no way out of. Only a plan in the
+ * state that action expects, for the requesting session, may spawn a process;
+ * anything else is left for the action to reject with its own error.
  */
-async function ensureLeaderStartedForApproval(
+async function ensureLeaderStartedForPlanAction(
   teamName: string,
   sessionId: string,
   requestUrl: URL,
+  expectedState: 'review_pending' | 'interrupted',
 ): Promise<void> {
   const pending = await readTeamPlan(teamName)
-  if (pending?.sessionId !== sessionId || pending.state !== 'review_pending') return
+  if (pending?.sessionId !== sessionId || pending.state !== expectedState) return
   try {
     await ensureCliSessionStartedForControl(sessionId, requestUrl, 'team_approval')
   } catch (error) {
@@ -77,8 +78,16 @@ export async function handleTeamsApi(
       if (!parsed.success) throw ApiError.badRequest('Invalid team plan action')
       const action = segments[4]
       if (action === 'approve') {
-        await ensureLeaderStartedForApproval(teamName, parsed.data.sessionId, new URL(req.url))
+        await ensureLeaderStartedForPlanAction(teamName, parsed.data.sessionId, new URL(req.url), 'review_pending')
         return Response.json({ plan: await teamPlanService.approve(teamName, parsed.data) })
+      }
+      if (action === 'resume') {
+        // Resume re-launches workers too, so it needs the same live leader.
+        await ensureLeaderStartedForPlanAction(teamName, parsed.data.sessionId, new URL(req.url), 'interrupted')
+        const confirmTaskIds = Array.isArray((raw as { confirmTaskIds?: unknown }).confirmTaskIds)
+          ? (raw as { confirmTaskIds: unknown[] }).confirmTaskIds.filter((id): id is string => typeof id === 'string')
+          : []
+        return Response.json({ plan: await teamPlanService.resume(teamName, parsed.data, confirmTaskIds) })
       }
       if (action === 'return' || action === 'cancel' || action === 'retry') return Response.json({ plan: await teamPlanService.action(teamName, action, parsed.data) })
       throw ApiError.badRequest('Unknown team plan action')
