@@ -2179,14 +2179,29 @@ export function normalizeMessagesForAPI(
     if (!blockTypesToStrip) {
       continue
     }
-    // Walk backward to find the nearest preceding user message. Normal pasted
-    // images are ordinary user turns, while attachment-derived media can be
-    // meta turns; both need to be stripped after a provider media rejection.
-    // Only that one turn is at fault: the request-too-large case is the one
-    // that drops media from everything the failed request carried.
+    // The API does not identify which content block was rejected, so every
+    // media-bearing user message the failed request carried is a candidate.
+    // That window is "everything after the last assistant message": its
+    // request succeeded, which proves media from before it was accepted and
+    // must replay untouched. Within the window every candidate must go —
+    // parallel tool results arrive as consecutive user messages with no
+    // assistant turn between them, so stopping at the nearest one (often a
+    // text-only tool result) can leave the bad image in history and make
+    // every later text-only turn fail again.
     for (let j = i - 1; j >= 0; j--) {
       const candidate = reorderedMessages[j]!
       if (candidate.type === 'user') {
+        const content = candidate.message.content
+        if (!Array.isArray(content)) continue
+        const containsTargetMedia = content.some(block => {
+          if (blockTypesToStrip.has(block.type)) return true
+          return (
+            block.type === 'tool_result' &&
+            Array.isArray(block.content) &&
+            block.content.some(nested => blockTypesToStrip.has(nested.type))
+          )
+        })
+        if (!containsTargetMedia) continue
         const existing = stripTargets.get(candidate.uuid)
         if (existing) {
           for (const t of blockTypesToStrip) {
@@ -2195,13 +2210,15 @@ export function normalizeMessagesForAPI(
         } else {
           stripTargets.set(candidate.uuid, new Set(blockTypesToStrip))
         }
-        break
-      }
-      // Skip over other synthetic error messages
-      if (isSyntheticApiErrorMessage(candidate)) {
         continue
       }
-      // Stop if we hit an assistant message or any other non-user message.
+      // Skip over other synthetic error messages and attachment turns; both
+      // were part of the failed request, so keep walking.
+      if (isSyntheticApiErrorMessage(candidate) || candidate.type === 'attachment') {
+        continue
+      }
+      // Stop if we hit an assistant message or any other non-user message:
+      // everything before it was part of a request that already succeeded.
       break
     }
   }
