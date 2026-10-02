@@ -1975,24 +1975,22 @@ export class SessionService {
 
     const mutationEpoch = getSharedSessionMutationState(this.localIndexGateway).epoch
     try {
+      // A missing page (source not indexed yet) or an unverifiable/over-budget
+      // read concerns this transcript only: fall back to reading it, without
+      // cooling down index reads for every other session. Read failures are
+      // reported by the gateway itself and still reach the catch below.
       const page = this.localIndexGateway.getSessionEntryLocators(
         found.filePath,
         entryTypes,
       )
-      if (!page) {
-        this.markIndexReadFailure()
-        return null
-      }
+      if (!page) return null
       const result = await this.targetedEntryReader({
         transcriptPath: found.filePath,
         projectsRoot: this.getProjectsDir(),
         expectedProjectDir: found.projectDir,
         page,
       })
-      if (!result) {
-        this.markIndexReadFailure()
-        return null
-      }
+      if (!result) return null
       if (
         mutationEpoch !== getSharedSessionMutationState(this.localIndexGateway).epoch ||
         !this.indexStatusRemainsUsable()

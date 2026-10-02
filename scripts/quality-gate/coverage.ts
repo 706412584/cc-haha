@@ -1085,6 +1085,12 @@ export async function runCoverageGate(options: {
     'src/components/settings/AgentManager.test.tsx',
     'src/pages/EmptySession.test.tsx',
     'src/pages/TraceSession.test.tsx',
+    // `is stopped at the limit…` asserts an absolute 250 ms wall-clock budget
+    // that the v8 instrumented run cannot honour (394 ms measured), so this
+    // file only goes red inside this coverage job — upstream's own coverage
+    // run fails on it identically. `desktop-checks` still executes it
+    // uninstrumented, where it passes.
+    'src/lib/workspace/officeZipGuard.test.ts',
   ]
   const desktop = await runSuite(
     'desktop',

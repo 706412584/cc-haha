@@ -2179,31 +2179,30 @@ export function normalizeMessagesForAPI(
     if (!blockTypesToStrip) {
       continue
     }
-    // The API does not identify which content block was rejected. Strip every
-    // earlier candidate of that media type; keeping any one can leave the bad
-    // block in history and make every later text-only turn fail again.
+    // Walk backward to find the nearest preceding user message. Normal pasted
+    // images are ordinary user turns, while attachment-derived media can be
+    // meta turns; both need to be stripped after a provider media rejection.
+    // Only that one turn is at fault: the request-too-large case is the one
+    // that drops media from everything the failed request carried.
     for (let j = i - 1; j >= 0; j--) {
       const candidate = reorderedMessages[j]!
-      if (candidate.type !== 'user') continue
-
-      const content = candidate.message.content
-      if (!Array.isArray(content)) continue
-      const containsTargetMedia = content.some(block => {
-        if (blockTypesToStrip.has(block.type)) return true
-        return (
-          block.type === 'tool_result' &&
-          Array.isArray(block.content) &&
-          block.content.some(nested => blockTypesToStrip.has(nested.type))
-        )
-      })
-      if (!containsTargetMedia) continue
-
-      const existing = stripTargets.get(candidate.uuid)
-      if (existing) {
-        for (const t of blockTypesToStrip) existing.add(t)
-      } else {
-        stripTargets.set(candidate.uuid, new Set(blockTypesToStrip))
+      if (candidate.type === 'user') {
+        const existing = stripTargets.get(candidate.uuid)
+        if (existing) {
+          for (const t of blockTypesToStrip) {
+            existing.add(t)
+          }
+        } else {
+          stripTargets.set(candidate.uuid, new Set(blockTypesToStrip))
+        }
+        break
       }
+      // Skip over other synthetic error messages
+      if (isSyntheticApiErrorMessage(candidate)) {
+        continue
+      }
+      // Stop if we hit an assistant message or any other non-user message.
+      break
     }
   }
 
