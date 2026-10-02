@@ -2332,33 +2332,70 @@ export class TeamService {
 
   // ── Delete team ─────────────────────────────────────────────────────────
 
-  async deleteTeam(name: string): Promise<void> {
+  /**
+   * Tear a team down. The default is the conservative "already empty" delete:
+   * it refuses while the lead is active or teammates remain registered, so an
+   * accidental call cannot destroy a live team.
+   *
+   * `force` is the explicit user disband: it first stops the plan runtime and
+   * deregisters every teammate, then removes the directories. Without it a team
+   * whose workers had already exited could never be cleaned up, because the
+   * members stay registered in config.json (only the *lead's* isActive is
+   * flipped, and only after a graceful shutdown) and nothing in the UI can
+   * remove them.
+   */
+  async deleteTeam(name: string, options: { force?: boolean } = {}): Promise<void> {
+    if (options.force) {
+      const runtime = await import('./teamPlanRuntime.js')
+      await runtime.stopTeamPlanRuntimesForTeam(name).catch(error => {
+        console.error(`[TeamService] failed to stop runtimes for disbanded team ${name}`, error)
+      })
+      await this.deregisterTeamMembers(name)
+      const { deleteTeamPlan } = await import('../../utils/swarm/teamPlanStore.js')
+      await deleteTeamPlan(name).catch(() => {
+        // A still-running plan refuses to be erased; the directory teardown
+        // below is the authoritative removal either way.
+      })
+    }
     return withTaskListLifecycleLock(
       getCanonicalTeamTaskListId(name),
       async () => {
-      const config = await this.loadTeamConfig(name)
+      // Re-read inside the lock: a concurrent launch may have registered
+      // teammates between the force-cleanup above and acquiring the lock.
+      const current = await this.loadTeamConfig(name)
 
-      const remainingTeammates = config.members.filter(
-        member => member.agentId !== config.leadAgentId,
+      const remainingTeammates = current.members.filter(
+        member => member.agentId !== current.leadAgentId,
       )
-      const lead = config.members.find(
-        member => member.agentId === config.leadAgentId,
+      const lead = current.members.find(
+        member => member.agentId === current.leadAgentId,
       )
-      if (lead?.isActive !== false || remainingTeammates.length > 0) {
+      if (remainingTeammates.length > 0 || (!options.force && lead?.isActive !== false)) {
         throw ApiError.conflict(
           `Cannot delete team "${name}": lead is active or teammates remain registered`,
         )
       }
 
       await this.getWorkbench(name)
-      await cleanupTeamDirectories(config.name)
+      await cleanupTeamDirectories(current.name)
       await this.markWorkbenchArchiveDeleted(
-        config.name,
-        config.leadSessionId,
-        teamIncarnationId(config),
+        current.name,
+        current.leadSessionId,
+        teamIncarnationId(current),
       )
       },
     )
+  }
+
+  /** Drop every non-lead member from config.json so the delete guard can pass. */
+  private async deregisterTeamMembers(name: string): Promise<void> {
+    const config = await this.loadTeamConfig(name)
+    const teammates = config.members.filter(member => member.agentId !== config.leadAgentId)
+    if (teammates.length === 0) return
+    const { removeMemberByAgentId } = await import('../../utils/swarm/teamHelpers.js')
+    for (const member of teammates) {
+      await removeMemberByAgentId(name, member.agentId).catch(() => {})
+    }
   }
 
   // ── Internal helpers ────────────────────────────────────────────────────

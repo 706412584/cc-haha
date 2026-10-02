@@ -120,6 +120,21 @@ export function replaceTeamPlan(teamName: string, identity: TeamPlanIdentity, pa
     return { ...applyDraftPatch(plan, patch, !options.preserveReview), state: options.preserveReview ? plan.state : 'draft' }
   })
 }
+/**
+ * Remove the durable plan for a team that is being torn down. Refuses while the
+ * plan is still launching or running so a disband racing a live launch cannot
+ * erase the record the runtime still needs to revoke itself.
+ */
+export async function deleteTeamPlan(teamName: string): Promise<void> {
+  await locked(teamName, async () => {
+    const plan = await readTeamPlan(teamName)
+    if (!plan) return
+    if (plan.state === 'launching' || plan.state === 'running') throw new TeamPlanError('Stop the team before disbanding it')
+    await unlink(planPath(teamName)).catch(error => {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    })
+  })
+}
 /** A complete model proposal becomes reviewable in one revision and one lock transaction. */
 export function submitTeamPlan(teamName: string, identity: TeamPlanIdentity, patch?: TeamPlanPatch): Promise<TeamPlanRecord> {
   return mutateTeamPlan(teamName, identity, plan => {

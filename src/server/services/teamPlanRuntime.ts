@@ -281,15 +281,40 @@ export function isTeamPlanRuntimeActive(planId: string): boolean {
   return !!launch && !launch.stopped && conversationService.hasSession(launch.parentId)
 }
 
+/**
+ * Stop every launch belonging to a team by name, regardless of which session
+ * asked. Used by the explicit disband path, where the caller knows the team but
+ * not necessarily the parent session that owns the launch.
+ */
+export async function stopTeamPlanRuntimesForTeam(teamName: string): Promise<void> {
+  const owned = [...launches.entries()].filter(([, launch]) => launch.plan.teamName === teamName)
+  await Promise.all(owned.map(([planId]) => stopTeamPlanRuntime(planId)))
+  const plan = await readTeamPlan(teamName)
+  if (plan && (plan.state === 'launching' || plan.state === 'running')) {
+    await mutateTeamPlan(teamName, { ...plan, expectedRevision: plan.revision }, current => ({
+      ...current, state: 'interrupted',
+      launch: { ...current.launch, status: 'failed', executionStarted: true, error: 'The user disbanded the team.' },
+    })).catch(error => {
+      console.error('[TeamPlanRuntime] disbanded plan changed concurrently', error)
+    })
+  }
+}
+
 export async function stopTeamPlanRuntimesForParent(parentSessionId: string): Promise<void> {
   const stopOwned = () => Promise.all([...launches.entries()].filter(([, launch]) => launch.parentId === parentSessionId).map(([planId]) => stopTeamPlanRuntime(planId)))
   const hadReleasedWork = [...launches.values()].some(launch => launch.parentId === parentSessionId && launch.released)
   await stopOwned()
   const plan = await findTeamPlanForSession(parentSessionId)
-  if (plan?.state === 'launching') {
+  // `running` used to fall through untouched: stopping a live team killed the
+  // workers but left the plan reading "running", so the UI kept showing a team
+  // that no longer existed and the plan could never be cleared. A running team
+  // has necessarily started work, so it lands on `interrupted`.
+  if (plan?.state === 'launching' || plan?.state === 'running') {
+    const running = plan.state === 'running'
+    const executionStarted = hadReleasedWork || running
     await mutateTeamPlan(plan.teamName, { ...plan, expectedRevision: plan.revision }, current => ({
-      ...current, state: hadReleasedWork ? 'interrupted' : 'cancelled',
-      launch: { ...current.launch, status: 'failed', executionStarted: hadReleasedWork, error: 'The user stopped team startup.' },
+      ...current, state: executionStarted ? 'interrupted' : 'cancelled',
+      launch: { ...current.launch, status: 'failed', executionStarted, error: running ? 'The user stopped the running team.' : 'The user stopped team startup.' },
     })).catch(error => {
       // A concurrent approval/cancellation changes the revision; the second
       // ownership pass still revokes any process launch admitted in that window.

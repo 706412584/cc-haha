@@ -6,6 +6,8 @@ export const zh: Record<TranslationKey, string> = {
   "teamPlan.savePreset": "请先保存预设变更，核对解析后的模型再确认启动。",
   "teamPlan.unspecified": "未提供",
   "teamPlan.stop": "停止团队与主任务",
+  "teamPlan.disband": "解散团队",
+  "teamPlan.hide": "隐藏",
   "teamPlan.stopping": "正在停止团队与主任务…",
   "teamPlan.configureMember": "配置 {name}",
   "teamPlan.roster": "团队成员",
@@ -3901,6 +3903,7 @@ export const zh: Record<TranslationKey, string> = {
   'agentTeams.inline.tasks': '{completed}/{total} 任务',
   'agentTeams.strip.label': '团队',
 
+  'agentTeams.strip.hide': '隐藏团队状态',
   // ─── Session Activity ──────────────────────────────────────
   'session.activity.tasksProgress': '任务进度 {completed}/{total}',
   'session.activity.section.team': '团队',

@@ -6,6 +6,8 @@ export const jp: Record<TranslationKey, string> = {
   "teamPlan.savePreset": "プリセットの変更を保存し、解決されたモデルを確認してから承認してください。",
   "teamPlan.unspecified": "未指定",
   "teamPlan.stop": "チームとメインタスクを停止",
+  "teamPlan.disband": "チームを解散",
+  "teamPlan.hide": "隠す",
   "teamPlan.stopping": "チームとメインタスクを停止中…",
   "teamPlan.configureMember": "{name} を設定",
   "teamPlan.roster": "チームメンバー",
@@ -3901,6 +3903,7 @@ export const jp: Record<TranslationKey, string> = {
   'agentTeams.inline.tasks': 'タスク {completed}/{total}',
   'agentTeams.strip.label': 'チーム',
 
+  'agentTeams.strip.hide': 'チーム表示を隠す',
   // ─── Session Activity ──────────────────────────────────────
   'session.activity.tasksProgress': 'タスク進捗 {completed}/{total}',
   'session.activity.section.team': 'チーム',

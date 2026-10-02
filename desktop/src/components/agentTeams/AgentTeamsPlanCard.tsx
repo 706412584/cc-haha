@@ -9,6 +9,7 @@ import { TextArea } from '@/components/ui/TextArea'
 import { useTranslation, type TranslationKey } from '@/i18n'
 import { useChatStore } from '@/stores/chatStore'
 import { useTeamPlanStore } from '@/stores/teamPlanStore'
+import { useTeamStore } from '@/stores/teamStore'
 import { useSessionRuntimeStore } from '@/stores/sessionRuntimeStore'
 import { useProviderStore } from '@/stores/providerStore'
 import type { RuntimeSelection } from '@/types/runtime'
@@ -39,6 +40,7 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
   const [activeMemberId, setActiveMemberId] = useState<string | null>(null)
   const [feedback, setFeedback] = useState('')
   const [stoppingPlanId, setStoppingPlanId] = useState<string | null>(null)
+  const [disbanding, setDisbanding] = useState(false)
   const currentLeaderSelection = useSessionRuntimeStore(state => state.selections[sessionId])
   const plan = entry?.plan
 
@@ -55,7 +57,7 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
 
   // Keep polling for failed launches and subsequent reviews, but release the
   // composer once approval has handed control to the running team.
-  if (!plan || approved) return null
+  if (!plan) return null
   const leaderRuntime = currentLeaderSelection ? runtimeFor(currentLeaderSelection) : plan.leaderRuntime
   const agents = Object.entries(plan.agentCatalog ?? {}).map(([agentType, definition]) => ({ agentType, ...definition }))
   const draft = entry.draft
@@ -66,7 +68,11 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
   const hasUnassignedTasks = tasks.some(task => !members.some(member => member.id === task.ownerId))
   const invalidNames = members.filter(member => !isValidTeamMemberName(member.name)).map(member => member.name)
   const presetChanged = members.some(member => plan.members.find(previous => previous.id === member.id)?.agentType !== member.agentType)
-  const canStop = Boolean(plan.parentPlanId)
+  // A running team has no parent plan to point at, but it still needs a stop
+  // control — that is the whole point of the button. Keep the old parent-plan
+  // case (an incremental plan can stop the workers it inherited).
+  const canStop = approved || Boolean(plan.parentPlanId)
+  const canDisband = !approved
   const editable = plan.state === 'review_pending' && !entry.busy && !entry.conflict
   const runtimeName = (runtime: TeamPlanRuntime) => {
     const provider = runtime.providerId === CLAUDE_OFFICIAL_PROVIDER_ID
@@ -103,7 +109,24 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
           <p className="mb-1 text-xs text-[var(--color-text-secondary)]" role="status">{stateLabel} · {t('teamPlan.memberCount', { count: members.length })}</p>
           <h3 className="truncate text-base font-semibold tracking-tight text-[var(--color-text-primary)]">{plan.teamName}</h3>
         </div>
-        <Button data-testid="team-plan-open" variant="secondary" onClick={openEditor}>{t('teamPlan.open')}</Button>
+        <div className="flex shrink-0 items-center gap-2">
+          {/* A live team has no review dialog to open, so its controls live on
+              the card itself: stop the workers, or remove the team entirely. */}
+          {canStop ? <Button data-testid="team-plan-stop" variant="danger-outline" disabled={stoppingPlanId === plan.planId} onClick={() => {
+            if (stoppingPlanId === plan.planId) return
+            setStoppingPlanId(plan.planId)
+            useChatStore.getState().stopGeneration(sessionId)
+          }}>{stoppingPlanId === plan.planId ? t('teamPlan.stopping') : t('teamPlan.stop')}</Button> : null}
+          {canDisband ? <Button data-testid="team-plan-disband" variant="ghost" loading={disbanding} onClick={() => {
+            setDisbanding(true)
+            void useTeamStore.getState().disbandTeam(plan.teamName, sessionId, plan.incarnationId).finally(() => setDisbanding(false))
+          }}>{t('teamPlan.disband')}</Button> : null}
+          <Button data-testid="team-plan-hide" variant="ghost" onClick={() => {
+            setOpen(false)
+            useTeamStore.getState().hideTeamStrip(sessionId, plan.incarnationId)
+          }}>{t('teamPlan.hide')}</Button>
+          {!approved ? <Button data-testid="team-plan-open" variant="secondary" onClick={openEditor}>{t('teamPlan.open')}</Button> : null}
+        </div>
       </div>
       <Modal open={open} onClose={() => { if (!entry.busy) setOpen(false) }} title={t('teamPlan.title')} width={1080} className="team-plan-dialog" typography="interface" footer={(
         <div className="team-plan-footer flex w-full flex-wrap items-center justify-between gap-3">
@@ -117,11 +140,8 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
               <Button variant="ghost" disabled={!editable} onClick={() => void act(sessionId, 'cancel')}>{t('teamPlan.cancel')}</Button>
               <Button data-testid="team-plan-approve" disabled={!editable || presetChanged || hasUnassignedTasks || invalidNames.length > 0} loading={entry.busy} onClick={() => void act(sessionId, 'approve')}>{t('teamPlan.approve')}</Button>
             </>}
-            {canStop && <Button data-testid="team-plan-stop" variant="danger-outline" disabled={stoppingPlanId === plan.planId} onClick={() => {
-              if (stoppingPlanId === plan.planId) return
-              setStoppingPlanId(plan.planId)
-              useChatStore.getState().stopGeneration(sessionId)
-            }}>{stoppingPlanId === plan.planId ? t('teamPlan.stopping') : t('teamPlan.stop')}</Button>}
+            {/* Stop lives on the card header so it stays reachable for a running
+                team, which has no review dialog. */}
             {plan.state === 'launch_failed' && <Button disabled={entry.busy} onClick={() => void act(sessionId, 'retry')}>{t('teamPlan.retry')}</Button>}
           </div>
         </div>

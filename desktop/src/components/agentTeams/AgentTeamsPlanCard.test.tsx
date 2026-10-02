@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { teamPlansApi } from '@/api/teamPlans'
 import { useChatStore } from '@/stores/chatStore'
 import { useTeamPlanStore } from '@/stores/teamPlanStore'
+import { useTeamStore } from '@/stores/teamStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useSessionRuntimeStore } from '@/stores/sessionRuntimeStore'
 import { useProviderStore } from '@/stores/providerStore'
@@ -200,10 +201,37 @@ describe('AgentTeamsPlanCard', () => {
 
   it.each(['launching', 'running'] as const)('does not restore the pinned review for an already approved %s plan', async state => {
     vi.mocked(teamPlansApi.get).mockResolvedValue({ plan: { ...fixture(), state } })
-    const { container } = render(<AgentTeamsPlanCard sessionId="session" />)
+    render(<AgentTeamsPlanCard sessionId="session" />)
     await waitFor(() => expect(useTeamPlanStore.getState().bySession.session?.plan?.state).toBe(state))
-    expect(container).toBeEmptyDOMElement()
+    // The review dialog stays closed, but the card itself must remain: a live
+    // team has no other place to put its stop control.
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Review configuration' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Stop team and main task' })).toBeInTheDocument()
+  })
+
+  it('disbands a non-running team and hides its strip', async () => {
+    const disband = vi.fn().mockResolvedValue(true)
+    const hide = vi.fn()
+    const original = useTeamStore.getState()
+    useTeamStore.setState({ disbandTeam: disband, hideTeamStrip: hide })
+    try {
+      render(<AgentTeamsPlanCard sessionId="session" />)
+      fireEvent.click(await screen.findByRole('button', { name: 'Disband team' }))
+      await waitFor(() => expect(disband).toHaveBeenCalledWith('Test team', 'session', 'incarnation'))
+      fireEvent.click(screen.getByRole('button', { name: 'Hide' }))
+      expect(hide).toHaveBeenCalledWith('session', 'incarnation')
+    } finally {
+      useTeamStore.setState({ disbandTeam: original.disbandTeam, hideTeamStrip: original.hideTeamStrip })
+    }
+  })
+
+  it('keeps Disband away from a running team, which must be stopped first', async () => {
+    vi.mocked(teamPlansApi.get).mockResolvedValue({ plan: { ...fixture(), state: 'running' } })
+    render(<AgentTeamsPlanCard sessionId="session" />)
+    await waitFor(() => expect(useTeamPlanStore.getState().bySession.session?.plan?.state).toBe('running'))
+    expect(screen.getByRole('button', { name: 'Stop team and main task' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Disband team' })).not.toBeInTheDocument()
   })
 
   it('restores review access after a launch failure or new review without reopening the approved dialog', async () => {

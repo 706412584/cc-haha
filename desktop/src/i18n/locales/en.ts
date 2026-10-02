@@ -3,6 +3,8 @@ export const en = {
   "teamPlan.savePreset": "Save the preset changes first, then review the resolved models before approving.",
   "teamPlan.unspecified": "Not provided",
   "teamPlan.stop": "Stop team and main task",
+  "teamPlan.disband": "Disband team",
+  "teamPlan.hide": "Hide",
   "teamPlan.stopping": "Stopping team and main task…",
   "teamPlan.configureMember": "Configure {name}",
   "teamPlan.roster": "Team roster",
@@ -3932,6 +3934,7 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   'agentTeams.inline.tasks': '{completed}/{total} tasks',
   'agentTeams.strip.label': 'Team',
 
+  'agentTeams.strip.hide': 'Hide team status',
   // ─── Session Activity ──────────────────────────────────────
   'session.activity.tasksProgress': 'Task progress {completed}/{total}',
   'session.activity.section.team': 'Team',

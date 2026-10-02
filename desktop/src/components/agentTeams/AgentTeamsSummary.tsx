@@ -1,4 +1,4 @@
-import { ChevronRight, UsersRound } from 'lucide-react'
+import { ChevronRight, UsersRound, X } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Badge, StatusDot, type Tone } from '@/components/ui/Badge'
 import { useTranslation, type TranslationKey } from '../../i18n'
@@ -74,10 +74,13 @@ function AvatarStack({
 export function AgentTeamsStrip({
   snapshot,
   onOpen,
+  onHide,
   compact,
 }: {
   snapshot: TeamWorkbenchSnapshot
   onOpen: () => void
+  /** Hides this team's strip for the session. Omitted renders no hide control. */
+  onHide?: () => void
   compact: boolean
 }) {
   const t = useTranslation()
@@ -86,37 +89,56 @@ export function AgentTeamsStrip({
   const members = snapshot.team.members
 
   return (
-    <button
-      type="button"
-      data-testid="agent-teams-strip"
-      onClick={onOpen}
-      title={snapshot.team.name}
+    <div
       className={[
-        'mt-2 flex w-full max-w-full items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2.5 py-1.5 text-left transition-colors',
+        'group/strip mt-2 flex w-full max-w-full items-center rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] transition-colors',
         'hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-hover)]',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]',
-        compact ? 'text-[11px]' : 'text-[12px]',
+        'focus-within:ring-2 focus-within:ring-[var(--color-border-focus)]',
       ].join(' ')}
     >
-      <UsersRound size={compact ? 13 : 14} strokeWidth={2.25} aria-hidden="true" className="shrink-0 text-[var(--color-brand)]" />
-      <span className="shrink-0 font-semibold text-[var(--color-text-primary)]">
-        {t('agentTeams.strip.label')}
-      </span>
-      <AvatarStack members={members} leadAgentId={snapshot.team.leadAgentId} size={compact ? 18 : 20} />
-      <span className="flex shrink-0 items-center gap-1 text-[var(--color-text-tertiary)]">
-        <StatusDot tone={phaseTone(phase)} pulse={phase === 'running'} />
-        {t(`agentTeams.phase.${phase}` as TranslationKey)}
-      </span>
-      {progress.total > 0 ? (
-        <span className="shrink-0 tabular-nums text-[var(--color-text-secondary)]">
-          {t('agentTeams.inline.tasks', { completed: progress.completed, total: progress.total })}
+      <button
+        type="button"
+        data-testid="agent-teams-strip"
+        onClick={onOpen}
+        title={snapshot.team.name}
+        className={[
+          'flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-sm)] px-2.5 py-1.5 text-left',
+          'focus-visible:outline-none',
+          compact ? 'text-[11px]' : 'text-[12px]',
+        ].join(' ')}
+      >
+        <UsersRound size={compact ? 13 : 14} strokeWidth={2.25} aria-hidden="true" className="shrink-0 text-[var(--color-brand)]" />
+        <span className="shrink-0 font-semibold text-[var(--color-text-primary)]">
+          {t('agentTeams.strip.label')}
         </span>
+        <AvatarStack members={members} leadAgentId={snapshot.team.leadAgentId} size={compact ? 18 : 20} />
+        <span className="flex shrink-0 items-center gap-1 text-[var(--color-text-tertiary)]">
+          <StatusDot tone={phaseTone(phase)} pulse={phase === 'running'} />
+          {t(`agentTeams.phase.${phase}` as TranslationKey)}
+        </span>
+        {progress.total > 0 ? (
+          <span className="shrink-0 tabular-nums text-[var(--color-text-secondary)]">
+            {t('agentTeams.inline.tasks', { completed: progress.completed, total: progress.total })}
+          </span>
+        ) : null}
+        <span className="ml-auto flex shrink-0 items-center gap-0.5 font-medium text-[var(--color-brand)]">
+          {t('agentTeams.inline.open')}
+          <ChevronRight size={12} strokeWidth={2.4} aria-hidden="true" />
+        </span>
+      </button>
+      {onHide ? (
+        <button
+          type="button"
+          data-testid="agent-teams-strip-hide"
+          onClick={onHide}
+          title={t('agentTeams.strip.hide')}
+          aria-label={t('agentTeams.strip.hide')}
+          className="mr-1 shrink-0 rounded-[var(--radius-sm)] p-1 text-[var(--color-text-tertiary)] opacity-0 transition-opacity hover:bg-[var(--color-surface-container)] hover:text-[var(--color-text-primary)] focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] group-hover/strip:opacity-100"
+        >
+          <X size={compact ? 12 : 13} strokeWidth={2.4} aria-hidden="true" />
+        </button>
       ) : null}
-      <span className="ml-auto flex shrink-0 items-center gap-0.5 font-medium text-[var(--color-brand)]">
-        {t('agentTeams.inline.open')}
-        <ChevronRight size={12} strokeWidth={2.4} aria-hidden="true" />
-      </span>
-    </button>
+    </div>
   )
 }
 

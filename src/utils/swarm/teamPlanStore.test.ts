@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { approveTeamPlan, ensureTeamDraft, findTeamPlanForSession, readTeamPlan, replaceTeamPlan, stageMember, submitTeamPlan } from './teamPlanStore.js'
+import { approveTeamPlan, deleteTeamPlan, ensureTeamDraft, findTeamPlanForSession, readTeamPlan, replaceTeamPlan, stageMember, submitTeamPlan } from './teamPlanStore.js'
 import { getTeamDir, writeTeamFileAsync } from './teamHelpers.js'
 import type { TeamPlanRecord } from '../../shared/teamPlan.js'
 let root: string
@@ -144,4 +144,20 @@ test('draft permits unfinished allocation but submission rejects extra unassigne
   expect((await readTeamPlan('review'))?.revision).toBe(unassigned.revision)
   const complete = await submitTeamPlan('review', identity(unassigned), { tasks: unassigned.tasks.map(task => ({ ...task, ownerId: 'worker' })) })
   expect(complete.state).toBe('review_pending')
+})
+
+test('disband removes a settled plan but refuses to erase one that is still running', async () => {
+  const plan = await draft()
+  await deleteTeamPlan('review')
+  expect(await readTeamPlan('review')).toBeNull()
+  // Idempotent: a second disband of an already-gone plan is not an error.
+  await deleteTeamPlan('review')
+
+  await writeFile(join(getTeamDir('review'), 'plan.json'), JSON.stringify({ ...plan, state: 'running' }))
+  await expect(deleteTeamPlan('review')).rejects.toThrow('Stop the team before disbanding it')
+  expect((await readTeamPlan('review'))?.state).toBe('running')
+
+  await writeFile(join(getTeamDir('review'), 'plan.json'), JSON.stringify({ ...plan, state: 'interrupted' }))
+  await deleteTeamPlan('review')
+  expect(await readTeamPlan('review')).toBeNull()
 })
