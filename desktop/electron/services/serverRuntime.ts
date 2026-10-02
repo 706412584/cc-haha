@@ -228,6 +228,12 @@ export class ElectronServerRuntime {
   private tunnelGeneration = 0
   private tunnelHealthTimer: ReturnType<typeof setTimeout> | null = null
   private tunnelHealthFailures = 0
+  /**
+   * Set once a public health probe succeeds, cleared when a new tunnel starts.
+   * A later failure is then known to be a regression of a URL that *was* live,
+   * not a probe that never worked — which is what gates recovery below.
+   */
+  private tunnelExternallyVerified = false
   private startupError: string | null = null
   private restartAfterExit = false
   private automaticRestartAttempts = 0
@@ -357,6 +363,9 @@ export class ElectronServerRuntime {
     // Replace any existing tunnel so a mode switch / restart is clean.
     this.stopTunnelProcess()
     const generation = this.tunnelGeneration
+    // A fresh tunnel's URL has not served anything yet; re-verify before any
+    // failure is allowed to degrade it.
+    this.tunnelExternallyVerified = false
     this.tunnelState = { status: 'starting', url: null, mode: options.mode, error: null, provider: null, download: null }
 
     const env = await this.resolveSidecarBaseEnv()
@@ -578,6 +587,7 @@ export class ElectronServerRuntime {
   private stopTunnelProcess(sync = false) {
     this.tunnelGeneration += 1
     this.clearTunnelHealthTimer()
+    this.tunnelExternallyVerified = false
     if (this.tunnel) {
       const instance = this.tunnel.instance
       this.tunnel = null
@@ -635,8 +645,25 @@ export class ElectronServerRuntime {
     }
 
     if (context.generation !== this.tunnelGeneration || this.tunnel?.instance.child !== context.child) return
+    const wasDegraded = this.tunnelState.status === 'error'
     if (failureReason === null) {
       this.tunnelHealthFailures = 0
+      this.tunnelExternallyVerified = true
+      // A URL that answered before and answers again is healthy — including
+      // when the edge reconnected after a transient outage. Coming back from
+      // `error` re-publishes the URL so the settings page and the server
+      // mirror stop reporting a tunnel that is in fact serving again.
+      if (wasDegraded) {
+        this.tunnelState = {
+          status: 'running',
+          url: context.tunnelUrl,
+          mode: this.tunnelState.mode ?? 'quick',
+          error: null,
+          provider: this.tunnelState.provider ?? this.tunnel?.instance.provider ?? null,
+          download: this.tunnelState.download,
+        }
+        await this.reportTunnel(context.serverUrl)
+      }
     } else {
       this.tunnelHealthFailures += 1
     }
@@ -646,19 +673,30 @@ export class ElectronServerRuntime {
       return
     }
 
-    this.clearTunnelHealthTimer()
-    this.tunnel = null
-    killSidecar(context.child)
+    // The probe failed a URL that had already served traffic. cloudflared
+    // reconnects its edge on its own, and only the process exiting means the
+    // tunnel is truly gone — so degrade the *status* while leaving the process
+    // alive, and keep probing. Killing it here would strand a tunnel that
+    // recovers seconds later on a dead address the user then has to restart by
+    // hand. A probe that never succeeded (`!tunnelExternallyVerified`) is more
+    // likely a client-side limitation than a real outage, so it stays advisory
+    // and does not flip the state at all.
+    if (!this.tunnelExternallyVerified) {
+      this.scheduleTunnelHealthCheck(context, TUNNEL_HEALTH_INTERVAL_MS)
+      return
+    }
     this.tunnelState = {
       status: 'error',
       url: null,
-      mode: 'quick',
-      error: `Cloudflare tunnel became unreachable after ${TUNNEL_HEALTH_FAILURE_THRESHOLD} consecutive health check failures (${failureReason}).`,
+      mode: this.tunnelState.mode ?? 'quick',
+      error: `Cloudflare tunnel is not answering after ${TUNNEL_HEALTH_FAILURE_THRESHOLD} consecutive health check failures (${failureReason}). It will keep retrying.`,
       provider: null,
-      download: null,
+      download: this.tunnelState.download,
     }
     await this.clearTunnelOnServer(context.serverUrl)
     await this.reportTunnel(context.serverUrl)
+    // Keep the process and the schedule: this is a state, not a teardown.
+    this.scheduleTunnelHealthCheck(context, TUNNEL_HEALTH_INTERVAL_MS)
   }
 
   /** Wipe the server-side runtime tunnel override after the tunnel is stopped. */

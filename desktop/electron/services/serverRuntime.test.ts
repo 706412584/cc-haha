@@ -368,7 +368,7 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
     `)
   })
 
-  it('marks a quick tunnel unavailable after three consecutive public health failures', async () => {
+  it('degrades a verified quick tunnel after three failures without killing it', async () => {
     await expectIsolatedPass(String.raw`
       const scheduled = []
       const setTimeoutFn = (fn) => {
@@ -379,10 +379,13 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
 
       await withRuntime(async (runtime) => {
         const urlsHit = []
+        // One healthy probe first: only a URL that has served traffic may be
+        // declared down, so the state change is gated on that verification.
+        const healthStatuses = [200, 524, 524, 524]
         globalThis.fetch = async (url, init) => {
           urlsHit.push(String(url))
           if (String(url).includes('trycloudflare.com/health')) {
-            return new Response(null, { status: 524 })
+            return new Response(null, { status: healthStatuses.shift() ?? 524 })
           }
           if (init?.body && typeof init.body === 'string') {
             state.reportPayloads.push(JSON.parse(init.body))
@@ -395,7 +398,7 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
         child.emitUrl('https://health-failure.trycloudflare.com')
         await started
 
-        for (let index = 0; index < 3; index += 1) {
+        for (let index = 0; index < 4; index += 1) {
           const callback = scheduled.shift()
           assert(callback, 'health check was not scheduled')
           await callback()
@@ -405,12 +408,66 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
           status: 'error',
           url: null,
           mode: 'quick',
-          error: 'Cloudflare tunnel became unreachable after 3 consecutive health check failures (HTTP 524).',
+          error: 'Cloudflare tunnel is not answering after 3 consecutive health check failures (HTTP 524). It will keep retrying.',
           provider: null,
           download: null,
         }, 'health failure status mismatch')
-        assert(state.killedTunnelChildren.includes(child), 'unhealthy tunnel child was not stopped')
-        assert(urlsHit.some((url) => url.endsWith('/api/h5-access/tunnel/clear')), 'unhealthy tunnel did not clear the server URL')
+        // The edge reconnects on its own, so the process must survive: killing
+        // it would strand a tunnel that recovers seconds later.
+        assert(!state.killedTunnelChildren.includes(child), 'a recoverable tunnel must not be killed')
+        assert(urlsHit.some((url) => url.endsWith('/api/h5-access/tunnel/clear')), 'degraded tunnel did not clear the server URL')
+        assert(scheduled.length > 0, 'probing must continue while the tunnel is degraded')
+      }, { setTimeoutFn, clearTimeoutFn })
+    `)
+  })
+
+  it('recovers a degraded tunnel to running once the public URL answers again', async () => {
+    await expectIsolatedPass(String.raw`
+      const scheduled = []
+      const setTimeoutFn = (fn) => {
+        scheduled.push(fn)
+        return scheduled.length
+      }
+      const clearTimeoutFn = () => {}
+
+      await withRuntime(async (runtime) => {
+        // 200 (verify) -> 3x524 (degrade) -> 200 (edge reconnected)
+        const healthStatuses = [200, 524, 524, 524, 200]
+        globalThis.fetch = async (url, init) => {
+          if (String(url).includes('trycloudflare.com/health')) {
+            return new Response(null, { status: healthStatuses.shift() ?? 524 })
+          }
+          if (init?.body && typeof init.body === 'string') {
+            state.reportPayloads.push(JSON.parse(init.body))
+          }
+          return new Response(null, { status: 200 })
+        }
+
+        const started = runtime.startTunnel({ mode: 'quick' })
+        const child = await waitForTunnelChild(0)
+        child.emitUrl('https://health-recover.trycloudflare.com')
+        await started
+
+        for (let index = 0; index < 4; index += 1) {
+          const callback = scheduled.shift()
+          assert(callback, 'health check was not scheduled')
+          await callback()
+        }
+        assertEqual(runtime.getTunnelStatus().status, 'error', 'tunnel should be degraded before recovery')
+
+        const recovery = scheduled.shift()
+        assert(recovery, 'probing stopped while degraded, so recovery could never be observed')
+        await recovery()
+
+        assertEqual(runtime.getTunnelStatus(), {
+          status: 'running',
+          url: 'https://health-recover.trycloudflare.com',
+          mode: 'quick',
+          error: null,
+          provider: 'cloudflare',
+          download: null,
+        }, 'a recovered tunnel must report running again')
+        assert(state.reportPayloads.some((payload) => payload.status === 'running' && payload.url === 'https://health-recover.trycloudflare.com'), 'recovery was not reported to the server')
       }, { setTimeoutFn, clearTimeoutFn })
     `)
   })
