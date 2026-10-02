@@ -407,6 +407,78 @@ describe('CurrentTurnChangeCard – row opens the workspace diff', () => {
   })
 })
 
+describe('CurrentTurnChangeCard – a document the workspace can draw', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    openPreviewSpy.mockResolvedValue(undefined)
+  })
+
+  it('opens the document itself rather than its diff, since a document has no line diff', () => {
+    renderExpandedCard(['/w/proj/out/thesis.pdf'])
+
+    fireEvent.click(screen.getByRole('button', { name: /turnChangesOpenInWorkspaceAria/ }))
+
+    // The turn's recorded change for a binary file is empty: the review view
+    // would open onto nothing. What the reader asked for is the document.
+    expect(openPreviewSpy).toHaveBeenCalledWith('s1', 'out/thesis.pdf', 'file', expect.objectContaining({ sourceTurnKey: 'msg-1' }))
+    expect(reviewOpenSpy).not.toHaveBeenCalled()
+    expect(openSystemFileSpy).not.toHaveBeenCalled()
+  })
+
+  it('opens a Word document itself too, not its diff', () => {
+    renderExpandedCard(['/w/proj/out/thesis.docx'])
+
+    fireEvent.click(screen.getByRole('button', { name: /turnChangesOpenInWorkspaceAria/ }))
+
+    expect(openPreviewSpy).toHaveBeenCalledWith('s1', 'out/thesis.docx', 'file', expect.objectContaining({ sourceTurnKey: 'msg-1' }))
+    expect(reviewOpenSpy).not.toHaveBeenCalled()
+    expect(openSystemFileSpy).not.toHaveBeenCalled()
+  })
+
+  it.each(['out/budget.xlsx', 'out/legacy.xls'])('opens an Excel workbook (%s) itself too, not its diff', (relative) => {
+    renderExpandedCard([`/w/proj/${relative}`])
+
+    fireEvent.click(screen.getByRole('button', { name: /turnChangesOpenInWorkspaceAria/ }))
+
+    expect(openPreviewSpy).toHaveBeenCalledWith('s1', relative, 'file', expect.objectContaining({ sourceTurnKey: 'msg-1' }))
+    expect(reviewOpenSpy).not.toHaveBeenCalled()
+    expect(openSystemFileSpy).not.toHaveBeenCalled()
+  })
+
+  it('labels the row as opening in the workspace, not as handing the file to another app', () => {
+    renderExpandedCard(['/w/proj/out/thesis.pdf'])
+
+    expect(screen.getByRole('button', { name: /turnChangesOpenInWorkspaceAria/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /turnChangesOpenFileAria/ })).not.toBeInTheDocument()
+  })
+
+  it('opens one outside the workdir as a file too, as it does any other file there', () => {
+    renderExpandedCard(['/other/place/thesis.pdf'])
+
+    fireEvent.click(screen.getByRole('button', { name: /turnChangesOpenInWorkspaceAria/ }))
+
+    expect(openPreviewSpy).toHaveBeenCalledWith('s1', '/other/place/thesis.pdf', 'file', expect.objectContaining({ sourceTurnKey: 'msg-1' }))
+    expect(reviewOpenSpy).not.toHaveBeenCalled()
+  })
+
+  it('keeps a source file on its diff', () => {
+    renderExpandedCard(['/w/proj/src/main.ts'])
+
+    fireEvent.click(screen.getByRole('button', { name: /turnChangesOpenInWorkspaceAria/ }))
+
+    expect(reviewOpenSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a format without a viewer with the system application', () => {
+    renderExpandedCard(['/w/proj/out/launch.pptx'])
+
+    fireEvent.click(screen.getByRole('button', { name: /turnChangesOpenFileAria/ }))
+
+    expect(openSystemFileSpy).toHaveBeenCalledWith('/w/proj/out/launch.pptx')
+    expect(openPreviewSpy).not.toHaveBeenCalled()
+  })
+})
+
 describe('CurrentTurnChangeCard – open-with buttons', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -540,12 +612,12 @@ describe('CurrentTurnChangeCard – open-with buttons', () => {
     expect(getTargetsForPathMock).toHaveBeenCalledWith('/w/proj/README.md')
   })
 
-  it('opens an office changed file with the system application instead of the binary workspace preview', () => {
-    renderExpandedCard(['/w/proj/reports/brief.docx'])
+  it('opens an office changed file the workspace cannot draw with the system application instead of the binary workspace preview', () => {
+    renderExpandedCard(['/w/proj/reports/brief.pptx'])
 
     fireEvent.click(screen.getByRole('button', { name: /turnChangesOpenFileAria/ }))
 
-    expect(openSystemFileSpy).toHaveBeenCalledWith('/w/proj/reports/brief.docx')
+    expect(openSystemFileSpy).toHaveBeenCalledWith('/w/proj/reports/brief.pptx')
     expect(openPreviewSpy).not.toHaveBeenCalled()
   })
 

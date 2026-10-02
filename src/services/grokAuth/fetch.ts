@@ -14,11 +14,26 @@ import { getGrokOAuthTokens } from './storage.js'
 
 export const GROK_CLI_BASE_URL = 'https://cli-chat-proxy.grok.com/v1'
 export const GROK_CLI_API_ENDPOINT = `${GROK_CLI_BASE_URL}/responses`
-export const GROK_CLI_VERSION = '0.2.99'
+// The gateway answers HTTP 426 below its minimum (currently 1.0.13). Keep this
+// pinned to an official stable release; https://x.ai/cli/stable is the source.
+export const GROK_CLI_VERSION = '1.0.46'
+export const GROK_CLI_MIN_VERSION = '1.0.13'
 export const GROK_OAUTH_DUMMY_KEY = 'grok-oauth-dummy-key'
 
 export function shouldUseGrokAuth(): boolean {
   return !!getGrokOAuthTokens()?.refreshToken
+}
+
+// Official interactive UA: `grok-pager/<v> grok-shell/<v> (<os>; <arch>)`, with
+// os/arch named the way the Rust client reports them.
+export function buildGrokUserAgent(
+  version = GROK_CLI_VERSION,
+  platform: string = process.platform,
+  arch: string = process.arch,
+): string {
+  const os = platform === 'darwin' ? 'macos' : platform === 'win32' ? 'windows' : platform
+  const cpu = arch === 'x64' ? 'x86_64' : arch === 'arm64' ? 'aarch64' : arch === 'ia32' ? 'x86' : arch
+  return `grok-pager/${version} grok-shell/${version} (${os}; ${cpu})`
 }
 
 export function buildGrokIdentityHeaders(accessToken: string): Headers {
@@ -31,7 +46,9 @@ export function buildGrokIdentityHeaders(accessToken: string): Headers {
     // The CLI gateway distinguishes interactive sessions from batch traffic;
     // the official client always declares one.
     'x-grok-client-mode': 'interactive',
-    'User-Agent': `xai-grok-workspace/${GROK_CLI_VERSION}`,
+    'x-grok-client-identifier': 'grok-pager',
+    'x-authenticateresponse': 'authenticate-response',
+    'User-Agent': buildGrokUserAgent(),
   })
 }
 

@@ -1,8 +1,10 @@
 import { memo, useMemo, useState } from 'react'
 import { getDisclosure, setDisclosure } from '../../lib/disclosureMemory'
+import { toolResultImagesFor, type ToolResultImageExtraction } from '@/lib/toolResultContent'
 import { CircleX } from 'lucide-react'
 import { ToolCallBlock, formatDuration } from './ToolCallBlock'
 import { ThinkingBlock } from './ThinkingBlock'
+import { ToolResultImages } from './ToolResultImages'
 import {
   activityDurationMs,
   activityStepToolCalls,
@@ -147,6 +149,10 @@ export const ActivityGroup = memo(function ActivityGroup({
           </span>
         </button>
 
+        {/* Folding hides the rows, and with them any picture a tool returned.
+            Open, each row shows its own, so these exist only while folded. */}
+        {collapsed ? <CollapsedRunImages toolCalls={toolCalls} resultMap={resultMap} /> : null}
+
         {/* Rows hang off the summary that names them, so they take the guide
             line and its indent. That is also why they can afford it here and not
             when there is no summary — nothing to hang from, nothing to indent. */}
@@ -172,6 +178,65 @@ export const ActivityGroup = memo(function ActivityGroup({
     </div>
   )
 })
+
+type RunImageStrip = ToolResultImageExtraction & {
+  id: string
+  toolName: string
+  originalPath?: string
+}
+
+/**
+ * The pictures a folded run's tools returned, under its summary line.
+ *
+ * A picture is what the tool was called for, not machinery to skim past, so it
+ * does not vanish with the rows. One strip per top-level call, in step order, each
+ * named for its own tool and offering its own original; calls the run dispatched
+ * are left to their rows.
+ *
+ * Read from the result map on every render, but each result's content is
+ * validated once: the map is rebuilt for every streamed token (and so is this
+ * component's input), which is why the memoization sits on the content object in
+ * `extractToolResultImages` rather than on the map or the calls.
+ */
+function CollapsedRunImages({
+  toolCalls,
+  resultMap,
+}: {
+  toolCalls: ToolCall[]
+  resultMap: Map<string, ToolResult>
+}) {
+  const strips = useMemo(() => {
+    const found: RunImageStrip[] = []
+    for (const toolCall of toolCalls) {
+      const result = resultMap.get(toolCall.toolUseId)
+      if (!result) continue
+      const shown = toolResultImagesFor({
+        toolName: toolCall.toolName,
+        input: toolCall.input,
+        content: result.content,
+      })
+      if (shown.images.length > 0 || shown.dropped > 0) {
+        found.push({ ...shown, id: toolCall.id, toolName: toolCall.toolName })
+      }
+    }
+    return found
+  }, [resultMap, toolCalls])
+
+  return (
+    <>
+      {strips.map((strip) => (
+        <ToolResultImages
+          key={strip.id}
+          images={strip.images}
+          omitted={strip.dropped}
+          originalPath={strip.originalPath}
+          toolName={strip.toolName}
+          className="pb-1 pt-1"
+        />
+      ))}
+    </>
+  )
+}
 
 /** A tool row plus, indented under it, the rows of anything it dispatched. */
 function ActivityToolRow({

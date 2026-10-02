@@ -86,6 +86,12 @@ export interface LocalIndexGateway extends SessionIndexReader {
     transcriptPath: string,
     entryTypes?: string[],
   ): SessionEntryLocatorPage | null
+  /**
+   * When every outstanding failure belongs to a single transcript, the paths
+   * of those transcripts (empty when there are none). Null when the snapshot
+   * as a whole cannot be trusted, or there are too many to overlay.
+   */
+  getSourceScopedFailurePaths?(): readonly string[] | null
 }
 
 export type SessionSourceRecord = {

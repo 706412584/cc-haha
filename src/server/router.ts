@@ -35,6 +35,7 @@ import { handleProjectsApi } from './api/projects.js'
 import { handleTracesApi } from './api/traces.js'
 import { handleProjectRulesApi } from './api/project-rules.js'
 import { handleWorkflowsApi } from './api/workflows.js'
+import { handleVoiceApi } from './api/voice.js'
 import { apiPerformanceMonitor } from './services/apiPerformanceMonitor.js'
 
 import { remoteProviderRouteAllowed, remoteSettingsRouteAllowed, projectRemoteProvider, projectRemoteSettings, replaceRemoteCompatibility, validateRemoteSettingsPatch, type ApiRequestContext } from './remoteBrowserPolicy.js'
@@ -218,6 +219,9 @@ async function routeApiRequest(req: Request, url: URL): Promise<Response> {
 
     case 'projects':
       return handleProjectsApi(req, url, segments)
+
+    case 'voice':
+      return handleVoiceApi(req, url, segments)
 
     case 'traces':
       return handleTracesApi(req, url, segments)

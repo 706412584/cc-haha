@@ -1,37 +1,52 @@
-import { useCallback, useMemo } from 'react'
-import { ArrowLeft, CircleAlert, Download, KeyRound, RefreshCw, Trash2 } from 'lucide-react'
+import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import {
+  ArrowLeft,
+  CircleAlert,
+  Download,
+  ExternalLink,
+  History,
+  KeyRound,
+  RefreshCw,
+  ShieldCheck,
+  Trash2,
+} from 'lucide-react'
 import { useTranslation } from '../../i18n'
+import { Badge, StatusDot } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
+import { Card } from '@/components/ui/Card'
 import { Skeleton, SkeletonGroup } from '@/components/ui/Skeleton'
+import { formatBytes } from '../../lib/formatBytes'
+import { readingMinutes } from '../../lib/skillInsights'
 import { useMarketStore } from '../../stores/marketStore'
-import { SkillDetailView, type SkillDetailMetaItem } from './SkillDetailView'
+import { CapabilityPanel, useSkillInsights } from './CapabilityPanel'
+import { ChangelogPanel } from './ChangelogPanel'
+import { resolveCategory, skillSummary, useMarketLocale, visibleTags } from './catalogLocale'
+import { formatCount, formatIsoDate, safeUrl } from './marketFormat'
+import { SecurityBadge } from './SecurityBadge'
+import { SecurityReportPanel } from './SecurityReportPanel'
+import {
+  SkillDetailView,
+  type SkillDetailMetaItem,
+  type SkillDetailStat,
+  type SkillDetailTab,
+} from './SkillDetailView'
 
-function formatCount(value?: number): string {
-  if (value === undefined) return '—'
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`
-  return String(value)
-}
-
-function formatDate(ts?: number): string {
-  if (!ts) return '—'
-  try {
-    return new Date(ts).toLocaleDateString()
-  } catch {
-    return '—'
-  }
-}
+/** Tags beside the category in the hero; the card shows three, the hero has less room to spare. */
+const HERO_TAGS = 2
 
 export function MarketSkillDetail({
   onRequestInstall,
   onRequestUninstall,
 }: {
-  onRequestInstall: (id: string) => void
+  onRequestInstall: (id: string, owner?: string) => void
   onRequestUninstall: (id: string) => void
 }) {
   const t = useTranslation()
+  const locale = useMarketLocale()
   const selectedId = useMarketStore((s) => s.selectedId)
+  const selectedOwner = useMarketStore((s) => s.selectedOwner)
   const detail = useMarketStore((s) => s.detail)
+  const categories = useMarketStore((s) => s.categories)
   const isDetailLoading = useMarketStore((s) => s.isDetailLoading)
   const detailError = useMarketStore((s) => s.detailError)
   const installingIds = useMarketStore((s) => s.installingIds)
@@ -39,33 +54,35 @@ export function MarketSkillDetail({
   const backToList = useMarketStore((s) => s.backToList)
   const refreshDetail = useMarketStore((s) => s.refreshDetail)
   const fetchFileContent = useMarketStore((s) => s.fetchFileContent)
+  const { capabilities, triggers } = useSkillInsights(detail)
+
+  // Tab state is owned here, not by the view: the capability panel's "full
+  // report" link switches tabs from inside the overview.
+  const [tab, setTab] = useState('overview')
+  useEffect(() => setTab('overview'), [selectedId])
 
   const loadFile = useCallback(
     (path: string) => {
       if (!selectedId) return Promise.reject(new Error('No skill selected'))
-      return fetchFileContent(selectedId, path)
+      return fetchFileContent(selectedId, path, selectedOwner ?? undefined)
     },
-    [selectedId, fetchFileContent],
+    [selectedId, selectedOwner, fetchFileContent],
   )
+
+  const categoryName = detail ? resolveCategory(detail, categories, locale) : undefined
+  const updated = formatIsoDate(detail?.updatedAt)
+  const author = detail ? detail.author.displayName || detail.author.handle : ''
 
   const meta = useMemo<SkillDetailMetaItem[]>(() => {
     if (!detail) return []
     const items: SkillDetailMetaItem[] = [
-      {
-        label: t('market.detail.author'),
-        value: detail.author.displayName || detail.author.handle || '—',
-      },
-      { label: t('market.detail.downloads'), value: formatCount(detail.stats.downloads) },
+      { label: t('market.detail.author'), value: author || '—' },
+      { label: t('market.filter.source'), value: t(`market.source.${detail.source}`) },
     ]
-    if (detail.stats.installs !== undefined) {
-      items.push({ label: t('market.detail.installs'), value: formatCount(detail.stats.installs) })
-    }
-    if (detail.stats.stars !== undefined) {
-      items.push({ label: t('market.detail.stars'), value: formatCount(detail.stats.stars) })
-    }
-    items.push({ label: t('market.detail.updated'), value: formatDate(detail.updatedAt) })
-    if (detail.category) items.push({ label: t('market.detail.category'), value: detail.category })
+    if (categoryName) items.push({ label: t('market.detail.category'), value: categoryName })
+    if (detail.version) items.push({ label: t('market.detail.version'), value: `v${detail.version}` })
     if (detail.license) items.push({ label: t('market.detail.license'), value: detail.license })
+    items.push({ label: t('market.detail.updated'), value: updated || '—' })
     if (detail.requiresApiKey) {
       items.push({
         label: t('market.detail.requiresApiKey'),
@@ -73,7 +90,7 @@ export function MarketSkillDetail({
       })
     }
     return items
-  }, [detail, t])
+  }, [detail, t, author, categoryName, updated])
 
   if (!selectedId) return null
 
@@ -91,16 +108,17 @@ export function MarketSkillDetail({
           </Button>
           <SkeletonGroup label={t('market.loading')} className="mt-[18px]">
             <div className="flex items-start gap-6 pb-6">
-              <Skeleton shape="block" width="92px" height="92px" radius="lg" tone="strong" className="flex-shrink-0" />
+              <Skeleton shape="block" width="72px" height="72px" radius="lg" tone="strong" className="flex-shrink-0" />
               <div className="min-w-0 flex-1 pt-1">
-                <Skeleton height="0.75rem" className="w-32" />
-                <Skeleton height="2rem" tone="strong" className="mt-3 w-64 max-w-full" />
+                <Skeleton height="2rem" tone="strong" className="w-64 max-w-full" />
+                <Skeleton height="0.75rem" className="mt-3 w-48" />
                 <Skeleton height="0.75rem" className="mt-4 w-[min(100%,36rem)]" />
               </div>
             </div>
+            <div className="h-[74px] rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)]" />
             <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_300px] lg:gap-9">
               <div>
-                <Skeleton height="2.75rem" className="w-52" />
+                <Skeleton height="2.75rem" className="w-72" />
                 <div className="mt-[22px] h-72 rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)]" />
               </div>
               <div className="order-first h-72 rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] lg:order-none" />
@@ -134,14 +152,106 @@ export function MarketSkillDetail({
   }
 
   const installing = installingIds.has(detail.id)
+  const pageUrl = safeUrl(detail.pageUrl)
+  const flagged = detail.securityStatus === 'flagged'
+  const skillMd = detail.files.find((file) => file.path === 'SKILL.md')
   const mirrorSource = detail.mirrors?.length
     ? detail.mirrors[0]!.split(':')[0]
     : detail.upstream
       ? detail.upstream.source
       : null
 
+  const metaFacts: ReactNode[] = [
+    author ? <span key="author">{t('market.detail.by', { author })}</span> : null,
+    <span key="source">{t(`market.source.${detail.source}`)}</span>,
+    detail.license ? <span key="license">{detail.license}</span> : null,
+    updated ? <span key="updated">{t('market.detail.updatedOn', { date: updated })}</span> : null,
+  ].filter(Boolean)
+  const metaLine = metaFacts.map((fact, index) => (
+    <Fragment key={index}>
+      {index > 0 && <span aria-hidden="true">·</span>}
+      {fact}
+    </Fragment>
+  ))
+
+  const chips = (
+    <>
+      <SecurityBadge status={detail.securityStatus} />
+      {detail.featured && (
+        <Badge tone="info" size="md" pill={false} data-testid="market-detail-featured">
+          {t('market.featured')}
+        </Badge>
+      )}
+      {categoryName && (
+        <Badge size="md" pill={false}>
+          {categoryName}
+        </Badge>
+      )}
+      {visibleTags(detail, locale).slice(0, HERO_TAGS).map((tag) => (
+        <Badge key={tag} size="md" pill={false}>
+          {tag}
+        </Badge>
+      ))}
+    </>
+  )
+
+  const stats: SkillDetailStat[] = [
+    { label: t('market.detail.downloads'), value: formatCount(detail.stats.downloads) },
+    ...(detail.stats.installs === undefined
+      ? []
+      : [{ label: t('market.detail.installs'), value: formatCount(detail.stats.installs) }]),
+    ...(detail.stats.stars === undefined
+      ? []
+      : [{ label: t('market.detail.stars'), value: formatCount(detail.stats.stars) }]),
+    { label: t('market.detail.files'), value: String(detail.files.length) },
+  ]
+
+  const extraTabs: SkillDetailTab[] = [
+    {
+      key: 'security',
+      label: t('market.detail.security'),
+      icon: ShieldCheck,
+      badge: flagged ? (
+        <span data-testid="market-detail-flagged-dot" className="inline-flex items-center">
+          <StatusDot tone="warning" size="md" />
+          <span className="sr-only">{t('market.detail.flaggedDot')}</span>
+        </span>
+      ) : undefined,
+      content: (
+        <SecurityReportPanel
+          capabilities={capabilities}
+          reports={detail.securityReports ?? []}
+          securityNote={detail.securityNote}
+        />
+      ),
+    },
+    // A tab that can only say "nothing here" is not worth the slot.
+    ...(detail.changelog
+      ? [
+          {
+            key: 'changelog',
+            label: t('market.detail.changelog'),
+            icon: History,
+            content: <ChangelogPanel changelog={detail.changelog} version={detail.version} pageUrl={pageUrl} />,
+          },
+        ]
+      : []),
+  ]
+
   const actions = (
     <>
+      {pageUrl && (
+        <a
+          href={pageUrl}
+          target="_blank"
+          rel="noreferrer noopener"
+          data-testid="market-source-page-link"
+          className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] px-1 text-sm font-medium text-[var(--color-text-secondary)] underline-offset-2 transition-colors hover:text-[var(--color-text-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+        >
+          {t('market.detail.sourcePage')}
+          <ExternalLink className="h-3.5 w-3.5" strokeWidth={1.8} aria-hidden="true" />
+        </a>
+      )}
       {detail.installState === 'installable' && (
         <Button
           size="lg"
@@ -149,7 +259,7 @@ export function MarketSkillDetail({
           data-market-skill-action-id={detail.id}
           loading={installing}
           icon={<Download className="h-4 w-4" strokeWidth={2} aria-hidden="true" />}
-          onClick={() => onRequestInstall(detail.id)}
+          onClick={() => onRequestInstall(detail.id, selectedOwner ?? undefined)}
         >
           {installing ? t('market.install.installing') : t('market.install.action')}
         </Button>
@@ -193,20 +303,54 @@ export function MarketSkillDetail({
     </>
   )
 
+  const sideCards = triggers.length > 0 && (
+    <Card radius="xl" surface="base" padding="none" className="px-[18px] py-4" data-testid="market-detail-triggers">
+      <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">{t('market.detail.whenToUse')}</h2>
+      <ol className="mt-3 flex flex-col gap-2.5">
+        {triggers.map((trigger, index) => (
+          <li key={trigger} className="flex items-start gap-2.5 text-[13px] leading-5 text-[var(--color-text-secondary)]">
+            <Badge size="xs" pill={false} mono className="mt-px">
+              {index + 1}
+            </Badge>
+            <span className="min-w-0 break-words">{trigger}</span>
+          </li>
+        ))}
+      </ol>
+    </Card>
+  )
+
   return (
     <SkillDetailView
       name={detail.name}
       version={detail.version}
       iconUrl={detail.iconUrl}
       sourceLabel={t(`market.source.${detail.source}`)}
-      summary={detail.summary}
+      summary={skillSummary(detail, locale)}
       securityStatus={detail.securityStatus}
-      securityReports={detail.securityReports}
       installState={detail.installState}
       notInstallableReason={detail.notInstallableReason}
       actions={actions}
+      actionsPlacement="hero"
       banner={banner}
       meta={meta}
+      metaTitle={t('market.detail.info')}
+      metaLine={metaLine}
+      chips={chips}
+      stats={stats}
+      extraTabs={extraTabs}
+      activeTab={tab}
+      onTabChange={setTab}
+      overviewLead={<CapabilityPanel capabilities={capabilities} onViewReport={() => setTab('security')} />}
+      docHeader={
+        <>
+          <span className="font-mono">SKILL.md</span>
+          <span>
+            {skillMd ? `${formatBytes(skillMd.size)} · ` : ''}
+            {t('market.detail.readingTime', { minutes: String(readingMinutes(detail.description)) })}
+          </span>
+        </>
+      }
+      sideCards={sideCards || undefined}
       description={detail.description}
       descriptionFrontmatter={detail.descriptionFrontmatter}
       files={detail.files.map((f) => ({ path: f.path, size: f.size, language: f.language, tooBig: f.tooBig }))}

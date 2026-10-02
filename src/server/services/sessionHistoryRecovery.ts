@@ -32,9 +32,7 @@ const brief = (value: unknown): string | undefined => typeof value === 'string' 
  * edit tools for rollback. It is by far the largest field in the result (a
  * single `Edit` on a 60KB file carries a ~63KB snapshot) and nothing that reads
  * recovery state ever looks at it — the workspace view derives the change from
- * `old_string`/`new_string` on the tool_use side, and the desktop only reads
- * `answers`/`questions` (AskUserQuestion) and `backgroundTaskId` (shell tasks)
- * from other tools' results.
+ * `old_string`/`new_string` on the tool_use side.
  *
  * Every other field is preserved, so this is a size fix rather than a schema
  * change. Without it a few ordinary edits to a large file push the entry past
@@ -71,6 +69,7 @@ export async function recoverBoundedSessionHistory(options: {
       const saveTool = database.query('INSERT OR REPLACE INTO tools VALUES (?, ?, ?, ?, ?)')
       const getTool = database.query('SELECT ordinal, json, legacy, name FROM tools WHERE id = ?')
       const saveEvidence = database.query('INSERT OR REPLACE INTO evidence VALUES (?, ?, ?, ?)')
+      const getEvidenceCategory = database.query('SELECT category FROM evidence WHERE id = ?')
       const saveNotice = database.query('INSERT OR REPLACE INTO notices VALUES (?, ?, ?)')
       const teammate = database.query('INSERT OR IGNORE INTO teammates VALUES (?)')
       let ordinal = 0
@@ -80,12 +79,18 @@ export async function recoverBoundedSessionHistory(options: {
       let goalBase: Evidence | undefined
       let goalStatus: Evidence | undefined
       let omitted = 0
-      let suppressTaskNotificationResponse = false
       const completeness = { goal: true, todos: true, activity: true, usage: true, workspace: true }
       const usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 }
       const saveActivity = (evidence: Evidence, category: 'activity' | 'workspace' = 'activity') => {
         const json = JSON.stringify(evidence.message)
         if (Buffer.byteLength(json) > STATE_RECORD_BYTES) { omitted++; completeness[category] = false; return }
+        const previous = getEvidenceCategory.get(evidence.message.id) as { category: 'activity' | 'workspace' } | null
+        if (previous && previous.category !== category) {
+          // A mixed message can produce multiple projections with the same id.
+          // Replacing one loses evidence even when the surviving row fits the budget.
+          omitted++
+          completeness[previous.category] = false
+        }
         saveEvidence.run(evidence.message.id, evidence.ordinal, json, category)
       }
       const scan = await streamBoundedHistory(options.filePath, (entry) => {
@@ -104,15 +109,9 @@ export async function recoverBoundedSessionHistory(options: {
           saveNotice.run(JSON.stringify([notice.ownerAgentId ?? null, notice.toolUseId]), ordinal, json)
         }
         const rawMessage = entry.message as { role?: string; content?: unknown } | undefined
-        const notificationUser = rawMessage?.role === 'user' && notifications.length > 0
-        const hasToolResult = Array.isArray(rawMessage?.content) && rawMessage.content.some((block: any) => block?.type === 'tool_result')
-        // The acknowledgement ends where the interrupted work resumes, not at the
-        // next real user prompt; otherwise the whole post-notification run is lost.
-        const hasToolUse = Array.isArray(rawMessage?.content) && rawMessage.content.some((block: any) => block?.type === 'tool_use')
-        if (notificationUser) { suppressTaskNotificationResponse = true; return }
-        if (rawMessage?.role === 'user' && !hasToolResult) suppressTaskNotificationResponse = false
-        else if (rawMessage?.role === 'assistant' && hasToolUse) suppressTaskNotificationResponse = false
-        else if (suppressTaskNotificationResponse) return
+        // The queued notification turn is plumbing (its data was saved above); the
+        // assistant's response to it is ordinary conversation and is kept.
+        if (rawMessage?.role === 'user' && notifications.length > 0) return
         const message = options.toMessage(entry, owner)
         if (!message) return
         if (message.usage && (!message.usageKey || usageKey.run(message.usageKey).changes > 0)) {
@@ -199,18 +198,7 @@ export async function recoverBoundedSessionHistory(options: {
             for (const block of workspaceCalls) saveTool.run(block.id, ordinal, json, 0, block.name)
           }
         }
-        if (workspaceResults.length) {
-          // `toolUseResult.originalFile` is the pre-edit snapshot the edit tools
-          // keep for rollback — a full copy of the file. The workspace view never
-          // reads it: it derives status, line counts and the diff from
-          // `input.old_string`/`new_string` on the tool_use side. Carrying it here
-          // is what pushes these entries past the 64KB state budget (a single
-          // `Edit` to a 60KB file yields a ~67KB entry whose tool_result is 174
-          // bytes), which marked the workspace incomplete and made the API answer
-          // 413 HISTORY_WORKSPACE_LIMIT — permanently disabling the session's
-          // change view. Drop the snapshot; keep everything the view reads.
-          saveActivity({ ordinal, message: { ...base, content: workspaceResults, toolUseResult: slimToolUseResult(message.toolUseResult) } }, 'workspace')
-        }
+        if (workspaceResults.length) saveActivity({ ordinal, message: { ...base, content: workspaceResults, toolUseResult: slimToolUseResult(message.toolUseResult) } }, 'workspace')
         if (agentBlocks.length) saveActivity({ ordinal, message: { ...base, content: agentBlocks } })
       }, options.signal, { maxRecordBytes: HISTORY_SEMANTIC_RECORD_BYTES })
       database.exec('COMMIT')
@@ -221,7 +209,14 @@ export async function recoverBoundedSessionHistory(options: {
       for (const row of database.query('SELECT ordinal, json, category FROM evidence ORDER BY ordinal DESC').iterate() as Iterable<{ ordinal: number; json: string; category: 'activity' | 'workspace' }>) {
         if (options.signal?.aborted) throw options.signal.reason ?? new DOMException('Aborted', 'AbortError')
         bytes += Buffer.byteLength(row.json)
-        if (bytes > RECOVERY_BYTES || messages.size >= 2048) { omitted++; completeness.activity = false; completeness.workspace = false; break }
+        if (bytes > RECOVERY_BYTES || messages.size >= 2048) {
+          omitted++
+          // Only categories present in the discarded suffix are incomplete. A
+          // long activity history must not invalidate fully retained file changes.
+          const discarded = database.query('SELECT DISTINCT category FROM evidence WHERE ordinal <= ?').all(row.ordinal) as Array<{ category: 'activity' | 'workspace' }>
+          for (const { category } of discarded) completeness[category] = false
+          break
+        }
         const message = JSON.parse(row.json)
         messages.set(message.id, { ordinal: row.ordinal, message })
         if (messages.size % 64 === 0) await new Promise<void>(resolve => setImmediate(resolve))

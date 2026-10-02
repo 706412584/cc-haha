@@ -842,8 +842,8 @@ export const FileReadTool = buildTool({
     // The earlier Read tool_result is still in context — two full copies
     // waste cache_creation tokens on every subsequent turn. BQ proxy shows
     // ~18% of Read calls are same-file collisions (up to 2.64% of fleet
-    // cache_creation). Only applies to text/notebook reads — images/PDFs
-    // aren't cached in readFileState so won't match here.
+    // cache_creation). Only applies to text/notebook reads. PDF state tracks
+    // overwrite authorization, not line ranges or model-facing text content.
     //
     // Ant soak: 1,734 dedup hits in 2h, no Read error regression.
     // Killswitch pattern: GB can disable if the stub message confuses
@@ -862,6 +862,7 @@ export const FileReadTool = buildTool({
     // entry reflects post-edit mtime, so deduping against it would wrongly
     // point the model at the pre-edit Read content.
     if (
+      !isPDFExtension(ext) &&
       existingState &&
       !existingState.isPartialView &&
       existingState.offset !== undefined
@@ -1350,6 +1351,18 @@ async function callInner(
       throw new Error(readResult.error.message)
     }
     const pdfData = readResult.data
+    // A successful full document Read satisfies Write's existing-file guard.
+    // Use the pre-read mtime: a change during Read must still require a reread.
+    // Keep this entry out of text diffing/content fallbacks (like other Read
+    // entries, offset is defined). PDFs have no comparable text snapshot; do
+    // not cache base64 payloads that can exceed the file-state cache budget.
+    // Page-range reads above deliberately do not authorize full replacement.
+    readFileState.set(fullFilePath, {
+      content: '',
+      timestamp: Math.floor(stats.mtimeMs),
+      offset: 1,
+      limit: undefined,
+    })
     logFileOperation({
       operation: 'read',
       tool: 'FileReadTool',

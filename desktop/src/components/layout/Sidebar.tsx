@@ -45,7 +45,9 @@ import {
 import { projectsApi } from '../../api/projects'
 import { getDesktopHost } from '../../lib/desktopHost'
 import { hasRunningBackgroundTasks } from '../../lib/backgroundTasks'
+import { collectAttentionIds } from '../../lib/sessionAttention'
 import { getSessionWorkspaceState, getSessionSeedWorkDir } from '../../lib/sessionWorkspace'
+import { SessionAttentionMark } from './SessionAttentionMark'
 
 // Reachability: extracted sidebar primitives live in ./sidebarComponents.
 // Local copies below still own the live props (mobile actionsRef / hideTimestamp);
@@ -319,14 +321,11 @@ export function Sidebar({
     return ids
   }, [chatSessions, tabs])
   // 停在权限请求上的会话在 `runningSessionIds` 里也算「没结束」，但它不是在
-  // 干活而是在等人。任务视图要把这两种状态分开显示。
-  const attentionSessionIds = useMemo(() => {
-    const ids = new Set<string>()
-    for (const [sessionId, sessionState] of Object.entries(chatSessions)) {
-      if (sessionState.chatState === 'permission_pending') ids.add(sessionId)
-    }
-    return ids
-  }, [chatSessions])
+  // 干活而是在等人。两个视图都要把这两种状态分开显示。
+  // 判定看挂起的请求记录而不是 `chatState`：`status` / `session_state` 消息会在
+  // 卡片还开着的时候把 chatState 改掉，按它判定会在有卡的会话上熄灯。tab 栏与
+  // 这里共用同一个 `sessionNeedsAttention`，不要各写各的。
+  const attentionSessionIds = useMemo(() => new Set(collectAttentionIds(chatSessions)), [chatSessions])
   const taskGroups = useMemo(() => {
     if (!isTaskView) return []
     // 隐藏的项目在任务视图里也要隐藏，否则两个视图对「有哪些会话」说法不一致。
@@ -1471,7 +1470,7 @@ export function Sidebar({
                 const sessionsExpanded = expandedProjectKeys.has(project.key)
                 const visibleItems = projectCollapsed
                   ? []
-                  : getVisibleProjectSessions(project.sessions, sessionsExpanded, activeTabId)
+                  : getVisibleProjectSessions(project.sessions, sessionsExpanded, activeTabId, attentionSessionIds)
                 const hiddenCount = project.sessions.length - visibleItems.length
                 const projectSessionTotal = projectSessionTotals[project.key]
                 const hasUnloadedSessions = projectSessionTotal === undefined
@@ -1677,6 +1676,7 @@ export function Sidebar({
                                     )}
                                     <SessionRowMeta
                                       isRunning={runningSessionIds.has(session.id)}
+                                      needsAttention={attentionSessionIds.has(session.id)}
                                       isWorktree={isWorktreeSession(session)}
                                       modifiedAt={session.modifiedAt}
                                       t={t}
@@ -2556,14 +2556,21 @@ function getVisibleProjectSessions(
   sessions: SessionListItem[],
   expanded: boolean,
   activeSessionId: string | null,
+  attentionSessionIds: ReadonlySet<string>,
 ): SessionListItem[] {
   if (expanded || sessions.length <= PROJECT_GROUP_VISIBLE_COUNT) return sessions
 
   const visible = sessions.slice(0, PROJECT_GROUP_VISIBLE_COUNT)
-  if (!activeSessionId || visible.some((session) => session.id === activeSessionId)) return visible
-
-  const activeSession = sessions.find((session) => session.id === activeSessionId)
-  return activeSession ? [...visible, activeSession] : visible
+  // 折叠掉的行是要人自己去翻的。当前打开的会话不该被翻到看不见，正在等人的会话
+  // 更不该：手机上没有 tab 栏，汉堡按钮上的提示点指向的就是抽屉里这一行，
+  // 折叠起来等于信号在最后一步断了。它们按列表原有顺序排在前几行之后。
+  // 只管已经加载进列表的行：侧边栏每个项目只预取最近
+  // `SIDEBAR_PROJECT_SESSION_PREVIEW_LIMIT` 条，更早的会话在列表里根本没有行，
+  // 桌面上由 tab 栏兜底，手机上要展开历史后才看得到。
+  const pinned = sessions
+    .slice(PROJECT_GROUP_VISIBLE_COUNT)
+    .filter((session) => session.id === activeSessionId || attentionSessionIds.has(session.id))
+  return pinned.length > 0 ? [...visible, ...pinned] : visible
 }
 
 function compareSessionsByTimestamp(
@@ -2651,12 +2658,14 @@ function ProjectMenuItem({
 
 function SessionRowMeta({
   isRunning,
+  needsAttention,
   isWorktree,
   modifiedAt,
   t,
   hideTimestamp = false,
 }: {
   isRunning: boolean
+  needsAttention: boolean
   isWorktree: boolean
   modifiedAt: string
   t: (key: TranslationKey, params?: Record<string, string | number>) => string
@@ -2670,7 +2679,14 @@ function SessionRowMeta({
       className="ml-auto flex h-5 flex-shrink-0 items-center justify-end gap-1.5 whitespace-nowrap text-[10px] font-medium tabular-nums text-[var(--color-text-tertiary)]"
       title={updatedLabel}
     >
-      {isRunning && (
+      {/* 等人比在跑更要紧：停在卡片上的会话按 chatState 也算「在跑」，但转圈会
+          让人以为可以不管它。 */}
+      {needsAttention && (
+        <span className="inline-flex h-4 w-4 flex-shrink-0 items-center justify-center">
+          <SessionAttentionMark label={t('sidebar.sessionNeedsAttention')} />
+        </span>
+      )}
+      {isRunning && !needsAttention && (
         <span
           className="inline-flex h-4 w-4 flex-shrink-0 items-center justify-center text-[var(--color-success)]"
           aria-label={t('sidebar.sessionRunning')}

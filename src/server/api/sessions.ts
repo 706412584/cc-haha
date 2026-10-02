@@ -38,7 +38,7 @@ import {
 } from '../ws/handler.js'
 import { sessionActivityCoordinator } from '../services/sessionActivityCoordinator.js'
 import { listSkillSlashCommands, type SkillSlashCommand } from './skills.js'
-import { WorkspaceService } from '../services/workspaceService.js'
+import { WorkspaceService, type WorkspaceRawFile } from '../services/workspaceService.js'
 import { WorkspaceFileService } from '../services/workspaceFileService.js'
 import { WorkspaceLspService, type WorkspaceLspConfigInput, type WorkspaceLspSyncInput } from '../services/workspaceLspService.js'
 import { isLspFeatureEnabled } from '../services/lspFeatureFlag.js'
@@ -818,6 +818,8 @@ async function handleSessionWorkspaceRoute(
         sessionId,
         requireWorkspacePath(url, 'file'),
       ))
+    case 'raw':
+      return await serveWorkspaceRaw(sessionId, requireWorkspacePath(url, 'raw'))
     case 'diff':
       return await runWorkspaceDiffRequest(() => workspaceService.getDiff(
         sessionId,
@@ -1218,7 +1220,7 @@ async function requireSessionWorkspace(sessionId: string): Promise<string> {
   return workDir
 }
 
-function requireWorkspacePath(url: URL, route: 'file' | 'diff'): string {
+function requireWorkspacePath(url: URL, route: 'file' | 'diff' | 'raw'): string {
   const filePath = url.searchParams.get('path')
   if (!filePath) {
     throw ApiError.badRequest(`path query parameter is required for workspace ${route}`)
@@ -1226,18 +1228,62 @@ function requireWorkspacePath(url: URL, route: 'file' | 'diff'): string {
   return filePath
 }
 
+/**
+ * Turns a workspace service failure into the API error a client can act on.
+ * Shared by the JSON routes and the byte-streaming `raw` route so a path outside
+ * the workspace is a 403 and an unknown session a 404 on both.
+ */
+function mapWorkspaceError(error: unknown): unknown {
+  if (isOutsideWorkspaceError(error)) {
+    return new ApiError(403, error.message, 'FORBIDDEN')
+  }
+  if (isSessionNotFoundError(error)) {
+    return ApiError.notFound(error.message)
+  }
+  return error
+}
+
 async function runWorkspaceRequest<T>(operation: () => Promise<T>): Promise<Response> {
   try {
     return Response.json(await operation())
   } catch (error) {
-    if (isOutsideWorkspaceError(error)) {
-      throw new ApiError(403, error.message, 'FORBIDDEN')
-    }
-    if (isSessionNotFoundError(error)) {
-      throw ApiError.notFound(error.message)
-    }
-    throw error
+    throw mapWorkspaceError(error)
   }
+}
+
+/**
+ * Stream a workspace document's bytes to an in-app viewer.
+ *
+ * This is deliberately a `/api/sessions/:id/workspace/*` route rather than a
+ * static file route: the renderer fetches it with the bearer credential, the one
+ * form that works in the desktop shell, in a LAN browser and over remote access
+ * alike (an `<img>`/`<iframe>` subresource cannot carry the header, and remote
+ * access only exposes `/api/sessions`). Everything else about it — the workspace
+ * boundary, the extension allowlist, the size cap — lives in
+ * `WorkspaceService.resolveRawFile`.
+ */
+async function serveWorkspaceRaw(sessionId: string, requestedPath: string): Promise<Response> {
+  let file: WorkspaceRawFile
+  try {
+    file = await workspaceService.resolveRawFile(sessionId, requestedPath)
+  } catch (error) {
+    throw mapWorkspaceError(error)
+  }
+
+  return new Response(Bun.file(file.canonicalPath), {
+    status: 200,
+    headers: {
+      'Content-Type': file.format.mimeType,
+      // No hand-written Content-Length: the size validated above was read a
+      // moment ago, and this route's usual caller fetches a file an agent may be
+      // rewriting. Bun derives the length from the file it actually sends, so a
+      // figure copied from the earlier stat could only be redundant or wrong.
+      // A viewer refetches on a new `version`; a stale copy after an agent
+      // rewrites the file is worse than one revalidation.
+      'Cache-Control': 'private, no-cache',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  })
 }
 
 async function runWorkspaceDiffRequest<T extends { state?: string; error?: string }>(

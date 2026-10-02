@@ -153,6 +153,19 @@ describe('provider 1M runtime selection', () => {
     model1mSupport: { main: true, fable: false, haiku: false, sonnet: true, opus: false },
   }
 
+  it.each([true, false, undefined])('resolves Fable 1M support %s for selection and restoration', (enabled) => {
+    const relay: SavedProvider = {
+      ...provider,
+      models: { ...provider.models, fable: 'claude-fable-5-1[1m]' },
+      model1mSupport: enabled === undefined ? undefined : { ...provider.model1mSupport!, fable: enabled },
+    }
+    const modelId = enabled === false ? 'claude-fable-5-1' : 'claude-fable-5-1[1m]'
+    expect(resolveProviderSlotModelId(relay, 'fable')).toBe(modelId)
+    expect(resolveProviderRuntimeModelId(relay, 'claude-fable-5-1')).toBe(modelId)
+    expect(resolveDefaultRuntimeSelection(relay.id, relay.name, [relay], 'claude-fable-5-1'))
+      .toEqual({ providerId: relay.id, modelId })
+  })
+
   it('waits for provider hydration before recovering a removed provider and preserves valid session choices', () => {
     const selection = { providerId: 'deleted-provider', modelId: 'old-model', effortLevel: 'max' as const }
     const context = { activeId: provider.id, providers: [provider], hasLoadedProviders: false }

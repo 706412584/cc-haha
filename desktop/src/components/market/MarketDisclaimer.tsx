@@ -28,7 +28,7 @@ export function MarketDisclaimer() {
     <div
       role="note"
       data-testid="market-disclaimer"
-      className="mt-6 flex items-start gap-3 rounded-[var(--radius-lg)] border border-[var(--color-primary-fixed-dim)] bg-[var(--color-brand-soft)] px-[18px] py-3.5"
+      className="flex items-start gap-3 rounded-[var(--radius-lg)] border border-[var(--color-primary-fixed-dim)] bg-[var(--color-brand-soft)] px-[18px] py-3.5"
     >
       <ShieldAlert className="mt-0.5 h-[17px] w-[17px] flex-shrink-0 text-[var(--color-brand)]" strokeWidth={1.5} aria-hidden="true" />
       {/* Foreground is the darkened pair, never `--color-brand`: terracotta on

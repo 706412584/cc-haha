@@ -5,6 +5,8 @@ import { Button } from './Button'
 import type { StateSize } from './EmptyState'
 
 export type ErrorStateProps = {
+  /** Inline Markdown needs phrasing content inside paragraphs and links. */
+  as?: 'div' | 'span'
   title: string
   detail?: ReactNode
   onRetry?: () => void
@@ -34,6 +36,7 @@ const SIZE_CLASSES: Record<StateSize, string> = {
  * reader user only discovers by chance.
  */
 export function ErrorState({
+  as: Tag = 'div',
   title,
   detail,
   onRetry,
@@ -43,7 +46,7 @@ export function ErrorState({
   className,
 }: ErrorStateProps) {
   return (
-    <div
+    <Tag
       role="alert"
       className={cx(
         'flex flex-col rounded-[var(--radius-lg)] border',
@@ -63,6 +66,6 @@ export function ErrorState({
           {retryLabel}
         </Button>
       )}
-    </div>
+    </Tag>
   )
 }

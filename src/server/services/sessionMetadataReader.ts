@@ -3,10 +3,10 @@ import { StringDecoder } from 'node:string_decoder'
 import parser, { type Token } from 'stream-json/parser.js'
 import { ApiError } from '../middleware/errorHandler.js'
 import { HISTORY_SEMANTIC_RECORD_BYTES } from './boundedSessionHistory.js'
+import { createBoundedJsonProjection } from './boundedJsonProjection.js'
 
 const METADATA_BYTES = 128 * 1024
 const TEXT_PREVIEW_CHARS = 4096
-const MAX_DEPTH = 128
 const truncatedTextEntries = new WeakSet<object>()
 
 /** A projected long text is unsuitable for authoritative notification classification. */
@@ -21,12 +21,6 @@ const rootFields = new Set([
   'entrypoint', 'message', 'content',
 ])
 const blockFields = new Set(['type', 'name', 'id', 'tool_use_id', 'text'])
-type Frame = {
-  path: string[]
-  value?: Record<string, unknown> | unknown[]
-  key: string
-  index: number
-}
 
 function limit(): ApiError {
   return new ApiError(413, 'Session metadata exceeds its resource budget', 'SESSION_METADATA_TOO_LARGE')
@@ -34,122 +28,30 @@ function limit(): ApiError {
 
 /** Assemble only the small structural envelope; the parser still validates every byte. */
 function createProjection() {
-  const frames: Frame[] = []
-  let root: unknown
-  let bytes = 0
-  let scalar = ''
-  let scalarPath: string[] = []
-  let scalarMode: 'key' | 'string' | 'number' | undefined
-  let scalarOverflow = false
-  const truncatedSlots = new WeakMap<object, Set<string>>()
-  const charge = (size: number) => {
-    bytes += size
-    if (bytes > METADATA_BYTES) throw limit()
-  }
-  const nextPath = (): string[] => {
-    const parent = frames.at(-1)
-    return parent ? [...parent.path, Array.isArray(parent.value) ? String(parent.index) : parent.key] : []
-  }
-  const selected = (path: string[]): boolean => {
-    if (!path.length) return true
-    if (path.includes('\0unselected')) return false
-    if (!rootFields.has(path[0]!)) return false
-    if (path[0] !== 'message') return true
-    if (path.length === 1) return true
-    if (path[1] === 'role') return path.length === 2
-    if (path[1] !== 'content') return false
-    return path.length <= 3 || path.length === 4 && blockFields.has(path[3]!)
-  }
-  const preview = (path: string[]) => path.length === 1 && path[0] === 'content'
-    || path[0] === 'message' && path[1] === 'content' && (path.length === 2 || path.length === 4 && path[3] === 'text')
-  const attach = (value: unknown, path: string[], truncated = false) => {
-    const parent = frames.at(-1)
-    if (selected(path)) {
-      if (!parent) root = value
-      else if (parent.value) {
-        charge(16 + (Array.isArray(parent.value) ? 0 : Buffer.byteLength(parent.key)))
-        const slot = Array.isArray(parent.value) ? String(parent.value.length) : parent.key
-        const slots = truncatedSlots.get(parent.value) ?? new Set<string>()
-        if (truncated) slots.add(slot)
-        else slots.delete(slot)
-        truncatedSlots.set(parent.value, slots)
-        if (Array.isArray(parent.value)) parent.value.push(value)
-        else Object.defineProperty(parent.value, parent.key, { value, writable: true, configurable: true, enumerable: true })
-      }
-    }
-    if (parent) parent.index++
-  }
-  const token = (token: Token) => {
-    switch (token.name) {
-      case 'startObject':
-      case 'startArray': {
-        if (frames.length >= MAX_DEPTH) throw limit()
-        const path = nextPath()
-        const value = selected(path) ? token.name === 'startArray' ? [] : Object.create(null) : undefined
-        attach(value, path)
-        frames.push({ path, value, key: '', index: 0 })
-        break
-      }
-      case 'endObject':
-      case 'endArray':
-        frames.pop()
-        break
-      case 'startKey':
-        scalarMode = 'key'
-        scalar = ''
-        scalarOverflow = false
-        break
-      case 'startString':
-      case 'startNumber':
-        scalarMode = token.name === 'startString' ? 'string' : 'number'
-        scalarPath = nextPath()
-        scalar = ''
-        scalarOverflow = false
-        break
-      case 'stringChunk':
-      case 'numberChunk': {
-        if (scalarMode !== 'key' && !selected(scalarPath)) break
-        const bound = scalarMode === 'key' ? 256 : preview(scalarPath) ? TEXT_PREVIEW_CHARS : METADATA_BYTES
-        const available = bound - scalar.length
-        if (token.value.length > available) {
-          scalarOverflow = true
-          if (scalarMode !== 'key' && !preview(scalarPath)) throw limit()
-        }
-        scalar += token.value.slice(0, Math.max(0, available))
-        break
-      }
-      case 'endKey': {
-        // A retained metadata map must never silently rename a key. Unknown
-        // root/body fields can be discarded without affecting launch state.
-        const parent = frames.at(-1)!
-        if (scalarOverflow && parent.value && parent.path.length && parent.path[0] !== 'message') throw limit()
-        frames.at(-1)!.key = scalarOverflow ? '\0unselected' : scalar
-        scalarMode = undefined
-        break
-      }
-      case 'endString':
-      case 'endNumber': {
-        if (selected(scalarPath)) {
-          charge(Buffer.byteLength(scalar))
-        }
-        attach(token.name === 'endNumber' ? Number(scalar) : scalar, scalarPath, scalarOverflow && scalarPath[0] === 'message')
-        scalarMode = undefined
-        break
-      }
-      case 'trueValue':
-      case 'falseValue':
-      case 'nullValue':
-        attach(token.value, nextPath())
-        break
-    }
-  }
+  const projection = createBoundedJsonProjection({
+    selected: path => {
+      if (!path.length) return true
+      if (!rootFields.has(path[0]!)) return false
+      if (path[0] !== 'message') return true
+      if (path.length === 1) return true
+      if (path[1] === 'role') return path.length === 2
+      if (path[1] !== 'content') return false
+      return path.length <= 3 || path.length === 4 && blockFields.has(path[3]!)
+    },
+    preview: path => path.length === 1 && path[0] === 'content'
+      || path[0] === 'message' && path[1] === 'content' && (path.length === 2 || path.length === 4 && path[3] === 'text'),
+    metadataBytes: METADATA_BYTES,
+    previewChars: TEXT_PREVIEW_CHARS,
+    limitError: limit,
+  })
   return {
-    token,
+    token: projection.token,
     result: () => {
+      const root = projection.root()
       if (root && typeof root === 'object' && !Array.isArray(root)) {
         const message = (root as Record<string, unknown>).message as Record<string, unknown> | undefined
-        if (message && typeof message === 'object' && (truncatedSlots.get(message)?.has('content')
-          || Array.isArray(message.content) && message.content.some(block => block && typeof block === 'object' && truncatedSlots.get(block)?.has('text')))) {
+        if (message && typeof message === 'object' && (projection.wasTruncated(message, 'content')
+          || Array.isArray(message.content) && message.content.some(block => block && typeof block === 'object' && projection.wasTruncated(block, 'text')))) {
           truncatedTextEntries.add(root)
         }
         return root as Record<string, unknown>

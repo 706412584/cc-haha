@@ -10,14 +10,26 @@ export function isVisibleSessionBackgroundTask(
   return task.taskType !== 'in_process_teammate'
 }
 
-export function hasRunningBackgroundTasks(tasks?: Record<string, BackgroundAgentTask>): boolean {
+function isBusyBackgroundTask(task: BackgroundAgentTask): boolean {
   // AutoDream is detached maintenance work: it remains visible and stoppable
   // in Activity, but must not keep the foreground conversation marked busy.
-  return Object.values(tasks ?? {}).some(
-    (task) => isVisibleSessionBackgroundTask(task) &&
-      task.status === 'running' &&
-      task.taskType !== 'dream',
-  )
+  return isVisibleSessionBackgroundTask(task) &&
+    task.status === 'running' &&
+    task.taskType !== 'dream'
+}
+
+export function hasRunningBackgroundTasks(tasks?: Record<string, BackgroundAgentTask>): boolean {
+  return Object.values(tasks ?? {}).some(isBusyBackgroundTask)
+}
+
+/**
+ * The tasks `hasRunningBackgroundTasks` counted, for a caller that has been told
+ * to stop them. Asking "is this session running?" and stopping it share one
+ * definition so a confirmation can never offer a Stop that leaves running the
+ * very task that raised it.
+ */
+export function listRunningBackgroundTasks(tasks?: Record<string, BackgroundAgentTask>): BackgroundAgentTask[] {
+  return Object.values(tasks ?? {}).filter(isBusyBackgroundTask)
 }
 
 export function hasRunningSubagentTasks(tasks?: Record<string, BackgroundAgentTask>): boolean {

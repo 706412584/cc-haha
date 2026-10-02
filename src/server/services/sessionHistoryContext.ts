@@ -5,11 +5,12 @@ import { rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withHistoryReadBudget } from './boundedSessionHistory.js'
-import { isSessionMetadataTextTruncated, streamSessionMetadata } from './sessionMetadataReader.js'
+import { streamSessionMetadata } from './sessionMetadataReader.js'
 import { ApiError } from '../middleware/errorHandler.js'
 
-type Context = { owner?: string; suppressed: boolean }
-type Cache = { database: Database; directory: string; identity: string; size: number; mtime: string; offset: number; suppressed: boolean | null; fingerprint?: string }
+/** `hidden` marks an unowned sidechain record that a root-only view must not show. */
+type Context = { owner?: string; hidden: boolean }
+type Cache = { database: Database; directory: string; identity: string; size: number; mtime: string; offset: number; fingerprint?: string }
 type Flight = { promise: Promise<void>; controller: AbortController; users: number }
 const cache = new Map<string, Cache>()
 const flights = new Map<string, Flight>()
@@ -42,7 +43,7 @@ export async function readHistoryContexts(options: {
   offsets: number[]
   signal?: AbortSignal
   includeUnownedSidechains?: boolean
-  classify: (entry: Record<string, unknown>) => { notification: boolean; reset: boolean; agentToolId?: string }
+  agentToolId: (entry: Record<string, unknown>) => string | undefined
 }): Promise<{ contexts: Map<number, Context>; scannedBytes: number }> {
   if (options.signal?.aborted) throw options.signal.reason ?? new DOMException('Aborted', 'AbortError')
   const [dev, ino, size, mtime] = options.sourceVersion.split(':')
@@ -73,8 +74,8 @@ export async function readHistoryContexts(options: {
       }
       const directory = await mkdtemp(join(tmpdir(), 'claude-history-context-'))
       const database = new Database(join(directory, 'context.sqlite'))
-      database.exec('PRAGMA journal_mode=OFF; PRAGMA cache_size=-512; PRAGMA temp_store=FILE; CREATE TABLE parents (id TEXT PRIMARY KEY, chain TEXT); CREATE TABLE context (offset INTEGER PRIMARY KEY, owner TEXT, suppressed INTEGER, unowned_sidechain INTEGER)')
-      state = { database, directory, identity, size: 0, mtime: '', offset: 0, suppressed: false }
+      database.exec('PRAGMA journal_mode=OFF; PRAGMA cache_size=-512; PRAGMA temp_store=FILE; CREATE TABLE parents (id TEXT PRIMARY KEY, chain TEXT); CREATE TABLE context (offset INTEGER PRIMARY KEY, owner TEXT, unowned_sidechain INTEGER)')
+      state = { database, directory, identity, size: 0, mtime: '', offset: 0 }
       cache.set(options.filePath, state)
     }
     cache.delete(options.filePath)
@@ -82,39 +83,27 @@ export async function readHistoryContexts(options: {
     if (state.size >= targetSize) return
     const getParent = state.database.query('SELECT chain FROM parents WHERE id = ?')
     const saveParent = state.database.query('INSERT OR REPLACE INTO parents VALUES (?, ?)')
-    const saveContext = state.database.query('INSERT OR REPLACE INTO context VALUES (?, ?, ?, ?)')
+    const saveContext = state.database.query('INSERT OR REPLACE INTO context VALUES (?, ?, ?)')
     const originalOffset = state.offset
-    let suppressed = state.suppressed
-    let completeSuppression = suppressed
     try {
       const fingerprint = await sourceAnchors(options.filePath, targetSize, signal)
       state.database.exec('BEGIN')
-      const result = await streamSessionMetadata(options.filePath, (entry, completeLine, offset) => {
-        const classification = options.classify(entry)
+      const result = await streamSessionMetadata(options.filePath, (entry, _completeLine, offset) => {
         const inherited = typeof entry.parentUuid === 'string' ? (getParent.get(entry.parentUuid) as { chain?: string } | null)?.chain : undefined
         const explicit = typeof entry.parent_tool_use_id === 'string' && entry.parent_tool_use_id ? entry.parent_tool_use_id : undefined
         const owner = explicit ?? (entry.isSidechain === true ? inherited : undefined)
-        const chain = classification.agentToolId ?? inherited
+        const chain = options.agentToolId(entry) ?? inherited
         if (typeof entry.uuid === 'string') saveParent.run(entry.uuid, chain ?? null)
-        const message = entry.message as { role?: unknown } | undefined
-        // A bounded text preview cannot prove whether a user record contains a
-        // task notification beyond its prefix. Keep uncertainty fail-closed;
-        // images and tool payloads do not affect this textual classification.
-        if (message?.role === 'user' && !entry.isMeta && isSessionMetadataTextTruncated(entry)) suppressed = null
-        else if (classification.notification) suppressed = true
-        else if (classification.reset) suppressed = false
-        // Keep root-only ownership filtering separate from notification state:
-        // a dedicated child transcript legitimately lacks its parent's Agent call.
-        saveContext.run(offset, owner ?? null, suppressed !== false ? 1 : 0, entry.isSidechain === true && !owner ? 1 : 0)
-        if (completeLine) completeSuppression = suppressed
-      }, signal, { startOffset: originalOffset, endOffset: targetSize, onSkipped: () => { suppressed = null; completeSuppression = null } })
+        // Root-only ownership filtering: a dedicated child transcript legitimately
+        // lacks its parent's Agent call, so the flag is kept per record.
+        saveContext.run(offset, owner ?? null, entry.isSidechain === true && !owner ? 1 : 0)
+      }, signal, { startOffset: originalOffset, endOffset: targetSize })
       if (fingerprint !== await sourceAnchors(options.filePath, targetSize, signal)) throw new ApiError(409, 'History was rewritten during context scan', 'HISTORY_CHANGED')
       state.database.exec('COMMIT')
       state.fingerprint = fingerprint
       state.size = targetSize
       state.mtime = mtime!
       state.offset = result.nextOffset
-      state.suppressed = completeSuppression
       scannedBytes += result.scannedBytes
     } catch (error) {
       try { state.database.exec('ROLLBACK') } catch { /* Validation may fail before BEGIN. */ }
@@ -162,12 +151,12 @@ export async function readHistoryContexts(options: {
     })
   }
   const state = cache.get(options.filePath)!
-  const query = state.database.query('SELECT owner, suppressed, unowned_sidechain FROM context WHERE offset = ?')
+  const query = state.database.query('SELECT owner, unowned_sidechain FROM context WHERE offset = ?')
   const contexts = new Map<number, Context>()
   for (const offset of options.offsets) {
-    const row = query.get(offset) as { owner: string | null; suppressed: number; unowned_sidechain: number } | null
+    const row = query.get(offset) as { owner: string | null; unowned_sidechain: number } | null
     if (!row) throw new ApiError(409, 'History context is unavailable; reload the page', 'HISTORY_CHANGED')
-    contexts.set(offset, { owner: row.owner ?? undefined, suppressed: row.suppressed === 1 || (!options.includeUnownedSidechains && row.unowned_sidechain === 1) })
+    contexts.set(offset, { owner: row.owner ?? undefined, hidden: !options.includeUnownedSidechains && row.unowned_sidechain === 1 })
   }
   return { contexts, scannedBytes }
 }

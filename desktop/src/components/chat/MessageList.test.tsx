@@ -42,6 +42,7 @@ import type { MessageEntry } from '../../types/session'
 import type { PerSessionState } from '../../stores/chatStore'
 import { FindInPageModal } from '../search/FindInPageModal'
 import { getConversationFindController } from '../search/conversationFindBridge'
+import { workspaceOpen } from '@/lib/workspace/openTarget'
 
 vi.mock('@/lib/workspace/openSideChat', () => ({ openSideChat: vi.fn(async () => 'tab-side') }))
 
@@ -7185,15 +7186,22 @@ describe('MessageList nested tool calls', () => {
     expect(screen.queryByLabelText('Turn changed files')).toBeNull()
   })
 
-  it('does not show the checkpoint preview budget as a chat error', async () => {
+  it('retains the workspace file list when a long history exceeds the checkpoint preview budget', async () => {
     vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockRejectedValue(new ApiError(413, {
       error: 'HISTORY_CHECKPOINT_PREVIEW_LIMIT',
       message: 'This transcript exceeds the full checkpoint preview budget. Chat history remains available in pages.',
     }))
+    let resolveStatus!: (result: Awaited<ReturnType<typeof sessionsApi.getWorkspaceStatus>>) => void
+    vi.mocked(sessionsApi.getWorkspaceStatus).mockReturnValue(new Promise((resolve) => { resolveStatus = resolve }))
+    const openFile = vi.spyOn(workspaceOpen, 'file')
+    const openReview = vi.spyOn(workspaceOpen, 'review')
+    const rewind = vi.spyOn(sessionsApi, 'rewind')
     useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState({
       messages: [
         { id: 'user-1', type: 'user_text', content: 'Continue the work', timestamp: 1 },
-        { id: 'assistant-1', type: 'assistant_text', content: 'Done', timestamp: 2 },
+        { id: 'write-1', type: 'tool_use', toolUseId: 'write-1', toolName: 'Write', input: { file_path: '/tmp/example-project/qa-status.txt', content: 'QA-005 retained workspace file\n' }, timestamp: 2 },
+        { id: 'write-result', type: 'tool_result', toolUseId: 'write-1', content: 'Created file', isError: false, timestamp: 3 },
+        { id: 'assistant-1', type: 'assistant_text', content: 'Done', timestamp: 4 },
       ],
     }) } })
 
@@ -7205,6 +7213,148 @@ describe('MessageList nested tool calls', () => {
     expect(sessionsApi.getTurnCheckpoints).toHaveBeenCalledTimes(1)
     expect(screen.getByText('Done')).toBeTruthy()
     expect(screen.queryByText(/This transcript exceeds the full checkpoint preview budget/)).toBeNull()
+    expect(screen.queryByRole('region', { name: 'Workspace changed files' })).toBeNull()
+    await act(async () => resolveStatus({
+      state: 'ok', workDir: '/tmp/example-project', repoName: null, branch: null, isGitRepo: false,
+      changedFiles: [{ path: 'qa-status.txt', status: 'added', additions: 1, deletions: 0 }],
+    }))
+    const fallback = await screen.findByRole('region', { name: 'Workspace changed files' })
+    expect(fallback.closest('[data-chat-render-item-key]')).toBeNull()
+    expect(within(fallback).getByText(/too long for turn previews or file undo/)).toBeTruthy()
+    expect(within(fallback).getByText(/current workspace changes/)).toBeTruthy()
+    fireEvent.click(within(fallback).getByRole('button', { name: 'Open current content of qa-status.txt' }))
+    expect(openFile).toHaveBeenCalledWith(ACTIVE_TAB, 'qa-status.txt')
+    expect(openReview).not.toHaveBeenCalled()
+    expect(rewind).not.toHaveBeenCalled()
+    expect(screen.queryByLabelText('Turn changed files')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Undo current turn|Rewind to before this turn|Roll back conversation/ })).toBeNull()
+  })
+
+  it('explains the checkpoint preview limit even when the verified workspace has no changed files', async () => {
+    vi.mocked(sessionsApi.getTurnCheckpoints).mockRejectedValue(new ApiError(413, { error: 'HISTORY_CHECKPOINT_PREVIEW_LIMIT' }))
+    useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState({ messages: [
+      { id: 'user-1', type: 'user_text', content: 'Continue', timestamp: 1 },
+      { id: 'assistant-1', type: 'assistant_text', content: 'Done', timestamp: 2 },
+    ] }) } })
+    render(<MessageList />)
+    const fallback = await screen.findByRole('region', { name: 'Workspace changed files' })
+    expect(within(fallback).getByText(/too long for turn previews or file undo/)).toBeTruthy()
+    expect(within(fallback).getByText('No current workspace changes were found.')).toBeTruthy()
+    expect(within(fallback).queryByRole('button')).toBeNull()
+  })
+
+  it.each(['error', 'missing_workdir', 'not_git_repo', 'incomplete', 'rejected', 'workspace-budget'] as const)(
+    'keeps the transcript readable and withholds an unverified fallback file list when workspace status is %s', async (failure) => {
+      vi.mocked(sessionsApi.getTurnCheckpoints).mockRejectedValue(new ApiError(413, { error: 'HISTORY_CHECKPOINT_PREVIEW_LIMIT' }))
+      if (failure === 'rejected' || failure === 'workspace-budget') {
+        vi.mocked(sessionsApi.getWorkspaceStatus).mockRejectedValue(failure === 'rejected'
+          ? new Error('offline')
+          : new ApiError(413, { error: 'HISTORY_WORKSPACE_LIMIT' }))
+      } else {
+        vi.mocked(sessionsApi.getWorkspaceStatus).mockResolvedValue({
+          state: failure === 'incomplete' ? 'ok' : failure,
+          workDir: '/tmp/example-project', repoName: null, branch: null, isGitRepo: false,
+          ...(failure === 'incomplete' ? {} : { changedFiles: [{ path: 'unverified.txt', status: 'added', additions: 1, deletions: 0 }] }),
+        } as Awaited<ReturnType<typeof sessionsApi.getWorkspaceStatus>>)
+      }
+      useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState({ messages: [
+        { id: 'user-1', type: 'user_text', content: 'Continue', timestamp: 1 },
+        { id: 'assistant-1', type: 'assistant_text', content: 'Transcript remains readable', timestamp: 2 },
+      ] }) } })
+      render(<MessageList />)
+      const fallback = await screen.findByRole('region', { name: 'Workspace changed files' })
+      expect(within(fallback).getByText(/Current workspace changes could not be verified/)).toBeTruthy()
+      expect(within(fallback).queryByRole('button')).toBeNull()
+      expect(screen.queryByText('unverified.txt')).toBeNull()
+      expect(screen.getByText('Transcript remains readable')).toBeTruthy()
+    },
+  )
+
+  it.each([
+    new ApiError(500, { error: 'HISTORY_CHECKPOINT_PREVIEW_LIMIT', message: 'Checkpoint request failed' }),
+    new ApiError(413, { error: 'HISTORY_WORKSPACE_LIMIT', message: 'Workspace evidence is incomplete' }),
+    new Error('Checkpoint request failed'),
+  ])('does not replace a non-checkpoint-budget error with workspace evidence: %s', async (error) => {
+    vi.mocked(sessionsApi.getTurnCheckpoints).mockRejectedValue(error)
+    useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState({ messages: [
+      { id: 'user-1', type: 'user_text', content: 'Continue', timestamp: 1 },
+      { id: 'assistant-1', type: 'assistant_text', content: 'Done', timestamp: 2 },
+    ] }) } })
+    render(<MessageList />)
+    expect(await screen.findByText(error instanceof ApiError ? String((error.body as { message: string }).message) : error.message)).toBeTruthy()
+    expect(screen.queryByRole('region', { name: 'Workspace changed files' })).toBeNull()
+  })
+
+  it('does not show a stale workspace fallback after switching sessions while status is pending', async () => {
+    vi.mocked(sessionsApi.getTurnCheckpoints).mockImplementation((sessionId) => sessionId === 'session-one'
+      ? Promise.reject(new ApiError(413, { error: 'HISTORY_CHECKPOINT_PREVIEW_LIMIT' }))
+      : Promise.resolve({ checkpoints: [] }))
+    let resolveStatus!: (result: Awaited<ReturnType<typeof sessionsApi.getWorkspaceStatus>>) => void
+    const requests: Array<AbortSignal | undefined> = []
+    vi.mocked(sessionsApi.getWorkspaceStatus).mockImplementation((sessionId, signal) => {
+      requests.push(signal)
+      return sessionId === 'session-one'
+        ? new Promise((resolve) => { resolveStatus = resolve })
+        : Promise.resolve({ state: 'ok', workDir: '/tmp/two', repoName: null, branch: null, isGitRepo: false, changedFiles: [] })
+    })
+    const messages: UIMessage[] = [
+      { id: 'user-1', type: 'user_text', content: 'Continue', timestamp: 1 },
+      { id: 'assistant-1', type: 'assistant_text', content: 'Done', timestamp: 2 },
+    ]
+    useChatStore.setState({ sessions: {
+      'session-one': makeSessionState({ messages }), 'session-two': makeSessionState({ messages }),
+    } })
+    const { rerender } = render(<MessageList sessionId="session-one" />)
+    await waitFor(() => expect(requests).toHaveLength(1))
+    rerender(<MessageList sessionId="session-two" />)
+    await waitFor(() => expect(requests).toHaveLength(2))
+    expect(requests[0]?.aborted).toBe(true)
+    await act(async () => resolveStatus({
+      state: 'ok', workDir: '/tmp/one', repoName: null, branch: null, isGitRepo: false,
+      changedFiles: [{ path: 'stale.txt', status: 'added', additions: 1, deletions: 0 }],
+    }))
+    expect(screen.queryByRole('region', { name: 'Workspace changed files' })).toBeNull()
+    expect(screen.queryByText('stale.txt')).toBeNull()
+  })
+
+  it('keeps successful turn checkpoints authoritative when workspace status also contains cumulative changes', async () => {
+    vi.mocked(sessionsApi.getTurnCheckpoints).mockResolvedValue({ checkpoints: [{
+      target: { targetUserMessageId: 'user-1', userMessageIndex: 0, userMessageCount: 1 },
+      code: { available: true, filesChanged: ['turn-owned.ts'], insertions: 1, deletions: 0 },
+    }] })
+    vi.mocked(sessionsApi.getWorkspaceStatus).mockResolvedValue({
+      state: 'ok', workDir: '/tmp/example-project', repoName: null, branch: null, isGitRepo: false,
+      changedFiles: [{ path: 'unrelated-workspace.ts', status: 'modified', additions: 8, deletions: 2 }],
+    })
+    useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState({ messages: [
+      { id: 'user-1', type: 'user_text', content: 'Create a file', timestamp: 1 },
+      { id: 'assistant-1', type: 'assistant_text', content: 'Done', timestamp: 2 },
+    ] }) } })
+    render(<MessageList />)
+    const turnCard = await screen.findByRole('region', { name: 'Turn changed files' })
+    fireEvent.click(within(turnCard).getByRole('button', { name: 'Show 1 changed files' }))
+    expect(within(turnCard).getByRole('button', { name: 'Open turn-owned.ts in workspace' })).toBeTruthy()
+    expect(within(turnCard).getByRole('button', { name: 'Undo current turn changes' })).toBeTruthy()
+    expect(screen.queryByRole('region', { name: 'Workspace changed files' })).toBeNull()
+    expect(screen.queryByText('unrelated-workspace.ts')).toBeNull()
+  })
+
+  it('hides workspace fallback while a new turn runs and clears it after successful checkpoint reload', async () => {
+    vi.mocked(sessionsApi.getTurnCheckpoints)
+      .mockRejectedValueOnce(new ApiError(413, { error: 'HISTORY_CHECKPOINT_PREVIEW_LIMIT' }))
+      .mockResolvedValue({ checkpoints: [] })
+    const messages: UIMessage[] = [
+      { id: 'user-1', type: 'user_text', content: 'Continue', timestamp: 1 },
+      { id: 'assistant-1', type: 'assistant_text', content: 'Done', timestamp: 2 },
+    ]
+    useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState({ messages }) } })
+    render(<MessageList />)
+    expect(await screen.findByRole('region', { name: 'Workspace changed files' })).toBeTruthy()
+    act(() => useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState({ messages, chatState: 'thinking' }) } }))
+    expect(screen.queryByRole('region', { name: 'Workspace changed files' })).toBeNull()
+    act(() => useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState({ messages }) } }))
+    await waitFor(() => expect(sessionsApi.getTurnCheckpoints).toHaveBeenCalledTimes(2))
+    expect(screen.queryByRole('region', { name: 'Workspace changed files' })).toBeNull()
   })
 
   it('renders multiple historical turn change cards across three turns', async () => {
@@ -9075,6 +9225,43 @@ describe('MessageList nested tool calls', () => {
     ).toBeTruthy()
     expect(screen.queryByText(/The image data was invalid/)).toBeNull()
   })
+
+  it.each([
+    ['en', /too large for your provider or relay/, /removed automatically/],
+    ['zh', /服务商或中转站允许的大小/, /自动移除/],
+  ] as const)(
+    'explains a request-too-large rejection as a provider limit and the recovery that follows (%s)',
+    (locale, limit, recovery) => {
+      useSettingsStore.setState({ locale })
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({
+            messages: [
+              {
+                id: 'error-1',
+                type: 'error',
+                code: 'invalid_request',
+                businessErrorCode: 'request_too_large',
+                message:
+                  'Request too large: your provider or relay rejected it (HTTP 413). This conversation is about 24MB.',
+                timestamp: 1,
+              },
+            ],
+          }),
+        },
+      })
+
+      render(<MessageList />)
+
+      expect(screen.getByText(limit)).toBeTruthy()
+      expect(screen.getByText(recovery)).toBeTruthy()
+      // The old copy blamed the selected model and asked users to delete files
+      // by hand, although the limit belongs to the provider and old media is
+      // now dropped automatically.
+      expect(screen.queryByText(/selected model|当前模型/)).toBeNull()
+      expect(screen.queryByText(/Remove large files|移除大文件/)).toBeNull()
+    },
+  )
 
   it('restores opener focus without scrolling when its render item remains fully visible', async () => {
     useChatStore.setState({

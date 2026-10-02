@@ -2,6 +2,9 @@ import {
   COST_FABLE_51,
   COST_HAIKU_35,
   COST_HAIKU_45,
+  COST_OPUS_55,
+  COST_OPUS_55_FAST,
+  COST_TIER_2_10,
   COST_TIER_3_15,
   COST_TIER_5_25,
   COST_TIER_10_50,
@@ -44,6 +47,7 @@ export type PricedTokens = {
 // @[MODEL LAUNCH]: add the new model's canonical prefix here alongside its entry in MODEL_COSTS.
 // Longest match wins, so a bare family name may sit next to its versioned variants.
 const MODEL_TIERS: ReadonlyArray<readonly [prefix: string, costs: ModelCosts]> = [
+  ['claude-opus-5-5', COST_OPUS_55],
   ['claude-opus-5', COST_TIER_5_25],
   ['claude-opus-4-8', COST_TIER_5_25],
   ['claude-opus-4-7', COST_TIER_5_25],
@@ -54,7 +58,8 @@ const MODEL_TIERS: ReadonlyArray<readonly [prefix: string, costs: ModelCosts]> =
   ['claude-fable-5', COST_TIER_10_50],
   ['claude-fable-5-1', COST_FABLE_51],
   ['claude-mythos-5', COST_TIER_10_50],
-  ['claude-sonnet-5', COST_TIER_3_15],
+  ['claude-sonnet-5-5', COST_TIER_2_10],
+  ['claude-sonnet-5', COST_TIER_2_10],
   ['claude-sonnet-4-6', COST_TIER_3_15],
   ['claude-sonnet-4-5', COST_TIER_3_15],
   ['claude-sonnet-4', COST_TIER_3_15],
@@ -68,7 +73,9 @@ const MODEL_TIERS: ReadonlyArray<readonly [prefix: string, costs: ModelCosts]> =
 
 // Fast mode bills at its own rate on the models that offer it; everything else ignores `speed`.
 const FAST_MODE_TIERS: ReadonlyArray<readonly [prefix: string, costs: ModelCosts]> = [
+  ['claude-opus-5-5', COST_OPUS_55_FAST],
   ['claude-opus-5', COST_TIER_10_50],
+  ['claude-opus-4-8', COST_TIER_10_50],
   ['claude-opus-4-7', COST_TIER_30_150],
 ]
 

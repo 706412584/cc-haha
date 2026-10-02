@@ -1,5 +1,5 @@
 import { getBaseUrl } from '../api/client'
-import { isAbsoluteLocalPath } from './handlePreviewLink'
+import { filesystemImageUrl, isAbsoluteLocalPath } from './handlePreviewLink'
 
 /**
  * Extensions that count as an inline image attachment.
@@ -23,7 +23,7 @@ export function isManagedGeneratedImagePath(filePath: string): boolean {
 
 /** Serves a local absolute image path through the local server. */
 export function localImageFileUrl(filePath: string): string {
-  return `${getBaseUrl()}/api/filesystem/file?path=${encodeURIComponent(filePath)}`
+  return filesystemImageUrl(getBaseUrl(), filePath)
 }
 
 type ImageSourceCandidate = {

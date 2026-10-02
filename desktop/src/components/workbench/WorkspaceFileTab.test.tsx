@@ -39,7 +39,19 @@ vi.mock('../workspace/surfaces/CodeSurface', () => ({
     language: string
     onAddSelection: (selection: { startLine: number; endLine: number; text: string }) => void
   }) => (
-    <div data-testid="code-surface" data-language={language}>
+    <div
+      data-testid="code-surface"
+      data-language={language}
+      // Like the real surface: a scroll container the panel restores a saved
+      // position onto. jsdom lays nothing out and ignores scrollTop writes, so the
+      // property is made a plain one that keeps what it is given.
+      data-workspace-scroll-surface=""
+      ref={(node) => {
+        if (node && !Object.prototype.hasOwnProperty.call(node, 'scrollTop')) {
+          Object.defineProperty(node, 'scrollTop', { value: 0, writable: true, configurable: true })
+        }
+      }}
+    >
       {value}
       <button
         type="button"
@@ -49,6 +61,48 @@ vi.mock('../workspace/surfaces/CodeSurface', () => ({
       </button>
     </div>
   ),
+}))
+
+/**
+ * The document surface owns fetching and rendering bytes and has its own suite.
+ * Here it is a marker that records what the panel handed it, and a scroll
+ * container that (like a real viewer) has nothing to scroll until it has laid out.
+ */
+vi.mock('../workspace/surfaces/document/DocumentSurface', () => ({
+  DocumentSurface: (props: {
+    sessionId: string
+    path: string
+    absolutePath: string
+    previewType: string
+    version: string | undefined
+    initialView: { scrollTop: number; scrollLeft: number } | undefined
+  }) => (
+    <div
+      data-testid="document-surface"
+      data-preview-type={props.previewType}
+      data-version={props.version ?? ''}
+      data-absolute-path={props.absolutePath}
+      data-initial-scroll-top={props.initialView?.scrollTop ?? ''}
+    >
+      <div
+        data-testid="deferred-scroller"
+        data-workspace-scroll-surface="deferred"
+        // An empty container has nothing to scroll, so a browser clamps every
+        // write to 0. jsdom would remember the value; without this the clamp that
+        // makes the regression below real would never happen under test.
+        ref={(node) => {
+          if (node && !Object.prototype.hasOwnProperty.call(node, 'scrollTop')) {
+            Object.defineProperty(node, 'scrollTop', { get: () => 0, set: () => {}, configurable: true })
+          }
+        }}
+      />
+    </div>
+  ),
+}))
+
+vi.mock('../../lib/systemFileOpen', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../lib/systemFileOpen')>()),
+  openLocalFileWithSystem: vi.fn().mockResolvedValue(undefined),
 }))
 
 vi.mock('../workspace/surfaces/MarkdownSurface', () => ({
@@ -73,6 +127,7 @@ vi.mock('../workspace/WorkspaceFileOpenWith', () => ({
 }))
 
 import { WorkspaceFileTab } from './WorkspaceFileTab'
+import { openLocalFileWithSystem } from '../../lib/systemFileOpen'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
 import { useWorkspaceContentStore, type WorkspaceFileEntry } from '../../stores/workspaceContentStore'
@@ -217,12 +272,130 @@ describe('content states', () => {
     )
   })
 
+  it('leaves a zoomed picture\'s scroll position to the picture, which has nothing to scroll until it has loaded', () => {
+    // Restoring it here would be clamped to 0 by a picture not yet laid out at its zoom,
+    // and the panel would then record that 0 over the position it was trying to restore.
+    seedEntry('assets/logo.png', { state: 'ok', previewType: 'image', dataUrl: 'data:image/png;base64,AAAA' })
+    useWorkspaceContentStore.setState({
+      fileViewByKey: { [`${SESSION}::assets/logo.png`]: { scrollTop: 442, scrollLeft: 524, zoom: 1.75 } },
+    })
+    renderTab('assets/logo.png')
+
+    expect(screen.getByRole('group', { name: 'assets/logo.png' })).toHaveAttribute('data-workspace-scroll-surface', 'deferred')
+    expect(useWorkspaceContentStore.getState().fileViewByKey[`${SESSION}::assets/logo.png`]).toMatchObject({
+      scrollTop: 442,
+      scrollLeft: 524,
+    })
+  })
+
   it('renders markdown through the markdown surface', () => {
     seedEntry('docs/README.md', { state: 'ok', previewType: 'text', content: '# Title' })
     renderTab('docs/README.md')
 
     expect(screen.getByTestId('markdown-surface')).toHaveTextContent('# Title')
     expect(screen.queryByTestId('code-surface')).toBeNull()
+  })
+
+  describe('documents', () => {
+    it.each(['pdf', 'docx', 'xlsx'] as const)('hands a %s to the document surface, not to the text viewers', (previewType) => {
+      seedEntry(`out/file.${previewType}`, { state: 'ok', previewType, version: 'v7' })
+      renderTab(`out/file.${previewType}`)
+
+      const surface = screen.getByTestId('document-surface')
+      expect(surface).toHaveAttribute('data-preview-type', previewType)
+      expect(surface).toHaveAttribute('data-version', 'v7')
+      expect(surface).toHaveAttribute('data-absolute-path', `/repo/out/file.${previewType}`)
+      expect(screen.queryByTestId('code-surface')).toBeNull()
+      expect(screen.queryByTestId('markdown-surface')).toBeNull()
+    })
+
+    it('passes the position this file was last left at, for the viewer to restore once it has laid out', () => {
+      seedEntry('out/thesis.pdf', { state: 'ok', previewType: 'pdf', version: 'v1' })
+      useWorkspaceContentStore.setState({
+        fileViewByKey: { [`${SESSION}::out/thesis.pdf`]: { scrollTop: 320, scrollLeft: 0 } },
+      })
+      renderTab('out/thesis.pdf')
+
+      expect(screen.getByTestId('document-surface')).toHaveAttribute('data-initial-scroll-top', '320')
+    })
+
+    it('does not overwrite a saved scroll position with 0 while the viewer has nothing to scroll yet', () => {
+      // Regression anchor. A rendered document lays out asynchronously, so its
+      // scroll container is empty when this panel first looks at it: assigning the
+      // saved offset clamps to 0, and the position that was then written back
+      // erased where the reader had been.
+      seedEntry('out/thesis.pdf', { state: 'ok', previewType: 'pdf', version: 'v1' })
+      useWorkspaceContentStore.setState({
+        fileViewByKey: { [`${SESSION}::out/thesis.pdf`]: { scrollTop: 320, scrollLeft: 0, zoom: 1.5 } },
+      })
+
+      renderTab('out/thesis.pdf')
+
+      expect(useWorkspaceContentStore.getState().fileViewByKey[`${SESSION}::out/thesis.pdf`]).toEqual({
+        scrollTop: 320,
+        scrollLeft: 0,
+        zoom: 1.5,
+      })
+    })
+
+    it('still records where the reader scrolls a deferred viewer to', () => {
+      seedEntry('out/thesis.pdf', { state: 'ok', previewType: 'pdf', version: 'v1' })
+      renderTab('out/thesis.pdf')
+      const scroller = screen.getByTestId('deferred-scroller')
+
+      Object.defineProperty(scroller, 'scrollTop', { value: 480, configurable: true })
+      fireEvent.scroll(scroller)
+
+      expect(useWorkspaceContentStore.getState().fileViewByKey[`${SESSION}::out/thesis.pdf`]).toMatchObject({ scrollTop: 480 })
+    })
+
+    it('still restores a saved position onto a surface that renders immediately', () => {
+      // The counterpart of the guard above: text surfaces have their content on
+      // the first render, and restoring them must keep working.
+      seedEntry('src/a.ts', { state: 'ok', previewType: 'text', content: 'const x = 1' })
+      useWorkspaceContentStore.setState({
+        fileViewByKey: { [`${SESSION}::src/a.ts`]: { scrollTop: 250, scrollLeft: 0 } },
+      })
+
+      renderTab('src/a.ts')
+
+      expect((screen.getByTestId('code-surface') as HTMLElement).scrollTop).toBe(250)
+    })
+  })
+
+  describe('a way out when the file cannot be shown', () => {
+    it.each(['too_large', 'binary', 'error'] as const)('offers the system app for %s', (state) => {
+      seedEntry('out/report.docx', { state, error: state === 'error' ? 'boom' : undefined })
+      renderTab('out/report.docx')
+
+      fireEvent.click(screen.getByRole('button', { name: 'Open in system app' }))
+
+      expect(openLocalFileWithSystem).toHaveBeenCalledWith('/repo/out/report.docx')
+    })
+
+    it('offers nothing for a file that is not there', () => {
+      seedEntry('out/report.docx', { state: 'missing' })
+      renderTab('out/report.docx')
+
+      expect(screen.queryByRole('button', { name: 'Open in system app' })).toBeNull()
+    })
+
+    it('offers nothing until the workdir is known, since a relative path would open nothing', () => {
+      useWorkspaceContentStore.setState({ statusBySession: {} })
+      seedEntry('out/report.docx', { state: 'binary' })
+      renderTab('out/report.docx')
+
+      expect(screen.queryByRole('button', { name: 'Open in system app' })).toBeNull()
+    })
+
+    it('offers the system app beside an image too', () => {
+      seedEntry('assets/logo.png', { state: 'ok', previewType: 'image', dataUrl: 'data:image/png;base64,AAAA' })
+      renderTab('assets/logo.png')
+
+      fireEvent.click(screen.getByRole('button', { name: 'Open in system app' }))
+
+      expect(openLocalFileWithSystem).toHaveBeenCalledWith('/repo/assets/logo.png')
+    })
   })
 
   it('renders everything else as code, with the language the server detected', () => {

@@ -42,6 +42,14 @@ export type MentionComposerHandle = {
   /** Caret/selection as offsets in the projected plain text. */
   getSelectionOffsets: () => { start: number; end: number }
   setSelectionOffsets: (start: number, end?: number) => void
+  /** Whether the editable element currently holds keyboard focus. */
+  hasFocus: () => boolean
+  /**
+   * Replaces the projected-text range with plain text as one editor
+   * transaction, so a single undo removes it (unlike a `value` rewrite, which
+   * resets history). The caret lands after the inserted text.
+   */
+  insertTextAtOffsets: (start: number, end: number, text: string) => void
   /**
    * Content for the model: text with each mention pill serialized to
    * file paths or explicit skill/plugin requests. Read from the live document, so literal text that
@@ -341,6 +349,17 @@ export const MentionComposer = forwardRef<MentionComposerHandle, MentionComposer
           ? TextSelection.near(view.state.doc.resolve(from))
           : TextSelection.create(view.state.doc, from, to)
         view.dispatch(view.state.tr.setSelection(selection))
+      },
+      hasFocus: () => viewRef.current?.hasFocus() ?? false,
+      insertTextAtOffsets: (start, end, text) => {
+        const view = viewRef.current
+        if (!view || !text) return
+        const docLength = projectedDocLength(view.state.doc)
+        const from = textOffsetToPmPos(view.state.doc, Math.min(start, docLength))
+        const to = textOffsetToPmPos(view.state.doc, Math.min(Math.max(start, end), docLength))
+        const tr = view.state.tr.insertText(text, from, to)
+        tr.setSelection(TextSelection.near(tr.doc.resolve(from + text.length)))
+        view.dispatch(tr.scrollIntoView())
       },
       getModelContent: () => {
         const view = viewRef.current

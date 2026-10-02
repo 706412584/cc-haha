@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   DESKTOP_UI_SMOKE_ALLOW_SELECTOR,
+  DESKTOP_UI_SMOKE_ATTENTION_PROBE,
+  DESKTOP_UI_SMOKE_ATTENTION_TAB,
   DESKTOP_UI_SMOKE_LOCALE,
   buildDesktopUiSmokeBootstrap,
   buildDesktopUiSmokePrompt,
@@ -32,6 +34,24 @@ describe('deterministic desktop UI smoke setup', () => {
     expect(dialog).toContain("aria-label={`${t('permission.allow')}: ${permissionContext}`}")
     expect(english).toContain("'permission.allow': 'Allow'")
     expect(DESKTOP_UI_SMOKE_ALLOW_SELECTOR).toBe('button[aria-label^="Allow: "]')
+  })
+
+  test('matches the waiting-tab marker the desktop actually renders', () => {
+    const tabBar = readFileSync('desktop/src/components/layout/TabBar.tsx', 'utf8')
+    const mark = readFileSync('desktop/src/components/layout/SessionAttentionMark.tsx', 'utf8')
+    const english = readFileSync('desktop/src/i18n/locales/en.ts', 'utf8')
+
+    // Same idea as the approval button above: the selectors are derived from the
+    // production markup, so a rename fails here before the lane times out waiting.
+    expect(tabBar).toContain('data-testid="tab-bar"')
+    expect(tabBar).toContain("data-attention={needsAttention ? 'true' : 'false'}")
+    expect(mark).toContain('role="img"')
+    expect(english).toContain("'tabs.sessionRunning': 'Session running'")
+    expect(DESKTOP_UI_SMOKE_ATTENTION_TAB).toBe('[data-testid="tab-bar"] [data-attention="true"]')
+    expect(DESKTOP_UI_SMOKE_ATTENTION_PROBE).toContain(DESKTOP_UI_SMOKE_ATTENTION_TAB)
+    expect(DESKTOP_UI_SMOKE_ATTENTION_PROBE).toContain('[role="img"]')
+    // The probe must also reject a tab that carries the running dot.
+    expect(DESKTOP_UI_SMOKE_ATTENTION_PROBE).toContain('!tab.querySelector(\'[aria-label="Session running"]\')')
   })
 
   test('asks the mock runtime to write inside the fixture copy only', () => {

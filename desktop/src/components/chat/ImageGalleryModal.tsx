@@ -1,14 +1,25 @@
 import { useEffect } from 'react'
-import { X } from 'lucide-react'
+import { ExternalLink, X } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { Modal } from '@/components/ui/Modal'
+import { ZoomableImage, type ZoomableImageProps } from '@/components/ui/ZoomableImage'
+import { useAuthedImageFallback } from '../../lib/useAuthedImageFallback'
+import { AuthedImage } from './AuthedImage'
+import { getDesktopHost } from '@/lib/desktopHost'
+import { isRootedLocalPath } from '@/lib/handlePreviewLink'
+import { openLocalFileWithSystem, reportOpenFailure } from '@/lib/systemFileOpen'
 import { useOverlayStore } from '../../stores/overlayStore'
 import { useTranslation } from '../../i18n'
 
 type GalleryImage = {
   src: string
   name: string
+  /**
+   * The file on disk, when the picture is one (a blob or inline image is not).
+   * It is what "open in system app" hands to the operating system.
+   */
+  path?: string
 }
 
 type Props = {
@@ -18,6 +29,12 @@ type Props = {
   onClose: () => void
   onSelect: (index: number) => void
   onAnnotate?: (image: GalleryImage) => void
+}
+
+/** The lightbox picture, which also loads where a bare request is refused (web UI, H5). */
+function AuthedZoomableImage({ src, onError, ...props }: ZoomableImageProps) {
+  const image = useAuthedImageFallback(src, onError)
+  return <ZoomableImage {...props} src={image.src ?? src} onError={image.onError} />
 }
 
 export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect, onAnnotate }: Props) {
@@ -51,6 +68,14 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
 
   if (!activeImage) return null
 
+  // Only in the desktop app: in a browser the "system" is the machine the server
+  // runs on, which is not the one the reader is looking at. (Same rule as the
+  // attachment chips.)
+  const host = getDesktopHost()
+  const originalPath = activeImage.path && isRootedLocalPath(activeImage.path) && host.isDesktop && host.capabilities.shell
+    ? activeImage.path
+    : undefined
+
   return (
     <Modal open={open} onClose={onClose} title={activeImage.name} variant="media">
       <div className="flex h-full min-h-0 flex-col">
@@ -81,11 +106,31 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
           </div>
         </div>
 
-        <div className="relative flex min-h-0 flex-1 items-center justify-center px-4 pb-4">
-          <img
+        <div className="relative flex min-h-0 flex-1 flex-col px-4 pb-4">
+          <AuthedZoomableImage
+            // The size it measures belongs to one picture, and so does the zoom.
+            key={activeImage.src}
             src={activeImage.src}
             alt={activeImage.name}
-            className="max-h-full max-w-full rounded-[var(--radius-md)] object-contain"
+            surface="media"
+            labels={{
+              group: t('workspace.zoom.group'),
+              zoomIn: t('workspace.zoom.in'),
+              zoomOut: t('workspace.zoom.out'),
+              fit: t('workspace.zoom.fitWindow'),
+            }}
+            actions={originalPath ? (
+              <IconButton
+                icon={<ExternalLink size={16} strokeWidth={1.9} />}
+                label={t('workspace.openInSystemApp')}
+                size="md"
+                tone="secondary"
+                surface="media"
+                onClick={() => {
+                  void openLocalFileWithSystem(originalPath).catch(() => reportOpenFailure(originalPath))
+                }}
+              />
+            ) : undefined}
           />
 
           {images.length > 1 ? (
@@ -131,7 +176,7 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
                     : 'border-[var(--color-media-border)] opacity-55 hover:opacity-90'
                 }`}
               >
-                <img src={image.src} alt={image.name} className="h-12 w-12 object-cover" />
+                <AuthedImage src={image.src} alt={image.name} className="h-12 w-12 object-cover" />
               </button>
             ))}
           </div>

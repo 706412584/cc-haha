@@ -129,7 +129,7 @@ describe('Fable model configuration', () => {
     expect(getMarketingNameForModel('claude-opus-4-8')).toBe('Opus 4.8')
     expect(getMarketingNameForModel('claude-sonnet-5')).toBe('Sonnet 5')
     expect(renderDefaultModelSetting('opusplan')).toBe(
-      'Opus 5 in plan mode, else Sonnet 5',
+      'Opus 5.5 in plan mode, else Sonnet 5.5',
     )
   })
 
@@ -158,22 +158,46 @@ describe('Fable model configuration', () => {
     })
   })
 
-  test('publishes current model IDs and knowledge cutoffs in environment context', async () => {
+  test('publishes the current model lineup in environment context', async () => {
     expect(SKILL_MODEL_VARS).toMatchObject({
-      OPUS_ID: 'claude-opus-4-8',
-      OPUS_NAME: 'Claude Opus 4.8',
-      SONNET_ID: 'claude-sonnet-5',
-      SONNET_NAME: 'Claude Sonnet 5',
+      OPUS_ID: 'claude-opus-5-5',
+      OPUS_NAME: 'Claude Opus 5.5',
+      SONNET_ID: 'claude-sonnet-5-5',
+      SONNET_NAME: 'Claude Sonnet 5.5',
+      PREV_SONNET_ID: 'claude-sonnet-5',
     })
 
-    for (const model of ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5']) {
+    for (const model of ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-sonnet-5-5']) {
       const info = await computeSimpleEnvInfo(model)
-      expect(info).toContain('Assistant knowledge cutoff is January 2026.')
-      expect(info).toContain("Fable 5: 'claude-fable-5'")
-      expect(info).toContain("Opus 4.8: 'claude-opus-4-8'")
-      expect(info).toContain("Sonnet 5: 'claude-sonnet-5'")
-      expect(info).toContain('same Claude Opus 4.8 model')
+      expect(info).toContain('The most recent Claude models are the Claude 5 family and Haiku 4.5.')
+      expect(info).toContain("Fable 5.1: 'claude-fable-5-1'")
+      expect(info).toContain("Opus 5.5: 'claude-opus-5-5'")
+      expect(info).toContain("Sonnet 5.5: 'claude-sonnet-5-5'")
+      expect(info).toContain("Haiku 4.5: 'claude-haiku-4-5-20251001'")
+      // The fast-mode note no longer names an Opus generation that has since been superseded.
+      expect(info).toContain('Fast mode for Claude Code uses Claude Opus with faster output')
+      expect(info).not.toContain('same Claude Opus 4.8 model')
     }
+  })
+
+  // Reliable knowledge cutoffs: https://platform.claude.com/docs/en/models/overview and each
+  // model's page, which match the official Claude Code model catalog.
+  test.each([
+    ['claude-fable-5-1', 'June 2026'],
+    ['claude-opus-5-5', 'June 2026'],
+    ['claude-sonnet-5-5', 'June 2026'],
+    ['claude-opus-5', 'May 2026'],
+    ['claude-fable-5', 'January 2026'],
+    ['claude-opus-4-8', 'January 2026'],
+    ['claude-opus-4-7', 'January 2026'],
+    ['claude-sonnet-5', 'January 2026'],
+    ['claude-sonnet-4-6', 'August 2025'],
+    ['claude-opus-4-5', 'May 2025'],
+    ['claude-haiku-4-5', 'February 2025'],
+  ])('tells %s its knowledge cutoff is %s', async (model, cutoff) => {
+    expect(await computeSimpleEnvInfo(model)).toContain(`Assistant knowledge cutoff is ${cutoff}.`)
+    // A context-window marker does not change what the model knows.
+    expect(await computeSimpleEnvInfo(`${model}[1m]`)).toContain(`Assistant knowledge cutoff is ${cutoff}.`)
   })
 
   test('sanitizes new model trailers and keeps teammate fallbacks provider-safe', () => {

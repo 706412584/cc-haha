@@ -1,6 +1,9 @@
 import { open, stat } from 'node:fs/promises'
 import { statSync, type Stats } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
+import { StringDecoder } from 'node:string_decoder'
+import parser, { type Token } from 'stream-json/parser.js'
+import { createBoundedJsonProjection } from '../boundedJsonProjection.js'
 import type { LocalIndexDatabase, LocalIndexWriteOperation } from './database.js'
 import { writeActivityProjection } from './activityIndex.js'
 import {
@@ -38,7 +41,9 @@ import type {
 // 6: protocol enforcement was removed; rebuild v5 summaries without protocol restrictions.
 // 7: independent desktop team workers remain addressable but leave sidebar listings.
 // 8: complete runtime selections clear the previous effort when no override is saved.
-export const SESSION_SUMMARY_PARSER_VERSION = 8
+// 9: usage cost rates were corrected (Sonnet 5, Sonnet 5.5, Opus 5.5, fast mode); rebuild the
+//    persisted per-model dollars.
+export const SESSION_SUMMARY_PARSER_VERSION = 9
 
 export type SessionSourceCandidate = {
   path: string
@@ -114,6 +119,8 @@ export type SessionProjectorOptions = {
   maxSourceBytes?: number
   canCommit?: () => boolean
   signal?: AbortSignal
+  /** Records longer than this are streamed into a bounded skeleton. */
+  recordStreamingThresholdBytes?: number
 }
 
 type SourceProjectionBundle = {
@@ -125,6 +132,11 @@ type SourceProjectionBundle = {
   locatorWrite: 'append' | 'replace'
 }
 
+/**
+ * Records up to this size are buffered and parsed whole. A longer record (a
+ * base64 image or document result) is streamed into a bounded skeleton instead,
+ * so one large payload never makes the whole transcript unprojectable.
+ */
 export const MAX_PROJECTION_RECORD_BYTES = 8 * 1024 * 1024
 export const MAX_PROJECTION_RECORDS = 50_000
 export const MAX_PROJECTION_METADATA_BYTES = 16 * 1024 * 1024
@@ -136,6 +148,125 @@ class ProjectionLimitError extends Error {
   readonly code = 'LOCAL_INDEX_SOURCE_LIMIT'
   constructor() {
     super('Transcript exceeds the bounded local-index projection budget')
+  }
+}
+
+export const LOCAL_INDEX_SOURCE_LIMIT = 'LOCAL_INDEX_SOURCE_LIMIT'
+
+const OVERSIZED_SKELETON_BYTES = 1024 * 1024
+const OVERSIZED_PREVIEW_CHARS = 4096
+// Fails the reducer's JSON.parse, so an invalid oversized line is counted as
+// malformed exactly like an ordinary one.
+const UNPARSEABLE_RECORD_TEXT = '{'
+// Every field the reducer, its activity projection, usage dedupe and entry
+// locators read. Values the reducer never reads (tool results, base64 bodies)
+// are skipped while the parser still validates them.
+const SKELETON_ROOT_SCALARS = new Set([
+  'type', 'subtype', 'content', 'isMeta', 'isSidechain', 'entrypoint', 'timestamp',
+  'cwd', 'workDir', 'permissionMode', 'runtimeProviderId', 'runtimeModelId',
+  'effortLevel', 'customTitle', 'aiTitle', 'uuid', 'parentUuid', 'messageId',
+  'parent_tool_use_id', 'requestId', 'version', 'sessionId', 'timeSavedMs',
+])
+const SKELETON_ROOT_SUBTREES = new Set(['repository', 'worktreeSession', 'forkedFrom'])
+const SKELETON_BLOCK_FIELDS = new Set(['type', 'name', 'id', 'tool_use_id', 'text', 'input'])
+
+function skeletonSelected(path: readonly string[]): boolean {
+  if (!path.length) return true
+  const head = path[0]!
+  if (SKELETON_ROOT_SUBTREES.has(head)) return true
+  if (head !== 'message') return path.length === 1 && SKELETON_ROOT_SCALARS.has(head)
+  if (path.length === 1) return true
+  const field = path[1]
+  if (field === 'role' || field === 'id' || field === 'model') return path.length === 2
+  if (field === 'usage') return true
+  if (field !== 'content') return false
+  if (path.length <= 3) return true
+  if (!SKELETON_BLOCK_FIELDS.has(path[3]!)) return false
+  if (path.length === 4) return true
+  return path[3] === 'input' && path.length === 5 && (path[4] === 'skill' || path[4] === 'command')
+}
+
+function skeletonPreview(path: readonly string[]): boolean {
+  if (path.length === 0) return true
+  if (path.length === 1) return path[0] === 'content'
+  if (path[0] !== 'message' || path[1] !== 'content') return false
+  // Text bodies are only read for titles and shot attribution, so a preview is
+  // enough; identifiers such as tool names stay exact and budgeted.
+  return path.length === 2 ||
+    path.length === 3 ||
+    path.length === 4 && (path[3] === 'text' || path[3] === 'input') ||
+    path.length === 5 && path[3] === 'input' && path[4] === 'command'
+}
+
+function isJsonWhitespace(byte: number): boolean {
+  return byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d ||
+    byte === 0x0b || byte === 0x0c
+}
+
+/**
+ * Streams one record that is too large to buffer and yields the chunk text the
+ * reducer parses in its place. The original byte range stays with the chunk,
+ * so offsets and locators still describe the canonical line.
+ */
+class OversizedRecordStream {
+  private readonly stream = parser.asStream({ packValues: false, streamValues: true })
+  private readonly decoder = new StringDecoder('utf8')
+  private readonly projection = createBoundedJsonProjection({
+    selected: skeletonSelected,
+    preview: skeletonPreview,
+    metadataBytes: OVERSIZED_SKELETON_BYTES,
+    previewChars: OVERSIZED_PREVIEW_CHARS,
+    limitError: () => new ProjectionLimitError(),
+  })
+  private parseError: unknown
+  private projectionError: unknown
+  private sawContent = false
+
+  constructor() {
+    this.stream.on('error', error => {
+      this.parseError ??= error
+    })
+    this.stream.on('data', (token: Token) => {
+      if (this.projectionError || this.parseError) return
+      try {
+        this.projection.token(token)
+      } catch (error) {
+        this.projectionError = error
+      }
+    })
+  }
+
+  async write(part: Buffer): Promise<void> {
+    if (!this.sawContent) this.sawContent = part.some(byte => !isJsonWhitespace(byte))
+    // Keep parsing after a budget error: an invalid line must still count as
+    // malformed rather than as a projection limit.
+    if (this.parseError) return
+    const text = this.decoder.write(part)
+    if (!text) return
+    await new Promise<void>(resolve => this.stream.write(text, () => resolve()))
+  }
+
+  async finish(): Promise<string> {
+    try {
+      if (!this.sawContent) return ''
+      if (!this.parseError) {
+        await new Promise<void>(resolve => {
+          this.stream.once('end', resolve)
+          this.stream.once('error', () => resolve())
+          this.stream.end(this.decoder.end())
+        })
+      }
+      if (this.parseError) return UNPARSEABLE_RECORD_TEXT
+      if (this.projectionError) throw this.projectionError
+      const root = this.projection.root()
+      return root === undefined ? '' : JSON.stringify(root)
+    } finally {
+      this.stream.destroy()
+    }
+  }
+
+  discard(): void {
+    this.stream.destroy()
   }
 }
 
@@ -250,6 +381,7 @@ async function streamProjection(options: {
    * unread remainder is reported as pending tail.
    */
   readLimit: number
+  recordStreamingThresholdBytes: number
 }): Promise<{
   projection: TranscriptProjection
   entryLocators: TranscriptEntryLocator[]
@@ -257,6 +389,7 @@ async function streamProjection(options: {
 }> {
   let handle: ReadonlyFileHandle | undefined
   let thrown: unknown
+  let oversized: OversizedRecordStream | undefined
   const work: ProjectionWork = { maxBufferedChunks: 0, maxBufferedBytes: 0 }
   try {
     handle = await options.io.openReadonly(options.candidate.path, 'r')
@@ -277,6 +410,8 @@ async function streamProjection(options: {
     let pendingSegmentsLength = 0
     let chunks: TranscriptChunk[] = []
     let chunkBytes = 0
+    // Bytes of the current record already handed to `oversized`.
+    let oversizedBytes = 0
     let recordsRead = projectionRecordCounts.get(options.seed) ?? 0
     let metadataBytes = projectionMetadataBytes.get(options.seed) ?? 0
     const entryLocators: TranscriptEntryLocator[] = []
@@ -351,42 +486,68 @@ async function streamProjection(options: {
       let segmentStart = 0
       while (segmentStart < bytes.length) {
         const newline = bytes.indexOf(0x0a, segmentStart)
+        const segment = bytes.subarray(segmentStart, newline === -1 ? bytes.length : newline + 1)
+        if (!oversized && pendingSegmentsLength + segment.length > options.recordStreamingThresholdBytes) {
+          // Hand the record to the bounded stream instead of concatenating it.
+          oversized = new OversizedRecordStream()
+          for (const saved of pendingSegments) await oversized.write(saved)
+          oversizedBytes = pendingSegmentsLength
+          pendingSegments = []
+          pendingSegmentsLength = 0
+        }
         if (newline === -1) {
-          const segment = bytes.subarray(segmentStart)
-          if (pendingSegmentsLength + segment.length > MAX_PROJECTION_RECORD_BYTES) throw new ProjectionLimitError()
-          pendingSegments.push(segment)
-          pendingSegmentsLength += segment.length
-          work.maxBufferedBytes = Math.max(
-            work.maxBufferedBytes,
-            chunkBytes + pendingSegmentsLength,
-          )
+          if (oversized) {
+            await oversized.write(segment)
+            oversizedBytes += segment.length
+          } else {
+            pendingSegments.push(segment)
+            pendingSegmentsLength += segment.length
+            work.maxBufferedBytes = Math.max(
+              work.maxBufferedBytes,
+              chunkBytes + pendingSegmentsLength,
+            )
+          }
           break
         }
 
-        const finalSegment = bytes.subarray(segmentStart, newline + 1)
-        if (pendingSegmentsLength + finalSegment.length > MAX_PROJECTION_RECORD_BYTES) throw new ProjectionLimitError()
         recordsRead += 1
         if (recordsRead > MAX_PROJECTION_RECORDS) throw new ProjectionLimitError()
-        let completeLine: Buffer
-        if (pendingSegments.length === 0) {
-          completeLine = finalSegment
+        if (oversized) {
+          await oversized.write(segment)
+          const recordBytes = oversizedBytes + segment.length
+          const text = await oversized.finish()
+          oversized = undefined
+          oversizedBytes = 0
+          chunks.push({
+            text,
+            byteStart: lineByteStart,
+            byteLength: recordBytes,
+            completeLine: true,
+          })
+          chunkBytes += text.length
+          lineByteStart += recordBytes
         } else {
-          pendingSegments.push(finalSegment)
-          pendingSegmentsLength += finalSegment.length
-          completeLine = Buffer.concat(pendingSegments, pendingSegmentsLength)
+          let completeLine: Buffer
+          if (pendingSegments.length === 0) {
+            completeLine = segment
+          } else {
+            pendingSegments.push(segment)
+            pendingSegmentsLength += segment.length
+            completeLine = Buffer.concat(pendingSegments, pendingSegmentsLength)
+          }
+          chunks.push({
+            text: completeLine.toString('utf8'),
+            byteStart: lineByteStart,
+            byteLength: completeLine.length,
+            completeLine: true,
+          })
+          chunkBytes += completeLine.length
+          lineByteStart += completeLine.length
+          pendingSegments = []
+          pendingSegmentsLength = 0
         }
-        chunks.push({
-          text: completeLine.toString('utf8'),
-          byteStart: lineByteStart,
-          byteLength: completeLine.length,
-          completeLine: true,
-        })
-        chunkBytes += completeLine.length
         work.maxBufferedChunks = Math.max(work.maxBufferedChunks, chunks.length)
         work.maxBufferedBytes = Math.max(work.maxBufferedBytes, chunkBytes)
-        lineByteStart += completeLine.length
-        pendingSegments = []
-        pendingSegmentsLength = 0
         segmentStart = newline + 1
 
         if (
@@ -418,6 +579,17 @@ async function streamProjection(options: {
         ).projection
       }
       projection.pendingTailBytes = options.snapshot.size - projection.indexedBytes
+    } else if (oversized) {
+      // An unterminated oversized tail is only counted. The next append reads
+      // it again from `indexedBytes` once its newline arrives.
+      oversized.discard()
+      oversized = undefined
+      projection = reduceTranscriptWithLocators([{
+        text: '',
+        byteStart: lineByteStart,
+        byteLength: oversizedBytes,
+        completeLine: false,
+      }], projection, { isSubagent: options.isSubagent }).projection
     } else if (pendingSegmentsLength > 0) {
       const pending = pendingSegments.length === 1
         ? pendingSegments[0]!
@@ -466,6 +638,7 @@ async function streamProjection(options: {
     }
     throw new SourceReadRetryError('transient-io')
   } finally {
+    oversized?.discard()
     if (handle) {
       try {
         await handle.close()
@@ -560,6 +733,10 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
   const maxSourceBytes = Number.isFinite(configuredSourceLimit)
     ? Math.max(1, Math.trunc(configuredSourceLimit))
     : SESSION_INDEX_MAX_SOURCE_BYTES
+  const recordStreamingThresholdBytes = Math.min(
+    MAX_PROJECTION_RECORD_BYTES,
+    Math.max(1, options.recordStreamingThresholdBytes ?? MAX_PROJECTION_RECORD_BYTES),
+  )
   const projectionCache = new Map<string, TranscriptProjection>()
   const assertActive = (): void => {
     if (options.signal?.aborted || options.canCommit?.() === false) {
@@ -578,6 +755,28 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
       writeBackfillState(writer, options.scope, watermark, resolved, now())
       assertActive()
     })
+  }
+
+  /**
+   * Remember a committed transcript that no longer fits the projection budget,
+   * so the next launch knows before its first read. Only the state changes:
+   * the stored fingerprint and rows still describe the last successful
+   * projection, and the next successful commit resets the state.
+   */
+  const markSourceLimited = (path: string): void => {
+    try {
+      options.database.transaction(writer => {
+        assertActive()
+        writer.run(`
+          UPDATE source_files
+          SET state = 'degraded', last_error_code = ?, updated_at_ms = ?
+          WHERE path = ? AND NOT (state = 'degraded' AND last_error_code IS ?)
+        `, LOCAL_INDEX_SOURCE_LIMIT, now(), path, LOCAL_INDEX_SOURCE_LIMIT)
+      })
+    } catch {
+      // The failure still reaches the coordinator; persisting it only lets the
+      // next launch skip rediscovering it.
+    }
   }
 
   const commitSourceProjection = (
@@ -741,6 +940,7 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
     isSubagent = false,
     // Activity projections have never been size-capped; only `projectSource` passes a ceiling.
     readLimit = Number.POSITIVE_INFINITY,
+    recordStreamingThresholdBytes = MAX_PROJECTION_RECORD_BYTES,
   ): Promise<{
     projection: TranscriptProjection
     entryLocators: TranscriptEntryLocator[]
@@ -785,6 +985,7 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
       assertActive,
       isSubagent,
       readLimit,
+      recordStreamingThresholdBytes,
     })
     assertActive()
     const commitSnapshot = await captureSourceFingerprint({
@@ -845,7 +1046,19 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
         }
         if (change.kind === 'retry') return change
         if (change.kind === 'deleted') return this.deleteSource(candidate.path, progress)
-        if (
+        if (existing.state === 'degraded') {
+          // The budgets only grow as a transcript is appended to, so a limited
+          // source is retried once it is rewritten or the parser changes, not
+          // on every append. Its stored fingerprint describes the last
+          // successful projection and must never seed an append.
+          if (
+            existing.lastErrorCode === LOCAL_INDEX_SOURCE_LIMIT &&
+            (change.kind === 'unchanged' || change.kind === 'append')
+          ) {
+            throw new ProjectionLimitError()
+          }
+          action = 'rebuild'
+        } else if (
           change.kind === 'unchanged' &&
           options.index.getActivitySource(candidate.path)
         ) {
@@ -857,8 +1070,7 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
             projection: previousProjection,
             work: { maxBufferedChunks: 0, maxBufferedBytes: 0 },
           }
-        }
-        if (change.kind === 'unchanged') {
+        } else if (change.kind === 'unchanged') {
           action = 'rebuild'
         } else if (change.kind === 'append') {
           const dependedOnFileFallback = previous !== null &&
@@ -876,9 +1088,15 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
         }
       }
 
+      const failFrom = (error: unknown): Extract<SourceChange, { kind: 'retry' }> => {
+        if (error instanceof ProjectionLimitError && existing) {
+          markSourceLimited(candidate.path)
+        }
+        return retryFrom(error)
+      }
       let built
       try {
-        built = await buildProjection(candidate, start, seed, false, maxSourceBytes)
+        built = await buildProjection(candidate, start, seed, false, maxSourceBytes, recordStreamingThresholdBytes)
       } catch (error) {
         if (action === 'append' && error instanceof TranscriptRebuildRequiredError) {
           action = 'rebuild'
@@ -889,12 +1107,13 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
               initialProjection(candidate),
               false,
               maxSourceBytes,
+              recordStreamingThresholdBytes,
             )
           } catch (rebuildError) {
-            return retryFrom(rebuildError)
+            return failFrom(rebuildError)
           }
         } else {
-          return retryFrom(error)
+          return failFrom(error)
         }
       }
 

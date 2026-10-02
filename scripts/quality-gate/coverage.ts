@@ -161,6 +161,7 @@ const DESKTOP_SCOPE: CoverageScope = {
   includePrefixes: ['desktop/src/'],
   excludePrefixes: [
     'desktop/src/types/',
+    'desktop/src/test/',
     // Dev-only tooling, same category as mocks/. `dev/` holds the component
     // gallery, which Vite never bundles (its build input is index.html alone)
     // and which exists precisely to be looked at by a person — unit-testing a

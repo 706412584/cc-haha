@@ -18,6 +18,13 @@ const DEFAULT_PET_PREFERENCES = {
   lastSessionId: null,
 }
 
+const DEFAULT_VOICE_INPUT_PREFERENCES = {
+  enabled: false,
+  providerId: 'sensevoice-local',
+  language: 'auto',
+  downloadSource: 'auto',
+}
+
 async function setup() {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-ui-preferences-'))
   originalConfigDir = process.env.CLAUDE_CONFIG_DIR
@@ -66,7 +73,7 @@ describe('DesktopUiPreferencesService', () => {
 
     expect(result.exists).toBe(false)
     expect(result.preferences).toEqual({
-      schemaVersion: 5,
+      schemaVersion: 6,
       profile: {
         displayName: 'cc-haha',
         subtitle: 'github.com/706412584/cc-haha',
@@ -74,6 +81,7 @@ describe('DesktopUiPreferencesService', () => {
         avatarUpdatedAt: null,
       },
       pet: DEFAULT_PET_PREFERENCES,
+      voiceInput: DEFAULT_VOICE_INPUT_PREFERENCES,
       projectDisplayNames: {},
       sidebar: {
         projectOrder: [],
@@ -120,7 +128,7 @@ describe('DesktopUiPreferencesService', () => {
 
     expect(before.exists).toBe(true)
     expect(before.preferences).toEqual({
-      schemaVersion: 5,
+      schemaVersion: 6,
       futureField: { keep: true },
       profile: {
         displayName: 'cc-haha',
@@ -129,6 +137,7 @@ describe('DesktopUiPreferencesService', () => {
         avatarUpdatedAt: null,
       },
       pet: DEFAULT_PET_PREFERENCES,
+      voiceInput: DEFAULT_VOICE_INPUT_PREFERENCES,
       projectDisplayNames: {
         '/workspace/alpha': 'Alpha project',
       },
@@ -141,7 +150,7 @@ describe('DesktopUiPreferencesService', () => {
       },
     })
     expect(after).toEqual({
-      schemaVersion: 5,
+      schemaVersion: 6,
       futureField: { keep: true },
       profile: {
         displayName: 'cc-haha',
@@ -150,6 +159,7 @@ describe('DesktopUiPreferencesService', () => {
         avatarUpdatedAt: null,
       },
       pet: DEFAULT_PET_PREFERENCES,
+      voiceInput: DEFAULT_VOICE_INPUT_PREFERENCES,
       projectDisplayNames: {
         '/workspace/alpha': 'Alpha project',
       },
@@ -307,7 +317,7 @@ describe('DesktopUiPreferencesService', () => {
     })
 
     expect(after).toMatchObject({
-      schemaVersion: 5,
+      schemaVersion: 6,
       futureField: { keep: true },
       profile: {
         displayName: 'Local Operator',
@@ -386,7 +396,7 @@ describe('DesktopUiPreferencesService', () => {
     const after = await new DesktopUiPreferencesService().updatePetPreferences({ enabled: true })
 
     expect(after).toMatchObject({
-      schemaVersion: 5,
+      schemaVersion: 6,
       futureField: { keep: true },
       pet: {
         futurePetField: { keep: 'pet-too' },
@@ -482,7 +492,7 @@ describe('DesktopUiPreferencesService', () => {
     })
 
     expect(after).toEqual({
-      schemaVersion: 5,
+      schemaVersion: 6,
       profile: {
         displayName: 'Claude Captain',
         subtitle: 'local.example/profile',
@@ -490,6 +500,7 @@ describe('DesktopUiPreferencesService', () => {
         avatarUpdatedAt: null,
       },
       pet: DEFAULT_PET_PREFERENCES,
+      voiceInput: DEFAULT_VOICE_INPUT_PREFERENCES,
       projectDisplayNames: {},
       sidebar: {
         projectOrder: [],
@@ -575,7 +586,7 @@ describe('desktop UI preferences API', () => {
     expect(putBody).toEqual({
       ok: true,
       preferences: {
-        schemaVersion: 5,
+        schemaVersion: 6,
         profile: {
           displayName: 'cc-haha',
           subtitle: 'github.com/706412584/cc-haha',
@@ -583,6 +594,7 @@ describe('desktop UI preferences API', () => {
           avatarUpdatedAt: null,
         },
         pet: DEFAULT_PET_PREFERENCES,
+        voiceInput: DEFAULT_VOICE_INPUT_PREFERENCES,
         projectDisplayNames: {},
         sidebar: {
           projectOrder: ['/workspace/beta', '/workspace/alpha'],
@@ -602,7 +614,7 @@ describe('desktop UI preferences API', () => {
     expect(getBody).toEqual({
       exists: true,
       preferences: {
-        schemaVersion: 5,
+        schemaVersion: 6,
         profile: {
           displayName: 'cc-haha',
           subtitle: 'github.com/706412584/cc-haha',
@@ -610,6 +622,7 @@ describe('desktop UI preferences API', () => {
           avatarUpdatedAt: null,
         },
         pet: DEFAULT_PET_PREFERENCES,
+        voiceInput: DEFAULT_VOICE_INPUT_PREFERENCES,
         projectDisplayNames: {},
         sidebar: {
           projectOrder: ['/workspace/beta', '/workspace/alpha'],
@@ -700,7 +713,7 @@ describe('desktop UI preferences API', () => {
     await expect(putRes.json()).resolves.toMatchObject({
       ok: true,
       preferences: {
-        schemaVersion: 5,
+        schemaVersion: 6,
         pet: {
           enabled: true,
           selectedPetId: 'seedy',
@@ -936,6 +949,135 @@ describe('desktop UI preferences API', () => {
     await expect(patchRes.json()).resolves.toMatchObject({
       error: 'METHOD_NOT_ALLOWED',
       message: 'Method PATCH not allowed',
+    })
+  })
+})
+
+describe('DesktopUiPreferencesService voiceInput section', () => {
+  beforeEach(setup)
+  afterEach(teardown)
+
+  async function writeDesktopUiFile(contents: Record<string, unknown>) {
+    await fs.mkdir(path.join(tmpDir, 'cc-haha'), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, 'cc-haha', 'desktop-ui.json'), JSON.stringify(contents), 'utf-8')
+  }
+
+  test('normalizes old schema files without voiceInput and preserves unknown fields', async () => {
+    await writeDesktopUiFile({
+      schemaVersion: 5,
+      futureField: { keep: true },
+      pet: { ...DEFAULT_PET_PREFERENCES, enabled: true },
+      sidebar: { projectOrder: ['/workspace/alpha'] },
+    })
+
+    const service = new DesktopUiPreferencesService()
+    const read = await service.readPreferences()
+    expect(read.exists).toBe(true)
+    expect(read.preferences).toMatchObject({
+      schemaVersion: 6,
+      futureField: { keep: true },
+      pet: { enabled: true },
+      voiceInput: DEFAULT_VOICE_INPUT_PREFERENCES,
+    })
+
+    const after = await service.updateVoiceInputPreferences({ enabled: true, language: 'zh' })
+
+    expect(after.voiceInput).toEqual({ enabled: true, providerId: 'sensevoice-local', language: 'zh', downloadSource: 'auto' })
+    expect(await readDesktopUiFile()).toMatchObject({
+      schemaVersion: 6,
+      futureField: { keep: true },
+      pet: { enabled: true },
+      sidebar: { projectOrder: ['/workspace/alpha'] },
+      voiceInput: { enabled: true, providerId: 'sensevoice-local', language: 'zh', downloadSource: 'auto' },
+    })
+  })
+
+  test('applies partial voice updates and keeps unknown voiceInput fields', async () => {
+    await writeDesktopUiFile({
+      schemaVersion: 6,
+      voiceInput: {
+        enabled: true,
+        providerId: 'cloud-x',
+        language: 'ja',
+        futureVoiceField: { keep: 'voice' },
+      },
+    })
+
+    const service = new DesktopUiPreferencesService()
+    const after = await service.updateVoiceInputPreferences({ language: 'ko' })
+
+    expect(after.voiceInput).toEqual({
+      enabled: true,
+      providerId: 'cloud-x',
+      language: 'ko',
+      downloadSource: 'auto',
+      futureVoiceField: { keep: 'voice' },
+    } as typeof after.voiceInput)
+    expect((await service.readPreferences()).preferences.voiceInput).toEqual(after.voiceInput)
+  })
+
+  test('reads a voiceInput section saved before the download source existed as auto', async () => {
+    await writeDesktopUiFile({
+      schemaVersion: 6,
+      voiceInput: { enabled: true, providerId: 'sensevoice-local', language: 'zh' },
+    })
+
+    const service = new DesktopUiPreferencesService()
+    expect((await service.readPreferences()).preferences.voiceInput).toEqual({
+      enabled: true,
+      providerId: 'sensevoice-local',
+      language: 'zh',
+      downloadSource: 'auto',
+    })
+
+    const after = await service.updateVoiceInputPreferences({ downloadSource: 'mirror' })
+    expect(after.voiceInput).toEqual({ enabled: true, providerId: 'sensevoice-local', language: 'zh', downloadSource: 'mirror' })
+    expect((await readDesktopUiFile()).voiceInput).toEqual(after.voiceInput)
+  })
+
+  test('replaces malformed voiceInput values with defaults', async () => {
+    await writeDesktopUiFile({
+      schemaVersion: 6,
+      voiceInput: { enabled: 'yes', providerId: '   ', language: 'fr', downloadSource: 'npmmirror' },
+    })
+
+    const service = new DesktopUiPreferencesService()
+    expect((await service.readPreferences()).preferences.voiceInput).toEqual(DEFAULT_VOICE_INPUT_PREFERENCES)
+
+    await writeDesktopUiFile({ schemaVersion: 6, voiceInput: 'garbage' })
+    expect((await service.readPreferences()).preferences.voiceInput).toEqual(DEFAULT_VOICE_INPUT_PREFERENCES)
+
+    const after = await service.updateVoiceInputPreferences({ enabled: 1, providerId: 'x'.repeat(200), language: 'zh' })
+    expect(after.voiceInput).toEqual({ ...DEFAULT_VOICE_INPUT_PREFERENCES, language: 'zh' })
+  })
+
+  test('other preference updates keep the saved voiceInput section', async () => {
+    const service = new DesktopUiPreferencesService()
+    await service.updateVoiceInputPreferences({ enabled: true, language: 'en' })
+
+    await service.updatePetPreferences({ enabled: true })
+    await service.updateSidebarPreferences({ pinnedProjects: ['/workspace/alpha'] })
+    await service.updateProfilePreferences({ displayName: 'Operator' })
+    await service.updateProjectDisplayName({ projectKey: '/workspace/alpha', displayName: 'Alpha' })
+    await service.clearProfileAvatar()
+
+    expect((await readDesktopUiFile()).voiceInput).toEqual({
+      enabled: true,
+      providerId: 'sensevoice-local',
+      language: 'en',
+      downloadSource: 'auto',
+    })
+  })
+
+  test('keeps a newer schemaVersion while filling in voiceInput defaults', async () => {
+    await writeDesktopUiFile({ schemaVersion: 99, futureField: 1 })
+
+    const read = await new DesktopUiPreferencesService().readPreferences()
+
+    expect(read.preferences).toMatchObject({
+      schemaVersion: 99,
+      futureField: 1,
+      voiceInput: DEFAULT_VOICE_INPUT_PREFERENCES,
     })
   })
 })

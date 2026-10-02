@@ -389,7 +389,8 @@ describe('plan mode permission UI', () => {
     await waitFor(() => {
       expect(screen.getByTestId('model-selector-dropdown')).toBeTruthy()
     })
-    fireEvent.click(screen.getByRole('button', { name: /Sonnet 5/ }))
+    // Anchored so the official catalog's "Sonnet 5.5" is not also matched.
+    fireEvent.click(screen.getByRole('button', { name: /^Sonnet 5(?![.\d])/ }))
 
     await waitFor(() => {
       expect(screen.getByTestId('plan-execution-model').textContent).toContain('applies on approve')
@@ -445,7 +446,7 @@ describe('plan mode permission UI', () => {
     await waitFor(() => {
       expect(screen.getByTestId('model-selector-dropdown')).toBeTruthy()
     })
-    fireEvent.click(screen.getByRole('button', { name: /Sonnet 5/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Sonnet 5(?![.\d])/ }))
     await waitFor(() => {
       expect(screen.getByTestId('plan-execution-model').textContent).toContain('applies on approve')
     })

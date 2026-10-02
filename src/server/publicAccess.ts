@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { Server, ServerWebSocket, WebSocketHandler } from 'bun'
 import { isLocalAccessAuthorized } from './localAccessAuth.js'
+import { setResponseHeaders } from './middleware/responseHeaders.js'
 import { remoteProviderRouteAllowed, remoteSettingsRouteAllowed, type ApiRequestContext } from './remoteBrowserPolicy.js'
 import type { WebSocketData } from './ws/handler.js'
 
@@ -45,13 +46,13 @@ export function isPublicBusinessPathAllowed(url: URL, method: string): boolean {
 }
 
 function secure(response: Response): Response {
-  const headers = new Headers(response.headers)
-  headers.set('Cache-Control', 'no-store')
-  headers.set('Referrer-Policy', 'no-referrer')
-  headers.set('X-Content-Type-Options', 'nosniff')
-  headers.set('X-Frame-Options', 'DENY')
-  headers.set('Content-Security-Policy', "frame-ancestors 'none'; object-src 'none'; base-uri 'self'")
-  return new Response(response.body, { status: response.status, headers })
+  return setResponseHeaders(response, {
+    'Cache-Control': 'no-store',
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Content-Security-Policy': "frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
+  })
 }
 const json = (value: unknown, status = 200) => secure(Response.json(value, { status }))
 

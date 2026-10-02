@@ -982,4 +982,150 @@ describe('AskUserQuestion', () => {
       expect(storedDraft()).toBeUndefined()
     })
   })
+
+  // Issue #1400. The input is whatever the model emitted. The server validates it and
+  // answers a bad call with InputValidationError, but the transcript keeps the
+  // tool_use as sent, so a card is rebuilt from it on every replay. One provider's
+  // tool-call parser turned "`rm <path>`" inside a description into an object
+  // ({ $text, path }); rendering that as a child threw React #31, which took the
+  // whole app down — again on every launch, since the open tab is restored.
+  describe('input the model got wrong', () => {
+    // The exact shape from the report: text around an inline <path> became an object.
+    const BROKEN_TEXT = {
+      path: '`（一次一个，不用 wildcard）。CLAUDE.md 禁止 wildcard 删多个文件。',
+      $text: '我会逐个执行 `rm ',
+    }
+    const INVALID_INPUT_RESULT =
+      '<tool_use_error>InputValidationError: AskUserQuestion failed due to the following issue:\n' +
+      'The parameter `questions[0].options[0].description` type is expected as `string` but provided as `object`</tool_use_error>'
+
+    function singleQuestion(question: Record<string, unknown>) {
+      return { questions: [{ question: 'Pick one?', ...question }] }
+    }
+
+    it('renders the rest of a question whose option description is an object', () => {
+      render(<AskUserQuestion toolUseId="tool-1" input={singleQuestion({
+        question: 'Delete these 5 files?',
+        header: 'Confirm',
+        options: [
+          { label: 'Delete all 5', description: BROKEN_TEXT },
+          { label: 'Wait', description: 'Back up first.' },
+        ],
+      })} />)
+
+      expect(screen.getByText('Delete these 5 files?')).toBeTruthy()
+      // The broken description is dropped with nothing rendered in its place.
+      expect(screen.getByRole('button', { name: /^Delete all 5$/ })).toBeTruthy()
+      // Its sound sibling keeps its own.
+      expect(screen.getByText('Back up first.')).toBeTruthy()
+    })
+
+    it('still answers a question that has a broken option, handing the original input back', () => {
+      const input = singleQuestion({
+        question: 'Delete these 5 files?',
+        options: [{ label: 'Delete all 5', description: BROKEN_TEXT }, { label: 'Wait' }],
+      })
+      render(<AskUserQuestion toolUseId="tool-1" input={input} />)
+
+      fireEvent.click(screen.getByRole('button', { name: /^Wait$/ }))
+      fireEvent.click(screen.getByRole('button', { name: /submit/i }))
+
+      // Only what is shown is cleaned up; the answer travels with the input untouched.
+      expect(sendMock).toHaveBeenCalledWith(ACTIVE_TAB, {
+        type: 'permission_response',
+        requestId: 'perm-1',
+        allowed: true,
+        updatedInput: { ...input, answers: { 'Delete these 5 files?': 'Wait' } },
+      })
+    })
+
+    it('shows a failed call from history together with its error result', () => {
+      render(<AskUserQuestion
+        toolUseId="tool-failed"
+        input={singleQuestion({
+          question: 'Delete these 5 files?',
+          options: [{ label: 'Delete all 5', description: BROKEN_TEXT }, { label: 'Wait' }],
+        })}
+        result={INVALID_INPUT_RESULT}
+      />)
+
+      expect(screen.getByText('Delete these 5 files?')).toBeTruthy()
+      expect(screen.getByText(/InputValidationError/)).toBeTruthy()
+    })
+
+    it('renders nothing for a question whose text is an object', () => {
+      const { container } = render(<AskUserQuestion toolUseId="tool-1" input={singleQuestion({
+        question: BROKEN_TEXT,
+        options: [{ label: 'Yes' }],
+      })} />)
+
+      expect(container.textContent).toBe('')
+    })
+
+    it('drops an option whose label is an object and keeps its siblings', () => {
+      render(<AskUserQuestion toolUseId="tool-1" input={singleQuestion({
+        options: [{ label: BROKEN_TEXT, description: 'goes with its label' }, { label: 'B' }],
+      })} />)
+
+      expect(screen.getByRole('button', { name: /^B$/ })).toBeTruthy()
+      expect(screen.queryByText('goes with its label')).toBeNull()
+    })
+
+    it.each([
+      ['a string', 'A or B'],
+      ['an object', { A: 'first', B: 'second' }],
+    ])('renders the question when options is %s instead of a list', (_shape, options) => {
+      render(<AskUserQuestion toolUseId="tool-1" input={singleQuestion({ options })} />)
+
+      expect(screen.getByText('Pick one?')).toBeTruthy()
+      expect(screen.getByRole('textbox')).toBeTruthy()
+    })
+
+    it('skips null and non-object entries among the options', () => {
+      render(<AskUserQuestion toolUseId="tool-1" input={singleQuestion({
+        options: [null, 'stray text', 7, { label: 'Real' }],
+      })} />)
+
+      expect(screen.getByRole('button', { name: /^Real$/ })).toBeTruthy()
+      expect(screen.queryByText('stray text')).toBeNull()
+    })
+
+    it('skips entries of questions that are not questions', () => {
+      render(<AskUserQuestion toolUseId="tool-1" input={{
+        questions: [null, 'stray text', { question: 'Real?', options: [{ label: 'Yes' }] }],
+      }} />)
+
+      expect(screen.getByText('Real?')).toBeTruthy()
+      // One question is left, so there is no tab strip to number.
+      expect(screen.queryByRole('button', { name: 'Q1' })).toBeNull()
+    })
+
+    it('numbers the tab of a question whose header is not text', () => {
+      render(<AskUserQuestion toolUseId="tool-1" input={{
+        questions: [
+          { question: 'First?', header: BROKEN_TEXT, options: [{ label: 'A' }] },
+          { question: 'Second?', header: 'Sound', options: [{ label: 'B' }] },
+        ],
+      }} />)
+
+      expect(screen.getByRole('button', { name: 'Q1' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: 'Sound' })).toBeTruthy()
+    })
+
+    // chatStore rebuilds tool_use messages under a stable id, so a mounted card can be
+    // handed a repaired input after it was handed a broken one.
+    it('recovers when a broken input is replaced by a sound one while mounted', () => {
+      const { container, rerender } = render(<AskUserQuestion toolUseId="tool-1" input={singleQuestion({
+        question: BROKEN_TEXT,
+      })} />)
+      expect(container.textContent).toBe('')
+
+      rerender(<AskUserQuestion toolUseId="tool-1" input={singleQuestion({
+        question: 'Ship it?',
+        options: [{ label: 'Yes' }],
+      })} />)
+
+      expect(screen.getByText('Ship it?')).toBeTruthy()
+    })
+  })
 })

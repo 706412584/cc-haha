@@ -34,19 +34,27 @@ describe('openWithContextForHref', () => {
     expect(result).toEqual({ kind: 'file', absolutePath: '/w/README-拍摄大纲.md', relPath: 'README-拍摄大纲.md', previewable: true })
   })
 
-  it('relative office document with workDir → actionable but not workspace-previewable', () => {
-    const result = openWithContextForHref('reports/brief.docx', {
+  it('relative office document the workspace cannot draw, with workDir → actionable but not workspace-previewable', () => {
+    const result = openWithContextForHref('reports/brief.pptx', {
       sessionId: SESSION,
       serverBaseUrl: BASE,
       workDir: '/w',
     })
     expect(result).toEqual({
       kind: 'file',
-      absolutePath: '/w/reports/brief.docx',
-      relPath: 'reports/brief.docx',
+      absolutePath: '/w/reports/brief.pptx',
+      relPath: 'reports/brief.pptx',
       previewable: false,
     })
   })
+
+  it.each(['reports/brief.pdf', 'reports/brief.docx', 'reports/budget.xlsx', 'reports/legacy.xls'])(
+    'relative document the workspace draws (%s), with workDir → workspace-previewable',
+    (href) => {
+      const result = openWithContextForHref(href, { sessionId: SESSION, serverBaseUrl: BASE, workDir: '/w' })
+      expect(result).toEqual({ kind: 'file', absolutePath: `/w/${href}`, relPath: href, previewable: true })
+    },
+  )
 
   it('absolute path in browser-file → inAppBrowserUrl via localFileUrl ($HOME-sandboxed route)', () => {
     const result = openWithContextForHref('/x/p.html', { sessionId: SESSION, serverBaseUrl: BASE })

@@ -28,6 +28,8 @@ export type SecurityReport = {
   vendor: string
   status: string
   statusText: string
+  /** The scanner's own explanation of its verdict, when it gives one. */
+  summary?: string
   reportUrl?: string
 }
 
@@ -56,6 +58,17 @@ export type NormalizedSkill = {
   installState: InstallState
   notInstallableReason?: NotInstallableReason
   installedInfo?: { version?: string; installedAt?: string; dirName: string }
+  /** Editor's pick in the curated catalog. */
+  featured?: boolean
+  /**
+   * The entry is (or matches) a curated catalog skill. Only then is `category`
+   * a catalog category key; otherwise it is SkillHub's raw category string.
+   */
+  curated?: boolean
+  /** Original upstream summary, for non-Chinese readers (`summary` is zh-CN for curated skills). */
+  summaryEn?: string
+  /** Why a curated skill ships despite a flagged verdict. */
+  securityNote?: string
 }
 
 export type MarketFileMeta = {
@@ -76,6 +89,10 @@ export type NormalizedSkillDetail = NormalizedSkill & {
   license?: string
   files: MarketFileMeta[]
   totalSize: number
+  /** Release note of the latest version, when upstream has a meaningful one. */
+  changelog?: { version?: string; text: string; publishedAt?: number }
+  /** The skill's page on its registry website. */
+  pageUrl?: string
 }
 
 export type MarketFileContent = {
@@ -93,10 +110,34 @@ export type SourceStatusInfo = {
   error?: string
 }
 
+/**
+ * `catalog`: the curated snapshot shipped with the app (no network).
+ * `market`: live list/search across both upstream registries.
+ */
+export type MarketScope = 'catalog' | 'market'
+
+export const MARKET_SCOPES: MarketScope[] = ['catalog', 'market']
+
+export type MarketCategory = {
+  key: string
+  /** zh-CN display name */
+  name: string
+  nameEn: string
+  /** Skills in this category across the whole catalog (static, not filtered). */
+  count: number
+}
+
 export type MarketListResult = {
+  scope: MarketScope
   items: NormalizedSkill[]
   nextCursor: string | null
   sources: Record<MarketSource, SourceStatusInfo>
+  /** Catalog scope: matching skills across all pages. */
+  total?: number
+  /** Catalog scope: category bar entries. */
+  categories?: MarketCategory[]
+  /** Catalog scope: epoch millis of the upstream reads behind the snapshot. */
+  catalogGeneratedAt?: number
 }
 
 // ─── Provider layer ──────────────────────────────────────────────────────────
@@ -164,6 +205,17 @@ export const MARKET_LIMITS = {
   /** ClawHub search has no pagination — cap merged search results */
   searchResultCap: 50,
 } as const
+
+/** Shape of a registry owner handle accepted from clients (`?owner=` / install body). */
+export const MARKET_OWNER_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/
+
+/** A release note worth showing: registries stamp placeholders on synced versions. */
+export function meaningfulChangelog(text: unknown): string | undefined {
+  const value = typeof text === 'string' ? text.trim() : ''
+  if (!value) return undefined
+  if (/^synced by .*pipeline$/i.test(value)) return undefined
+  return value
+}
 
 export function skillId(source: MarketSource, slug: string): string {
   return `${source}:${slug}`

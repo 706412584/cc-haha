@@ -15,5 +15,8 @@
        and server runtime to work under a notarized hardened-runtime build. -->
   <key>com.apple.security.cs.disable-library-validation</key>
   <true/>
+  <!-- Voice dictation records from the microphone via getUserMedia in the renderer. -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
 </dict>
 </plist>

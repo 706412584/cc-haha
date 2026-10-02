@@ -11,6 +11,18 @@ const SYSTEM_OPEN_EXTENSIONS: ReadonlySet<string> = new Set([
   'mp4', 'mov', 'm4v', 'webm', 'mkv', 'avi',
 ])
 
+/**
+ * Documents the workspace panel renders itself, from raw bytes.
+ *
+ * A subset of {@link SYSTEM_OPEN_EXTENSIONS} on purpose. Those extensions stay
+ * "not source" for the editor menus (`isEditorOpenableFile`) — a `.pdf` opened in
+ * an IDE is still not a thing anyone asked for — and only these are also
+ * previewable in the workspace. A format joins this set when its viewer lands,
+ * not before, and the server (`workspaceDocumentPreview.ts`) serves exactly
+ * these: a parity test pins the two lists together.
+ */
+export const WORKSPACE_DOCUMENT_EXTENSIONS: ReadonlySet<string> = new Set<string>(['pdf', 'docx', 'xlsx', 'xlsm', 'xls'])
+
 // These are user-facing deliverables often created without being repeated in the
 // final prose. Source files stay in the changed-file card unless the assistant
 // explicitly cites them, so a large code change does not become a wall of cards.
@@ -49,11 +61,11 @@ export function fileExtension(path: string): string {
 /**
  * Whether offering a code editor for this path makes any sense.
  *
- * Same set as the workspace preview gate, for the same reason: an Office package,
- * an archive or a media file is a binary container, and a `.pdf` opened in PyCharm
- * is not a thing anyone asked for. Deliberately not a fourth extension table —
- * a separate list of "editable" extensions would drift from this one within a
- * release or two.
+ * Driven by {@link SYSTEM_OPEN_EXTENSIONS} alone, not by what the workspace can
+ * preview: an Office package, an archive or a media file is a binary container,
+ * and a `.pdf` opened in PyCharm is not a thing anyone asked for — even now that
+ * the panel renders it. Deliberately not a separate list of "editable"
+ * extensions, which would drift from this one within a release or two.
  */
 export function isEditorOpenableFile(path: string): boolean {
   return !SYSTEM_OPEN_EXTENSIONS.has(fileExtension(path))
@@ -67,10 +79,16 @@ export function isShellProducedDeliverable(path: string): boolean {
   return SHELL_PRODUCED_DELIVERABLE_EXTENSIONS.has(fileExtension(path))
 }
 
-/** Whether the workspace can render this path as text/source or an image. */
+/** Whether the workspace renders this path as a document (PDF, Word, Excel…) from raw bytes. */
+export function isWorkspaceDocumentFile(path: string): boolean {
+  return WORKSPACE_DOCUMENT_EXTENSIONS.has(fileExtension(path))
+}
+
+/** Whether the workspace can render this path as text/source, an image or a document. */
 export function isWorkspacePreviewableFile(path: string): boolean {
   const extension = fileExtension(path)
   if (!extension) return true
+  if (WORKSPACE_DOCUMENT_EXTENSIONS.has(extension)) return true
   return LINKABLE_FILE_EXTENSIONS.has(extension) && !SYSTEM_OPEN_EXTENSIONS.has(extension)
 }
 

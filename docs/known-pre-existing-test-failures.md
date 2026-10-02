@@ -253,3 +253,17 @@ Bun 的 `fs.watch` 在 Linux 与 Windows 上都把 rename 的目标事件丢掉�
 - `src/utils/noKeyValueNudges.test.ts`（0 pass / 1 fail，架构分歧）
 
 「1 红 55 绿」类文件（agentToolUtils、tasks、ws-memory-events 等）**不 quarantine**——不值当丢覆盖，靠本清单记录即可。
+
+## 上游 v0.6.8 新增文件在 Windows 本地的失败（非合并引入）
+
+以下文件由上游 v0.6.8 引入，其**源码与测试与本仓库逐字节相同**（仅行尾差异），
+失败原因均为 Windows 本地环境，CI（Linux/macOS）上应通过：
+
+- `electron/services/microphonePermissions.test.ts > tolerates percent-encoding differences, and drive-letter case only on Windows`
+  — 用例传入 POSIX 绝对路径 `/Applications/My App/dist/index.html`，在 Windows 上
+  `pathToFileURL` 会解析成带盘符的路径，`darwin` 分支的比较因此不成立。
+- `src/__tests__/documentEngineImports.test.ts > imports a document engine only dynamically, or as a type`
+  — 扫描器用 `path.relative` 得到反斜杠分隔的相对路径，与 `ENTRY_POINTS` 里正斜杠的
+  `components/workspace/surfaces/document/pdf.worker.ts` 比较时不相等。
+- `src/__tests__/documentEngineImports.test.ts > reaches every document viewer through a lazy import…`
+  — 同一原因：`file.endsWith('document/documentViewers.ts')` 在 Windows 上不匹配。

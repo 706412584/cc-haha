@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
 import { SkillCard } from './SkillCard'
@@ -34,7 +34,7 @@ describe('SkillCard', () => {
     expect(screen.getByText('Demo Skill')).toBeInTheDocument()
     expect(screen.getByText('Does demo things')).toBeInTheDocument()
     expect(screen.getByText('ClawHub')).toBeInTheDocument()
-    expect(screen.getByText('by Alice')).toBeInTheDocument()
+    expect(screen.getByText('Alice')).toBeInTheDocument()
     expect(screen.getByText('12.3k')).toBeInTheDocument()
     expect(screen.getByTestId('security-badge-benign')).toBeInTheDocument()
     expect(screen.getByTestId('install-badge-installable')).toBeInTheDocument()
@@ -90,8 +90,7 @@ describe('SkillCard', () => {
   it('flags risky skills visibly', () => {
     render(<SkillCard skill={makeSkill({ securityStatus: 'flagged' })} onOpen={vi.fn()} />)
 
-    expect(screen.getByTestId('security-badge-flagged')).toBeInTheDocument()
-    expect(screen.getByText('Flagged')).toBeInTheDocument()
+    expect(screen.getByTestId('security-badge-flagged')).toHaveTextContent('Flagged')
   })
 
   it('hides the redundant installable badge when the quick-install button is shown', () => {
@@ -122,6 +121,49 @@ describe('SkillCard', () => {
     const img = container.querySelector('img')
     expect(img).toHaveAttribute('src', 'https://example.com/icon.png')
     expect(screen.queryByTestId('skill-avatar-fallback')).not.toBeInTheDocument()
+  })
+
+  it('puts the short scan verdict, the featured mark and tags in one chip row', () => {
+    render(<SkillCard skill={makeSkill({ featured: true, tags: ['workflow'] })} onOpen={vi.fn()} />)
+
+    const chips = screen.getByTestId('market-card-chips')
+    expect(within(chips).getByTestId('security-badge-benign')).toHaveTextContent('Scan passed')
+    expect(within(chips).getByTestId('market-card-featured')).toHaveTextContent('Featured')
+    expect(within(chips).getByText('workflow')).toBeInTheDocument()
+  })
+
+  it('shows no featured mark on an ordinary skill', () => {
+    render(<SkillCard skill={makeSkill()} onOpen={vi.fn()} />)
+
+    expect(screen.queryByTestId('market-card-featured')).not.toBeInTheDocument()
+  })
+
+  it('reads a curated skill in English from summaryEn and drops its Chinese tags', () => {
+    const curated = makeSkill({
+      curated: true,
+      summary: '用文件持久化跟踪多步任务',
+      summaryEn: 'Track multi-step tasks in files',
+      tags: ['任务规划', '文件记忆'],
+    })
+    render(<SkillCard skill={curated} onOpen={vi.fn()} />)
+
+    expect(screen.getByText('Track multi-step tasks in files')).toBeInTheDocument()
+    expect(screen.queryByText('用文件持久化跟踪多步任务')).not.toBeInTheDocument()
+    expect(screen.queryByText('任务规划')).not.toBeInTheDocument()
+  })
+
+  it('reads a curated skill in Chinese with its Chinese summary and tags', () => {
+    useSettingsStore.setState({ locale: 'zh' })
+    const curated = makeSkill({
+      curated: true,
+      summary: '用文件持久化跟踪多步任务',
+      summaryEn: 'Track multi-step tasks in files',
+      tags: ['任务规划'],
+    })
+    render(<SkillCard skill={curated} onOpen={vi.fn()} />)
+
+    expect(screen.getByText('用文件持久化跟踪多步任务')).toBeInTheDocument()
+    expect(screen.getByText('任务规划')).toBeInTheDocument()
   })
 
   it('explains the security status via tooltip', () => {

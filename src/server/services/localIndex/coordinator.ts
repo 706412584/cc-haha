@@ -24,6 +24,7 @@ import {
 } from './sessionIndex.js'
 import {
   createSessionProjector,
+  LOCAL_INDEX_SOURCE_LIMIT,
   SESSION_SUMMARY_PARSER_VERSION,
   type SessionProjector,
   type SessionSourceCandidate,
@@ -113,6 +114,20 @@ export type LocalIndexCoordinatorDependencies = {
 }
 
 export const LOCAL_INDEX_STORAGE_LIMIT_BYTES = 512 * 1024 * 1024
+
+/**
+ * Failures that belong to a single transcript. The rest of the committed
+ * snapshot stays complete and current, so list reads can keep using it and
+ * read just these transcripts from disk. Anything else (storage, SQLite,
+ * discovery, watcher) leaves the whole snapshot suspect.
+ */
+const SOURCE_SCOPED_FAILURE_CODES = new Set([
+  LOCAL_INDEX_SOURCE_LIMIT,
+  'LOCAL_INDEX_SOURCE_CHANGED',
+  'LOCAL_INDEX_TRANSIENT_IO',
+])
+// Past this many the overlay would approach the cost of a full scan.
+export const MAX_SOURCE_SCOPED_FAILURES = 32
 
 const OFF_STATUS: LocalIndexStatus = {
   mode: 'off',
@@ -496,6 +511,22 @@ export function createLocalIndexCoordinator(
   // `lastErrorCode` without counting as outstanding reconciliation work.
   let limitedPaths = new Map<string, string>()
   let fullSweepFailureCode: string | null = null
+  // A code restored from the previous run's backfill state describes that
+  // run; this run's first sweep replaces it.
+  let fullSweepFailureFromPreviousRun = false
+  // Set while the public state is degraded for a reason that is not tied to
+  // one transcript; cleared wherever the state is recomputed from bookkeeping.
+  let indexScopedFailureCode: string | null = null
+  // Whether committed rows describe a complete snapshot: rows existed at
+  // startup, or a discovery generation has finished.
+  let servableSnapshot = false
+  // Per-path failures recorded by the discovery generation that is still
+  // running. Its unattributed failures are only recorded at its end, together
+  // with `fullSweepFailureCode`.
+  let activeSweepFailures: {
+    generation: number
+    paths: Map<string, string>
+  } | null = null
   let lifecycleRevision = 0
   let startPromise: Promise<void> | undefined
   let stopPromise: Promise<void> | undefined
@@ -532,6 +563,7 @@ export function createLocalIndexCoordinator(
 
   const markDegraded = (error: unknown, fallback: string): void => {
     const code = errorCode(error, fallback)
+    indexScopedFailureCode = code
     if (code === 'SQLITE_BUSY') noteTransientDatabaseBusy()
     const currentStatus = status.mode === mode
       ? status
@@ -769,7 +801,13 @@ export function createLocalIndexCoordinator(
     let genericFailureCount = 0
     let genericFailureCode: string | null = null
     let degraded = 0
+    const sweepFailures = {
+      generation: expectedGeneration,
+      paths: sweepFailedPaths,
+    }
+    activeSweepFailures = sweepFailures
 
+    indexScopedFailureCode = null
     status = {
       ...status,
       // A catch-up over an already-served snapshot is not a rebuild. Keep
@@ -970,6 +1008,8 @@ export function createLocalIndexCoordinator(
         for (const [path, code] of sweepLimitedPaths) limitedPaths.set(path, code)
         fullSweepFailureCode = genericFailureCode ?? 'LOCAL_INDEX_DISCOVERY_INCOMPLETE'
       }
+      fullSweepFailureFromPreviousRun = false
+      if (activeSweepFailures === sweepFailures) activeSweepFailures = null
       try {
         await runActivityDiscoveryGeneration(
           signal,
@@ -999,6 +1039,8 @@ export function createLocalIndexCoordinator(
       }
       if (!isActiveGeneration()) return
       const outstandingFailures = outstandingReconciliationFailures()
+      indexScopedFailureCode = null
+      servableSnapshot = true
       status = {
         ...status,
         state: outstandingFailures === 0 && watcherHealthy ? 'ready' : 'degraded',
@@ -1015,8 +1057,11 @@ export function createLocalIndexCoordinator(
         isActiveGeneration()
       ) {
         fullSweepFailureCode = errorCode(error, 'LOCAL_INDEX_DISCOVERY_FAILED')
+        fullSweepFailureFromPreviousRun = false
         markDegraded({ code: fullSweepFailureCode }, 'LOCAL_INDEX_DISCOVERY_FAILED')
       }
+    } finally {
+      if (activeSweepFailures === sweepFailures) activeSweepFailures = null
     }
   }
 
@@ -1040,6 +1085,7 @@ export function createLocalIndexCoordinator(
     if (!isActiveGeneration()) return
     refreshStorageStatus(activeDatabase)
     if (storageLimited) return
+    indexScopedFailureCode = null
     status = {
       ...status,
       // Reconciling a watched batch never withdraws a snapshot that is already
@@ -1123,6 +1169,7 @@ export function createLocalIndexCoordinator(
     if (!isActiveGeneration()) return
     const count = activeIndex.countSources()
     const outstandingFailures = outstandingReconciliationFailures()
+    indexScopedFailureCode = null
     status = {
       ...status,
       state: outstandingFailures === 0 && watcherHealthy ? 'ready' : 'degraded',
@@ -1239,7 +1286,12 @@ export function createLocalIndexCoordinator(
       fullSweepFailureCode = isSourceLimitationCode(persistedSweepCode)
         ? null
         : persistedSweepCode
-      status = initialBuildingStatus(mode, persisted, activeIndex.countSources() > 0)
+      fullSweepFailureFromPreviousRun = fullSweepFailureCode !== null
+      indexScopedFailureCode = null
+      activeSweepFailures = null
+      const hasCommittedRows = activeIndex.countSources() > 0
+      servableSnapshot = hasCommittedRows
+      status = initialBuildingStatus(mode, persisted, hasCommittedRows)
       if (outstandingReconciliationFailures() > 0) {
         status = {
           ...status,
@@ -1510,6 +1562,28 @@ export function createLocalIndexCoordinator(
         markDegraded(error, 'LOCAL_INDEX_READ_FAILED')
         return false
       }
+    },
+
+    getSourceScopedFailurePaths(): readonly string[] | null {
+      if (
+        !indexReadAllowed() ||
+        !index ||
+        !servableSnapshot ||
+        !watcherHealthy ||
+        storageLimited ||
+        indexScopedFailureCode !== null ||
+        (fullSweepFailureCode !== null && !fullSweepFailureFromPreviousRun)
+      ) return null
+      const sweep = activeSweepFailures?.generation === generation
+        ? activeSweepFailures
+        : null
+      const paths = new Map(failedPaths)
+      if (sweep) for (const [path, code] of sweep.paths) paths.set(path, code)
+      if (paths.size > MAX_SOURCE_SCOPED_FAILURES) return null
+      for (const code of paths.values()) {
+        if (!SOURCE_SCOPED_FAILURE_CODES.has(code)) return null
+      }
+      return [...paths.keys()]
     },
 
     isActivityScopeReady(): boolean {

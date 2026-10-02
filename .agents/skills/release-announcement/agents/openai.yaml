@@ -1,0 +1,4 @@
+interface:
+  display_name: "版本发布长图"
+  short_description: "从最新 release note 生成微信群短文案、长图和贡献者头像"
+  default_prompt: "用 $release-announcement 读取本项目最新发布说明，制作微信群短文案和发布长图。"

@@ -16,14 +16,23 @@ export type PreviewLinkDeps = {
 /**
  * Build a `/preview-fs/<sessionId>/<path>` URL for the local server.
  *
- * Absolute file paths (leading slash) are preserved as-is, so the resulting URL
- * carries a `//` between `<sessionId>` and the path. That double slash is
- * intentional: the server slices everything after the `<sessionId>` segment and
- * runs `path.resolve(workDir, relPath)`, so an absolute path is resolved as an
+ * Absolute file paths (leading slash) keep it, so the resulting URL carries a `//`
+ * between `<sessionId>` and the path. That double slash is intentional: the server
+ * slices everything after the `<sessionId>` segment and runs
+ * `path.resolve(workDir, relPath)`, so an absolute path is resolved as an
  * absolute-within-workspace path and sandbox-checked against the work dir root.
+ *
+ * Each segment is escaped, as {@link localFileUrl} does, so the server decodes
+ * exactly the name it was given. Left raw, a `%` or `#` in a name would be read as
+ * URL syntax, and a name that spells a dot segment (`%2e%2e`) would be collapsed by
+ * the URL parser before the request is sent — a request for `/api/status`, not a
+ * file. A Windows path's backslashes are separators, as the browser already made
+ * them.
  */
 export function previewFsUrl(base: string, sessionId: string, filePath: string): string {
-  return `${base.replace(/\/$/, '')}/preview-fs/${encodeURIComponent(sessionId)}/${filePath.replace(/^\/+/, '/')}`
+  const rooted = filePath.replace(/\\/g, '/').replace(/^\/+/, '/')
+  const escaped = rooted.split('/').map((segment) => encodeURIComponent(segment)).join('/')
+  return `${base.replace(/\/$/, '')}/preview-fs/${encodeURIComponent(sessionId)}/${escaped}`
 }
 
 /** True for POSIX absolute (`/...`) or Windows drive (`X:\` / `X:/`) paths. */
@@ -58,6 +67,15 @@ export function localFileUrl(base: string, absPath: string): string {
     .map((segment) => encodeURIComponent(segment))
     .join('/')
   return `${base.replace(/\/$/, '')}/local-file${encoded}`
+}
+
+/**
+ * Build the `/api/filesystem/file` URL that serves one local image by absolute
+ * (or `~/`) path. The server serves images only, and only from `$HOME`, the
+ * temporary directories and the roots it has registered; anything else is a 403.
+ */
+export function filesystemImageUrl(base: string, filePath: string): string {
+  return `${base.replace(/\/$/, '')}/api/filesystem/file?path=${encodeURIComponent(filePath)}`
 }
 
 /** Returns true if handled (caller should preventDefault). */

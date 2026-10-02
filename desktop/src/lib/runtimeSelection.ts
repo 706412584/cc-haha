@@ -32,7 +32,7 @@ export function resolveProviderSlotModelId(
   slot: keyof SavedProvider['models'],
 ): string {
   const modelId = provider.models[slot]?.trim() ?? ''
-  const enabled = slot === 'fable' ? undefined : provider.model1mSupport?.[slot]
+  const enabled = provider.model1mSupport?.[slot]
   // Missing flags are legacy configuration: preserve explicit model suffixes.
   if (!modelId || enabled === undefined) return modelId
   const baseModelId = baseProviderModelId(modelId)

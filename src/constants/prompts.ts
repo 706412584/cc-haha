@@ -116,15 +116,14 @@ export const CLAUDE_CODE_DOCS_MAP_URL =
 export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY =
   '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__'
 
-// @[MODEL LAUNCH]: Update the latest frontier model.
-const FRONTIER_MODEL_NAME = 'Claude Opus 4.8'
-
-// @[MODEL LAUNCH]: Update the model family IDs below to the latest in each tier.
+// @[MODEL LAUNCH]: Update the model family IDs below to the latest in each tier, and the
+// matching names in the "most recent Claude models" sentence in computeSimpleEnvInfo.
+// The Haiku ID is the pinned snapshot, as in the official Claude Code prompt.
 const LATEST_CLAUDE_MODEL_IDS = {
-  fable: 'claude-fable-5',
-  opus: 'claude-opus-4-8',
-  sonnet: 'claude-sonnet-5',
-  haiku: 'claude-haiku-4-5',
+  fable: 'claude-fable-5-1',
+  opus: 'claude-opus-5-5',
+  sonnet: 'claude-sonnet-5-5',
+  haiku: 'claude-haiku-4-5-20251001',
 }
 
 function getHooksSection(): string {
@@ -718,13 +717,13 @@ export async function computeSimpleEnvInfo(
     knowledgeCutoffMessage,
     process.env.USER_TYPE === 'ant' && isUndercover()
       ? null
-      : `The most recent Claude flagship models are Claude Fable 5, Claude Opus 4.8, Claude Sonnet 5, and Claude Haiku 4.5. Model IDs — Fable 5: '${LATEST_CLAUDE_MODEL_IDS.fable}', Opus 4.8: '${LATEST_CLAUDE_MODEL_IDS.opus}', Sonnet 5: '${LATEST_CLAUDE_MODEL_IDS.sonnet}', Haiku 4.5: '${LATEST_CLAUDE_MODEL_IDS.haiku}'. When building AI applications, default to the latest and most capable Claude models.`,
+      : `The most recent Claude models are the Claude 5 family and Haiku 4.5. Model IDs — Fable 5.1: '${LATEST_CLAUDE_MODEL_IDS.fable}', Opus 5.5: '${LATEST_CLAUDE_MODEL_IDS.opus}', Sonnet 5.5: '${LATEST_CLAUDE_MODEL_IDS.sonnet}', Haiku 4.5: '${LATEST_CLAUDE_MODEL_IDS.haiku}'. When building AI applications, default to the latest and most capable Claude models.`,
     process.env.USER_TYPE === 'ant' && isUndercover()
       ? null
       : `Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).`,
     process.env.USER_TYPE === 'ant' && isUndercover()
       ? null
-      : `Fast mode for Claude Code uses the same ${FRONTIER_MODEL_NAME} model with faster output. It does NOT switch to a different model. It can be toggled with /fast.`,
+      : `Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.`,
   ].filter(item => item !== null)
 
   return [
@@ -737,16 +736,25 @@ export async function computeSimpleEnvInfo(
 // @[MODEL LAUNCH]: Add a knowledge cutoff date for the new model.
 function getKnowledgeCutoff(modelId: string): string | null {
   const canonical = getCanonicalName(modelId)
+  // Order matters: a point release (`-5-5`, `-5-1`) contains its whole-number id, so it is
+  // matched first. Values follow Anthropic's model pages and the official Claude Code catalog.
   if (
+    canonical.includes('claude-fable-5-1') ||
+    canonical.includes('claude-opus-5-5') ||
+    canonical.includes('claude-sonnet-5-5')
+  ) {
+    return 'June 2026'
+  } else if (canonical.includes('claude-opus-5')) {
+    return 'May 2026'
+  } else if (
     canonical.includes('claude-fable-5') ||
     canonical.includes('claude-opus-4-8') ||
+    canonical.includes('claude-opus-4-7') ||
     canonical.includes('claude-sonnet-5')
   ) {
     return 'January 2026'
   } else if (canonical.includes('claude-sonnet-4-6')) {
     return 'August 2025'
-  } else if (canonical.includes('claude-opus-4-7')) {
-    return 'May 2025'
   } else if (canonical.includes('claude-opus-4-5')) {
     return 'May 2025'
   } else if (canonical.includes('claude-haiku-4')) {

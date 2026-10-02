@@ -162,6 +162,7 @@ export function sanitizeModelName(shortName: string): string {
   if (shortName.includes('opus-4-5')) return 'claude-opus-4-5'
   if (shortName.includes('opus-4-1')) return 'claude-opus-4-1'
   if (shortName.includes('opus-4')) return 'claude-opus-4'
+  if (shortName.includes('sonnet-5-5')) return 'claude-sonnet-5-5'
   if (shortName.includes('sonnet-5')) return 'claude-sonnet-5'
   if (shortName.includes('sonnet-4-6')) return 'claude-sonnet-4-6'
   if (shortName.includes('sonnet-4-5')) return 'claude-sonnet-4-5'

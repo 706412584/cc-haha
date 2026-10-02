@@ -431,6 +431,155 @@ describe('MarkdownRenderer', () => {
   })
 })
 
+describe('MarkdownRenderer local image destinations', () => {
+  // These are the shapes a model writes for a picture on disk. DOMPurify used to drop
+  // the src of the first two (a `file:` scheme; `C:` read as a scheme), so the image
+  // lost its source before the resolver ever saw it.
+  function seenByResolver(markdown: string): string[] {
+    const seen: string[] = []
+    render(
+      <MarkdownRenderer
+        content={markdown}
+        resolveImageSrc={(src) => {
+          seen.push(src)
+          return `resolved:${src}`
+        }}
+      />,
+    )
+    return seen
+  }
+
+  it.each([
+    ['a file:// URL with a drive letter', '![chart](file:///C:/Users/me/chart.png)', '/C:/Users/me/chart.png'],
+    ['a file:// URL', '![chart](file:///Users/me/chart.png)', '/Users/me/chart.png'],
+    ['a Windows path with backslashes', '![chart](C:\\Users\\me\\chart.png)', '/C:/Users/me/chart.png'],
+    ['a Windows path with slashes', '![chart](C:/Users/me/chart.png)', '/C:/Users/me/chart.png'],
+    // Markdown reads `\.` and `\_` as escapes, but here the backslash is the separator.
+    ['a Windows path through a hidden folder', '![chart](C:\\Users\\me\\.claude\\chart.png)', '/C:/Users/me/.claude/chart.png'],
+    ['a Windows path through an underscored folder', '![chart](C:\\Users\\me\\_out\\chart.png)', '/C:/Users/me/_out/chart.png'],
+    // The renderer escapes the space, as for any destination; the resolver decodes it.
+    ['a Windows path in angle brackets, which may hold spaces and parentheses', '![chart](<C:\\Users\\me\\(new) pics\\chart.png>)', '/C:/Users/me/(new)%20pics/chart.png'],
+    ['a home-relative path', '![chart](~/Pictures/chart.png)', '~/Pictures/chart.png'],
+    ['an absolute POSIX path', '![chart](/Users/me/chart.png)', '/Users/me/chart.png'],
+    ['a relative path', '![chart](figures/chart.png)', 'figures/chart.png'],
+  ])('hands the resolver %s', (_label, markdown, expected) => {
+    expect(seenByResolver(markdown)).toEqual([expected])
+  })
+
+  it('keeps a percent-escaped name as written, for the resolver to decode', () => {
+    expect(seenByResolver('![chart](file:///Users/me/My%20Pics/chart.png)')).toEqual(['/Users/me/My%20Pics/chart.png'])
+  })
+
+  it('still strips a file:// URL that names no local root, and a script scheme', () => {
+    const seen = seenByResolver([
+      '![unc](file://server/share/chart.png)',
+      '![script](javascript:alert(1))',
+    ].join('\n\n'))
+
+    expect(seen).toEqual([])
+  })
+
+  it('does not rewrite a raw HTML image, which the author did not write as Markdown', () => {
+    expect(seenByResolver('<img alt="raw" src="file:///Users/me/chart.png">')).toEqual([])
+  })
+})
+
+describe('MarkdownRenderer image clicks', () => {
+  const TWO_IMAGES = '![one](data:image/png;base64,AAAA)\n\n![two](blob:https://desktop.invalid/2)'
+
+  it('reports the image that was clicked, with every image in the text and its place among them', () => {
+    const onImageClick = vi.fn()
+    const { container } = render(<MarkdownRenderer content={TWO_IMAGES} onImageClick={onImageClick} />)
+
+    fireEvent.click(container.querySelectorAll('img')[1]!)
+
+    expect(onImageClick).toHaveBeenCalledExactlyOnceWith({
+      images: [
+        { src: 'data:image/png;base64,AAAA', alt: 'one' },
+        { src: 'blob:https://desktop.invalid/2', alt: 'two' },
+      ],
+      index: 1,
+    })
+  })
+
+  it('counts the images across code blocks, which split the text into parts', () => {
+    const onImageClick = vi.fn()
+    const { container } = render(
+      <MarkdownRenderer
+        content={'![one](data:image/png;base64,AAAA)\n\n```js\nconst x = 1\n```\n\n![two](blob:https://desktop.invalid/2)'}
+        onImageClick={onImageClick}
+      />,
+    )
+
+    fireEvent.click(container.querySelectorAll('img')[1]!)
+
+    expect(onImageClick.mock.calls[0]![0]).toMatchObject({ index: 1 })
+    expect(onImageClick.mock.calls[0]![0].images).toHaveLength(2)
+  })
+
+  it('reports the resolved source, since that is the one that loads', () => {
+    const onImageClick = vi.fn()
+    const { container } = render(
+      <MarkdownRenderer content="![chart](figures/chart.png)" resolveImageSrc={(src) => `http://127.0.0.1:3456/${src}`} onImageClick={onImageClick} />,
+    )
+
+    fireEvent.click(container.querySelector('img')!)
+
+    expect(onImageClick.mock.calls[0]![0].images).toEqual([{ src: 'http://127.0.0.1:3456/figures/chart.png', alt: 'chart' }])
+  })
+
+  it('leaves an image inside a link to the link', () => {
+    const onImageClick = vi.fn()
+    const onLinkClick = vi.fn(() => false)
+    const { container } = render(
+      <MarkdownRenderer
+        content="[![badge](data:image/png;base64,AAAA)](https://example.com)"
+        onImageClick={onImageClick}
+        onLinkClick={onLinkClick}
+      />,
+    )
+
+    fireEvent.click(container.querySelector('img')!)
+
+    expect(onImageClick).not.toHaveBeenCalled()
+    expect(onLinkClick).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores a picture that has lost its source: there is nothing to show', () => {
+    const onImageClick = vi.fn()
+    const { container } = render(<MarkdownRenderer content={TWO_IMAGES} onImageClick={onImageClick} />)
+    const [first] = Array.from(container.querySelectorAll('img'))
+    first!.removeAttribute('src')
+
+    fireEvent.click(first!)
+
+    expect(onImageClick).not.toHaveBeenCalled()
+  })
+
+  it('ignores a click that is not on an image', () => {
+    const onImageClick = vi.fn()
+    render(<MarkdownRenderer content={`words\n\n${TWO_IMAGES}`} onImageClick={onImageClick} />)
+
+    fireEvent.click(screen.getByText('words'))
+
+    expect(onImageClick).not.toHaveBeenCalled()
+  })
+
+  it('does nothing about an image click when nobody asked to hear about it', () => {
+    const { container } = render(<MarkdownRenderer content={TWO_IMAGES} />)
+
+    expect(() => fireEvent.click(container.querySelector('img')!)).not.toThrow()
+  })
+
+  it('shows the zoom cursor on images only when a click will be handled', () => {
+    const { container, rerender } = render(<MarkdownRenderer content={TWO_IMAGES} />)
+    expect(container.firstElementChild!.className).not.toContain('cursor-zoom-in')
+
+    rerender(<MarkdownRenderer content={TWO_IMAGES} onImageClick={() => undefined} />)
+    expect(container.firstElementChild!.className).toContain('[&_img]:cursor-zoom-in')
+  })
+})
+
 describe('MarkdownRenderer parse cache', () => {
   beforeEach(() => {
     __markdownParseCacheInternals.reset()

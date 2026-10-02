@@ -13,7 +13,9 @@ A session is one complete collaboration: you describe what you want, Claude read
 
 Click **New session** in the sidebar, or press `⌘N` (`Ctrl+N` on Windows and Linux). The empty session asks you for exactly one thing: a project directory. After that you can start typing — the model and permission mode come from your defaults in Settings.
 
-Each session opens as a tab, and you can run many side by side. A dot on the tab means that session is still running; closing a running tab asks whether you want to **Keep running** or **Stop and close**.
+Each session opens as a tab, and you can run many side by side. A dot on the tab means that session is still running; closing a running tab asks whether you want to **Keep running** or **Stop and close**, and **Stop and close** also stops the background tasks that session still has running.
+
+When a session is stopped on a permission request, a question or a plan review and needs you, the dot on its tab becomes an amber warning triangle, and so does its row in the sidebar. It stays until you have dealt with it, whether or not system notifications are on. When so many tabs are open that some scroll out of view, the scroll arrow on that side gets an amber dot, and the number button on the right of the tab bar shows how many other sessions are waiting; press it to jump to the next one. On a phone there is no tab bar: a dot on the menu button means another session is waiting, and its row in the sidebar carries the triangle.
 
 The small line under the session title is metadata: project path, branch, model. A session is bound to one directory — to work on a different project, start a new session.
 
@@ -27,6 +29,7 @@ Claude doesn't just reply with a paragraph. Several kinds of card appear along t
 - **Thinking blocks** — the reasoning before it acts, labelled **Thinking** while it runs and **Thought** once done. Collapsed by default.
 - **File edits** — shown as an inline diff right in the conversation, so you don't have to look anywhere else.
 - **Claude needs your input** — when it's genuinely unsure it asks, with buttons for the likely answers plus a free-text box.
+- **Images** — a local image a reply references with Markdown image syntax is shown right in the conversation, and it doesn't have to be inside the project: an absolute path, one starting with `~/`, a Windows `C:\...` path or a `file:///...` URL all work (for images under your home directory or the temporary directories). Pictures Claude looked at with a tool such as Read also appear as thumbnails under that tool call, without expanding it. Click any of them to zoom and drag; in the desktop app the viewer has **Open in system app** at the bottom right, which opens the original file. When you use the app from a browser (H5), pictures referenced by path don't load yet; the thumbnails of pictures Claude read with a tool are not affected.
 
 In a long conversation, `⌘F` opens find-in-page and jumps between matches in the current session. `⌘K` is global search across every session you've ever had.
 
@@ -83,7 +86,7 @@ The first button on the right of the tab bar opens the Activity panel, which lis
 
 - **Tasks** — the to-do list Claude maintains for itself, with "Task progress 3/7" at the top.
 - **SubAgents** — the agents it delegated to. Open one to read its full transcript.
-- **Background tasks** — commands and workflows running in the background; each can be stopped individually.
+- **Background tasks** — commands and workflows running in the background; each can be stopped individually. When one finishes, Claude is notified and carries on, and its reply appears in the conversation as usual.
 - **Team** — when an Agent Team is in play, one row per member, and you can message a member directly.
 
 Tool activity from background subagents bubbles up here too, so you don't have to wait for one to finish to see what it's doing.

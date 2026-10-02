@@ -47,6 +47,7 @@ const SETTINGS_TABS = [
   'providers',
   'activity',
   'general',
+  'voice',
   'h5Access',
   'adapters',
   'terminal',
@@ -234,6 +235,7 @@ export type SettingsTab =
   | 'providers'
   | 'activity'
   | 'general'
+  | 'voice'
   | 'h5Access'
   | 'adapters'
   | 'terminal'

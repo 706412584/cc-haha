@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -109,7 +109,13 @@ beforeEach(() => {
       clawhub: { status: 'ok' },
       skillhub: { status: 'cached', fetchedAt: 1_700_000_000_000 },
     },
+    scope: 'catalog',
+    category: 'all',
+    categories: [],
+    total: null,
+    catalogGeneratedAt: null,
     query: '',
+    liveQuery: '',
     filters: { source: 'all', security: 'all', installed: 'all' },
     isLoading: false,
     isLoadingMore: false,
@@ -126,17 +132,18 @@ afterEach(() => {
 })
 
 describe('MarketHome', () => {
-  it('renders the compact catalog header, command bar, sources and semantic cards', () => {
+  it('renders the catalog header, command bar and semantic cards', () => {
     render(<MarketHome onRequestInstall={vi.fn()} />)
 
     expect(screen.getByRole('heading', { name: 'Skills Market' })).toBeInTheDocument()
     expect(screen.getByTestId('market-search-input')).toBeInTheDocument()
     expect(screen.getByTestId('market-filter-bar')).toBeInTheDocument()
-    expect(screen.getByTestId('market-source-status-clawhub')).toHaveTextContent('Online')
-    expect(screen.getByTestId('market-source-status-skillhub')).toHaveTextContent('Cached')
     expect(screen.getByTestId('market-grid')).toContainElement(screen.getByRole('article'))
     expect(screen.getByRole('button', { name: 'Demo Skill' })).toBeInTheDocument()
     expect(screen.getByText('1 skills')).toBeInTheDocument()
+    // The catalog is a shipped snapshot: live source health says nothing about it.
+    expect(screen.queryByTestId('market-source-status')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('market-not-curated')).not.toBeInTheDocument()
   })
 
   it('uses a catalog-shaped skeleton while the first page is loading', () => {
@@ -163,6 +170,20 @@ describe('MarketHome', () => {
 
     // Five rows fit below 300px, and a 1200px container is 3 tracks wide.
     expect(skeletonCardCount('market-loading')).toBe(15)
+  })
+
+  it('pins a ClawHub card\'s open and install to its owner', () => {
+    // ClawHub slugs are not unique; the card's publisher is what makes it this skill.
+    const openDetail = vi.fn()
+    const onRequestInstall = vi.fn()
+    useMarketStore.setState({ openDetail })
+
+    render(<MarketHome onRequestInstall={onRequestInstall} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Demo Skill' }))
+    expect(openDetail).toHaveBeenCalledWith('clawhub:demo', 'alice')
+    fireEvent.click(screen.getByRole('button', { name: 'Install' }))
+    expect(onRequestInstall).toHaveBeenCalledWith('clawhub:demo', 'alice')
   })
 
   it('opens the installed-skills browser from the header', () => {
@@ -262,4 +283,113 @@ it('keeps featured skill packages inside the existing scroll surface alongside s
   expect(screen.getByTestId('market-scroll')).toContainElement(screen.getByTestId('curated-skill-packages'))
   expect(screen.getByTestId('market-search-input')).toBeInTheDocument()
   expect(screen.getByTestId('market-installed-entry')).toBeInTheDocument()
+})
+
+describe('MarketHome catalog and live scope', () => {
+  const CATEGORIES = [
+    { key: 'dev', name: '开发编程', nameEn: 'Development', count: 40 },
+    { key: 'office', name: '办公文档', nameEn: 'Office', count: 36 },
+  ]
+
+  it('summarises the curated catalog with its total, snapshot date and category chips', () => {
+    const setCategory = vi.fn()
+    useMarketStore.setState({
+      categories: CATEGORIES,
+      total: 398,
+      catalogGeneratedAt: Date.UTC(2026, 9, 1),
+      setCategory,
+    })
+
+    render(<MarketHome onRequestInstall={vi.fn()} />)
+
+    expect(screen.getByTestId('market-result-summary')).toHaveTextContent('398 curated skills')
+    expect(screen.getByTestId('market-result-summary')).toHaveTextContent('list updated 2026-10-01')
+    fireEvent.click(screen.getByRole('radio', { name: 'Development 40' }))
+    expect(setCategory).toHaveBeenCalledWith('dev')
+  })
+
+  it('offers the live market search for a catalog query and runs it on request', () => {
+    const searchAllMarkets = vi.fn()
+    useMarketStore.setState({ query: 'pdf', searchAllMarkets })
+
+    render(<MarketHome onRequestInstall={vi.fn()} />)
+
+    expect(screen.getByTestId('market-scope-hint')).toHaveTextContent('Searching curated skills only.')
+    fireEvent.click(screen.getByRole('button', { name: 'Search all markets for “pdf”' }))
+    expect(searchAllMarkets).toHaveBeenCalledTimes(1)
+  })
+
+  it('turns an empty catalog search into a way out to the live market', () => {
+    const searchAllMarkets = vi.fn()
+    useMarketStore.setState({ items: [], query: 'obscure', searchAllMarkets, fetchList: vi.fn() })
+
+    render(<MarketHome onRequestInstall={vi.fn()} />)
+
+    const empty = screen.getByTestId('market-empty')
+    fireEvent.click(within(empty).getByRole('button', { name: 'Search all markets for “obscure”' }))
+    expect(searchAllMarkets).toHaveBeenCalledTimes(1)
+  })
+
+  it('labels live results as not curated, hides the category chips and shows source health', () => {
+    const backToCatalog = vi.fn()
+    useMarketStore.setState({
+      scope: 'market',
+      query: 'pdf',
+      liveQuery: 'pdf',
+      categories: CATEGORIES,
+      backToCatalog,
+    })
+
+    render(<MarketHome onRequestInstall={vi.fn()} />)
+
+    expect(screen.getByTestId('market-not-curated')).toHaveTextContent('Not curated')
+    expect(screen.getByTestId('market-result-summary')).toHaveTextContent('1 live results')
+    expect(screen.queryByTestId('market-category-bar')).not.toBeInTheDocument()
+    expect(screen.getByTestId('market-source-status-clawhub')).toHaveTextContent('Online')
+    expect(screen.getByTestId('market-source-status-skillhub')).toHaveTextContent('Cached')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to curated' }))
+    expect(backToCatalog).toHaveBeenCalledTimes(1)
+  })
+
+  it('submits on Enter but not on the Enter that confirms an IME candidate', () => {
+    const submitQuery = vi.fn()
+    const setQuery = vi.fn()
+    useMarketStore.setState({ scope: 'market', query: 'pdf', liveQuery: 'pdf', submitQuery, setQuery })
+
+    render(<MarketHome onRequestInstall={vi.fn()} />)
+    const input = screen.getByTestId('market-search-input')
+
+    fireEvent.compositionStart(input)
+    fireEvent.change(input, { target: { value: 'wendang' } })
+    // The in-progress pinyin is shown but never becomes a query.
+    expect(input).toHaveValue('wendang')
+    expect(setQuery).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(submitQuery).not.toHaveBeenCalled()
+
+    fireEvent.change(input, { target: { value: '文档' } })
+    fireEvent.compositionEnd(input)
+    expect(setQuery).toHaveBeenCalledTimes(1)
+    expect(setQuery).toHaveBeenCalledWith('文档')
+
+    // Safari: the confirming keydown arrives as 229 once `isComposing` cleared.
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 })
+    expect(submitQuery).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(submitQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it('tells the reader that live search waits for Enter', () => {
+    useMarketStore.setState({ scope: 'market', query: 'pdf', liveQuery: 'pdf' })
+
+    render(<MarketHome onRequestInstall={vi.fn()} />)
+
+    expect(screen.getByTestId('market-search-input')).toHaveAttribute(
+      'placeholder',
+      'Search all markets — press Enter to search',
+    )
+  })
 })

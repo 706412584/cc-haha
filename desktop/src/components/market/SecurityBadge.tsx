@@ -28,7 +28,20 @@ const ICONS: Record<SecurityStatus, LucideIcon> = {
   flagged: ShieldAlert,
 }
 
-export function SecurityBadge({ status, className = '' }: { status: SecurityStatus; className?: string }) {
+/**
+ * `short` is the card chip: one or two words in the chip row's size, where the
+ * full label would push the featured mark and tags off the line. The tooltip
+ * still carries the full explanation either way.
+ */
+export function SecurityBadge({
+  status,
+  short = false,
+  className = '',
+}: {
+  status: SecurityStatus
+  short?: boolean
+  className?: string
+}) {
   const t = useTranslation()
   const Icon = ICONS[status]
   return (
@@ -36,13 +49,13 @@ export function SecurityBadge({ status, className = '' }: { status: SecurityStat
       data-testid={`security-badge-${status}`}
       title={t(`market.securityHint.${status}`)}
       tone={TONES[status]}
-      size="md"
+      size={short ? 'sm' : 'md'}
       pill={false}
-      bordered
+      bordered={!short}
       className={className}
-      icon={<Icon className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />}
+      icon={<Icon className={short ? 'h-3 w-3' : 'h-3.5 w-3.5'} strokeWidth={2} aria-hidden="true" />}
     >
-      {t(`market.security.${status}`)}
+      {short ? t(`market.securityShort.${status}`) : t(`market.security.${status}`)}
     </Badge>
   )
 }

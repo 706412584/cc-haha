@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   api,
+  apiGetBlob,
   ApiResponseParseError,
   getApiUrl,
   getDefaultBaseUrl,
@@ -11,6 +12,16 @@ import {
 import { browserHost } from '../lib/desktopHost/browserHost'
 
 describe('api diagnostics reporting', () => {
+  it('passes cache bypass to fetch for an explicit image retry while keeping authentication', async () => {
+    setBaseUrl('http://127.0.0.1:3456')
+    setAuthToken('fixture-image-token')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('png', { status: 200 }))
+    await apiGetBlob('/preview-fs/s1/late.png', { cache: 'no-store' })
+    expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:3456/preview-fs/s1/late.png', expect.objectContaining({
+      cache: 'no-store',
+      headers: expect.objectContaining({ Authorization: 'Bearer fixture-image-token' }),
+    }))
+  })
   afterEach(() => {
     window.history.replaceState({}, '', '/')
     vi.useRealTimers()

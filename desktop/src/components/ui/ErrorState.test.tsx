@@ -5,6 +5,11 @@ import { describe, expect, it, vi } from 'vitest'
 import { ErrorState } from './ErrorState'
 
 describe('ErrorState', () => {
+  it('can render inside inline Markdown without putting a div inside a paragraph', () => {
+    render(<p><ErrorState as="span" title="Image failed" detail="missing.png" /></p>)
+    expect(screen.getByRole('alert').tagName).toBe('SPAN')
+    expect(screen.getByRole('alert')).toHaveTextContent('missing.png')
+  })
   it('announces the failure through an alert', () => {
     // Most of the replaced markup was a plain <div>, which a screen reader user
     // only encounters by chance.

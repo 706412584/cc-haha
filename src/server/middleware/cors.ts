@@ -1,6 +1,7 @@
 /**
  * CORS middleware for desktop and temporary open H5 access.
  */
+import { setResponseHeaders } from './responseHeaders.js'
 
 export function corsHeaders(origin?: string | null): Record<string, string> {
   const allowedOrigin = origin || 'http://localhost:3000'
@@ -122,4 +123,9 @@ export async function resolveCors(
     rejected: true,
     headers: baseCorsHeaders(),
   }
+}
+
+/** Put the CORS headers on a response, keeping its body as it is (see {@link setResponseHeaders}). */
+export function withCors(response: Response, cors: CorsResolution): Response {
+  return setResponseHeaders(response, cors.headers)
 }

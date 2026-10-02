@@ -11,6 +11,10 @@ import type { UIMessage } from '../../types/chat'
 
 describe('chat blocks', () => {
   beforeEach(() => {
+    // jsdom implements neither; the shared tool-result gallery builds a blob URL
+    // per thumbnail, and an unstubbed call drops the picture.
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, writable: true, value: () => 'blob:test' })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, writable: true, value: () => {} })
     useSettingsStore.setState({ locale: 'en' })
     useTabStore.setState({ activeTabId: 'active-tab', tabs: [{ sessionId: 'active-tab', title: 'Test', type: 'session' as const, status: 'idle' }] })
     useChatStore.setState({ sessions: {} })
@@ -613,7 +617,9 @@ describe('chat blocks', () => {
     expect(container.textContent).not.toContain('No output')
   })
 
-  it('renders an image-only MCP result (source-nested base64) inline with no empty text box', () => {
+  it('renders an image-only MCP result (source-nested base64) inline with no empty text box', async () => {
+    // jsdom has no URL.createObjectURL; the shared gallery builds a blob URL for
+    // every thumbnail, and without the stub it drops the picture.
     render(
       <ToolCallBlock
         toolName="mcp__layout-editor-mcp__layout_get_preview_image"
@@ -626,9 +632,11 @@ describe('chat blocks', () => {
       />,
     )
 
-    const images = screen.getAllByRole('img')
+    // The shared gallery hands each image to a blob URL through an effect, so
+    // the thumbnail appears asynchronously.
+    const images = await screen.findAllByRole('img')
     expect(images).toHaveLength(1)
-    expect(images[0]?.getAttribute('src')).toBe('data:image/png;base64,AAAA')
+    expect(images[0]?.getAttribute('src')).toBe('blob:test')
     // Image-only result: no empty "Tool Output" text box should render.
     expect(screen.queryByText('Tool Output')).toBeNull()
   })

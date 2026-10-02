@@ -287,6 +287,83 @@ describe('CronService', () => {
     const tasks = await service.listTasks()
     expect(tasks).toHaveLength(0)
   })
+
+  // Issue #1400. PowerShell 5.x `Set-Content -Encoding UTF8` prepends a BOM, and a
+  // crash mid-write on NTFS leaves a file at full size but zero-filled. Neither is
+  // damage to the user's tasks, yet each used to fail every read — and because every
+  // mutation reads first, the whole scheduled-task feature went down with it.
+  describe('task file written by another tool', () => {
+    const BOM = Buffer.from([0xef, 0xbb, 0xbf])
+    const validFile = JSON.stringify({
+      tasks: [{ id: 'abc12345', cron: '0 9 * * *', prompt: 'kept', createdAt: 1 }],
+    })
+    const tasksPath = () => path.join(tmpDir, 'scheduled_tasks.json')
+
+    it('reads a task file that starts with a UTF-8 BOM', async () => {
+      await fs.writeFile(tasksPath(), Buffer.concat([BOM, Buffer.from(validFile)]))
+
+      const tasks = await service.listTasks()
+
+      expect(tasks.map((task) => task.id)).toEqual(['abc12345'])
+    })
+
+    it('keeps the tasks of a BOM file when a new one is added', async () => {
+      await fs.writeFile(tasksPath(), Buffer.concat([BOM, Buffer.from(validFile)]))
+
+      const added = await service.createTask({ cron: '* * * * *', prompt: 'new' })
+
+      const tasks = await service.listTasks()
+      expect(tasks.map((task) => task.id).sort()).toEqual(['abc12345', added.id].sort())
+      // Written back as plain JSON: no reader has to know about the BOM again.
+      expect(JSON.parse(await fs.readFile(tasksPath(), 'utf-8')).tasks).toHaveLength(2)
+    })
+
+    const blankFiles: Array<[string, Buffer]> = [
+      ['a zero-filled file', Buffer.alloc(713, 0)],
+      ['an empty file', Buffer.alloc(0)],
+      ['a whitespace-only file', Buffer.from('  \r\n\t\n')],
+      ['a BOM-only file', BOM],
+    ]
+    for (const [name, bytes] of blankFiles) {
+      it(`treats ${name} as having no tasks`, async () => {
+        await fs.writeFile(tasksPath(), bytes)
+
+        expect(await service.listTasks()).toEqual([])
+      })
+    }
+
+    it('lets a task be created over a zero-filled file and heals it', async () => {
+      await fs.writeFile(tasksPath(), Buffer.alloc(713, 0))
+
+      const created = await service.createTask({ cron: '* * * * *', prompt: 'fresh' })
+
+      expect((await service.listTasks()).map((task) => task.id)).toEqual([created.id])
+      expect(JSON.parse(await fs.readFile(tasksPath(), 'utf-8')).tasks).toHaveLength(1)
+    })
+
+    // The other half of the contract: blank content holds nothing to lose, real
+    // content that will not parse might be recoverable. It must keep failing loudly
+    // and must not be overwritten by the next create.
+    it('still refuses content it cannot parse and leaves the file untouched', async () => {
+      const truncated = Buffer.from(validFile.slice(0, 30))
+      await fs.writeFile(tasksPath(), truncated)
+
+      await expect(service.listTasks()).rejects.toThrow('Failed to read scheduled tasks')
+      await expect(
+        service.createTask({ cron: '* * * * *', prompt: 'must not overwrite' }),
+      ).rejects.toThrow('Failed to read scheduled tasks')
+
+      expect((await fs.readFile(tasksPath())).equals(truncated)).toBe(true)
+    })
+
+    it('does not mistake NUL bytes around real content for a blank file', async () => {
+      const padded = Buffer.concat([Buffer.alloc(8, 0), Buffer.from('{"tasks": [')])
+      await fs.writeFile(tasksPath(), padded)
+
+      await expect(service.listTasks()).rejects.toThrow('Failed to read scheduled tasks')
+      expect((await fs.readFile(tasksPath())).equals(padded)).toBe(true)
+    })
+  })
 })
 
 // ─── SearchService tests ────────────────────────────────────────────────────

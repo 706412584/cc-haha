@@ -20,6 +20,7 @@ import {
   MARKET_META_FILENAME,
   readMarketMeta,
   resolveMarketSkill,
+  withMarketOwner,
   type MarketMeta,
 } from './marketService.js'
 import { marketCache } from './cache.js'
@@ -74,12 +75,16 @@ export type InstallResult = {
   skill: NormalizedSkill
 }
 
-export async function installMarketSkill(source: MarketSource, slug: string): Promise<InstallResult> {
+/**
+ * `owner` pins a ClawHub skill to the copy the reader picked (slugs are shared
+ * across owners); detail, file list and every file download use that owner.
+ */
+export async function installMarketSkill(source: MarketSource, slug: string, owner?: string): Promise<InstallResult> {
   const existing = inFlight.get(slug)
   if (existing) {
     throw new ApiError(409, `Install already in progress for ${slug}`, MARKET_ERROR_CODES.installInProgress)
   }
-  const task = performInstall(source, slug)
+  const task = withMarketOwner(source, slug, owner, () => performInstall(source, slug, owner))
   inFlight.set(slug, task.catch(() => {}))
   try {
     return await task
@@ -88,7 +93,7 @@ export async function installMarketSkill(source: MarketSource, slug: string): Pr
   }
 }
 
-async function performInstall(source: MarketSource, slug: string): Promise<InstallResult> {
+async function performInstall(source: MarketSource, slug: string, owner: string | undefined): Promise<InstallResult> {
   const dirName = sanitizeDirName(slug)
   if (!dirName) {
     throw new ApiError(422, `Skill slug cannot be used as a directory name: ${slug}`, MARKET_ERROR_CODES.notInstallable)
@@ -97,7 +102,7 @@ async function performInstall(source: MarketSource, slug: string): Promise<Insta
   // Resolve detail (includes file list + limits + install state).
   let detail
   try {
-    detail = await resolveMarketSkill(source, slug)
+    detail = await resolveMarketSkill(source, slug, owner)
   } catch (error) {
     throw toUpstreamApiError(error)
   }

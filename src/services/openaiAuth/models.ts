@@ -92,6 +92,15 @@ export const OPENAI_CODEX_MODEL_CATALOG: OpenAIModelCatalogEntry[] = [
     contextWindow: OPENAI_CODEX_STANDARD_EFFECTIVE_CONTEXT_WINDOW,
   },
   {
+    value: 'gpt-6.1-sol',
+    label: 'GPT-6.1-Sol',
+    description: 'Latest workhorse model for coding and everyday work',
+    descriptionForModel: 'GPT-6.1-Sol - latest workhorse model for coding and everyday work',
+    defaultReasoningEffort: 'low',
+    supportedReasoningEfforts: GPT_5_6_REASONING_EFFORTS,
+    contextWindow: OPENAI_CODEX_STANDARD_EFFECTIVE_CONTEXT_WINDOW,
+  },
+  {
     value: 'gpt-5.6-sol',
     label: 'GPT-5.6-Sol',
     description: 'Frontier agentic coding model',
@@ -245,6 +254,8 @@ export function getOpenAIModelDisplayName(model: string): string | null {
     case 'gpt-6':
     case 'gpt-6-astra':
       return 'GPT-6 Astra'
+    case 'gpt-6.1-sol':
+      return 'GPT-6.1-Sol'
     case 'gpt-6-sol':
       return 'GPT-6-Sol'
     case 'gpt-6-luna':
@@ -292,7 +303,7 @@ export function getOpenAICodexContextWindowForModel(
     return OPENAI_CODEX_STANDARD_EFFECTIVE_CONTEXT_WINDOW
   }
 
-  if (normalized === 'gpt-6-sol' || normalized === 'gpt-6-luna') {
+  if (normalized === 'gpt-6.1-sol' || normalized === 'gpt-6-sol' || normalized === 'gpt-6-luna') {
     return OPENAI_CODEX_STANDARD_EFFECTIVE_CONTEXT_WINDOW
   }
 

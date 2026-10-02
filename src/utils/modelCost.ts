@@ -17,9 +17,11 @@ import {
   CLAUDE_OPUS_4_8_CONFIG,
   CLAUDE_OPUS_4_CONFIG,
   CLAUDE_OPUS_5_5_CONFIG,
+  CLAUDE_OPUS_5_CONFIG,
   CLAUDE_SONNET_4_5_CONFIG,
   CLAUDE_SONNET_4_6_CONFIG,
   CLAUDE_SONNET_4_CONFIG,
+  CLAUDE_SONNET_5_5_CONFIG,
   CLAUDE_SONNET_5_CONFIG,
 } from './model/configs.js'
 import {
@@ -38,12 +40,23 @@ export type ModelCosts = {
   webSearchRequests: number
 }
 
-// Standard pricing tier for Sonnet models: $3 input / $15 output per Mtok
+// Pricing tier for Sonnet 4.x and earlier: $3 input / $15 output per Mtok
 export const COST_TIER_3_15 = {
   inputTokens: 3,
   outputTokens: 15,
   promptCacheWriteTokens: 3.75,
   promptCacheReadTokens: 0.3,
+  webSearchRequests: 0.01,
+} as const satisfies ModelCosts
+
+// Pricing tier for Sonnet 5 and Sonnet 5.5: $2 input / $10 output per Mtok.
+// Sonnet 5 launched at this price as introductory pricing; Anthropic made it the
+// standard price and cancelled the announced $3/$15 increase, so do not restore it.
+export const COST_TIER_2_10 = {
+  inputTokens: 2,
+  outputTokens: 10,
+  promptCacheWriteTokens: 2.5,
+  promptCacheReadTokens: 0.2,
   webSearchRequests: 0.01,
 } as const satisfies ModelCosts
 
@@ -86,6 +99,16 @@ export const COST_OPUS_55 = {
   outputTokens: 20,
   promptCacheWriteTokens: 5,
   promptCacheReadTokens: 0.2,
+  webSearchRequests: 0.01,
+} as const satisfies ModelCosts
+
+// Opus 5.5 fast mode (research preview): $8 input / $40 output per Mtok, with the cache
+// multipliers stacked on top (1.25x writes, 0.05x reads on Opus 5.5).
+export const COST_OPUS_55_FAST = {
+  inputTokens: 8,
+  outputTokens: 40,
+  promptCacheWriteTokens: 10,
+  promptCacheReadTokens: 0.4,
   webSearchRequests: 0.01,
 } as const satisfies ModelCosts
 
@@ -133,6 +156,7 @@ export function getOpus46CostTier(fastMode: boolean): ModelCosts {
 // Web search cost: $10 per 1000 requests = $0.01 per request
 export const MODEL_COSTS: Record<ModelShortName, ModelCosts> = {
   [firstPartyNameToCanonical(CLAUDE_OPUS_5_5_CONFIG.firstParty)]: COST_OPUS_55,
+  [firstPartyNameToCanonical(CLAUDE_OPUS_5_CONFIG.firstParty)]: COST_TIER_5_25,
   [firstPartyNameToCanonical(CLAUDE_FABLE_5_1_CONFIG.firstParty)]:
     COST_FABLE_51,
   [firstPartyNameToCanonical(CLAUDE_FABLE_5_CONFIG.firstParty)]:
@@ -151,8 +175,10 @@ export const MODEL_COSTS: Record<ModelShortName, ModelCosts> = {
     COST_TIER_3_15,
   [firstPartyNameToCanonical(CLAUDE_SONNET_4_6_CONFIG.firstParty)]:
     COST_TIER_3_15,
+  [firstPartyNameToCanonical(CLAUDE_SONNET_5_5_CONFIG.firstParty)]:
+    COST_TIER_2_10,
   [firstPartyNameToCanonical(CLAUDE_SONNET_5_CONFIG.firstParty)]:
-    COST_TIER_3_15,
+    COST_TIER_2_10,
   [firstPartyNameToCanonical(CLAUDE_OPUS_4_CONFIG.firstParty)]: COST_TIER_15_75,
   [firstPartyNameToCanonical(CLAUDE_OPUS_4_1_CONFIG.firstParty)]:
     COST_TIER_15_75,

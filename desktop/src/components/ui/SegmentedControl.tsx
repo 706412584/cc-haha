@@ -23,7 +23,13 @@ export type SegmentedControlProps<T extends string> = {
    * latter, and only a tablist implies associated panels.
    */
   as?: 'radiogroup' | 'tablist'
-  appearance?: 'solid' | 'raised' | 'underline'
+  /**
+   * `chip` is a wrapping row of separate pill buttons rather than one framed
+   * track — for option sets too long for a single line (the market's catalog
+   * categories). It wraps instead of scrolling sideways: a hidden horizontal
+   * overflow hides options from anyone who never thinks to scroll.
+   */
+  appearance?: 'solid' | 'raised' | 'underline' | 'chip'
   size?: 'sm' | 'md'
   /** `fill` stretches segments equally; `auto` sizes each to its content. */
   layout?: 'fill' | 'auto'
@@ -38,6 +44,12 @@ const SIZE_CLASSES = {
 const SEGMENT_PADDING = {
   sm: 'px-2.5 gap-1',
   md: 'px-3 gap-1.5',
+} as const
+
+/** Chips size themselves; the wrapping row has no single height to pin. */
+const CHIP_SIZE_CLASSES = {
+  sm: 'h-7 px-3 gap-1 text-xs',
+  md: 'h-8 px-3.5 gap-1.5 text-[13px]',
 } as const
 
 /**
@@ -86,6 +98,7 @@ export function SegmentedControl<T extends string>({
   }
 
   const isTabs = as === 'tablist'
+  const isChip = appearance === 'chip'
 
   return (
     <div
@@ -94,12 +107,12 @@ export function SegmentedControl<T extends string>({
       aria-label={label}
       onKeyDown={handleKeyDown}
       className={cx(
-        'inline-flex items-center',
+        isChip ? 'flex flex-wrap items-center gap-1.5' : 'inline-flex items-center',
         appearance === 'underline'
           ? 'gap-1 border-b border-[var(--color-border)]'
-          : 'gap-0.5 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container)] p-0.5',
+          : !isChip && 'gap-0.5 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container)] p-0.5',
         layout === 'fill' && 'flex w-full',
-        SIZE_CLASSES[size],
+        !isChip && SIZE_CLASSES[size],
         className,
       )}
     >
@@ -118,13 +131,22 @@ export function SegmentedControl<T extends string>({
             title={item.title}
             onClick={() => onChange(item.value)}
             className={cx(
-              'inline-flex h-full items-center justify-center font-medium whitespace-nowrap',
+              'inline-flex items-center justify-center font-medium whitespace-nowrap',
               'transition-colors duration-150 cursor-pointer',
               'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]',
               'disabled:cursor-not-allowed disabled:opacity-50',
-              SEGMENT_PADDING[size],
+              isChip ? CHIP_SIZE_CLASSES[size] : cx('h-full', SEGMENT_PADDING[size]),
               layout === 'fill' && 'flex-1',
-              appearance === 'underline'
+              isChip
+                ? cx(
+                  'rounded-full border',
+                  // The ink fill of the primary button, so the picked chip
+                  // reads as the same "on" state as the page's main action.
+                  selected
+                    ? 'border-[var(--color-btn-primary-bg)] bg-[var(--color-btn-primary-bg)] text-[var(--color-btn-primary-fg)]'
+                    : 'border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]',
+                )
+                : appearance === 'underline'
                 ? cx(
                   'rounded-none border-b-2 -mb-px',
                   selected

@@ -5,6 +5,7 @@ import {
   type WorkspaceStatusResult,
   type WorkspaceTreeResult,
 } from '../api/sessions'
+import { forgetDocumentBlobs } from '../lib/workspace/documentBlobCache'
 
 /**
  * Layer 2 of the workspace: content data.
@@ -28,7 +29,12 @@ export type WorkspaceFileEntry = {
   content?: string
   dataUrl?: string
   mimeType?: string
-  previewType?: 'text' | 'image'
+  previewType?: NonNullable<WorkspaceReadFileResult['previewType']>
+  /**
+   * Document types only. A viewer fetches the bytes again when this changes, and
+   * only then — a watcher reload that finds the same version costs no download.
+   */
+  version?: string
   language?: string
   size?: number
   truncated?: boolean
@@ -45,7 +51,22 @@ export type WorkspaceTreeView = {
 }
 
 export const EMPTY_WORKSPACE_TREE_VIEW: WorkspaceTreeView = { filter: '', mode: 'all', scrollTop: 0, open: true }
-export type WorkspaceFileView = { scrollTop: number; scrollLeft: number; revealNonce?: number }
+export type WorkspaceFileView = {
+  scrollTop: number
+  scrollLeft: number
+  revealNonce?: number
+  /**
+   * Zoom of a rendered document or image, as a scale factor. In memory only,
+   * like the scroll position it travels with, so it needs no persisted-shape
+   * migration; `undefined` means "the viewer's default".
+   */
+  zoom?: number
+  /**
+   * The worksheet a workbook was left on, by name. In memory only, for the same reason;
+   * `undefined` means the first one.
+   */
+  sheet?: string
+}
 
 type WorkspaceContentStore = {
   filesByKey: Record<string, WorkspaceFileEntry | undefined>
@@ -57,6 +78,10 @@ type WorkspaceContentStore = {
   fileViewByKey: Record<string, WorkspaceFileView | undefined>
   setTreeView: (sessionId: string, patch: Partial<WorkspaceTreeView>) => void
   setFileView: (sessionId: string, path: string, view: WorkspaceFileView) => void
+  /** Remember the zoom a viewer settled on; `undefined` returns to the viewer's default. */
+  setFileZoom: (sessionId: string, path: string, zoom: number | undefined) => void
+  /** Remember the worksheet a workbook was left on, by name. */
+  setFileSheet: (sessionId: string, path: string, sheet: string) => void
 
   getFile: (sessionId: string, path: string) => WorkspaceFileEntry | undefined
   getTree: (sessionId: string, path: string) => WorkspaceTreeResult | undefined
@@ -74,9 +99,12 @@ type WorkspaceContentStore = {
   clearSession: (sessionId: string) => void
 }
 
-function key(sessionId: string, path: string) {
+/** The identity of a file's content and view state: one entry however it was opened. */
+export function workspaceFileKey(sessionId: string, path: string) {
   return `${sessionId}::${path}`
 }
+
+const key = workspaceFileKey
 
 const fileRequests = new Map<string, number>()
 const treeRequests = new Map<string, number>()
@@ -119,8 +147,31 @@ export const useWorkspaceContentStore = create<WorkspaceContentStore>((set, get)
       [sessionId]: { ...EMPTY_WORKSPACE_TREE_VIEW, ...state.treeViewBySession[sessionId], ...patch },
     },
   })),
+  // Merged, not replaced: the scroll handlers write only the scroll fields, and a
+  // replace there would silently reset the zoom the viewer stored beside them.
   setFileView: (sessionId, path, view) => set((state) => ({
-    fileViewByKey: { ...state.fileViewByKey, [key(sessionId, path)]: view },
+    fileViewByKey: {
+      ...state.fileViewByKey,
+      [key(sessionId, path)]: { ...state.fileViewByKey[key(sessionId, path)], ...view },
+    },
+  })),
+  setFileZoom: (sessionId, path, zoom) => set((state) => {
+    const existing = state.fileViewByKey[key(sessionId, path)]
+    // Nothing to say about a file that has no view state and is being reset to
+    // the default: do not create an entry only to hold `undefined`.
+    if (!existing && zoom === undefined) return state
+    return {
+      fileViewByKey: {
+        ...state.fileViewByKey,
+        [key(sessionId, path)]: { scrollTop: 0, scrollLeft: 0, ...existing, zoom },
+      },
+    }
+  }),
+  setFileSheet: (sessionId, path, sheet) => set((state) => ({
+    fileViewByKey: {
+      ...state.fileViewByKey,
+      [key(sessionId, path)]: { scrollTop: 0, scrollLeft: 0, ...state.fileViewByKey[key(sessionId, path)], sheet },
+    },
   })),
 
   getFile: (sessionId, path) => get().filesByKey[key(sessionId, path)],
@@ -194,6 +245,7 @@ export const useWorkspaceContentStore = create<WorkspaceContentStore>((set, get)
               dataUrl: result.dataUrl,
               mimeType: result.mimeType,
               previewType: result.previewType ?? 'text',
+              version: result.version,
               language: result.language,
               size: result.size,
               truncated: result.truncated,
@@ -334,6 +386,7 @@ export const useWorkspaceContentStore = create<WorkspaceContentStore>((set, get)
   forgetFile: (sessionId, path) => {
     const entryKey = key(sessionId, path)
     invalidate(fileRequests, entryKey)
+    forgetDocumentBlobs(sessionId, path)
     set((state) => {
       if (!(entryKey in state.filesByKey)) return state
       const { [entryKey]: _removed, ...rest } = state.filesByKey
@@ -343,6 +396,7 @@ export const useWorkspaceContentStore = create<WorkspaceContentStore>((set, get)
 
   clearSession: (sessionId) => {
     statusRequests.delete(sessionId)
+    forgetDocumentBlobs(sessionId)
     const prefix = `${sessionId}::`
     for (const store of [fileRequests, treeRequests]) {
       for (const entryKey of store.keys()) {

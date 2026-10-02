@@ -29,6 +29,15 @@ const mocks = vi.hoisted(() => ({
   webviewUnlisten: vi.fn(),
   isMobile: false,
   isTauriRuntime: false,
+  voiceSupported: vi.fn(() => false),
+  voiceStartRecording: vi.fn(),
+  voiceTranscribe: vi.fn(),
+  voiceCatalog: vi.fn(async () => ({
+    supported: false,
+    providers: [],
+    preferences: { enabled: false, providerId: 'sensevoice-local', language: 'auto', downloadSource: 'auto' },
+    limits: { maxAudioSeconds: 60, maxAudioBytes: 1_000_000 },
+  })),
 }))
 
 vi.mock('../api/sessions', () => ({
@@ -41,13 +50,32 @@ vi.mock('../api/sessions', () => ({
   },
 }))
 
+vi.mock('@/api/voice', () => ({
+  voiceApi: {
+    catalog: mocks.voiceCatalog,
+    transcribe: mocks.voiceTranscribe,
+    providerStatus: vi.fn(),
+    updatePreferences: vi.fn(),
+    prepare: vi.fn(),
+    cancelPrepare: vi.fn(),
+    removeAssets: vi.fn(),
+  },
+}))
+
+vi.mock('@/features/voiceInput/recorder', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/features/voiceInput/recorder')>()),
+  isVoiceCaptureSupported: mocks.voiceSupported,
+  startRecording: mocks.voiceStartRecording,
+}))
+
 vi.mock('../api/skills', () => ({
   skillsApi: {
     list: mocks.listSkills,
   },
 }))
 
-vi.mock('../api/composerReferences', () => ({
+vi.mock('../api/composerReferences', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../api/composerReferences')>(),
   composerReferencesApi: { list: mocks.listReferences },
 }))
 
@@ -209,7 +237,8 @@ import { usePluginStore } from '../stores/pluginStore'
 import { useWorkflowStore } from '../stores/workflowStore'
 import type { RepositoryContextResult } from '../api/sessions'
 import { browserHost } from '../lib/desktopHost/browserHost'
-import { getComposerElement, getComposerText, setComposerText } from '../components/chat/composerTestUtils'
+import { getComposerElement, getComposerText, getComposerView, setComposerSelection, setComposerText } from '../components/chat/composerTestUtils'
+import { useVoiceInputStore } from '../stores/voiceInputStore'
 
 function okRepositoryContext(overrides: Partial<RepositoryContextResult> = {}): RepositoryContextResult {
   return {
@@ -297,6 +326,8 @@ describe('EmptySession', () => {
     mocks.webviewDragHandlers.length = 0
     mocks.isMobile = false
     mocks.isTauriRuntime = false
+    mocks.voiceSupported.mockReturnValue(false)
+    useVoiceInputStore.setState({ catalog: null, loading: false, error: null })
     useSettingsStore.setState({ locale: 'en', activeProviderName: null, permissionMode: 'default' })
     useSessionStore.setState(initialSessionState, true)
     useChatStore.setState(initialChatState, true)
@@ -1682,6 +1713,116 @@ describe('EmptySession', () => {
       })
     })
   })
+
+  describe('voice input', () => {
+    let finishTranscription: (text: string) => void
+    let activeRecording: { getLevel: () => number; stop: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn> }
+
+    beforeEach(() => {
+      activeRecording = {
+        getLevel: () => 0,
+        stop: vi.fn(async () => ({ wav: new Blob(['wav']), seconds: 2 })),
+        cancel: vi.fn(),
+      }
+      mocks.voiceSupported.mockReturnValue(true)
+      useVoiceInputStore.setState({
+        catalog: {
+          supported: true,
+          providers: [{
+            info: { id: 'sensevoice-local', name: 'SenseVoice', location: 'local', languages: ['auto', 'zh'] },
+            preparation: { phase: 'ready' },
+          }],
+          preferences: { enabled: true, providerId: 'sensevoice-local', language: 'zh', downloadSource: 'auto' },
+          limits: { maxAudioSeconds: 60, maxAudioBytes: 1_000_000 },
+        },
+      })
+      mocks.voiceStartRecording.mockImplementation(async () => activeRecording)
+      mocks.voiceTranscribe.mockImplementation(() => new Promise((resolve) => {
+        finishTranscription = (text) => resolve({ text, audioSeconds: 2, inferenceSeconds: 0.1 })
+      }))
+    })
+
+    async function dictate() {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Dictate' }))
+      })
+      await act(async () => {
+        fireEvent.click(await screen.findByRole('button', { name: 'Stop recording and transcribe' }))
+      })
+      await screen.findByRole('button', { name: 'Transcribing…' })
+    }
+
+    it('puts the microphone between the model picker and the send button', () => {
+      render(<EmptySession />)
+
+      const model = screen.getByTestId('model-selector')
+      const voice = screen.getByTestId('voice-input')
+      const run = screen.getByRole('button', { name: 'Run' })
+      expect(model.nextElementSibling).toBe(voice)
+      expect(voice.nextElementSibling).toBe(run)
+    })
+
+    it('does not render the microphone until dictation is ready', () => {
+      mocks.voiceSupported.mockReturnValue(false)
+      render(<EmptySession />)
+      expect(screen.queryByTestId('voice-input')).toBeNull()
+    })
+
+    it('writes dictated text at the caret without starting a session', async () => {
+      render(<EmptySession />)
+      setComposerText('ab', 1)
+      vi.spyOn(getComposerView(), 'hasFocus').mockReturnValue(true)
+      setComposerSelection(1)
+
+      await dictate()
+      await act(async () => {
+        finishTranscription('你好')
+      })
+
+      expect(getComposerText()).toBe('a你好b')
+      expect(mocks.createSession).not.toHaveBeenCalled()
+    })
+
+    it('keeps the text aside when the draft was edited while it was being recognised', async () => {
+      render(<EmptySession />)
+      setComposerText('hello', 5)
+
+      await dictate()
+      setComposerText('hello there', 11)
+      await act(async () => {
+        finishTranscription('dictated')
+      })
+
+      expect(getComposerText()).toBe('hello there')
+      expect(screen.getByTestId('voice-input-pending-text')).toHaveTextContent('dictated')
+    })
+
+    it('holds a result that arrives during an IME composition in the composer', async () => {
+      render(<EmptySession />)
+      await dictate()
+
+      fireEvent.compositionStart(getComposerElement())
+      await act(async () => {
+        finishTranscription('你好')
+      })
+
+      expect(getComposerText()).toBe('')
+      expect(screen.getByTestId('voice-input-pending-text')).toHaveTextContent('你好')
+    })
+
+    it('releases the microphone when the page is left mid-recording', async () => {
+      const { unmount } = render(<EmptySession />)
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Dictate' }))
+      })
+      await screen.findByRole('button', { name: 'Stop recording and transcribe' })
+
+      unmount()
+
+      expect(activeRecording.cancel).toHaveBeenCalledTimes(1)
+    })
+  })
+
 })
 
 describe('EmptySession welcome-screen task cards', () => {

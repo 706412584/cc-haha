@@ -13,6 +13,15 @@ describe('desktop build compatibility', () => {
     expect(config).not.toContain("target: ['es2021', 'safari15']")
   })
 
+  it('ships the data pdf.js reads at run time, without which a Chinese PDF is drawn as blanks', async () => {
+    // Not a text search: what matters is that the plugin is in the config that is actually used.
+    const { default: config } = await import('./vite.config')
+
+    const names = (config.plugins ?? []).flat(Infinity).map((plugin) => (plugin as { name?: string } | null)?.name)
+
+    expect(names).toContain('cc-haha:pdfjs-assets')
+  })
+
   it('does not rely on CSS color-mix for startup-critical shell chrome', () => {
     const css = readFileSync(join(desktopRoot, 'src', 'theme', 'globals.css'), 'utf8')
 

@@ -1,23 +1,27 @@
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it, spyOn } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { getEventListeners } from 'node:events'
-import { appendFile, chmod, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { appendFile, chmod, mkdir, mkdtemp, open, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import type { LocalIndexDatabase } from './database.js'
+import { openLocalIndexDatabase, type LocalIndexDatabase } from './database.js'
 import {
   createLocalIndexCoordinator,
   discoverActivityTranscriptSources,
   discoverTranscriptSources,
   type LocalIndexCoordinator,
 } from './coordinator.js'
-import type {
-  IndexedSessionRow,
-  PersistedBackfillState,
-  SessionIndex,
-  SessionSourceRecord,
+import {
+  createSessionIndex,
+  type IndexedSessionRow,
+  type PersistedBackfillState,
+  type SessionIndex,
+  type SessionSourceRecord,
 } from './sessionIndex.js'
 import {
   createSessionProjector,
+  MAX_PROJECTION_RECORD_BYTES,
+  MAX_PROJECTION_RECORDS,
   type ProjectionProgress,
   type SessionProjector,
   type SessionSourceCandidate,
@@ -849,6 +853,100 @@ describe('local index coordinator', () => {
       expect(upgradedCoordinator.getActivityStats('all')?.totalMessages).toBe(1)
       expect(upgradedCoordinator.getSessionEntryLocators?.(source.path)?.source.parserVersion)
         .toBe(SESSION_SUMMARY_PARSER_VERSION)
+    } finally {
+      await upgradedCoordinator.stop()
+    }
+  })
+
+  it('replaces persisted per-model dollars with the current rates after a parser upgrade', async () => {
+    // Version 9 corrected the Sonnet 5 / Sonnet 5.5 / Opus 5.5 rates. Dollars are persisted per model,
+    // so without a parser bump every already-indexed transcript would keep its old price forever.
+    expect(SESSION_SUMMARY_PARSER_VERSION).toBeGreaterThanOrEqual(9)
+
+    const root = await createTempDir('coordinator-activity-cost-upgrade')
+    const configDir = join(root, 'config')
+    const databasePath = join(configDir, 'cc-haha', 'db', 'index-v1.sqlite')
+    const transcriptPath = join(configDir, 'projects', '-repo', 'cost-upgrade.jsonl')
+    await mkdir(dirname(transcriptPath), { recursive: true })
+    await writeFile(transcriptPath, [
+      {
+        type: 'user',
+        message: { role: 'user', content: 'Price this' },
+        timestamp: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        type: 'assistant',
+        requestId: 'req_cost_upgrade',
+        message: {
+          id: 'msg_cost_upgrade',
+          role: 'assistant',
+          model: 'claude-sonnet-5',
+          content: [{ type: 'text', text: 'Priced' }],
+          usage: { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        },
+        timestamp: '2026-01-01T00:00:01.000Z',
+      },
+    ].map(entry => JSON.stringify(entry)).join('\n') + '\n')
+
+    const createIdleWatcher = (): ReconciliationWatcher => ({
+      async start() {},
+      async stop() {},
+      queueTranscriptPath() {},
+      queueFullSweep() {},
+      getMetrics: () => ({
+        queuedPaths: 0,
+        maxBatchSize: 0,
+        yielded: 0,
+        fullSweeps: 0,
+        watchFailures: 0,
+      }),
+    })
+    const previousCoordinator = createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => configDir,
+      resolveDatabasePath: () => databasePath,
+      createProjector: options => createSessionProjector({
+        ...options,
+        parserVersion: SESSION_SUMMARY_PARSER_VERSION - 1,
+      }),
+      createWatcher: createIdleWatcher,
+    })
+    await previousCoordinator.start()
+    await waitFor(() => previousCoordinator.isActivityScopeReady())
+    await previousCoordinator.stop()
+
+    // Leave behind what the previous release persisted: Sonnet 5 at the old $3/$15 rate.
+    const staleDatabase = new Database(databasePath)
+    try {
+      staleDatabase.run(
+        "UPDATE activity_daily_models SET cost_usd = 18 WHERE model = 'claude-sonnet-5'",
+      )
+      expect(staleDatabase.query<{ cost_usd: number }, []>(
+        "SELECT cost_usd FROM activity_daily_models WHERE model = 'claude-sonnet-5'",
+      ).get()?.cost_usd).toBe(18)
+    } finally {
+      staleDatabase.close()
+    }
+
+    let runScheduledDiscovery: (() => void) | undefined
+    const upgradedCoordinator = createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => configDir,
+      resolveDatabasePath: () => databasePath,
+      schedule: operation => { runScheduledDiscovery = operation },
+      createWatcher: createIdleWatcher,
+    })
+
+    try {
+      await upgradedCoordinator.start()
+      // The stale dollars are withheld until the rebuild has replaced them.
+      expect(upgradedCoordinator.getActivityStats('all')).toBeNull()
+
+      runScheduledDiscovery?.()
+      await waitFor(() => upgradedCoordinator.isActivityScopeReady())
+      // 1M input at $2 + 1M output at $10.
+      expect(upgradedCoordinator.getActivityStats('all')?.modelUsage['claude-sonnet-5']?.costUSD)
+        .toBeCloseTo(12, 6)
     } finally {
       await upgradedCoordinator.stop()
     }
@@ -2536,5 +2634,397 @@ describe('discoverActivityTranscriptSources', () => {
     // into a full filesystem walk.
     expect(result.candidates.some(candidate => candidate.path.endsWith('agent-x.jsonl')))
       .toBe(false)
+  })
+})
+
+describe('source-scoped index failures', () => {
+  const LEGACY = 'aaaaaaaa-0000-4000-8000-000000000001'
+  const HEALTHY = 'aaaaaaaa-0000-4000-8000-000000000002'
+  const LONG = 'aaaaaaaa-0000-4000-8000-000000000003'
+
+  function idleWatcher(): ReconciliationWatcher {
+    return {
+      async start() {},
+      async stop() {},
+      queueTranscriptPath() {},
+      queueFullSweep() {},
+      getMetrics: () => ({ queuedPaths: 0, maxBatchSize: 0, yielded: 0, fullSweeps: 0, watchFailures: 0 }),
+    }
+  }
+
+  function fakeProjector(index: SessionIndex, failures: Map<string, { code: string } | 'retry'>, gate?: Promise<void>, gatedId?: string): SessionProjector {
+    return {
+      async projectSource(item, progress = { discovered: 0, indexed: 0 }) {
+        if (gate && item.sessionId === gatedId) await gate
+        const failure = failures.get(item.sessionId)
+        if (failure === 'retry') return { kind: 'retry', reason: 'changed-during-read' }
+        if (failure) throw Object.assign(new Error('projection failed'), failure)
+        ;(index as unknown as { _upsert(item: SessionSourceCandidate, progress: ProjectionProgress): void })._upsert(item, progress)
+        return {
+          kind: 'indexed',
+          action: 'full',
+          projection: {
+            summary: { title: item.sessionId, createdAt: item.fallbackCreatedAt, modifiedAt: item.fallbackModifiedAt, messageCount: 1, workDir: item.fallbackWorkDir },
+            indexedBytes: 1,
+            pendingTailBytes: 0,
+            malformedLineCount: 0,
+          },
+          work: { maxBufferedChunks: 1, maxBufferedBytes: 1 },
+        }
+      },
+      async deleteSource(path) {
+        ;(index as unknown as { _delete(path: string): void })._delete(path)
+        return { kind: 'deleted' }
+      },
+      async projectActivitySource() {
+        return { kind: 'retry', reason: 'transient-io' }
+      },
+      async deleteActivitySource() {
+        return { kind: 'deleted' }
+      },
+    }
+  }
+
+  it('keeps the index ready when a stale-version transcript gained a record over the buffer threshold', async () => {
+    const root = await createTempDir('coordinator-oversized-record')
+    const configDir = join(root, 'config')
+    const databasePath = join(configDir, 'cc-haha', 'db', 'index-v1.sqlite')
+    const legacy = await createRealTranscript(configDir, '-repo', LEGACY, 'Legacy image session')
+    await createRealTranscript(configDir, '-repo', HEALTHY, 'Healthy session')
+    const previous = createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => configDir,
+      resolveDatabasePath: () => databasePath,
+      createProjector: options => createSessionProjector({ ...options, parserVersion: SESSION_SUMMARY_PARSER_VERSION - 1 }),
+      createWatcher: idleWatcher,
+    })
+    await previous.start()
+    await waitFor(() => previous.getPublicStatus().state === 'ready' && previous.listSessions().total === 2)
+    await previous.stop()
+
+    // A Read-tool image result stores its base64 twice.
+    const base64 = 'A'.repeat(MAX_PROJECTION_RECORD_BYTES / 2 + 1024)
+    await appendFile(legacy.path, `${JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_image', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64 } }] }] },
+      toolUseResult: { type: 'image', file: { base64, type: 'image/png' } },
+      uuid: 'image-record',
+      timestamp: '2026-01-01T00:00:05.000Z',
+    })}\n`)
+    rememberEnvironment()
+    process.env.CLAUDE_CONFIG_DIR = configDir
+
+    let runDiscovery: (() => void) | undefined
+    const upgraded = createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => configDir,
+      resolveDatabasePath: () => databasePath,
+      schedule: operation => { runDiscovery = operation },
+      createWatcher: idleWatcher,
+    })
+    try {
+      await upgraded.start()
+      const startedAt = upgraded.getPublicStatus().lastUpdatedAt
+      runDiscovery?.()
+      await waitFor(() => upgraded.getPublicStatus().lastUpdatedAt !== startedAt, 30_000)
+
+      expect(upgraded.getPublicStatus()).toMatchObject({ state: 'ready', degradedSources: 0, lastErrorCode: null })
+      expect(upgraded.getSessionEntryLocators?.(legacy.path)?.source.parserVersion).toBe(SESSION_SUMMARY_PARSER_VERSION)
+      const { SessionService } = await import('../sessionService.js')
+      const service = new SessionService(upgraded)
+      const internals = service as unknown as { scanSessionListSummary: (...args: unknown[]) => Promise<unknown> }
+      const scan = spyOn(internals, 'scanSessionListSummary')
+      try {
+        const previews = await service.listProjectPreviews(6)
+        const restoredTabs = await service.listSessions({ limit: 200 })
+        expect(previews.sessions.map(session => session.id).sort()).toEqual([LEGACY, HEALTHY].sort())
+        expect(restoredTabs.sessions.find(session => session.id === LEGACY)).toMatchObject({
+          title: 'Legacy image session',
+          messageCount: 2,
+          modifiedAt: '2026-01-01T00:00:05.000Z',
+        })
+        expect(scan).not.toHaveBeenCalled()
+      } finally { scan.mockRestore() }
+    } finally {
+      await upgraded.stop()
+    }
+  })
+
+  it.each([
+    ['a projection budget', { code: 'LOCAL_INDEX_SOURCE_LIMIT' }, true],
+    ['a source changing while it is read', 'retry', true],
+    ['a database write failure', { code: 'SQLITE_FULL' }, false],
+  ] as const)('tells whether a failure from %s belongs to one transcript', async (_label, failure, sourceScoped) => {
+    const root = await createTempDir('coordinator-failure-scope')
+    const configDir = join(root, 'config')
+    const good = await createRealTranscript(configDir, '-repo', HEALTHY, 'Good')
+    const bad = await createRealTranscript(configDir, '-repo', LEGACY, 'Bad')
+    const index = createFakeIndex()
+    const coordinator = createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => configDir,
+      resolveDatabasePath: () => join(configDir, 'cc-haha', 'db', 'index-v1.sqlite'),
+      openDatabase: () => fakeDatabase(() => {}),
+      createIndex: () => index,
+      createProjector: () => fakeProjector(index, new Map([[LEGACY, failure]])),
+      discoverSources: async () => [good, bad],
+      createWatcher: idleWatcher,
+    })
+    try {
+      await coordinator.start()
+      await waitFor(() => coordinator.getPublicStatus().state === 'degraded' && coordinator.getPublicStatus().lastUpdatedAt !== null)
+      expect(coordinator.getPublicStatus().degradedSources).toBe(1)
+      expect(coordinator.getSourceScopedFailurePaths?.()).toEqual(sourceScoped ? [bad.path] : null)
+    } finally {
+      await coordinator.stop()
+    }
+  })
+
+  it('withholds the overlay for index-wide failures, a first build, and too many failed transcripts', async () => {
+    const root = await createTempDir('coordinator-failure-overlay-limits')
+    const configDir = join(root, 'config')
+    const many = await Promise.all(Array.from({ length: 33 }, (_, n) => createRealTranscript(
+      configDir, '-repo', `aaaaaaaa-0000-4000-8000-${String(100 + n).padStart(12, '0')}`, `Bad ${n}`,
+    )))
+    const gatedId = LONG
+    const gated = await createRealTranscript(configDir, '-repo', gatedId, 'Gated')
+    await utimes(gated.path, new Date(1_600_000_000_000), new Date(1_600_000_000_000))
+    gated.modifiedAtMs = 1_600_000_000_000
+    const release = deferred<void>()
+    const index = createFakeIndex()
+    let watcherOptions!: ReconciliationWatcherOptions
+    const failures = new Map<string, { code: string }>(many.slice(0, 1).map(item => [item.sessionId, { code: 'LOCAL_INDEX_SOURCE_LIMIT' }]))
+    const coordinator = createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => configDir,
+      resolveDatabasePath: () => join(configDir, 'cc-haha', 'db', 'index-v1.sqlite'),
+      openDatabase: () => fakeDatabase(() => {}),
+      createIndex: () => index,
+      createProjector: () => fakeProjector(index, failures, release.promise, gatedId),
+      discoverSources: async () => [many[0]!, gated],
+      createWatcher: options => {
+        watcherOptions = options
+        return idleWatcher()
+      },
+    })
+    try {
+      await coordinator.start()
+      // The first build has no complete snapshot yet, even though its only failure is source-scoped.
+      await waitFor(() => coordinator.getPublicStatus().state === 'degraded')
+      expect(coordinator.getSourceScopedFailurePaths?.()).toBeNull()
+      release.resolve()
+      await waitFor(() => coordinator.getSourceScopedFailurePaths?.() !== null)
+      expect(coordinator.getSourceScopedFailurePaths?.()).toEqual([many[0]!.path])
+
+      watcherOptions.onWatchFailure?.('LOCAL_INDEX_WATCH_FAILED')
+      expect(coordinator.getSourceScopedFailurePaths?.()).toBeNull()
+      watcherOptions.onWatchRecovered?.()
+      // Still degraded for an index-wide reason until a reconciliation recomputes the state.
+      expect(coordinator.getPublicStatus().state).toBe('degraded')
+      expect(coordinator.getSourceScopedFailurePaths?.()).toBeNull()
+
+      for (const item of many) failures.set(item.sessionId, { code: 'LOCAL_INDEX_SOURCE_LIMIT' })
+      await watcherOptions.onBatch({ paths: many.map(item => item.path), fullSweep: false })
+      expect(coordinator.getPublicStatus().degradedSources).toBe(33)
+      expect(coordinator.getSourceScopedFailurePaths?.()).toBeNull()
+    } finally {
+      release.resolve()
+      await coordinator.stop()
+    }
+  })
+
+  it('overlays a transcript that failed in the sweep that is still running', async () => {
+    const root = await createTempDir('coordinator-failure-in-flight')
+    const configDir = join(root, 'config')
+    const bad = await createRealTranscript(configDir, '-repo', LEGACY, 'Bad')
+    const gated = await createRealTranscript(configDir, '-repo', LONG, 'Gated')
+    await utimes(gated.path, new Date(1_600_000_000_000), new Date(1_600_000_000_000))
+    gated.modifiedAtMs = 1_600_000_000_000
+    const release = deferred<void>()
+    // A committed snapshot already exists, so it stays servable during the sweep.
+    const index = createFakeIndex([candidate(1, configDir)])
+    const coordinator = createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => configDir,
+      resolveDatabasePath: () => join(configDir, 'cc-haha', 'db', 'index-v1.sqlite'),
+      openDatabase: () => fakeDatabase(() => {}),
+      createIndex: () => index,
+      createProjector: () => fakeProjector(index, new Map([[LEGACY, { code: 'LOCAL_INDEX_SOURCE_LIMIT' }]]), release.promise, LONG),
+      discoverSources: async () => [bad, gated],
+      createWatcher: idleWatcher,
+    })
+    try {
+      await coordinator.start()
+      await waitFor(() => coordinator.getPublicStatus().state === 'degraded')
+      expect(coordinator.getSourceScopedFailurePaths?.()).toEqual([bad.path])
+    } finally {
+      release.resolve()
+      await coordinator.stop()
+    }
+  })
+
+  it('withholds the overlay after this run could not discover every transcript', async () => {
+    const indexed = candidate(1)
+    const index = createFakeIndex([indexed])
+    const coordinator = createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => '/tmp/config',
+      resolveDatabasePath: () => '/tmp/config/cc-haha/db/index-v1.sqlite',
+      openDatabase: () => fakeDatabase(() => {}),
+      createIndex: () => index,
+      createProjector: () => fakeProjector(index, new Map()),
+      discoverSources: async () => ({ complete: false }),
+      createWatcher: idleWatcher,
+    })
+    try {
+      await coordinator.start()
+      await waitFor(() => coordinator.getPublicStatus().lastErrorCode === 'LOCAL_INDEX_DISCOVERY_INCOMPLETE' && coordinator.getPublicStatus().lastUpdatedAt !== null)
+      expect(coordinator.getPublicStatus().state).toBe('degraded')
+      expect(coordinator.getSourceScopedFailurePaths?.()).toBeNull()
+    } finally {
+      await coordinator.stop()
+    }
+  })
+
+  it('remembers a transcript over its budget across restarts without rereading it on appends', async () => {
+    const root = await createTempDir('coordinator-persisted-limit')
+    const configDir = join(root, 'config')
+    const databasePath = join(configDir, 'cc-haha', 'db', 'index-v1.sqlite')
+    const record = `${JSON.stringify({ type: 'progress' })}\n`
+    const longPath = join(configDir, 'projects', '-repo', `${LONG}.jsonl`)
+    await mkdir(dirname(longPath), { recursive: true })
+    await writeFile(longPath, `${JSON.stringify({ type: 'user', message: { role: 'user', content: 'Long session' }, timestamp: '2026-01-01T00:00:00.000Z' })}\n${record.repeat(MAX_PROJECTION_RECORDS - 1)}`)
+    await createRealTranscript(configDir, '-repo', HEALTHY, 'Healthy session')
+    rememberEnvironment()
+    process.env.CLAUDE_CONFIG_DIR = configDir
+
+    const opened = new Map<string, number>()
+    const countingIo = {
+      openReadonly: async (path: string, flags: string) => {
+        opened.set(path, (opened.get(path) ?? 0) + 1)
+        return open(path, flags)
+      },
+      statPath: (path: string) => stat(path),
+    }
+    let watcherOptions!: ReconciliationWatcherOptions
+    let runDiscovery: (() => void) | undefined
+    const createCoordinator = (deferDiscovery: boolean) => createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => configDir,
+      resolveDatabasePath: () => databasePath,
+      createProjector: options => createSessionProjector({ ...options, fileIo: countingIo }),
+      ...(deferDiscovery ? { schedule: (operation: () => void) => { runDiscovery = operation } } : {}),
+      createWatcher: options => {
+        watcherOptions = options
+        return idleWatcher()
+      },
+    })
+
+    const first = createCoordinator(false)
+    await first.start()
+    await waitFor(() => first.getPublicStatus().state === 'ready' && first.listSessions().total === 2)
+    const readySource = first.getSessionEntryLocators?.(longPath)?.source
+    expect(readySource?.state).toBe('ready')
+    await appendFile(longPath, record)
+    await watcherOptions.onBatch({ paths: [longPath], fullSweep: false })
+    expect(first.getPublicStatus()).toMatchObject({ state: 'degraded', lastErrorCode: 'LOCAL_INDEX_SOURCE_LIMIT' })
+    expect(first.getSourceScopedFailurePaths?.()).toEqual([longPath])
+    await first.stop()
+
+    const database = openLocalIndexDatabase({ path: databasePath })
+    try {
+      const persisted = createSessionIndex(database).getSource(longPath)
+      expect(persisted).toMatchObject({ state: 'degraded', lastErrorCode: 'LOCAL_INDEX_SOURCE_LIMIT' })
+      expect(persisted?.fingerprint).toBe(readySource?.fingerprint)
+      expect(persisted?.size).toBe(readySource?.size)
+    } finally { database.close() }
+
+    const restarted = createCoordinator(true)
+    try {
+      await restarted.start()
+      // Known before any sweep runs, so the first list request already overlays it.
+      expect(runDiscovery).toBeDefined()
+      expect(restarted.getPublicStatus()).toMatchObject({ state: 'degraded', degradedSources: 1 })
+      expect(restarted.getSourceScopedFailurePaths?.()).toEqual([longPath])
+      const { SessionService } = await import('../sessionService.js')
+      const service = new SessionService(restarted)
+      const internals = service as unknown as { scanSessionListSummary: (filePath: string, ...args: unknown[]) => Promise<unknown> }
+      const scan = spyOn(internals, 'scanSessionListSummary')
+      try {
+        const listed = await service.listSessions({ limit: 200 })
+        expect(listed.sessions.map(session => session.id).sort()).toEqual([HEALTHY, LONG].sort())
+        expect(scan.mock.calls.map(call => call[0])).toEqual([longPath])
+      } finally { scan.mockRestore() }
+
+      opened.clear()
+      await appendFile(longPath, record)
+      const startedAt = restarted.getPublicStatus().lastUpdatedAt
+      runDiscovery?.()
+      await waitFor(() => restarted.getPublicStatus().lastUpdatedAt !== startedAt)
+      // Only its fingerprint is read: appends can only keep it over budget.
+      expect(opened.get(longPath)).toBe(1)
+      expect(restarted.getSourceScopedFailurePaths?.()).toEqual([longPath])
+
+      // A rewrite that fits the budget again is projected and clears the failure.
+      await writeFile(longPath, `${JSON.stringify({ type: 'user', message: { role: 'user', content: 'Long session, compacted' }, timestamp: '2026-01-02T00:00:00.000Z' })}\n`)
+      await watcherOptions.onBatch({ paths: [longPath], fullSweep: false })
+      expect(restarted.getPublicStatus()).toMatchObject({ state: 'ready', degradedSources: 0 })
+      expect(restarted.getSessionEntryLocators?.(longPath)?.source.state).toBe('ready')
+    } finally {
+      await restarted.stop()
+    }
+  })
+
+  it('serves the snapshot at startup while a previous run left only a transcript failure behind', async () => {
+    const root = await createTempDir('coordinator-previous-run-degraded')
+    const configDir = join(root, 'config')
+    const databasePath = join(configDir, 'cc-haha', 'db', 'index-v1.sqlite')
+    await createRealTranscript(configDir, '-repo', HEALTHY, 'Healthy session')
+    rememberEnvironment()
+    process.env.CLAUDE_CONFIG_DIR = configDir
+    const first = createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => configDir,
+      resolveDatabasePath: () => databasePath,
+      createWatcher: idleWatcher,
+    })
+    await first.start()
+    await waitFor(() => first.getPublicStatus().state === 'ready' && first.listSessions().total === 1)
+    await first.stop()
+    // What a watched batch leaves behind when the app quits with a transient failure outstanding.
+    const database = openLocalIndexDatabase({ path: databasePath })
+    try {
+      database.write(operation => operation.run(
+        `UPDATE backfill_state SET state = 'degraded', degraded = 1, last_error_code = 'LOCAL_INDEX_SOURCE_CHANGED'`,
+      ))
+    } finally { database.close() }
+
+    let runDiscovery: (() => void) | undefined
+    const restarted = createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => configDir,
+      resolveDatabasePath: () => databasePath,
+      schedule: operation => { runDiscovery = operation },
+      createWatcher: idleWatcher,
+    })
+    try {
+      await restarted.start()
+      expect(restarted.getPublicStatus()).toMatchObject({ state: 'degraded', lastErrorCode: 'LOCAL_INDEX_SOURCE_CHANGED' })
+      expect(restarted.getSourceScopedFailurePaths?.()).toEqual([])
+      const { SessionService } = await import('../sessionService.js')
+      const service = new SessionService(restarted)
+      const internals = service as unknown as { scanSessionListSummary: (...args: unknown[]) => Promise<unknown> }
+      const scan = spyOn(internals, 'scanSessionListSummary')
+      try {
+        expect((await service.listProjectPreviews(6)).sessions.map(session => session.id)).toEqual([HEALTHY])
+        expect(scan).not.toHaveBeenCalled()
+      } finally { scan.mockRestore() }
+
+      runDiscovery?.()
+      await waitFor(() => restarted.getPublicStatus().state === 'ready')
+      expect(restarted.getPublicStatus().lastErrorCode).toBeNull()
+    } finally {
+      await restarted.stop()
+    }
   })
 })

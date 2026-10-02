@@ -85,13 +85,50 @@ describe('SegmentedControl', () => {
     expect(document.activeElement).toBe(screen.getByRole('radio', { name: 'C' }))
   })
 
-  it('gives every segment a focus ring in all three appearances', () => {
-    for (const appearance of ['solid', 'raised', 'underline'] as const) {
+  it('gives every segment a focus ring in all four appearances', () => {
+    for (const appearance of ['solid', 'raised', 'underline', 'chip'] as const) {
       const { unmount } = render(
         <SegmentedControl items={ITEMS} value="all" onChange={() => {}} label="Filter" appearance={appearance} />,
       )
       expect(screen.getByRole('radio', { name: 'All' }).className).toContain('focus-visible:ring-2')
       unmount()
     }
+  })
+
+  describe('chip appearance', () => {
+    it('wraps separate pills instead of pinning one framed track height', () => {
+      // A long category list in a single fixed-height track clips or forces a
+      // sideways scroll; chips have to be free to wrap onto the next line.
+      render(<SegmentedControl items={ITEMS} value="all" onChange={() => {}} label="Category" appearance="chip" />)
+
+      const group = screen.getByRole('radiogroup', { name: 'Category' })
+      expect(group.className).toContain('flex-wrap')
+      expect(group.className).not.toMatch(/\bh-8\b/)
+      for (const radio of screen.getAllByRole('radio')) {
+        expect(radio.className).toContain('rounded-full')
+        expect(radio.className).toMatch(/\bh-8\b/)
+      }
+    })
+
+    it('keeps the radiogroup semantics and arrow-key movement', () => {
+      const onChange = vi.fn()
+      render(<SegmentedControl items={ITEMS} value="active" onChange={onChange} label="Category" appearance="chip" />)
+
+      const active = screen.getByRole('radio', { name: 'Active' })
+      expect(active).toHaveAttribute('aria-checked', 'true')
+      expect(active).toHaveAttribute('tabindex', '0')
+
+      active.focus()
+      fireEvent.keyDown(active, { key: 'ArrowRight' })
+      expect(document.activeElement).toBe(screen.getByRole('radio', { name: 'Done' }))
+      expect(onChange).toHaveBeenCalledWith('done')
+    })
+
+    it('fills the picked chip with the primary ink pair', () => {
+      render(<SegmentedControl items={ITEMS} value="all" onChange={() => {}} label="Category" appearance="chip" />)
+
+      expect(screen.getByRole('radio', { name: 'All' }).className).toContain('bg-[var(--color-btn-primary-bg)]')
+      expect(screen.getByRole('radio', { name: 'Done' }).className).toContain('bg-[var(--color-surface)]')
+    })
   })
 })

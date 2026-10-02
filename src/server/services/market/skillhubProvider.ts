@@ -21,6 +21,7 @@ import {
   MARKET_ERROR_CODES,
   MARKET_LIMITS,
   MarketUpstreamError,
+  meaningfulChangelog,
   skillId,
   type MarketProvider,
   type NormalizedSkill,
@@ -65,7 +66,7 @@ type SkillhubSecurityReports = Record<
 type SkillhubDetail = {
   skill?: SkillhubListItem & { stats?: { downloads?: number; installs?: number; stars?: number } }
   owner?: { handle?: string; displayName?: string; image?: string }
-  latestVersion?: { version?: string; changelog?: string }
+  latestVersion?: { version?: string; changelog?: string; createdAt?: number }
   securityReports?: SkillhubSecurityReports
 }
 
@@ -197,6 +198,8 @@ export const skillhubProvider: MarketProvider = {
     }
     const security = mapSecurity(data.securityReports, data.skill.verified)
     const version = data.latestVersion?.version || item.version
+    const changelog = meaningfulChangelog(data.latestVersion?.changelog)
+    const publishedAt = data.latestVersion?.createdAt
 
     let files: ProviderFileEntry[] = []
     try {
@@ -222,6 +225,9 @@ export const skillhubProvider: MarketProvider = {
     return {
       ...item,
       version,
+      ...(changelog
+        ? { changelog: { version, text: changelog, publishedAt: typeof publishedAt === 'number' ? publishedAt : undefined } }
+        : {}),
       author: {
         handle: data.owner?.handle || item.author.handle,
         displayName: data.owner?.displayName,

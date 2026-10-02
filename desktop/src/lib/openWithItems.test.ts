@@ -83,6 +83,21 @@ describe('isPreviewableChangedFile', () => {
   })
 })
 
+describe('isPreviewableChangedFile for a document the workspace can draw', () => {
+  it('ranks a listed document with the other rendered previews, from the same set the gate uses', () => {
+    expect(isPreviewableChangedFile('out/thesis.pdf')).toBe(true)
+    expect(isPreviewableChangedFile('OUT/THESIS.PDF')).toBe(true)
+  })
+
+  it.each(['out/budget.xlsx', 'out/macros.xlsm', 'out/legacy.xls', 'out/thesis.docx'])('ranks %s with them too', (path) => {
+    expect(isPreviewableChangedFile(path)).toBe(true)
+  })
+
+  it('leaves an unlisted office file with the generic rows', () => {
+    expect(isPreviewableChangedFile('deck.pptx')).toBe(false)
+  })
+})
+
 function makeT() {
   return (key: string, vars?: Record<string, string>) =>
     vars?.target != null ? `${key}:${vars.target}` : key

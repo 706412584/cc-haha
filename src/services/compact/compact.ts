@@ -65,6 +65,7 @@ import {
   getMessagesAfterCompactBoundary,
   isCompactBoundaryMessage,
   normalizeMessagesForAPI,
+  replaceMediaWithPlaceholders,
 } from '../../utils/messages.js'
 import { expandPath } from '../../utils/path.js'
 import { getPlan, getPlanFilePath } from '../../utils/plans.js'
@@ -145,60 +146,9 @@ const MAX_COMPACT_STREAMING_RETRIES = 2
  * and thinking blocks but not images.
  */
 export function stripImagesFromMessages(messages: Message[]): Message[] {
-  return messages.map(message => {
-    if (message.type !== 'user') {
-      return message
-    }
-
-    const content = message.message.content
-    if (!Array.isArray(content)) {
-      return message
-    }
-
-    let hasMediaBlock = false
-    const newContent = content.flatMap(block => {
-      if (block.type === 'image') {
-        hasMediaBlock = true
-        return [{ type: 'text' as const, text: '[image]' }]
-      }
-      if (block.type === 'document') {
-        hasMediaBlock = true
-        return [{ type: 'text' as const, text: '[document]' }]
-      }
-      // Also strip images/documents nested inside tool_result content arrays
-      if (block.type === 'tool_result' && Array.isArray(block.content)) {
-        let toolHasMedia = false
-        const newToolContent = block.content.map(item => {
-          if (item.type === 'image') {
-            toolHasMedia = true
-            return { type: 'text' as const, text: '[image]' }
-          }
-          if (item.type === 'document') {
-            toolHasMedia = true
-            return { type: 'text' as const, text: '[document]' }
-          }
-          return item
-        })
-        if (toolHasMedia) {
-          hasMediaBlock = true
-          return [{ ...block, content: newToolContent }]
-        }
-      }
-      return [block]
-    })
-
-    if (!hasMediaBlock) {
-      return message
-    }
-
-    return {
-      ...message,
-      message: {
-        ...message.message,
-        content: newContent,
-      },
-    } as typeof message
-  })
+  return messages.map(message =>
+    message.type === 'user' ? replaceMediaWithPlaceholders(message) : message,
+  )
 }
 
 /**

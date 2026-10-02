@@ -6,7 +6,10 @@ import { useWorkspaceFileOpenTargets } from '@/components/workspace/workspaceFil
 import { useDismissable } from '@/hooks/useDismissable'
 import { useTranslation } from '../../i18n'
 import { WorkspaceEditableFile } from './WorkspaceEditableFile'
+import { DocumentSurface } from '../workspace/surfaces/document/DocumentSurface'
+import { isDocumentPreviewType } from '../workspace/surfaces/document/documentViewers'
 import { ImagePreview } from '../workspace/surfaces/ImagePreview'
+import { OpenInSystemButton } from '../workspace/surfaces/OpenInSystemButton'
 import { PanelMessage } from '../workspace/surfaces/PanelMessage'
 import { WorkspaceFileOpenWith } from '../workspace/WorkspaceFileOpenWith'
 import { WorkspaceTreeSidebar } from '@/components/workbench/WorkspaceTreeSidebar'
@@ -14,6 +17,7 @@ import { WorkspaceFileTreePane } from './WorkspaceFileTreePane'
 import { useMenuKeyboard } from './menuKeyboard'
 import { useWorkspaceContentStore, type WorkspaceFileView } from '../../stores/workspaceContentStore'
 import { workspaceOpen } from '../../lib/workspace/openTarget'
+import { isRootedLocalPath } from '../../lib/handlePreviewLink'
 import { resolveAbsoluteOpenPath } from '../../lib/systemFileOpen'
 import type { WorkspaceFileTab as WorkspaceFileTabModel } from '../../lib/workspace/types'
 
@@ -85,6 +89,11 @@ export function WorkspaceFileTab({ sessionId, tab }: WorkspaceFileTabProps) {
   useLayoutEffect(() => {
     const surface = fileContentRef.current?.querySelector<HTMLElement>('[data-workspace-scroll-surface]')
     if (!surface) return
+    // A surface whose content lays out asynchronously (a rendered document) has
+    // nothing to scroll yet: restoring here would clamp the saved offset to 0 and
+    // then write that 0 back over it. It restores its own position once laid out;
+    // `onScrollCapture` below still records where the reader leaves it.
+    if (surface.getAttribute('data-workspace-scroll-surface') === 'deferred') return
     if (restoredSurface.current?.node === surface && restoredSurface.current.revealNonce === tab.reveal?.nonce) return
     restoredSurface.current = { node: surface, revealNonce: tab.reveal?.nonce }
     surface.scrollTop = revealScroll ? 0 : savedView?.scrollTop ?? 0
@@ -147,6 +156,11 @@ export function WorkspaceFileTab({ sessionId, tab }: WorkspaceFileTabProps) {
   const breadcrumbSegments = projectSegment ? [projectSegment, ...segments] : segments
   const absolutePath = resolveAbsoluteOpenPath(path, workDir ?? undefined)
   const fileOpen = useWorkspaceFileOpenTargets(path ? absolutePath : null)
+  // Every state below that cannot show the file offers the way out that always
+  // works. It needs a real absolute path: until the workdir is known a relative
+  // one would have the OS open nothing.
+  const canOpenInSystem = !!path && isRootedLocalPath(absolutePath)
+  const systemAction = canOpenInSystem ? <OpenInSystemButton absolutePath={absolutePath} /> : undefined
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
@@ -267,13 +281,29 @@ export function WorkspaceFileTab({ sessionId, tab }: WorkspaceFileTabProps) {
           ) : entry.state === 'missing' ? (
             <PanelMessage icon="search_off" message={t('workspace.previewState.missing')} />
           ) : entry.state === 'too_large' ? (
-            <PanelMessage icon="database" message={t('workspace.previewState.tooLarge')} />
+            <PanelMessage icon="database" message={t('workspace.previewState.tooLarge')} action={systemAction} />
           ) : entry.state === 'binary' ? (
-            <PanelMessage icon="data_object" message={t('workspace.previewState.binary')} />
+            <PanelMessage icon="data_object" message={t('workspace.previewState.binary')} action={systemAction} />
           ) : entry.state === 'error' ? (
-            <PanelMessage icon="error" tone="error" message={entry.error || t('workspace.loadError')} />
+            <PanelMessage icon="error" tone="error" message={entry.error || t('workspace.loadError')} action={systemAction} />
           ) : entry.previewType === 'image' ? (
-            <ImagePreview dataUrl={entry.dataUrl} path={path} error={entry.error} />
+            <ImagePreview
+              sessionId={sessionId}
+              dataUrl={entry.dataUrl}
+              path={path}
+              absolutePath={canOpenInSystem ? absolutePath : undefined}
+              error={entry.error}
+              initialView={savedView}
+            />
+          ) : isDocumentPreviewType(entry.previewType) ? (
+            <DocumentSurface
+              sessionId={sessionId}
+              path={path}
+              absolutePath={absolutePath}
+              previewType={entry.previewType}
+              version={entry.version}
+              initialView={savedView}
+            />
           ) : (
             /*
               Markdown goes through the same read/edit switch as any other text

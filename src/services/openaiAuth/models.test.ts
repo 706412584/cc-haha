@@ -18,6 +18,20 @@ import {
 } from './models.js'
 
 describe('openai auth model resolution', () => {
+  test('supports GPT-6.1 Sol selection, metadata and OAuth context budgeting', () => {
+    expect(OPENAI_CODEX_MODEL_CATALOG.find(model => model.value === 'gpt-6.1-sol')).toMatchObject({
+      label: 'GPT-6.1-Sol',
+      defaultReasoningEffort: 'low',
+      supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      contextWindow: 258_400,
+    })
+    expect(resolveOpenAICodexModel('gpt-6.1-sol')).toBe('gpt-6.1-sol')
+    expect(getOpenAIModelDisplayName('gpt-6.1-sol')).toBe('GPT-6.1-Sol')
+    expect(getOpenAICodexContextWindowForModel('gpt-6.1-sol')).toBe(258_400)
+    expect(resolveOpenAIReasoningEffort('gpt-6.1-sol', undefined)).toBe('low')
+    expect(resolveOpenAIReasoningEffort('gpt-6.1-sol', 'max')).toBe('max')
+  })
+
   test('provides Astra fallback metadata and effective Codex OAuth context', () => {
     const astra = OPENAI_CODEX_MODEL_CATALOG.find((model) => model.value === 'gpt-6-astra')
     expect(astra).toMatchObject({
@@ -87,10 +101,11 @@ describe('openai auth model resolution', () => {
   })
 
   test('exposes GPT-6 Sol and Luna ahead of their GPT-5.6 predecessors', () => {
-    expect(OPENAI_CODEX_MODEL_CATALOG.slice(0, 6).map((model) => model.value)).toEqual([
+    expect(OPENAI_CODEX_MODEL_CATALOG.slice(0, 7).map((model) => model.value)).toEqual([
       'gpt-6-astra',
       'gpt-6-sol',
       'gpt-6-luna',
+      'gpt-6.1-sol',
       'gpt-5.6-sol',
       'gpt-5.6-terra',
       'gpt-5.6-luna',

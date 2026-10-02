@@ -1,4 +1,4 @@
-import { forwardRef, useMemo, useRef, useState, useEffect, useCallback } from 'react'
+import { forwardRef, useMemo, useRef, useState, useEffect, useLayoutEffect, useCallback, useId } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import {
   SCHEDULED_TAB_ID,
@@ -29,7 +29,10 @@ import { IconButton } from '@/components/ui/IconButton'
 import { useDismissable } from '@/hooks/useDismissable'
 import { useTranslation } from '../../i18n'
 import { getDesktopHost } from '../../lib/desktopHost'
-import { hasRunningBackgroundTasks } from '../../lib/backgroundTasks'
+import { hasRunningBackgroundTasks, listRunningBackgroundTasks } from '../../lib/backgroundTasks'
+import { collectAttentionIds, nextAttentionSessionId } from '../../lib/sessionAttention'
+import { SessionAttentionMark } from './SessionAttentionMark'
+import { TabAttentionJump } from './TabAttentionJump'
 import { WindowControls, showWindowControls } from './WindowControls'
 import { OpenProjectMenu } from './OpenProjectMenu'
 import { Building2, SquareTerminal } from 'lucide-react'
@@ -61,6 +64,26 @@ const REVEAL_ACTIVE_TAB: ScrollIntoViewOptions = {
 // whose edges land on fractional pixels reports the tab as clipped on every
 // single resize and re-scrolls forever.
 const TAB_VISIBILITY_TOLERANCE = 1
+
+type ClippedSide = 'left' | 'right'
+
+/**
+ * Which edge of the strip a tab is cut off by, or null when it is whole. This
+ * is the one definition of "whole": re-revealing the active tab and hinting at
+ * waiting tabs the strip has scrolled away both ask it, so the two cannot
+ * disagree about what is out of view. A tab that is only partly clipped counts —
+ * its glyph sits at the left edge, and a hint that sometimes stays quiet for a
+ * tab the person cannot fully see is worse than one that speaks a little early.
+ */
+function clippedSide(
+  strip: Pick<DOMRect, 'left' | 'right'>,
+  tab: Pick<DOMRect, 'left' | 'right'>,
+): ClippedSide | null {
+  if (tab.left < strip.left - TAB_VISIBILITY_TOLERANCE) return 'left'
+  if (tab.right > strip.right + TAB_VISIBILITY_TOLERANCE) return 'right'
+  return null
+}
+
 // One glyph per *non-chat* tab kind: the glyph says "this tab is not a
 // conversation". Chat tabs deliberately have none — a bubble on every tab in a
 // strip that is mostly chats is pure noise, and the slot it occupied is worth
@@ -129,6 +152,15 @@ export function TabBar() {
         (sessionState.chatState !== 'idle' || hasRunningBackgroundTasks(sessionState.backgroundAgentTasks))
     })
   ))
+  // Tabs that are stopped on a decision only the user can make. Read from the
+  // outstanding requests rather than from `chatState` (see
+  // `sessionNeedsAttention`), and `useShallow` for the same reason as above: a
+  // fresh array from every store update would loop the subscription.
+  const attentionList = useChatStore(useShallow((s) => collectAttentionIds(s.sessions, sessionTabIds)))
+  const attentionSet = useMemo(() => new Set(attentionList), [attentionList])
+  // The waiting tabs other than the one on screen: the places a jump can take
+  // you, and so the number on the button that offers it.
+  const otherAttentionCount = attentionList.filter((sessionId) => sessionId !== activeTabId).length
   const disconnectSession = useChatStore((s) => s.disconnectSession)
   const activeTab = tabs.find((tab) => tab.sessionId === activeTabId) ?? null
   const isActiveSessionTab = isSessionTab(activeTab) || isSessionTabId(activeTabId)
@@ -214,6 +246,14 @@ export function TabBar() {
   const userScrolledRef = useRef(false)
   const [canScrollLeft, setCanScrollLeft] = useState(false)
   const [canScrollRight, setCanScrollRight] = useState(false)
+  // Whether a waiting tab is scrolled out of view on each side. The mark on the
+  // tab itself is no use to someone who cannot see the tab, and "tab 多了" is
+  // exactly when that happens.
+  const [attentionOffscreen, setAttentionOffscreen] = useState({ left: false, right: false })
+  // `updateScrollState` is a stable callback with no dependencies, so it reads
+  // the waiting tabs through a ref that the layout effect below keeps current.
+  const attentionListRef = useRef<readonly string[]>([])
+  const attentionHintId = useId()
   const [tabHitWidth, setTabHitWidth] = useState(0)
   const [contextMenu, setContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null)
   const [pendingCloseRequest, setPendingCloseRequest] = useState<PendingCloseRequest | null>(null)
@@ -250,7 +290,32 @@ export function TabBar() {
     const last = el.lastElementChild as HTMLElement | null
     const contentWidth = first && last ? last.offsetLeft + last.offsetWidth - first.offsetLeft : 0
     setTabHitWidth(Math.max(0, Math.min(el.clientWidth, contentWidth - el.scrollLeft)))
+
+    // Only the waiting tabs are measured, so a scroll costs a few rect reads
+    // rather than one per tab. State is left alone when nothing changed: this
+    // runs on every scroll event, and a fresh object each time would rerender
+    // the strip for nothing.
+    const strip = el.getBoundingClientRect()
+    let left = false
+    let right = false
+    for (const sessionId of attentionListRef.current) {
+      const tabEl = tabRefs.current.get(sessionId)
+      if (!tabEl) continue
+      const side = clippedSide(strip, tabEl.getBoundingClientRect())
+      if (side === 'left') left = true
+      else if (side === 'right') right = true
+    }
+    setAttentionOffscreen((prev) => (prev.left === left && prev.right === right ? prev : { left, right }))
   }, [])
+
+  // A request can arrive, or be answered, with the strip standing still — no
+  // scroll, no resize — so nothing in the observer path would notice. Measuring
+  // in a layout effect keeps the chevron from showing the previous answer for
+  // a frame, and the tabs are in the DOM by then, so their rects are current.
+  useLayoutEffect(() => {
+    attentionListRef.current = attentionList
+    updateScrollState()
+  }, [attentionList, tabs, updateScrollState])
 
   // Keeping the active tab whole is an invariant the strip has to re-establish
   // after its own width changes, not something a single scroll on activation
@@ -284,10 +349,7 @@ export function TabBar() {
 
     // Already whole. The tolerance is for subpixel layout, which would
     // otherwise report a clip on every resize and scroll forever.
-    if (
-      tab.left >= strip.left - TAB_VISIBILITY_TOLERANCE &&
-      tab.right <= strip.right + TAB_VISIBILITY_TOLERANCE
-    ) return
+    if (!clippedSide(strip, tab)) return
 
     activeTabEl.scrollIntoView(REVEAL_ACTIVE_TAB)
   }, [])
@@ -385,7 +447,17 @@ export function TabBar() {
       if (isSessionTab(tab)) {
         const isRunning = runningSessionSet.has(tab.sessionId)
         if (isRunning && stopRunning) {
-          useChatStore.getState().stopGeneration(tab.sessionId)
+          const chat = useChatStore.getState()
+          const runningTasks = listRunningBackgroundTasks(chat.sessions[tab.sessionId]?.backgroundAgentTasks)
+          chat.stopGeneration(tab.sessionId)
+          // The dialog counts background tasks as the session running, but
+          // stopGeneration only reaches the foreground turn and Agent tasks (and
+          // marks the latter as stopping, which stopBackgroundTask skips). A shell
+          // command would outlive "Stop & Close" and keep the reopened session
+          // running. Both must go out before disconnectSession closes the socket.
+          for (const task of runningTasks) {
+            chat.stopBackgroundTask(tab.sessionId, task.taskId)
+          }
         }
         if (!isRunning || stopRunning) {
           // Auto-delete only when both server metadata and the loaded transcript
@@ -557,9 +629,34 @@ export function TabBar() {
     setActiveTab(sessionId)
   }
 
+  // Activation does the rest: the effect on `activeTabId` above scrolls the tab
+  // into view and hands the strip's position back to it.
+  const jumpToAttention = () => {
+    const next = nextAttentionSessionId(sessionTabIds, attentionSet, activeTabId)
+    if (next) setActiveTab(next)
+  }
+
+  // The chevron on the side a waiting tab has scrolled off gets a dot in its
+  // corner. Static on purpose: the pulse belongs to the mark on the tab, and
+  // several things pulsing out of phase across one strip read as noise. The
+  // sr-only text is the description, not the name — `aria-label` keeps naming
+  // the button by what it does.
+  const attentionHint = (side: ClippedSide) => attentionOffscreen[side] ? (
+    <>
+      <StatusDot
+        tone="warning"
+        size="md"
+        data-testid={`tab-strip-attention-${side}`}
+        className="pointer-events-none absolute right-1 top-3"
+      />
+      <span id={`${attentionHintId}-${side}`} className="sr-only">{t('sidebar.sessionNeedsAttention')}</span>
+    </>
+  ) : null
+
   const rightScrollControl = (canScrollLeft || canScrollRight) && (
-        <button type="button" onClick={() => scroll('right')} aria-label={t('tabs.scrollRight')} disabled={!canScrollRight} className={`flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)] ${canScrollRight ? '' : 'invisible'}`}>
+        <button type="button" onClick={() => scroll('right')} aria-label={t('tabs.scrollRight')} disabled={!canScrollRight} aria-describedby={attentionOffscreen.right ? `${attentionHintId}-right` : undefined} title={attentionOffscreen.right ? t('sidebar.sessionNeedsAttention') : undefined} className={`relative flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)] ${canScrollRight ? '' : 'invisible'}`}>
           <span className="material-symbols-outlined text-[16px]">chevron_right</span>
+          {attentionHint('right')}
         </button>
       )
 
@@ -591,14 +688,9 @@ export function TabBar() {
           unmounting the other changes the strip width and restarts alignment. */}
       <div data-testid="workspace-session-header" className={hasWorkspaceHeader ? 'flex min-w-0 flex-1 overflow-hidden' : 'contents'}>
       {(canScrollLeft || canScrollRight) && (
-        <button
-          type="button"
-          onClick={() => scroll('left')}
-          aria-label={t('tabs.scrollLeft')}
-          disabled={!canScrollLeft}
-          className={`flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)] ${canScrollLeft ? '' : 'invisible'}`}
-        >
+        <button type="button" onClick={() => scroll('left')} aria-label={t('tabs.scrollLeft')} disabled={!canScrollLeft} aria-describedby={attentionOffscreen.left ? `${attentionHintId}-left` : undefined} title={attentionOffscreen.left ? t('sidebar.sessionNeedsAttention') : undefined} className={`relative flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)] ${canScrollLeft ? '' : 'invisible'}`}>
           <span className="material-symbols-outlined text-[16px]">chevron_left</span>
+          {attentionHint('left')}
         </button>
       )}
 
@@ -629,11 +721,13 @@ export function TabBar() {
               displayTitle={displayTitle}
               closeLabel={t('tabs.closeTab', { title: displayTitle })}
               isRunning={runningSessionIds.has(tab.sessionId)}
+              needsAttention={attentionSet.has(tab.sessionId)}
               isActive={tab.sessionId === activeTabId}
               isDragOver={dragOverIndex === index}
               isDragging={tab.sessionId === draggingSessionId}
               dragOffsetX={tab.sessionId === draggingSessionId ? dragOffsetX : 0}
               runningLabel={t('tabs.sessionRunning')}
+              attentionLabel={t('sidebar.sessionNeedsAttention')}
               onClick={() => handleTabClick(tab.sessionId)}
               onClose={() => handleClose(tab.sessionId)}
               onContextMenu={(e) => handleContextMenu(e, tab.sessionId)}
@@ -696,6 +790,13 @@ export function TabBar() {
             className="flex h-[52px] min-w-0 flex-1"
           />
         ) : null}
+        {otherAttentionCount > 0 && (
+          <TabAttentionJump
+            count={otherAttentionCount}
+            label={t('tabs.jumpToAttention', { count: otherAttentionCount })}
+            onJump={jumpToAttention}
+          />
+        )}
         {showActivityButton && activeTabId && (
           <SessionActivityButton sessionId={activeTabId} />
         )}
@@ -838,24 +939,33 @@ const TabItem = forwardRef<HTMLDivElement, {
   displayTitle: string
   closeLabel: string
   isRunning: boolean
+  needsAttention: boolean
   isActive: boolean
   isDragOver: boolean
   isDragging: boolean
   dragOffsetX: number
   runningLabel: string
+  attentionLabel: string
   onClick: () => void
   onClose: () => void
   onContextMenu: (e: React.MouseEvent) => void
   onMouseDown: (event: React.MouseEvent) => void
-}>(({ tab, displayTitle, closeLabel, isRunning, isActive, isDragOver, isDragging, dragOffsetX, runningLabel, onClick, onClose, onContextMenu, onMouseDown }, ref) => {
+}>(({ tab, displayTitle, closeLabel, isRunning, needsAttention, isActive, isDragOver, isDragging, dragOffsetX, runningLabel, attentionLabel, onClick, onClose, onContextMenu, onMouseDown }, ref) => {
   // Chat tabs carry no glyph at all; the dot only appears when there is
   // something to say. Everything else identifies its section with one.
+  //
+  // Waiting on the user outranks running. A session parked on a permission card
+  // is also "running" by `chatState`, so before this the brand dot told the
+  // person the one thing that was not true of it: that it was working and
+  // could be left alone.
   const leadingGlyph = isSessionTab(tab)
-    ? (isRunning
-      ? <StatusDot tone="brand" pulse label={runningLabel} />
-      : tab.status === 'error'
-        ? <StatusDot tone="danger" />
-        : null)
+    ? (needsAttention
+      ? <SessionAttentionMark label={attentionLabel} />
+      : isRunning
+        ? <StatusDot tone="brand" pulse label={runningLabel} />
+        : tab.status === 'error'
+          ? <StatusDot tone="danger" />
+          : null)
     : (
       <span className="material-symbols-outlined text-[14px] leading-none text-[var(--color-text-tertiary)]">
         {TAB_TYPE_ICON[tab.type] ?? TAB_TYPE_ICON_FALLBACK}
@@ -867,6 +977,7 @@ const TabItem = forwardRef<HTMLDivElement, {
       ref={ref}
       data-dragging={isDragging ? 'true' : 'false'}
       data-active={isActive ? 'true' : 'false'}
+      data-attention={needsAttention ? 'true' : 'false'}
       onClick={onClick}
       onMouseDown={onMouseDown}
       onContextMenu={onContextMenu}
