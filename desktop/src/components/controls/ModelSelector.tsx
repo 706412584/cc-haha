@@ -91,6 +91,10 @@ const DROPDOWN_GAP = 8
 const VIEWPORT_MARGIN = 16
 const DROPDOWN_MAX_HEIGHT = 420
 const DROPDOWN_MIN_HEIGHT = 180
+const PROVIDER_PRESETS_BY_ID = new Map(
+  BUNDLED_PROVIDER_PRESETS.map(preset => [preset.id, preset]),
+)
+
 const PROVIDER_PRESET_DEFAULT_ENVS = new Map(
   BUNDLED_PROVIDER_PRESETS.map(preset => [preset.id, preset.defaultEnv ?? {}]),
 )
@@ -99,6 +103,9 @@ function getProviderModelCapabilityOverride(
   provider: SavedProvider,
   modelId: string,
 ): string | undefined {
+  // The preset's own default models matter when a slot is remapped: without them
+  // a stale capability table would describe the model the slot used to hold.
+  const preset = PROVIDER_PRESETS_BY_ID.get(provider.presetId)
   return getModelReasoningCapabilityOverride(
     modelId,
     {
@@ -107,7 +114,8 @@ function getProviderModelCapabilityOverride(
       sonnet: resolveProviderSlotModelId(provider, 'sonnet'),
       opus: resolveProviderSlotModelId(provider, 'opus'),
     },
-    PROVIDER_PRESET_DEFAULT_ENVS.get(provider.presetId) ?? {},
+    preset?.defaultEnv ?? PROVIDER_PRESET_DEFAULT_ENVS.get(provider.presetId) ?? {},
+    preset?.defaultModels,
   )
 }
 
@@ -280,6 +288,11 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   const runtimeSelection = useSessionRuntimeStore((state) =>
     runtimeKey ? state.selections[runtimeKey] : undefined,
   )
+  // An in-flight runtime change (the server has not confirmed it yet) outranks
+  // the last confirmed selection, so the control reflects what the user just picked.
+  const pendingRuntimeSelection = useChatStore((state) =>
+    runtimeKey ? state.sessions[runtimeKey]?.pendingRuntimeConfig?.selection : undefined,
+  )
   const [open, setOpen] = useState(false)
   const [effortOpen, setEffortOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -446,11 +459,12 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
     : storeModel
 
   const requestedRuntimeSelection = isRuntimeScoped
-    ? controlledRuntimeSelection ?? runtimeSelection ?? resolveDefaultRuntimeSelection(
+    ? controlledRuntimeSelection ?? pendingRuntimeSelection ?? runtimeSelection ?? resolveDefaultRuntimeSelection(
       activeId,
       activeProviderName,
       providers,
-      storeModel?.id,
+      storeModel,
+      effortLevel,
     )
     : null
   const resolvedRuntimeSelection = requestedRuntimeSelection
