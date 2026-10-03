@@ -17,6 +17,8 @@ export type TeamPlanRuntimeAdapter = {
   stop(planId: string): Promise<void>
   isRunning?(planId: string): boolean | Promise<boolean>
   notifyLeader?(plan: TeamPlanRecord, kind: 'approved' | 'returned' | 'cancelled'): Promise<void>
+  /** Freeze per-task outcomes from the live task list; absent in minimal test adapters. */
+  captureOutcomes?(plan: TeamPlanRecord): Promise<NonNullable<TeamPlanRecord['taskOutcomes']>>
 }
 const defaultRuntime: TeamPlanRuntimeAdapter = {
   isRunning: async id => (await import('./teamPlanRuntime.js')).isTeamPlanRuntimeActive(id),
@@ -24,6 +26,7 @@ const defaultRuntime: TeamPlanRuntimeAdapter = {
   launch: async plan => (await import('./teamPlanRuntime.js')).launchTeamPlanRuntime(plan),
   notifyLeader: async (plan, kind) => { await (await import('./teamPlanRuntime.js')).notifyTeamPlanLeader(plan, kind) },
   stop: async id => { await (await import('./teamPlanRuntime.js')).stopTeamPlanRuntime(id) },
+  captureOutcomes: async plan => (await import('./teamPlanRuntime.js')).captureTaskOutcomes(plan),
 }
 
 /** Only trusted HTTP/UI actions call approve; model tools import the draft store only. */
@@ -46,8 +49,7 @@ export class TeamPlanService {
     // the read path that already repairs lost launches. Persisted, so later
     // polls and the resume itself see the same snapshot.
     if (plan?.state === 'interrupted' && !plan.taskOutcomes) {
-      const { captureTaskOutcomes } = await import('./teamPlanRuntime.js')
-      const taskOutcomes = await captureTaskOutcomes(plan).catch(error => {
+      const taskOutcomes = await this.captureOutcomes(plan).catch(error => {
         console.warn('[TeamPlanService] Could not capture task outcomes for an interrupted plan', error)
         return undefined
       })
@@ -58,6 +60,11 @@ export class TeamPlanService {
       }
     }
     return plan
+  }
+
+  private async captureOutcomes(plan: TeamPlanRecord): Promise<NonNullable<TeamPlanRecord['taskOutcomes']>> {
+    const capture = this.runtime.captureOutcomes ?? (async item => (await import('./teamPlanRuntime.js')).captureTaskOutcomes(item))
+    return capture(plan)
   }
   /**
    * Freeze the interrupted plan together with its per-task outcomes, so a later
@@ -139,15 +146,19 @@ export class TeamPlanService {
     // commits the resume — capturing it as a separate mutation would bump the
     // revision and invalidate the client's expectedRevision.
     const existing = await readTeamPlan(teamName)
-    const fallbackOutcomes = existing?.planId === action.planId &&
+    const fallbackOutcomes = existing &&
+      existing.planId === action.planId &&
       existing.state === 'interrupted' &&
       !existing.taskOutcomes &&
       existing.tasks.length > 0
-      ? await (await import('./teamPlanRuntime.js')).captureTaskOutcomes(existing).catch(error => {
-          // Falling back to no outcomes would silently re-run finished work;
-          // record why the safety net did not engage.
-          console.warn('[TeamPlanService] Could not capture task outcomes before resume', error)
-          return undefined
+      ? await this.captureOutcomes(existing).catch(error => {
+          // No outcomes means every task would be released as "never started",
+          // re-running finished work. Refuse rather than guess; the caller can
+          // retry once the task list is readable.
+          throw new TeamPlanError(
+            `Cannot resume: the task list is unavailable (${error instanceof Error ? error.message : String(error)})`,
+            409,
+          )
         })
       : undefined
     const { plan, committed } = await resumeTeamPlan(teamName, action, action.requestId, {
