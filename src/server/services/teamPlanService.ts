@@ -47,7 +47,10 @@ export class TeamPlanService {
     // polls and the resume itself see the same snapshot.
     if (plan?.state === 'interrupted' && !plan.taskOutcomes) {
       const { captureTaskOutcomes } = await import('./teamPlanRuntime.js')
-      const taskOutcomes = await captureTaskOutcomes(plan).catch(() => undefined)
+      const taskOutcomes = await captureTaskOutcomes(plan).catch(error => {
+        console.warn('[TeamPlanService] Could not capture task outcomes for an interrupted plan', error)
+        return undefined
+      })
       if (taskOutcomes) {
         return mutateTeamPlan(plan.teamName, { ...plan, expectedRevision: plan.revision }, current => (
           current.taskOutcomes ? current : { ...current, taskOutcomes }
@@ -140,7 +143,12 @@ export class TeamPlanService {
       existing.state === 'interrupted' &&
       !existing.taskOutcomes &&
       existing.tasks.length > 0
-      ? await (await import('./teamPlanRuntime.js')).captureTaskOutcomes(existing).catch(() => undefined)
+      ? await (await import('./teamPlanRuntime.js')).captureTaskOutcomes(existing).catch(error => {
+          // Falling back to no outcomes would silently re-run finished work;
+          // record why the safety net did not engage.
+          console.warn('[TeamPlanService] Could not capture task outcomes before resume', error)
+          return undefined
+        })
       : undefined
     const { plan, committed } = await resumeTeamPlan(teamName, action, action.requestId, {
       confirmTaskIds,

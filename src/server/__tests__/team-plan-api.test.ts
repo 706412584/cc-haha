@@ -128,6 +128,12 @@ test('approving a pending plan starts the leader CLI before launching, and only 
     expect(foreign.status).toBe(409)
     expect(ensured).toHaveLength(0)
 
+    // Same session, but a planId that is not the pending plan's: the action
+    // will 409, so no process may be spawned for it either.
+    const stalePlanId = await request('POST', '/api/teams/leader-connect/plan/approve', { ...approveBody, planId: 'not-the-pending-plan', requestId: 'stale-plan' })
+    expect(stalePlanId.status).toBe(409)
+    expect(ensured).toHaveLength(0)
+
     const approved = await request('POST', '/api/teams/leader-connect/plan/approve', approveBody)
     expect(approved.status).toBe(200)
     expect(ensured).toHaveLength(1)
