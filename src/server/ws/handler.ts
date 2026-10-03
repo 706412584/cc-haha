@@ -4107,6 +4107,7 @@ async function ensureCliSessionStarted(
 export async function ensureCliSessionStartedForControl(
   sessionId: string,
   requestUrl: URL,
+  reason: 'agent_message' | 'team_approval' = 'agent_message',
 ): Promise<void> {
   const pendingStartup = sessionStartupPromises.get(sessionId)
   if (pendingStartup) {
@@ -4132,7 +4133,7 @@ export async function ensureCliSessionStartedForControl(
     )
     sdkUrl.searchParams.set('token', crypto.randomUUID())
 
-    console.log(`[WS] Starting CLI for ${sessionId} due to agent_message`)
+    console.log(`[WS] Starting CLI for ${sessionId} due to ${reason}`)
     await conversationService.startSession(
       sessionId,
       workDir,
