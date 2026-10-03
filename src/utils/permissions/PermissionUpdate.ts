@@ -22,15 +22,14 @@ import {
   permissionRuleValueFromString,
   permissionRuleValueToString,
 } from './permissionRuleParser.js'
-import { addPermissionRulesToSettings } from './permissionsLoader.js'
-import { transitionPermissionMode } from './permissionSetup.js'
-
 // permissionSetup imports this module back (`applyPermissionUpdate`), but it
 // only ever calls it from inside functions — never at module scope — so a
 // static import cannot observe a partially-initialized binding. `require()`
 // cannot be used here: under `bun test --feature=...` the cycle makes it
 // return an empty, permanently-cached snapshot, so every setMode update threw
 // `transitionPermissionMode is not a function`.
+import { transitionPermissionMode } from './permissionSetup.js'
+import { addPermissionRulesToSettings } from './permissionsLoader.js'
 
 // Re-export for backwards compatibility
 export type { AdditionalWorkingDirectory, WorkingDirectorySource }

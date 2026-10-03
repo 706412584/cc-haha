@@ -50,6 +50,9 @@
       "icon": "src-tauri/icons/icon.icns",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "仅在你点击听写按钮后使用麦克风录音，用于把语音转成文字。Microphone is used only after you click dictation, to turn speech into text."
+      },
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.inherit.plist",
       "signIgnore": [
@@ -154,7 +157,6 @@
     "@xterm/xterm": "^6.0.0",
     "dompurify": "^3.3.3",
     "electron-updater": "^6.8.3",
-    "fflate": "^0.8.3",
     "html2canvas": "^1.4.1",
     "katex": "^0.16.45",
     "lucide-react": "^0.469.0",
@@ -173,6 +175,7 @@
     "react": "^18.3.1",
     "react-diff-viewer-continued": "^4.2.0",
     "react-dom": "^18.3.1",
+    "react-file-icon": "^1.6.0",
     "react-shiki": "^0.9.2",
     "sharp": "0.34.5",
     "shiki": "^4.0.2",
@@ -186,17 +189,22 @@
     "@types/node": "^25.9.1",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
+    "@types/react-file-icon": "^1.0.5",
     "@typescript-eslint/parser": "^8",
     "@vitejs/plugin-react": "^6.0.1",
     "@vitest/coverage-v8": "3.2.4",
+    "docx-preview": "0.4.1",
     "electron": "^42.4.0",
     "electron-builder": "^26.8.1",
     "eslint": "^9",
     "eslint-plugin-react-hooks": "^5",
+    "fflate": "^0.8.3",
     "jsdom": "^25.0.1",
+    "pdfjs-dist": "6.3.289",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.9.3",
     "vite": "^8.0.10",
-    "vitest": "^3.0.4"
+    "vitest": "^3.0.4",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   }
 }

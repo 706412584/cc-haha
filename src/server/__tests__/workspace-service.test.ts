@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import * as fs from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { ApiError } from '../middleware/errorHandler.js'
 import { WorkspaceService } from '../services/workspaceService.js'
+import { WORKSPACE_DOCUMENT_FORMATS } from '../services/workspaceDocumentPreview.js'
 import {
   clearFilesystemAccessRootsForTests,
   registerFilesystemAccessRoot,
@@ -688,5 +689,222 @@ describe('WorkspaceService', () => {
       { path: 'a.txt', oldPath: undefined, status: 'modified', additions: 1, deletions: 0 },
       { path: 'b.txt', oldPath: undefined, status: 'modified', additions: 2, deletions: 3 },
     ])
+  })
+})
+
+describe('WorkspaceService document previews', () => {
+  // Same shared-registry hazard as the outside-workspace suite above.
+  beforeEach(() => {
+    clearFilesystemAccessRootsForTests()
+  })
+
+  afterEach(() => {
+    clearFilesystemAccessRootsForTests()
+  })
+
+  it.each([
+    ['report.pdf', 'pdf', 'application/pdf'],
+    ['thesis.DOCX', 'docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+    ['data.xlsx', 'xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+    ['macro.xlsm', 'xlsx', 'application/vnd.ms-excel.sheet.macroEnabled.12'],
+    ['legacy.XLS', 'xlsx', 'application/vnd.ms-excel'],
+  ])('classifies %s as a %s document and does not ship its bytes', async (name, previewType, mimeType) => {
+    const workDir = await makeTempDir('workspace-service-docs-')
+    const service = new WorkspaceService(async () => workDir)
+    await fs.writeFile(path.join(workDir, name), Buffer.from([0x50, 0x4b, 0x00, 0x04, 0xff]))
+
+    const result = await service.readFile('session-1', name)
+
+    expect(result).toMatchObject({
+      state: 'ok',
+      path: name,
+      previewType,
+      mimeType,
+      language: previewType,
+      size: 5,
+    })
+    expect(result.version).toBeString()
+    expect(result.content).toBeUndefined()
+    expect(result.dataUrl).toBeUndefined()
+  })
+
+  it('classifies a PDF with no NUL byte in its head as a document, not as text', async () => {
+    // The NUL sniff used to be the only gate, so a small PDF whose first MiB was
+    // plain ASCII came back as `previewType: 'text'` and rendered as garbage.
+    const workDir = await makeTempDir('workspace-service-docs-')
+    const service = new WorkspaceService(async () => workDir)
+    await fs.writeFile(
+      path.join(workDir, 'ascii.pdf'),
+      '%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n',
+    )
+
+    const result = await service.readFile('session-1', 'ascii.pdf')
+
+    expect(result.previewType).toBe('pdf')
+    expect(result.content).toBeUndefined()
+  })
+
+  it('classifies a document without reading or opening it', async () => {
+    const workDir = await makeTempDir('workspace-service-docs-')
+    const service = new WorkspaceService(async () => workDir)
+    await fs.writeFile(path.join(workDir, 'big.pdf'), '%PDF-1.4\n')
+    const readFile = spyOn(fs, 'readFile')
+    const open = spyOn(fs, 'open')
+
+    try {
+      await expect(service.readFile('session-1', 'big.pdf')).resolves.toMatchObject({
+        state: 'ok',
+        previewType: 'pdf',
+      })
+      // A document travels through the `raw` route; its JSON metadata must cost a
+      // stat, not a read, or every watcher reload re-reads every open PDF.
+      expect(readFile).not.toHaveBeenCalled()
+      expect(open).not.toHaveBeenCalled()
+    } finally {
+      readFile.mockRestore()
+      open.mockRestore()
+    }
+  })
+
+  it('leaves unlisted binary extensions on the NUL-sniffed path', async () => {
+    const workDir = await makeTempDir('workspace-service-docs-')
+    const service = new WorkspaceService(async () => workDir)
+    await fs.writeFile(path.join(workDir, 'legacy.doc'), Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0x00]))
+
+    await expect(service.readFile('session-1', 'legacy.doc')).resolves.toMatchObject({
+      state: 'binary',
+      language: 'binary',
+    })
+  })
+
+  it('reports too_large above the format limit and ok at exactly the limit', async () => {
+    const workDir = await makeTempDir('workspace-service-docs-')
+    const service = new WorkspaceService(async () => workDir)
+    const limit = WORKSPACE_DOCUMENT_FORMATS.docx!.maxBytes
+    // Sparse files: the limit is 30 MiB but nothing is written to disk.
+    const atLimit = path.join(workDir, 'at-limit.docx')
+    const overLimit = path.join(workDir, 'over-limit.docx')
+    await fs.writeFile(atLimit, '')
+    await fs.truncate(atLimit, limit)
+    await fs.writeFile(overLimit, '')
+    await fs.truncate(overLimit, limit + 1)
+
+    await expect(service.readFile('session-1', 'at-limit.docx')).resolves.toMatchObject({
+      state: 'ok',
+      previewType: 'docx',
+      size: limit,
+    })
+    await expect(service.readFile('session-1', 'over-limit.docx')).resolves.toMatchObject({
+      state: 'too_large',
+      previewType: 'docx',
+      size: limit + 1,
+    })
+  })
+
+  it('changes the version when the file is rewritten, by size or by mtime alone', async () => {
+    const workDir = await makeTempDir('workspace-service-docs-')
+    const service = new WorkspaceService(async () => workDir)
+    const target = path.join(workDir, 'draft.docx')
+    await fs.writeFile(target, 'one')
+    await fs.utimes(target, 1_700_000_000, 1_700_000_000)
+
+    const first = (await service.readFile('session-1', 'draft.docx')).version
+    expect((await service.readFile('session-1', 'draft.docx')).version).toBe(first)
+
+    await fs.utimes(target, 1_700_000_100, 1_700_000_100)
+    const afterTouch = (await service.readFile('session-1', 'draft.docx')).version
+    expect(afterTouch).not.toBe(first)
+
+    await fs.writeFile(target, 'three')
+    await fs.utimes(target, 1_700_000_100, 1_700_000_100)
+    const afterResize = (await service.readFile('session-1', 'draft.docx')).version
+    expect(afterResize).not.toBe(afterTouch)
+  })
+
+  describe('resolveRawFile', () => {
+    it('returns the canonical path, size and format of a workspace document', async () => {
+      const workDir = await makeTempDir('workspace-service-raw-')
+      const service = new WorkspaceService(async () => workDir)
+      await fs.mkdir(path.join(workDir, 'out'))
+      await fs.writeFile(path.join(workDir, 'out', 'thesis.pdf'), '%PDF-1.4\n')
+
+      const raw = await service.resolveRawFile('session-1', 'out/thesis.pdf')
+
+      expect(raw).toMatchObject({
+        canonicalPath: await fs.realpath(path.join(workDir, 'out', 'thesis.pdf')),
+        relativePath: 'out/thesis.pdf',
+        size: 9,
+      })
+      expect(raw.format.mimeType).toBe('application/pdf')
+    })
+
+    it('rejects relative traversal and absolute paths outside the workspace', async () => {
+      const baseDir = await makeTempDir('workspace-service-raw-')
+      const workDir = path.join(baseDir, 'work')
+      await fs.mkdir(workDir)
+      await fs.writeFile(path.join(baseDir, 'secret.pdf'), '%PDF-1.4\n')
+      const service = new WorkspaceService(async () => workDir)
+
+      await expect(service.resolveRawFile('session-1', '../secret.pdf')).rejects.toThrow(/outside workspace/)
+      await expect(
+        service.resolveRawFile('session-1', path.join(baseDir, 'secret.pdf')),
+      ).rejects.toThrow(/outside workspace/)
+    })
+
+    it.skipIf(process.platform === 'win32')('rejects a symlink that points outside the workspace', async () => {
+      const baseDir = await makeTempDir('workspace-service-raw-')
+      const workDir = path.join(baseDir, 'work')
+      await fs.mkdir(workDir)
+      await fs.writeFile(path.join(baseDir, 'secret.pdf'), '%PDF-1.4\n')
+      await fs.symlink(path.join(baseDir, 'secret.pdf'), path.join(workDir, 'innocent.pdf'))
+      const service = new WorkspaceService(async () => workDir)
+
+      await expect(service.resolveRawFile('session-1', 'innocent.pdf')).rejects.toThrow(/outside workspace/)
+    })
+
+    it('serves a document in a registered access root outside the workdir', async () => {
+      const workDir = await makeTempDir('workspace-service-raw-work-')
+      const outsideDir = await makeTempDir('workspace-service-raw-outside-')
+      const outsideFile = path.join(outsideDir, 'report.xlsx')
+      await fs.writeFile(outsideFile, 'PK')
+      const service = new WorkspaceService(async () => workDir)
+
+      await expect(service.resolveRawFile('session-1', outsideFile)).rejects.toThrow(/outside workspace/)
+
+      registerFilesystemAccessRoot(outsideDir)
+      const raw = await service.resolveRawFile('session-1', outsideFile)
+      expect(raw.canonicalPath).toBe(await fs.realpath(outsideFile))
+      expect(raw.format.previewType).toBe('xlsx')
+    })
+
+    it('answers 415 for a type it does not serve, even if the file exists', async () => {
+      const workDir = await makeTempDir('workspace-service-raw-')
+      const service = new WorkspaceService(async () => workDir)
+      await fs.writeFile(path.join(workDir, 'notes.txt'), 'hello\n')
+      await fs.writeFile(path.join(workDir, 'photo.png'), Buffer.from([0x89, 0x50]))
+
+      await expect(service.resolveRawFile('session-1', 'notes.txt')).rejects.toMatchObject({ statusCode: 415 })
+      await expect(service.resolveRawFile('session-1', 'photo.png')).rejects.toMatchObject({ statusCode: 415 })
+    })
+
+    it('answers 404 for a missing file and for a directory with a document name', async () => {
+      const workDir = await makeTempDir('workspace-service-raw-')
+      const service = new WorkspaceService(async () => workDir)
+      await fs.mkdir(path.join(workDir, 'folder.pdf'))
+
+      await expect(service.resolveRawFile('session-1', 'missing.pdf')).rejects.toMatchObject({ statusCode: 404 })
+      await expect(service.resolveRawFile('session-1', 'folder.pdf')).rejects.toMatchObject({ statusCode: 404 })
+    })
+
+    it('answers 413 above the format limit', async () => {
+      const workDir = await makeTempDir('workspace-service-raw-')
+      const service = new WorkspaceService(async () => workDir)
+      const limit = WORKSPACE_DOCUMENT_FORMATS.xlsx!.maxBytes
+      const target = path.join(workDir, 'huge.xlsx')
+      await fs.writeFile(target, '')
+      await fs.truncate(target, limit + 1)
+
+      await expect(service.resolveRawFile('session-1', 'huge.xlsx')).rejects.toMatchObject({ statusCode: 413 })
+    })
   })
 })

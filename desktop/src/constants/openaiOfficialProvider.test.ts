@@ -5,6 +5,15 @@ import {
 } from './openaiOfficialProvider'
 
 describe('ChatGPT Official fallback model catalog', () => {
+  it('offers GPT-6.1 Sol with OAuth context and reasoning metadata', () => {
+    expect(OPENAI_OFFICIAL_MODELS.find(model => model.id === 'gpt-6.1-sol')).toMatchObject({
+      name: 'GPT-6.1-Sol',
+      context: '258400',
+      defaultReasoningEffort: 'low',
+      supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    })
+  })
+
   it('exposes the current GPT-6 Codex tiers and effective context windows', () => {
     expect(OPENAI_OFFICIAL_DEFAULT_MODEL_ID).toBe('gpt-6-sol')
     expect(OPENAI_OFFICIAL_MODELS.slice(0, 3)).toMatchObject([

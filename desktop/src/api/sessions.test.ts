@@ -226,6 +226,73 @@ describe('sessionsApi', () => {
     expect(init).toMatchObject({ method: 'GET' })
   })
 
+  it('downloads a workspace document as a blob from the raw route with an encoded path', async () => {
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46])
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(bytes, {
+      status: 200,
+      headers: { 'Content-Type': 'application/pdf' },
+    }))
+
+    const blob = await sessionsApi.getWorkspaceRaw('session-1', 'docs/论文 final.pdf')
+
+    expect(blob.size).toBe(bytes.byteLength)
+    expect(blob.type).toBe('application/pdf')
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('http://127.0.0.1:3456/api/sessions/session-1/workspace/raw?path=docs%2F%E8%AE%BA%E6%96%87+final.pdf')
+    expect(init).toMatchObject({ method: 'GET' })
+  })
+
+  it('surfaces a refused document download as an API error instead of a blob', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('too large', { status: 413 }))
+
+    await expect(sessionsApi.getWorkspaceRaw('session-1', 'big.docx')).rejects.toMatchObject({ status: 413 })
+  })
+
+  describe('document download timing', () => {
+    // A hung transfer must be cut off, but a whole file over a remote link is
+    // far slower than the JSON the default two-minute limit is sized for.
+    function hangingFetch() {
+      const seen: { signal?: AbortSignal } = {}
+      vi.spyOn(globalThis, 'fetch').mockImplementationOnce((_url, init) => new Promise((_resolve, reject) => {
+        seen.signal = init?.signal ?? undefined
+        seen.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+      }))
+      return seen
+    }
+
+    // What the promise rejected with, without leaving an unawaited assertion behind.
+    const settle = (promise: Promise<unknown>) => promise.then(() => null, (error: unknown) => error)
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('allows ten minutes rather than the default request timeout', async () => {
+      vi.useFakeTimers()
+      const seen = hangingFetch()
+
+      const settled = settle(sessionsApi.getWorkspaceRaw('session-1', 'a.pdf'))
+      await vi.advanceTimersByTimeAsync(10 * 60_000 - 1)
+      expect(seen.signal?.aborted).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(seen.signal?.aborted).toBe(true)
+      expect(await settled).toMatchObject({ name: 'AbortError' })
+    })
+
+    it('stops as soon as the caller cancels', async () => {
+      const seen = hangingFetch()
+      const caller = new AbortController()
+
+      const settled = settle(sessionsApi.getWorkspaceRaw('session-1', 'a.pdf', caller.signal))
+      expect(seen.signal?.aborted).toBe(false)
+
+      caller.abort()
+      expect(seen.signal?.aborted).toBe(true)
+      expect(await settled).toMatchObject({ name: 'AbortError' })
+    })
+  })
+
   it('preserves optional local index progress from session list responses', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({

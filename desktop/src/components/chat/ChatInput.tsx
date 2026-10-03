@@ -39,7 +39,7 @@ import { ComposerReferenceMenu, type ComposerReferenceMenuHandle } from './Compo
 import { ComposerReferenceDetail } from './ComposerReferenceDetail'
 import { ComposerCapabilityMenu } from './ComposerCapabilityMenu'
 import { useCapabilityMenu } from './useCapabilityMenu'
-import { composerReferencesApi } from '@/api/composerReferences'
+import { composerReferencesApi, mentionProviderId } from '@/api/composerReferences'
 import type { ComposerReferenceCandidate } from '@/types/composerReference'
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from './LocalSlashCommandPanel'
 import { getSlashCommandOptionId, SlashCommandMenu } from './SlashCommandMenu'
@@ -81,6 +81,8 @@ import type { PermissionMode } from '../../types/settings'
 import { getSessionWorkspaceState, getSessionSeedWorkDir } from '../../lib/sessionWorkspace'
 import { attachmentImageSource } from '../../lib/attachmentImages'
 import { hasRunningSubagentTasks } from '../../lib/backgroundTasks'
+import { useComposerDictation } from '@/features/voiceInput/useComposerDictation'
+import { VoiceInputButton } from '@/features/voiceInput/VoiceInputButton'
 
 type GitInfo = SessionGitInfo
 
@@ -330,6 +332,14 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
   // they used to spell the condition out separately, which is how one branch
   // ends up locked while the other keeps accepting text.
   const composerDisabled = isWorkspaceMissing || launchTransitioning || isPreparingTurn || questionPending
+  // A hidden composer keeps its state but is not where the user is looking, so
+  // dictation started in it must not survive the switch.
+  const dictation = useComposerDictation({
+    composerRef,
+    draft: input,
+    blocked: composerDisabled,
+    contextKey: visible ? activeTabId : null,
+  })
   const hasWorkspaceReferences = !isMemberSession && workspaceReferences.length > 0
   const isHeroComposer = variant === 'hero' && !isMemberSession && !compact
   const resolvedWorkDir = activeSession?.workDir || gitInfo?.workDir || undefined
@@ -349,20 +359,21 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
   const useCompactControls = isMobileComposer || !fitsAtLeast(TOOLBAR_LOCATION_MIN_WIDTH)
   const activeLaunchWorkDir = showLaunchControls ? (launchWorkDir || resolvedWorkDir || '') : (resolvedWorkDir || '')
   const referenceCwd = activeLaunchWorkDir || resolvedWorkDir || ''
-  const referenceContext = `${activeTabId ?? ''}\0${referenceCwd}`
+  const referenceProviderId = mentionProviderId(runtimeSelection)
+  const referenceContext = `${activeTabId ?? ''}\0${referenceCwd}\0${referenceProviderId ?? ''}`
   const referenceCurrent = referenceState?.context === referenceContext ? referenceState : null
   const composerReferences = useMemo(() => (referenceCurrent?.items ?? EMPTY_COMPOSER_REFERENCES).filter(isComposerReferenceVisible), [referenceCurrent?.items])
   useEffect(() => {
     let active = true
     if (isMemberSession) return
     setReferenceState({ context: referenceContext, items: [], loading: true, error: false })
-    void composerReferencesApi.list(referenceCwd || undefined).then(data => {
+    void composerReferencesApi.list(referenceCwd || undefined, referenceProviderId).then(data => {
       if (active) setReferenceState({ context: referenceContext, items: [...data.plugins, ...data.skills], loading: false, error: false })
     }).catch(() => {
       if (active) setReferenceState({ context: referenceContext, items: [], loading: false, error: true })
     })
     return () => { active = false }
-  }, [referenceContext, referenceCwd, isMemberSession, slashMenuOpen, fileSearchOpen, plusMenuOpen])
+  }, [referenceContext, referenceCwd, referenceProviderId, isMemberSession, slashMenuOpen, fileSearchOpen, plusMenuOpen])
   useEffect(() => {
     setReferenceDetail(null)
     setReferenceOptionId(undefined)
@@ -1644,8 +1655,8 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
                 onChange={handleComposerChange}
                 onKeyDown={handleComposerKeyDown}
                 onPaste={handleComposerPaste}
-                onCompositionStart={() => { composingRef.current = true }}
-                onCompositionEnd={() => { composingRef.current = false }}
+                onCompositionStart={() => { composingRef.current = true; dictation.compositionHandlers.onCompositionStart() }}
+                onCompositionEnd={() => { composingRef.current = false; dictation.compositionHandlers.onCompositionEnd() }}
                 placeholder={composerPlaceholder}
                 disabled={composerDisabled}
                 // `min-w-0`: a paragraph holding an unbreakable run (a long URL,
@@ -1678,8 +1689,8 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
               onChange={handleComposerChange}
               onKeyDown={handleComposerKeyDown}
               onPaste={handleComposerPaste}
-              onCompositionStart={() => { composingRef.current = true }}
-              onCompositionEnd={() => { composingRef.current = false }}
+              onCompositionStart={() => { composingRef.current = true; dictation.compositionHandlers.onCompositionStart() }}
+              onCompositionEnd={() => { composingRef.current = false; dictation.compositionHandlers.onCompositionEnd() }}
               placeholder={composerPlaceholder}
               disabled={composerDisabled}
               editorClassName={`chat-reading-text max-h-[200px] overflow-y-auto text-sm leading-relaxed text-[var(--color-text-primary)] ${
@@ -1838,6 +1849,7 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
                   fluid
                 />
               )}
+              <VoiceInputButton dictation={dictation} blocked={composerDisabled} mobile={isMobileComposer} />
               {!isMemberSession && !isActive && (hasRunningSubagents || hasRunningTeam) ? (
                 <Button
                   variant="danger"

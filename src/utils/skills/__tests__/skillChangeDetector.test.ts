@@ -84,6 +84,7 @@ describe('skill change detector watch paths', () => {
     // chokidar on a non-existent path never fires, and would mask a real
     // directory appearing later; the loader tolerates the miss instead.
     await makeDir(tmpHome, '.claude', 'skills')
+    process.chdir(tmpHome)
 
     const paths = await getWatchablePaths()
 

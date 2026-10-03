@@ -1,3 +1,4 @@
+import { MODEL_SLOTS, type ModelSlot } from '@/lib/providerModelContext'
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -34,6 +35,7 @@ import {
   GROK_OFFICIAL_PROVIDER_ID,
 } from '../../constants/grokOfficialProvider'
 import { MobileBottomSheet } from '@/components/ui/MobileBottomSheet'
+import { SearchField } from '@/components/ui/SearchField'
 import { ReasoningEffortPopover } from './ReasoningEffortPopover'
 import { useUIStore } from '../../stores/uiStore'
 import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
@@ -92,6 +94,7 @@ const DROPDOWN_MIN_HEIGHT = 180
 const PROVIDER_PRESETS_BY_ID = new Map(
   BUNDLED_PROVIDER_PRESETS.map(preset => [preset.id, preset]),
 )
+
 const PROVIDER_PRESET_DEFAULT_ENVS = new Map(
   BUNDLED_PROVIDER_PRESETS.map(preset => [preset.id, preset.defaultEnv ?? {}]),
 )
@@ -100,6 +103,8 @@ function getProviderModelCapabilityOverride(
   provider: SavedProvider,
   modelId: string,
 ): string | undefined {
+  // The preset's own default models matter when a slot is remapped: without them
+  // a stale capability table would describe the model the slot used to hold.
   const preset = PROVIDER_PRESETS_BY_ID.get(provider.presetId)
   return getModelReasoningCapabilityOverride(
     modelId,
@@ -142,14 +147,12 @@ function mergeOfficialModels(availableModels: ModelInfo[]): ModelInfo[] {
 
 function buildProviderModels(
   provider: SavedProvider,
-  labels: Record<'main' | 'haiku' | 'sonnet' | 'opus', string>,
+  labels: Record<ModelSlot, string>,
 ): ModelInfo[] {
-  const entries: Array<{ id: string; label: string }> = [
-    { id: resolveProviderSlotModelId(provider, 'main'), label: labels.main },
-    { id: resolveProviderSlotModelId(provider, 'haiku'), label: labels.haiku },
-    { id: resolveProviderSlotModelId(provider, 'sonnet'), label: labels.sonnet },
-    { id: resolveProviderSlotModelId(provider, 'opus'), label: labels.opus },
-  ]
+  const entries = MODEL_SLOTS.map(slot => ({
+    id: resolveProviderSlotModelId(provider, slot),
+    label: labels[slot],
+  }))
 
   const byId = new Map<string, { id: string; labels: string[] }>()
   for (const entry of entries) {
@@ -191,7 +194,7 @@ function buildProviderChoices(
   officialName: string,
   openAIOfficialName: string,
   grokOfficialName: string,
-  labels: Record<'main' | 'haiku' | 'sonnet' | 'opus', string>,
+  labels: Record<ModelSlot, string>,
   claudeOfficialLoggedIn: boolean,
   openAIOfficialLoggedIn: boolean,
   grokOfficialLoggedIn: boolean,
@@ -240,6 +243,11 @@ function buildProviderChoices(
   return choices
 }
 
+function modelMatchesSearch(model: ModelInfo, query: string): boolean {
+  return [model.id, model.name, model.description]
+    .some(value => value.toLocaleLowerCase().includes(query))
+}
+
 export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function ModelSelector({
   value,
   onChange,
@@ -280,11 +288,14 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   const runtimeSelection = useSessionRuntimeStore((state) =>
     runtimeKey ? state.selections[runtimeKey] : undefined,
   )
+  // An in-flight runtime change (the server has not confirmed it yet) outranks
+  // the last confirmed selection, so the control reflects what the user just picked.
   const pendingRuntimeSelection = useChatStore((state) =>
     runtimeKey ? state.sessions[runtimeKey]?.pendingRuntimeConfig?.selection : undefined,
   )
   const [open, setOpen] = useState(false)
   const [effortOpen, setEffortOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
   const [dropdownPosition, setDropdownPosition] = useState<DropdownPosition | null>(null)
   const ref = useRef<HTMLDivElement>(null)
   const effortButtonRef = useRef<HTMLButtonElement>(null)
@@ -383,6 +394,10 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   }, [open, updateDropdownPosition])
 
   useEffect(() => {
+    if (!open && searchQuery) setSearchQuery('')
+  }, [open, searchQuery])
+
+  useEffect(() => {
     if (!open) return
     window.addEventListener('resize', updateDropdownPosition)
     window.addEventListener('scroll', updateDropdownPosition, true)
@@ -395,6 +410,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   const roleLabels = useMemo(
     () => ({
       main: t('settings.providers.mainModel'),
+      fable: t('settings.providers.fableModel'),
       haiku: t('settings.providers.haikuModel'),
       sonnet: t('settings.providers.sonnetModel'),
       opus: t('settings.providers.opusModel'),
@@ -417,13 +433,26 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
     ),
     [activeId, availableModels, providers, roleLabels, t, claudeOAuthStatus, grokOAuthStatus, openAIOAuthStatus],
   )
+  const normalizedSearchQuery = searchQuery.trim().toLocaleLowerCase()
   const selectableModels = isControlled && models ? models : availableModels
-  // Upstream v0.6.7: a locked provider (temporary side chat) must not offer
-  // another provider's models. The fork removed the search filter this used to
-  // live in, so the lock is applied here instead.
-  const lockedProviderChoices = lockedProviderId === undefined
-    ? providerChoices
-    : providerChoices.filter((choice) => choice.providerId === lockedProviderId)
+  const filteredProviderChoices = useMemo(() => {
+    const choices = lockedProviderId === undefined ? providerChoices : providerChoices.filter(choice => choice.providerId === lockedProviderId)
+    if (!normalizedSearchQuery) return choices
+
+    return choices.flatMap((choice) => {
+      const providerMatches = choice.providerName.toLocaleLowerCase().includes(normalizedSearchQuery)
+      const models = providerMatches
+        ? choice.models
+        : choice.models.filter(model => modelMatchesSearch(model, normalizedSearchQuery))
+      return models.length > 0 ? [{ ...choice, models }] : []
+    })
+  }, [normalizedSearchQuery, providerChoices, lockedProviderId])
+  const filteredAvailableModels = useMemo(
+    () => normalizedSearchQuery
+      ? selectableModels.filter(model => modelMatchesSearch(model, normalizedSearchQuery))
+      : selectableModels,
+    [normalizedSearchQuery, selectableModels],
+  )
 
   const selectedModel = isControlled
     ? selectableModels.find((model) => model.id === value) || null
@@ -608,6 +637,21 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
     })
   }
 
+  const hasMatchingModels = isRuntimeScoped
+    ? filteredProviderChoices.length > 0
+    : filteredAvailableModels.length > 0
+  const searchField = (
+    <SearchField
+      value={searchQuery}
+      onChange={setSearchQuery}
+      label={t('model.searchPlaceholder')}
+      placeholder={t('model.searchPlaceholder')}
+      clearLabel={t('model.clearSearch')}
+      size={isMobileBrowser ? 'xl' : 'md'}
+      autoFocus={!isMobileBrowser}
+    />
+  )
+
   const handleRuntimeThinkingSelect = (enabled: boolean) => {
     if (!activeRuntimeSelection) return
     handleRuntimeSelect({
@@ -618,17 +662,32 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
 
   const dropdownContent = (
     <>
+      {/* The header stays OUTSIDE the scroll region: a sticky header inside
+          `overflow-y-auto` depends on the engine compositing it above the
+          scrolling layer, and on the desktop shell scrolled items paint
+          through it (and above the panel edge). As a sibling above the
+          scrollport, the list is hard-clipped below the header instead. */}
       {!isMobileBrowser && (
         <div className="flex-none border-b border-[var(--color-border)] px-3.5 pb-2 pt-3">
           <div className="mb-2 px-1 text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-tertiary)]">
             {t('model.configuration')}
           </div>
+          {searchField}
         </div>
       )}
       <div className={`overflow-y-auto ${isMobileBrowser ? 'p-1' : 'min-h-0 flex-1 p-1.5'}`}>
+        {!hasMatchingModels && (
+          <div
+            role="status"
+            className={`flex items-center justify-center px-4 text-center text-sm text-[var(--color-text-tertiary)] ${isMobileBrowser ? 'min-h-28' : 'min-h-24'}`}
+          >
+            {t('model.noMatches')}
+          </div>
+        )}
+
         {isRuntimeScoped ? (
           <div className="space-y-3">
-            {lockedProviderChoices.map((choice) => (
+            {filteredProviderChoices.map((choice) => (
               <div key={choice.providerId ?? 'official'} className="space-y-1.5">
                 <div className="flex items-center justify-between gap-2 px-3 pt-1">
                   <span className="truncate text-xs font-semibold text-[var(--color-text-tertiary)]">
@@ -727,7 +786,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
           </div>
         ) : (
           <div className="space-y-1">
-            {availableModels.map((model) => {
+            {filteredAvailableModels.map((model) => {
               const isSelected = model.id === selectedModel?.id
               return (
                 <button
@@ -846,6 +905,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
         title={t('model.configuration')}
         closeLabel={t('tabs.close')}
         ariaLabel={t('model.configuration')}
+        headerExtra={searchField}
         contentClassName="p-1"
         panelRef={dropdownRef}
         testId="model-selector-dropdown"

@@ -73,6 +73,15 @@ describe('specifier resolution', () => {
 
   test('returns null for unresolvable asset imports instead of inventing an edge', () => {
     expect(resolveSpecifier(root, 'desktop/src/pages/Page.tsx', '../assets/logo.png', files)).toBeNull()
+    expect(resolveSpecifier(root, 'desktop/src/pages/Page.tsx', '../assets/logo.png?url', files)).toBeNull()
+  })
+
+  test('reads a Vite query suffix as the module it names, so a worker still selects its importer', () => {
+    // `import Worker from './service?worker'` is an edge to service.ts: without it, a
+    // change to the worker's source selects nothing for the module that starts it.
+    expect(resolveSpecifier(root, 'src/entry.ts', './service?worker', files)).toBe('src/service.ts')
+    expect(resolveSpecifier(root, 'src/entry.ts', './service?worker&inline', files)).toBe('src/service.ts')
+    expect(resolveSpecifier(root, 'desktop/src/pages/Page.tsx', '@/lib/alias?url', files)).toBe('desktop/src/lib/alias.ts')
   })
 
   rmSync(root, { recursive: true, force: true })

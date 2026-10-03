@@ -177,6 +177,45 @@ describe('logical project session history', () => {
     } finally { readIndex.mockRestore() }
   })
 
+  it('serves sidebar previews from a degraded index and reads only the failed transcripts from disk', async () => {
+    const rows = await Promise.all([0, 1, 2, 3].map(n => seed(n)))
+    // Row 1's index row is stale (its transcript was rewritten after its last
+    // successful projection); row 2 never reached the index.
+    const indexed = [rows[0]!, { ...rows[1]!, title: 'Stale 1', modifiedAt: '2030-01-01T00:00:00.000Z' }, rows[3]!]
+    const failedPaths = [rows[1]!.transcriptPath, rows[2]!.transcriptPath]
+    const index: LocalIndexGateway = {
+      ...gateway(indexed, 'on', 'degraded'),
+      getSourceScopedFailurePaths: () => failedPaths,
+    }
+    const service = new SessionService(index)
+    const readIndex = spyOn(index, 'listSessions')
+    const internals = service as unknown as { scanSessionListSummary: (filePath: string, ...args: unknown[]) => Promise<unknown> }
+    const scan = spyOn(internals, 'scanSessionListSummary')
+    try {
+      const preview = await service.listProjectPreviews(6)
+      expect(preview.sessions.map(session => [session.id, session.title])).toEqual(
+        rows.map((row, n) => [row.id, `History ${n}`]),
+      )
+      expect(preview.projects).toEqual([{ projectRoot, total: 4 }])
+      expect(readIndex).toHaveBeenCalled()
+      expect(scan.mock.calls.map(call => call[0]).sort()).toEqual([...failedPaths].sort())
+    } finally { readIndex.mockRestore(); scan.mockRestore() }
+  })
+
+  it('keeps scanning files for a degraded index whose failure is not tied to one transcript', async () => {
+    const rows = await Promise.all([0, 1, 2].map(n => seed(n)))
+    const index: LocalIndexGateway = {
+      ...gateway(rows.slice(0, 1), 'on', 'degraded'),
+      getSourceScopedFailurePaths: () => null,
+    }
+    const readIndex = spyOn(index, 'listSessions')
+    try {
+      const page = await new SessionService(index).listProjectHistory({ projectRoot })
+      expect(page.sessions.map(session => session.id)).toEqual(rows.map(row => row.id))
+      expect(readIndex).not.toHaveBeenCalled()
+    } finally { readIndex.mockRestore() }
+  })
+
   it('keeps building project history on indexed rows instead of scanning every JSONL', async () => {
     const rows = await Promise.all([0, 1, 2].map(n => seed(n)))
     const index = gateway(rows.slice(0, 1), 'on', 'building')

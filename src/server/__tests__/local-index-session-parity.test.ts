@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -91,6 +91,32 @@ class FakeLocalIndexGateway implements LocalIndexGateway {
       state: 'ready',
       lastUpdatedAt: '2026-07-15T00:00:00.000Z',
     }
+  }
+}
+
+/** An index degraded by failures that each belong to one transcript. */
+class SourceScopedDegradedGateway extends FakeLocalIndexGateway {
+  failedPaths: readonly string[] | null = []
+  rows: IndexedSessionRow[] = []
+
+  constructor() {
+    super()
+    this.setReady()
+    this.status = { ...this.status, state: 'degraded', lastErrorCode: 'LOCAL_INDEX_SOURCE_LIMIT' }
+  }
+
+  override listSessions(options?: { project?: string; limit?: number; offset?: number }): SessionIndexPage {
+    this.listCalls += 1
+    this.lastListOptions = options
+    const rows = this.rows
+      .filter(row => options?.project === undefined || row.projectPath === options.project)
+      .sort((left, right) => Date.parse(right.modifiedAt) - Date.parse(left.modifiedAt) || left.id.localeCompare(right.id))
+    const offset = options?.offset ?? 0
+    return { sessions: rows.slice(offset, offset + (options?.limit ?? 50)), total: rows.length }
+  }
+
+  getSourceScopedFailurePaths(): readonly string[] | null {
+    return this.failedPaths
   }
 }
 
@@ -275,6 +301,131 @@ describe('SessionService local-index routing parity', () => {
     now += 501
     await service.listSessions()
     expect(gateway.listCalls).toBe(2)
+  })
+
+  it.each([
+    ['has no locator page', 'missing-page', false],
+    ['cannot be verified by the targeted reader', 'reader-null', false],
+    ['fails with a read error', 'reader-throws', true],
+  ] as const)('keeps serving the list from the index when one transcript %s only if the failure is not a read error', async (_label, failure, coolsDown) => {
+    const projectDir = '-tmp-project'
+    const filePath = await writeSession(projectDir, SESSION_A, 'File title', '2026-07-15T00:00:00.000Z')
+    const gateway = new FakeLocalIndexGateway() as FakeLocalIndexGateway & {
+      getSessionEntryLocators(transcriptPath: string): unknown
+    }
+    gateway.setReady()
+    gateway.page = { sessions: [indexedRow(filePath, projectDir, SESSION_A, 'Indexed title')], total: 1 }
+    gateway.matches = [{ filePath, projectDir }]
+    let locatorCalls = 0
+    gateway.getSessionEntryLocators = () => {
+      locatorCalls += 1
+      if (failure === 'missing-page') return null
+      return {
+        source: { path: filePath, size: 1, mtimeMs: 1, fileIdentity: null, fingerprint: 'fixture', indexedBytes: 1, parserVersion: 1, state: 'ready', lastErrorCode: null, updatedAtMs: 1 },
+        entries: [],
+      }
+    }
+    const service = new SessionService(gateway, {
+      now: () => 1_000,
+      indexFailureCooldownMs: 60_000,
+      targetedEntryReader: async () => {
+        if (failure === 'reader-throws') throw new Error('injected range read failure')
+        return null
+      },
+    })
+
+    expect(await service.getSessionTaskNotifications(SESSION_A)).toEqual([])
+    expect(locatorCalls).toBe(1)
+    const listed = await service.listSessions()
+    expect(listed.sessions[0]?.title).toBe(coolsDown ? 'File title' : 'Indexed title')
+    expect(gateway.listCalls).toBe(coolsDown ? 0 : 1)
+  })
+
+  describe('with a degraded index whose failures belong to single transcripts', () => {
+    const SESSION_C = '33333333-3333-4333-8333-333333333333'
+    const SESSION_D = '44444444-4444-4444-8444-444444444444'
+    const SESSION_W = '55555555-5555-4555-8555-555555555555'
+    const SESSION_E = '66666666-6666-4666-8666-666666666666'
+    const projectOne = sanitizePath('/tmp/degraded-one')
+    const projectTwo = sanitizePath('/tmp/degraded-two')
+
+    async function fixture() {
+      const fileA = await writeSession(projectOne, SESSION_A, 'File A', '2026-07-15T00:01:00.000Z')
+      // B's projection failed after it moved on; its index row is stale.
+      const fileB = await writeSession(projectOne, SESSION_B, 'File B', '2026-07-15T00:04:00.000Z')
+      const fileC = await writeSession(projectTwo, SESSION_C, 'File C', '2026-07-15T00:02:00.000Z')
+      // E failed before it was ever indexed, in the other project.
+      const fileE = await writeSession(projectTwo, SESSION_E, 'File E', '2026-07-15T00:02:30.000Z')
+      // D failed and was then deleted.
+      const fileD = path.join(configDir, 'projects', projectOne, `${SESSION_D}.jsonl`)
+      // W failed and turns out to be a desktop team worker, which never lists.
+      const fileW = await writeSession(projectOne, SESSION_W, 'Worker', '2026-07-15T00:05:00.000Z')
+      await fs.appendFile(fileW, `${JSON.stringify({ type: 'user', entrypoint: 'claude-desktop-team-worker', message: { role: 'user', content: 'worker' }, timestamp: '2026-07-15T00:05:00.000Z' })}\n`)
+      const gateway = new SourceScopedDegradedGateway()
+      gateway.rows = [
+        { ...indexedRow(fileA, projectOne, SESSION_A, 'Indexed A'), modifiedAt: '2026-07-15T00:01:00.000Z' },
+        { ...indexedRow(fileB, projectOne, SESSION_B, 'Stale B'), modifiedAt: '2026-07-15T00:00:00.000Z' },
+        { ...indexedRow(fileC, projectTwo, SESSION_C, 'Indexed C'), modifiedAt: '2026-07-15T00:02:00.000Z' },
+        { ...indexedRow(fileD, projectOne, SESSION_D, 'Stale D'), modifiedAt: '2026-07-15T00:03:00.000Z' },
+      ]
+      gateway.failedPaths = [fileB, fileD, fileW, fileE]
+      return { gateway, fileB, fileD, fileW, fileE }
+    }
+
+    it('merges the index with the failed transcripts read from disk, in index order', async () => {
+      const { gateway, fileB, fileD, fileW, fileE } = await fixture()
+      const service = new SessionService(gateway)
+      const internals = service as unknown as { scanSessionListSummary: (filePath: string, ...args: unknown[]) => Promise<unknown> }
+      const scan = spyOn(internals, 'scanSessionListSummary')
+      try {
+        const result = await service.listSessions()
+        expect(result.sessions.map(session => session.title)).toEqual(['File B', 'File E', 'Indexed C', 'Indexed A'])
+        expect(result.total).toBe(4)
+        expect(gateway.listCalls).toBe(1)
+        expect(scan.mock.calls.map(call => call[0]).sort()).toEqual([fileB, fileW, fileE].sort())
+        expect(scan.mock.calls.map(call => call[0])).not.toContain(fileD)
+      } finally { scan.mockRestore() }
+    })
+
+    it('paginates and filters the merged rows like the index list', async () => {
+      const { gateway } = await fixture()
+      const service = new SessionService(gateway)
+
+      const second = await service.listSessions({ limit: 1, offset: 1 })
+      expect(second.sessions.map(session => session.title)).toEqual(['File E'])
+      expect(second.total).toBe(4)
+
+      const projectPage = await service.listSessions({ project: '/tmp/degraded-one' })
+      expect(projectPage.sessions.map(session => session.title)).toEqual(['File B', 'Indexed A'])
+      expect(projectPage.total).toBe(2)
+      expect(gateway.lastListOptions?.project).toBe(projectOne)
+    })
+
+    it('falls back to the file list when any failure is not tied to a transcript', async () => {
+      const { gateway } = await fixture()
+      gateway.failedPaths = null
+      const result = await new SessionService(gateway).listSessions()
+      expect(gateway.listCalls).toBe(0)
+      expect(result.sessions.map(session => session.title)).toEqual(['File B', 'File E', 'File C', 'File A'])
+    })
+
+    it('waits for a completed reconciliation after a mutation, then serves the degraded index again', async () => {
+      const { gateway } = await fixture()
+      gateway.matches = [{ filePath: path.join(configDir, 'projects', projectOne, `${SESSION_A}.jsonl`), projectDir: projectOne }]
+      const reader = new SessionService(gateway)
+      const writer = new SessionService(gateway)
+
+      await writer.renameSession(SESSION_A, 'Renamed A')
+      const bypassed = await reader.listSessions()
+      expect(gateway.listCalls).toBe(0)
+      expect(bypassed.sessions.map(session => session.title)).toContain('Renamed A')
+
+      gateway.status = { ...gateway.status, lastUpdatedAt: '2026-07-15T00:10:00.000Z' }
+      gateway.rows = gateway.rows.map(row => row.id === SESSION_A ? { ...row, title: 'Renamed A (indexed)' } : row)
+      const served = await reader.listSessions()
+      expect(gateway.listCalls).toBe(1)
+      expect(served.sessions.map(session => session.title)).toContain('Renamed A (indexed)')
+    })
   })
 
   it('keeps invalid direct pagination inputs on the legacy file path', async () => {

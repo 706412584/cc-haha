@@ -5,6 +5,7 @@ import type { SessionTurnCheckpoint } from '../../api/sessions'
 import { useTranslation, type TranslationKey } from '../../i18n'
 import { Button } from '@/components/ui/Button'
 import { OpenWithMenu } from '@/components/composite/OpenWithMenu'
+import { FileTypeIcon } from '@/components/ui/FileTypeIcon'
 import { describeFileType, isPreviewableChangedFile, type OpenWithItem } from '../../lib/openWithItems'
 import { buildOpenWithMenuItems } from '../../lib/openWithMenuItems'
 import { openWithContextForWorkspaceFile } from '../../lib/openWithContextForHref'
@@ -13,7 +14,7 @@ import { shouldOfferStaticHtmlPreview } from '../../lib/htmlPreviewPolicy'
 import { getServerBaseUrl } from '../../lib/desktopRuntime'
 import { useOpenTargetStore } from '../../stores/openTargetStore'
 import { workspaceOpen } from '../../lib/workspace/openTarget'
-import { isWorkspacePreviewableFile } from '../../lib/fileCapabilities'
+import { isWorkspaceDocumentFile, isWorkspacePreviewableFile } from '../../lib/fileCapabilities'
 import { openLocalFileWithSystem, reportOpenFailure } from '../../lib/systemFileOpen'
 
 type CurrentTurnChangeCardProps = {
@@ -91,6 +92,12 @@ export function CurrentTurnChangeCard({
         workspaceOpen.browser(sessionId, localFileUrl(getServerBaseUrl(), fileEntry.apiPath), { origin })
         return
       }
+      workspaceOpen.file(sessionId, fileEntry.displayPath, { origin })
+      return
+    }
+    // A document has no line diff: the turn's recorded change for it is empty, so
+    // the review view would open onto nothing. What was asked for is the document.
+    if (isWorkspaceDocumentFile(fileEntry.displayPath)) {
       workspaceOpen.file(sessionId, fileEntry.displayPath, { origin })
       return
     }
@@ -228,7 +235,7 @@ export function CurrentTurnChangeCard({
                   title={fileEntry.displayPath}
                   className="flex min-h-[52px] min-w-0 flex-1 items-center gap-3 rounded-[var(--radius-md)] px-4 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]"
                 >
-                  <span className="material-symbols-outlined shrink-0 text-[22px] text-[var(--color-text-tertiary)]">{typeInfo.icon}</span>
+                  <FileTypeIcon path={fileEntry.displayPath} size={24} />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium text-[var(--color-text-primary)]">{fileName}</span>
                     <span className="block truncate text-xs text-[var(--color-text-tertiary)]">{`${t(typeInfo.categoryKey as Parameters<typeof t>[0])} · ${typeInfo.ext}`}</span>

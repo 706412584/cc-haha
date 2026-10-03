@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { APIError } from '@anthropic-ai/sdk'
+import { getIsInteractive, setIsInteractive } from '../../bootstrap/state.js'
 import { BUSINESS_ERROR_CODES } from '../../constants/businessErrors.js'
 import {
   API_ERROR_MESSAGE_PREFIX,
@@ -10,6 +11,7 @@ import {
   isContextOverflowErrorText,
   isSerializedSizeOverflowText,
   isUnsupportedImageInputErrorMessage,
+  measureRequestPayload,
   PROMPT_TOO_LONG_ERROR_MESSAGE,
   parsePromptTooLongTokenCounts,
 } from './errors.js'
@@ -593,5 +595,169 @@ describe('context overflow errors', () => {
     const msg = getAssistantMessageFromError(error, 'claude-opus-4-8')
 
     expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.PROMPT_TOO_LONG)
+  })
+})
+
+describe('request too large (HTTP 413)', () => {
+  const MODEL = 'claude-sonnet-5-5'
+  const nginxHtml =
+    '<html>\r\n<head><title>413 Request Entity Too Large</title></head>\r\n<body>\r\n<center><h1>413 Request Entity Too Large</h1></center>\r\n<hr><center>nginx/1.18.0</center>\r\n</body>\r\n</html>'
+  const relayBody = {
+    error: { message: 'request body too large, limit is 10 MB', type: 'invalid_request_error' },
+  }
+  const anthropicBody = {
+    type: 'error',
+    error: { type: 'request_too_large', message: 'Request exceeds the maximum allowed number of bytes.' },
+  }
+  const sources = [
+    {
+      name: 'nginx in front of a relay',
+      error: new APIError(413, undefined, `413 ${nginxHtml}`, undefined),
+      upstream: 'nginx/1.18.0',
+    },
+    {
+      name: 'a relay that names its own limit',
+      error: new APIError(413, relayBody, `413 ${JSON.stringify(relayBody)}`, undefined),
+      upstream: 'limit is 10 MB',
+    },
+    {
+      name: 'the Anthropic API',
+      error: new APIError(413, anthropicBody, `413 ${JSON.stringify(anthropicBody)}`, undefined),
+      upstream: 'maximum allowed number of bytes',
+    },
+  ]
+  const textOf = (msg: { message: { content: unknown[] } }) =>
+    (msg.message.content[0] as { text: string }).text
+  const image = (chars: number) => ({
+    type: 'image',
+    source: { type: 'base64', media_type: 'image/png', data: 'A'.repeat(chars) },
+  })
+  const userTurn = (content: unknown[]) => ({
+    type: 'user' as const,
+    message: { role: 'user' as const, content },
+  })
+  const relayRejection = sources[1]!.error
+
+  test.each(sources)(
+    'does not invent a size limit when $name rejects the request',
+    ({ error, upstream }) => {
+      const msg = getAssistantMessageFromError(error, MODEL)
+      const text = textOf(msg)
+
+      // The old wording hard-coded the PDF limit ("max 20MB") for every 413,
+      // which is wrong for a relay with its own limit and for the API's real one.
+      expect(text).not.toMatch(/\d\s?MB/)
+      expect(text).not.toMatch(/smaller file/i)
+      expect(text).toContain('HTTP 413')
+      expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.REQUEST_TOO_LARGE)
+      // Whoever rejected the request said something; keep it for diagnosis.
+      expect(msg.errorDetails).toStartWith('request_too_large: ')
+      expect(msg.errorDetails).toContain(upstream)
+    },
+  )
+
+  test('reports how much of the rejected request was images and documents', () => {
+    const messagesForAPI = [
+      userTurn([{ type: 'text', text: 'take a screenshot' }]),
+      userTurn([
+        { type: 'tool_result', tool_use_id: 't1', content: [image(2 * 1024 * 1024)] },
+      ]),
+    ]
+
+    const text = textOf(
+      getAssistantMessageFromError(relayRejection, MODEL, {
+        messagesForAPI: messagesForAPI as never,
+      }),
+    )
+
+    expect(text).toContain('about 2MB')
+    expect(text).toContain('2MB is images or documents')
+    expect(text).toContain('placeholders')
+  })
+
+  test('says so when the rejected request carried no images or documents', () => {
+    const messagesForAPI = [
+      userTurn([
+        { type: 'tool_result', tool_use_id: 't1', content: 'x'.repeat(1.5 * 1024 * 1024) },
+      ]),
+    ]
+
+    const text = textOf(
+      getAssistantMessageFromError(relayRejection, MODEL, {
+        messagesForAPI: messagesForAPI as never,
+      }),
+    )
+
+    expect(text).toContain('about 1.5MB')
+    expect(text).toContain('none of it is images or documents')
+  })
+
+  test('points interactive users at /compact and non-interactive callers at a new session', () => {
+    // Session mode is process-global and bun runs every file in one process:
+    // set both modes explicitly and put back whatever was there.
+    const original = getIsInteractive()
+    try {
+      setIsInteractive(true)
+      expect(textOf(getAssistantMessageFromError(relayRejection, MODEL))).toContain('/compact')
+      setIsInteractive(false)
+      expect(textOf(getAssistantMessageFromError(relayRejection, MODEL))).toContain(
+        'start a new session',
+      )
+    } finally {
+      setIsInteractive(original)
+    }
+  })
+
+  describe('measureRequestPayload', () => {
+    const toolUse = {
+      type: 'tool_use',
+      id: 't',
+      name: 'Read',
+      input: { file_path: '/a' },
+    }
+
+    test('counts media by data length and keeps it separate from everything else', () => {
+      const size = measureRequestPayload([
+        userTurn([{ type: 'text', text: 'hello' }]),
+        userTurn([
+          {
+            type: 'tool_result',
+            tool_use_id: 't',
+            content: [image(1000), { type: 'text', text: 'abc' }],
+          },
+        ]),
+        userTurn([
+          {
+            type: 'document',
+            source: { type: 'base64', media_type: 'application/pdf', data: 'B'.repeat(500) },
+          },
+        ]),
+        { type: 'assistant', message: { role: 'assistant', content: [toolUse] } },
+      ] as never)
+
+      expect(size?.mediaBytes).toBe(1500)
+      expect(size?.totalBytes).toBe(
+        5 + 1003 + 500 + Buffer.byteLength(JSON.stringify(toolUse)),
+      )
+    })
+
+    test('never throws while classifying: an unserializable payload falls back to the unmeasured wording', () => {
+      const circular: Record<string, unknown> = {}
+      circular.self = circular
+      const messagesForAPI = [
+        {
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: 't', name: 'Read', input: circular }],
+          },
+        },
+      ] as never
+
+      expect(measureRequestPayload(messagesForAPI)).toBeUndefined()
+      expect(
+        textOf(getAssistantMessageFromError(relayRejection, MODEL, { messagesForAPI })),
+      ).toContain('The size limit is set by that endpoint')
+    })
   })
 })

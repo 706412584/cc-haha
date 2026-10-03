@@ -1,4 +1,4 @@
-import { isEditorOpenableFile } from './fileCapabilities'
+import { isEditorOpenableFile, isWorkspaceDocumentFile } from './fileCapabilities'
 import type { OpenTarget } from '../stores/openTargetStore'
 
 // ─── File-type description ────────────────────────────────────────────────────
@@ -17,7 +17,7 @@ const FILE_TYPE_RULES: Array<{ re: RegExp; key: string; icon: string }> = [
   { re: /\.(mp4|mov|m4v|webm|mkv|avi)$/i, key: 'video', icon: 'video_file' },
   { re: /\.(html?|xhtml)$/i, key: 'web', icon: 'html' },
   { re: /\.(png|jpe?g|gif|svg|webp|avif|bmp|ico)$/i, key: 'image', icon: 'image' },
-  { re: /\.(ts|tsx|js|jsx|mjs|cjs|json|css|scss|less|py|rs|go|java|rb|php|c|cc|cpp|h|hpp|sh|ya?ml|toml|xml|sql)$/i, key: 'code', icon: 'code' },
+  { re: /\.(ts|tsx|js|jsx|mjs|cjs|json|jsonl|css|scss|less|py|rs|go|java|rb|php|c|cc|cpp|h|hpp|sh|ya?ml|toml|xml|sql)$/i, key: 'code', icon: 'code' },
 ]
 
 export function describeFileType(path: string): FileTypeInfo {
@@ -36,11 +36,13 @@ const PREVIEWABLE_CHANGED_FILE_RE = /\.(md|markdown|html?|png|jpe?g|gif|webp|svg
 
 /**
  * True only for changed-file types with a meaningful *rendered* preview
- * (markdown / html / image). Source files (.ts/.json/.css …) return false.
- * Used only to sort rich-preview files ahead of generic source/document rows.
+ * (markdown / html / image / a document the workspace renders). Source files
+ * (.ts/.json/.css …) return false. Used only to sort rich-preview files ahead of
+ * generic source rows. Documents come from the same set the preview gate uses, so
+ * the ordering cannot disagree with what actually opens.
  */
 export function isPreviewableChangedFile(path: string): boolean {
-  return PREVIEWABLE_CHANGED_FILE_RE.test(path)
+  return PREVIEWABLE_CHANGED_FILE_RE.test(path) || isWorkspaceDocumentFile(path)
 }
 
 // ─── Open-with items ──────────────────────────────────────────────────────────

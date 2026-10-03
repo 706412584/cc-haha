@@ -970,6 +970,14 @@ describe('Models API', () => {
         supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
       },
       {
+        id: 'claude-sonnet-5-5',
+        name: 'Sonnet 5.5',
+        description: 'Best combination of speed and intelligence',
+        context: '1m',
+        defaultReasoningEffort: 'medium',
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      {
         id: 'claude-sonnet-5',
         name: 'Sonnet 5',
         description: 'Best combination of speed and intelligence',
@@ -1178,7 +1186,8 @@ describe('Models API', () => {
 
     expect(res.status).toBe(200)
     const body = await res.json()
-    expect(body.model.id).toBe('claude-opus-5')
+    // The CLI launches without an explicit model here and its `opus` alias is Opus 5.5.
+    expect(body.model).toMatchObject({ id: 'claude-opus-5-5', name: 'Opus 5.5' })
   })
 
   it('GET /api/models/current should replace the legacy opus[1m] default with the Claude OAuth Pro default', async () => {
@@ -1201,8 +1210,9 @@ describe('Models API', () => {
     const currentBody = await currentResponse.json()
 
     expect(currentBody.model).toMatchObject({
-      id: 'claude-sonnet-5',
-      name: 'Sonnet 5',
+      id: 'claude-sonnet-5-5',
+      name: 'Sonnet 5.5',
+      defaultReasoningEffort: 'medium',
     })
 
     const listRequest = makeRequest('GET', '/api/models')
@@ -1218,6 +1228,7 @@ describe('Models API', () => {
       'claude-opus-5-5',
       'claude-opus-5',
       'claude-opus-4-8',
+      'claude-sonnet-5-5',
       'claude-sonnet-5',
       'claude-haiku-4-5',
     ])
@@ -1387,6 +1398,7 @@ describe('Models API', () => {
       'gpt-6-astra',
       'gpt-6-sol',
       'gpt-6-luna',
+      'gpt-6.1-sol',
       'gpt-5.6-sol',
       'gpt-5.6-terra',
       'gpt-5.6-luna',
@@ -1397,6 +1409,12 @@ describe('Models API', () => {
     ])
     expect(body.models[0]).toMatchObject({
       id: 'gpt-6-astra',
+      defaultReasoningEffort: 'low',
+      supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    })
+    expect(body.models.find(model => model.id === 'gpt-6.1-sol')).toMatchObject({
+      id: 'gpt-6.1-sol',
+      context: '258400',
       defaultReasoningEffort: 'low',
       supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     })
@@ -1575,16 +1593,17 @@ describe('Model Options', () => {
   beforeEach(setup)
   afterEach(teardown)
 
-  it('defaults Anthropic API users to Opus 5 and exposes the current official options once', () => {
+  it('defaults Anthropic API users to Opus 5.5 and exposes the current official options once', () => {
     process.env.ANTHROPIC_API_KEY = 'test-api-key'
 
-    expect(getDefaultMainLoopModelSetting()).toBe('claude-opus-5')
+    expect(getDefaultMainLoopModelSetting()).toBe('claude-opus-5-5')
 
     const options = getModelOptions()
     const values = options.map(option => option.value)
 
-    expect(options[0]?.description).toContain('Opus 5')
-    expect(options[0]?.description).toContain('$5')
+    expect(options[0]?.description).toContain('Opus 5.5')
+    // Opus 5.5 is $4/$20, not the $5/$25 of the Opus 5 it replaces as the default.
+    expect(options[0]?.description).toContain('$4/$20 per Mtok')
     expect(values).toContain('fable')
     expect(values).toContain('sonnet')
     expect(values).not.toContain('opus')
@@ -1624,10 +1643,10 @@ describe('Model Options', () => {
   it('labels extended-context options with current first-party and conservative third-party names', () => {
     process.env.ANTHROPIC_API_KEY = 'test-api-key'
 
-    expect(getSonnet46_1MOption().description).toContain('Sonnet 5')
-    expect(getOpus46_1MOption().description).toContain('Opus 5')
-    expect(getMaxSonnet46_1MOption().description).toContain('Sonnet 5')
-    expect(getMaxOpus46_1MOption().description).toContain('Opus 5')
+    expect(getSonnet46_1MOption().description).toContain('Sonnet 5.5')
+    expect(getOpus46_1MOption().description).toContain('Opus 5.5')
+    expect(getMaxSonnet46_1MOption().description).toContain('Sonnet 5.5')
+    expect(getMaxOpus46_1MOption().description).toContain('Opus 5.5')
 
     process.env.ANTHROPIC_BASE_URL = 'https://api.deepseek.com/anthropic'
 

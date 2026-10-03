@@ -86,6 +86,16 @@ export function getRainbowColor(
   return colors[charIndex % colors.length]!
 }
 
+// Fable, Opus 5.5 and Sonnet 5.5 reject `thinking: disabled` and manual budgets;
+// they always run adaptive thinking.
+function isAdaptiveOnlyModel(canonical: string): boolean {
+  return (
+    canonical.includes('claude-fable-5') ||
+    canonical === 'claude-opus-5-5' ||
+    canonical === 'claude-sonnet-5-5'
+  )
+}
+
 // TODO(inigo): add support for probing unknown models via API error detection
 // Provider-aware thinking support detection (aligns with modelSupportsISP in betas.ts)
 export function modelSupportsThinking(model: string): boolean {
@@ -101,9 +111,9 @@ export function modelSupportsThinking(model: string): boolean {
   // IMPORTANT: Do not change thinking support without notifying the model
   // launch DRI and research. This can greatly affect model quality and bashing.
   const canonical = getCanonicalName(model)
-  // Fable and Opus 5.5 use always-on adaptive thinking. Keep this after the provider
+  // Adaptive-only models use always-on adaptive thinking. Keep this after the provider
   // capability override so an explicitly incompatible 3P route can opt out.
-  if (canonical.includes('claude-fable-5') || canonical === 'claude-opus-5-5') {
+  if (isAdaptiveOnlyModel(canonical)) {
     return true
   }
   const provider = getAPIProvider()
@@ -136,8 +146,7 @@ export function modelRequiresThinking(model: string): boolean {
   if (required3P !== undefined) {
     return required3P
   }
-  const canonical = getCanonicalName(model)
-  return canonical.includes('claude-fable-5') || canonical === 'claude-opus-5-5'
+  return isAdaptiveOnlyModel(getCanonicalName(model))
 }
 
 /** Fable 5.1 binds replayed thinking to the preceding system, tools and history. */
@@ -159,9 +168,9 @@ export function modelSupportsAdaptiveThinking(model: string): boolean {
     return supported3P
   }
   const canonical = getCanonicalName(model)
-  // Fable and Opus 5.5 reject disabled/manual thinking and require adaptive thinking.
+  // Adaptive-only models reject disabled/manual thinking and require adaptive thinking.
   // Explicit 3P capability declarations above remain authoritative.
-  if (canonical.includes('claude-fable-5') || canonical === 'claude-opus-5-5') {
+  if (isAdaptiveOnlyModel(canonical)) {
     return true
   }
   const provider = getAPIProvider()

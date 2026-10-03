@@ -10,7 +10,7 @@ import { handleSessionCollaborationApi } from './api/sessionCollaboration.js'
 
 import { handleApiRequest } from './router.js'
 import { handleWebSocket, type WebSocketData } from './ws/handler.js'
-import { resolveCors, type CorsResolution } from './middleware/cors.js'
+import { resolveCors, withCors, type CorsResolution } from './middleware/cors.js'
 import { requireAuth, requireH5Token } from './middleware/auth.js'
 import { teamWatcher } from './services/teamWatcher.js'
 import { cronScheduler } from './services/cronScheduler.js'
@@ -142,17 +142,6 @@ function beginBackgroundIndexStartup(): void {
   backgroundIndexStartup = operation
   void operation.finally(() => {
     if (backgroundIndexStartup === operation) backgroundIndexStartup = undefined
-  })
-}
-
-function withCors(response: Response, cors: CorsResolution): Response {
-  const headers = new Headers(response.headers)
-  for (const [key, value] of Object.entries(cors.headers)) {
-    headers.set(key, value)
-  }
-  return new Response(response.body, {
-    status: response.status,
-    headers,
   })
 }
 

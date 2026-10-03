@@ -22,6 +22,12 @@ export type ButtonVariant =
   | 'ghost'
   | 'danger'
   | 'danger-outline'
+  /**
+   * Danger-colored text with no border or fill until hovered, for a destructive
+   * action that is rarely wanted and should not compete with the page's real
+   * primary action (unlike `danger-outline`, which reads as a call to act).
+   */
+  | 'danger-ghost'
   | 'link'
   /**
    * Inverted fill — dark on light themes, light on dark. For a neutral but
@@ -110,6 +116,8 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
     `bg-[var(--color-inverse-surface)] text-[var(--color-inverse-on-surface)] hover:bg-[var(--color-brand)] hover:-translate-y-px active:translate-y-0 active:scale-[0.97] ${DISABLED_FILL}`,
   'danger-outline':
     `bg-transparent text-[var(--color-error)] border border-[var(--color-error)] hover:bg-[var(--color-error-soft)] active:scale-[0.98] ${DISABLED_FADE}`,
+  'danger-ghost':
+    `bg-transparent text-[var(--color-error)] hover:bg-[var(--color-error-soft)] active:scale-[0.98] ${DISABLED_FADE}`,
   link:
     `bg-transparent text-[var(--color-brand)] underline-offset-2 hover:underline hover:text-[var(--color-brand-hover)] px-0 ${DISABLED_FADE}`,
 }

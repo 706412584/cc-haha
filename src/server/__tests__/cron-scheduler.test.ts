@@ -581,6 +581,91 @@ describe('CronScheduler', () => {
     const runs = await scheduler.getRecentRuns(2)
     expect(runs.length).toBeLessThanOrEqual(2)
   })
+
+  // Issue #1400. The run log is read by a second reader, independent of the task
+  // file's, with the same exposure to a BOM (PowerShell 5.x) or a zero-filled file
+  // (crash mid-write). History queries used to fail with a bare 500 and the startup
+  // stale-run cleanup logged an error on every launch.
+  describe('run log written by another tool', () => {
+    const BOM = Buffer.from([0xef, 0xbb, 0xbf])
+    const logPath = () => path.join(tmpDir, 'scheduled_tasks_log.json')
+    const finishedRun: TaskRun = {
+      id: 'run-1',
+      taskId: 'task-a',
+      taskName: 'Task A',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      completedAt: '2026-01-01T00:00:01.000Z',
+      status: 'completed',
+      prompt: 'test prompt',
+      exitCode: 0,
+      durationMs: 1000,
+    }
+    const staleRun: TaskRun = {
+      id: 'run-stale',
+      taskId: 'task-a',
+      taskName: 'Task A',
+      startedAt: '2020-01-01T00:00:00.000Z',
+      status: 'running',
+      prompt: 'left behind by a crashed process',
+    }
+    const withBom = (runs: TaskRun[]) =>
+      Buffer.concat([BOM, Buffer.from(JSON.stringify({ runs }))])
+
+    async function waitUntil(check: () => Promise<boolean>, timeoutMs = 3000) {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        if (await check().catch(() => false)) return
+        await Bun.sleep(10)
+      }
+      throw new Error('timed out waiting for the run log to be rewritten')
+    }
+
+    it('reads run history from a log that starts with a UTF-8 BOM', async () => {
+      await fs.writeFile(logPath(), withBom([finishedRun]))
+
+      expect((await scheduler.getRecentRuns()).map((run) => run.id)).toEqual(['run-1'])
+      expect((await scheduler.getTaskRuns('task-a')).map((run) => run.id)).toEqual(['run-1'])
+    })
+
+    const blankLogs: Array<[string, Buffer]> = [
+      ['a zero-filled log', Buffer.alloc(200, 0)],
+      ['an empty log', Buffer.alloc(0)],
+      ['a BOM-only log', BOM],
+    ]
+    for (const [name, bytes] of blankLogs) {
+      it(`reports no runs for ${name}`, async () => {
+        await fs.writeFile(logPath(), bytes)
+
+        expect(await scheduler.getRecentRuns()).toEqual([])
+        expect(await scheduler.getTaskRuns('task-a')).toEqual([])
+      })
+    }
+
+    it('still fails on a log with real content it cannot parse', async () => {
+      await fs.writeFile(logPath(), Buffer.from('{"runs": [{"id": "run-1"'))
+
+      await expect(scheduler.getRecentRuns()).rejects.toThrow()
+    })
+
+    it('completes the startup stale-run cleanup on a BOM log without logging an error', async () => {
+      await fs.writeFile(logPath(), withBom([staleRun]))
+      const errors = spyOn(console, 'error').mockImplementation(() => {})
+      let logged: string[] = []
+
+      try {
+        scheduler.start()
+        await waitUntil(async () => {
+          const rewritten = JSON.parse(await fs.readFile(logPath(), 'utf-8')) as { runs: TaskRun[] }
+          return rewritten.runs[0]?.status === 'failed'
+        })
+      } finally {
+        logged = errors.mock.calls.map((args) => args.map(String).join(' '))
+        errors.mockRestore()
+      }
+
+      expect(logged.filter((line) => line.includes('cleaning up stale runs'))).toEqual([])
+    })
+  })
 })
 
 // ─── Execution log trimming ────────────────────────────────────────────────

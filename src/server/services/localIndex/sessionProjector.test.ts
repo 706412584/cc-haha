@@ -259,16 +259,272 @@ describe('session projector', () => {
     }
   })
 
-  it('rejects oversized records before concatenation and preserves the canonical file', async () => {
+  it('indexes a Read-tool image record larger than the buffer threshold without concatenating it', async () => {
     const root = await createTempDir('projector-record-budget')
-    const candidate = await createCandidate({ root, projectPath: '-repo', sessionId: 'large', content: line(user('x'.repeat(MAX_PROJECTION_RECORD_BYTES + 1), '2026-01-01T00:00:00Z')) })
+    // A Read-tool image result stores its base64 twice, which is how real
+    // transcripts end up with single lines above 8 MiB.
+    const base64 = 'A'.repeat(MAX_PROJECTION_RECORD_BYTES / 2 + 1024)
+    const prompt = line(user('Look at this screenshot', '2026-01-01T00:00:00Z'))
+    const image = line({
+      parentUuid: 'u-prompt',
+      isSidechain: false,
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{
+          tool_use_id: 'toolu_1',
+          type: 'tool_result',
+          content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64 } }],
+        }],
+      },
+      toolUseResult: { type: 'image', file: { base64, type: 'image/png', originalSize: base64.length } },
+      uuid: 'u-image',
+      timestamp: '2026-01-01T00:00:01Z',
+    })
+    const reply = line(assistant('2026-01-01T00:00:02Z'))
+    expect(Buffer.byteLength(image)).toBeGreaterThan(MAX_PROJECTION_RECORD_BYTES)
+    const candidate = await createCandidate({ root, projectPath: '-repo', sessionId: 'large', content: prompt + image + reply })
     const before = await sourceHash(candidate.path)
+    const database = openLocalIndexDatabase({ path: join(root, 'index.sqlite') })
+    const index = createSessionIndex(database)
+    try {
+      const projector = createSessionProjector({ database, index, scope: root })
+      const result = await projector.projectSource(candidate)
+      expect(result).toMatchObject({ kind: 'indexed', action: 'full' })
+      if (result.kind !== 'indexed') throw new Error('expected an indexed result')
+      expect(result.projection.summary).toMatchObject({
+        title: 'Look at this screenshot',
+        messageCount: 3,
+        modifiedAt: '2026-01-01T00:00:02Z',
+      })
+      expect(result.projection.indexedBytes).toBe(Buffer.byteLength(prompt + image + reply))
+      expect(result.projection.malformedLineCount).toBe(0)
+      expect(result.work.maxBufferedBytes).toBeLessThanOrEqual(MAX_PROJECTION_RECORD_BYTES + 2 * 1024 * 1024)
+      const locators = index.getSessionEntryLocators(candidate.path)!.entries
+      expect(locators).toHaveLength(3)
+      expect(locators[1]).toMatchObject({
+        jsonlLine: 2,
+        byteStart: Buffer.byteLength(prompt),
+        byteLength: Buffer.byteLength(image),
+        entryType: 'user',
+        messageId: 'u-image',
+        role: 'user',
+        timestamp: '2026-01-01T00:00:01Z',
+      })
+      expect(locators[2]).toMatchObject({ byteStart: Buffer.byteLength(prompt + image), entryType: 'assistant' })
+      expect(index.getSource(candidate.path)).toMatchObject({ state: 'ready', parserVersion: SESSION_SUMMARY_PARSER_VERSION })
+      expect(await sourceHash(candidate.path)).toBe(before)
+    } finally { database.close() }
+  })
+
+  it('titles an oversized first prompt from its preview, like a small one', async () => {
+    const root = await createTempDir('projector-record-title')
+    const candidate = await createCandidate({ root, projectPath: '-repo', sessionId: 'large-title', content: line(user('x'.repeat(MAX_PROJECTION_RECORD_BYTES + 1), '2026-01-01T00:00:00Z')) })
     const database = openLocalIndexDatabase({ path: join(root, 'index.sqlite') })
     try {
       const projector = createSessionProjector({ database, index: createSessionIndex(database), scope: root })
-      await expect(projector.projectSource(candidate)).rejects.toMatchObject({ code: 'LOCAL_INDEX_SOURCE_LIMIT' })
-      expect(await sourceHash(candidate.path)).toBe(before)
+      const result = await projector.projectSource(candidate)
+      expect(result).toMatchObject({ kind: 'indexed', projection: { summary: { title: `${'x'.repeat(80)}...`, messageCount: 1 } } })
     } finally { database.close() }
+  })
+
+  const skeletonPadding = 'p'.repeat(12_000)
+  const skeletonTranscript: Array<Record<string, unknown> | string> = [
+    { type: 'session-meta', workDir: '/work', permissionMode: 'plan', runtimeProviderId: 'provider', runtimeModelId: 'model-x', effortLevel: 'high', timestamp: '2026-01-01T00:00:00Z', padding: skeletonPadding },
+    { type: 'worktree-state', worktreeSession: { worktreePath: '/work/.claude/worktrees/a', worktreeName: 'a', originalCwd: '/work' }, timestamp: '2026-01-01T00:00:01Z' },
+    { type: 'user', cwd: '/work/cwd', version: '2.1.0', sessionId: 'parity', repository: { repoRoot: '/work' }, message: { role: 'user', content: [{ type: 'text', text: `Fix the bug ${'t'.repeat(6_000)}` }] }, uuid: 'u1', timestamp: '2026-01-01T00:00:03Z' },
+    {
+      type: 'assistant',
+      version: '2.1.0',
+      sessionId: 'parity',
+      requestId: 'req_1',
+      uuid: 'a1',
+      timestamp: '2026-01-01T00:00:04Z',
+      message: {
+        id: 'msg_1',
+        role: 'assistant',
+        model: 'claude-sonnet-5-5',
+        content: [
+          { type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'review', args: skeletonPadding } },
+          { type: 'tool_use', id: 't2', name: 'Bash', input: { command: `echo 2-shotted by me ${'c'.repeat(100)}`, description: skeletonPadding } },
+          { type: 'tool_use', id: 't3', name: 'Write', input: { file_path: '/work/a.ts', content: skeletonPadding } },
+        ],
+        usage: {
+          input_tokens: 10,
+          output_tokens: 20,
+          cache_read_input_tokens: 5,
+          cache_creation: { ephemeral_5m_input_tokens: 1, ephemeral_1h_input_tokens: 2 },
+          server_tool_use: { web_search_requests: 1 },
+          speed: 'fast',
+          iterations: [{ type: 'advisor_message', model: 'claude-opus-5-5', input_tokens: 3, output_tokens: 4 }],
+        },
+      },
+    },
+    // Same message id under another request: billed separately only when the
+    // requestId survives into the dedupe key.
+    { type: 'assistant', version: '2.1.0', sessionId: 'parity', requestId: 'req_2', uuid: 'a2', timestamp: '2026-01-01T00:00:04.500Z', message: { id: 'msg_1', role: 'assistant', model: 'claude-sonnet-5-5', content: [{ type: 'text', text: 'again' }], usage: { input_tokens: 100, output_tokens: 200 } } },
+    { type: 'user', parent_tool_use_id: 't3', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't3', content: skeletonPadding }] }, toolUseResult: { stdout: skeletonPadding }, uuid: 'u2', timestamp: '2026-01-01T00:00:05Z' },
+    { type: 'assistant', forkedFrom: { sessionId: 'parent', messageUuid: 'm0' }, sessionId: 'parity', version: '2.1.0', requestId: 'req_0', uuid: 'a0', timestamp: '2026-01-01T00:00:06Z', message: { id: 'msg_0', role: 'assistant', model: 'claude-sonnet-5-5', content: [{ type: 'text', text: 'forked' }], usage: { input_tokens: 1, output_tokens: 1 } } },
+    { type: 'speculation-accept', timeSavedMs: 1234, timestamp: '2026-01-01T00:00:07Z' },
+    { type: 'assistant', isSidechain: true, message: { role: 'assistant', content: 'side' }, uuid: 'sc', timestamp: '2026-01-01T00:00:08Z' },
+    { type: 'user', isMeta: true, message: { role: 'user', content: 'meta' }, uuid: 'm', timestamp: '2026-01-01T00:00:09Z' },
+    { type: 'user', entrypoint: 'claude-desktop-team-worker', message: { role: 'user', content: 'worker' }, uuid: 'w', timestamp: '2026-01-01T00:00:10Z' },
+    '[1,2,3]',
+    '"a bare string"',
+  ]
+
+  const withoutSessionMeta = skeletonTranscript.filter(record => typeof record === 'string' || record.type !== 'session-meta')
+  it.each([
+    ['an AI title', [...skeletonTranscript, { type: 'ai-title', aiTitle: 'AI named it' }], { title: 'AI named it', permissionMode: 'plan', effortLevel: 'high', workDir: '/work' }],
+    ['a /goal title', [{ type: 'system', subtype: 'local_command', content: '<command-name>/goal</command-name><command-args>ship the fix</command-args>', timestamp: '2026-01-01T00:00:02Z', padding: skeletonPadding }, ...skeletonTranscript], { title: '/goal ship the fix' }],
+    ['a custom title', [...skeletonTranscript, { type: 'custom-title', customTitle: 'Named by hand', padding: skeletonPadding }], { title: 'Named by hand' }],
+    ['the first prompt', skeletonTranscript, { title: `Fix the bug ${'t'.repeat(68)}...`, modifiedAt: '2026-01-01T00:00:10Z' }],
+    // Without session metadata the workspace falls back to the entries' cwd.
+    ['a cwd-only workspace', withoutSessionMeta, { workDir: '/work/cwd' }],
+    // A later meta prompt must not move the semantic modification time.
+    ['a trailing meta prompt', [...skeletonTranscript, { type: 'user', isMeta: true, message: { role: 'user', content: 'meta later' }, uuid: 'm2', timestamp: '2026-01-01T00:00:59Z', padding: skeletonPadding }], { modifiedAt: '2026-01-01T00:00:10Z' }],
+  ] as const)('projects streamed skeletons exactly like fully parsed records (%s)', async (_label, records, expectedSummary) => {
+    const root = await createTempDir('projector-skeleton-parity')
+    const candidate = await createCandidate({ root, projectPath: '-repo', sessionId: 'parity', content: records.map(line).join('') })
+    const project = async (label: string, recordStreamingThresholdBytes?: number) => {
+      const database = openLocalIndexDatabase({ path: join(root, `${label}.sqlite`) })
+      const index = createSessionIndex(database)
+      try {
+        const projector = createSessionProjector({ database, index, scope: root, recordStreamingThresholdBytes })
+        const result = await projector.projectSource(candidate)
+        if (result.kind !== 'indexed') throw new Error(`expected an indexed result, got ${result.kind}`)
+        return {
+          projection: result.projection,
+          locators: index.getSessionEntryLocators(candidate.path)!.entries,
+          maxBufferedBytes: result.work.maxBufferedBytes,
+        }
+      } finally { database.close() }
+    }
+
+    const parsed = await project('parsed')
+    const streamed = await project('streamed', 1)
+    expect(parsed.projection.summary).toMatchObject({ isTeamWorker: true, ...expectedSummary })
+    expect(parsed.projection.activity?.models.find(model => model.model === 'claude-sonnet-5-5')?.inputTokens).toBe(110)
+    expect(parsed.projection.activity?.models.some(model => model.model === 'claude-opus-5-5')).toBe(true)
+    expect(parsed.projection.activity?.skills).toEqual([expect.objectContaining({ name: 'review' })])
+    expect(parsed.projection.activity?.shotCount).toBe(2)
+    expect(parsed.projection.activity?.speculationTimeSavedMs).toBe(1234)
+    expect(streamed.projection).toEqual(parsed.projection)
+    expect(streamed.locators).toEqual(parsed.locators)
+    expect(streamed.maxBufferedBytes).toBeLessThan(parsed.maxBufferedBytes)
+  })
+
+  it('counts an invalid or blank oversized line exactly like a buffered one', async () => {
+    const root = await createTempDir('projector-skeleton-malformed')
+    const content = [
+      line(user('Before', '2026-01-01T00:00:00Z')),
+      '{"type":"user","message":{"role":"user","content":"trailing comma"},}\n',
+      `${JSON.stringify(user('one', '2026-01-01T00:00:01Z'))}${JSON.stringify(user('two', '2026-01-01T00:00:02Z'))}\n`,
+      `${' '.repeat(64)}\n`,
+      line(user('After', '2026-01-01T00:00:03Z')),
+    ].join('')
+    const candidate = await createCandidate({ root, projectPath: '-repo', sessionId: 'malformed', content })
+    const project = async (label: string, recordStreamingThresholdBytes?: number) => {
+      const database = openLocalIndexDatabase({ path: join(root, `${label}.sqlite`) })
+      const index = createSessionIndex(database)
+      try {
+        const projector = createSessionProjector({ database, index, scope: root, recordStreamingThresholdBytes })
+        const result = await projector.projectSource(candidate)
+        if (result.kind !== 'indexed') throw new Error(`expected an indexed result, got ${result.kind}`)
+        return { projection: result.projection, locators: index.getSessionEntryLocators(candidate.path)!.entries }
+      } finally { database.close() }
+    }
+
+    const parsed = await project('parsed')
+    const streamed = await project('streamed', 1)
+    expect(parsed.projection.malformedLineCount).toBe(2)
+    expect(parsed.locators.map(locator => locator.jsonlLine)).toEqual([1, 5])
+    expect(streamed).toEqual(parsed)
+  })
+
+  it('counts an unterminated oversized tail and reads it again once its newline arrives', async () => {
+    const root = await createTempDir('projector-skeleton-tail')
+    const first = line(user('First', '2026-01-01T00:00:00Z'))
+    const tail = line(user(`Second ${'y'.repeat(4_000)}`, '2026-01-01T00:00:01Z'))
+    const candidate = await createCandidate({ root, projectPath: '-repo', sessionId: 'tail', content: first + tail.slice(0, -10) })
+    const database = openLocalIndexDatabase({ path: join(root, 'index.sqlite') })
+    const index = createSessionIndex(database)
+    try {
+      const projector = createSessionProjector({ database, index, scope: root, recordStreamingThresholdBytes: 256 })
+      const pending = await projector.projectSource(candidate)
+      expect(pending).toMatchObject({
+        kind: 'indexed',
+        projection: {
+          indexedBytes: Buffer.byteLength(first),
+          pendingTailBytes: Buffer.byteLength(tail) - 10,
+          summary: { messageCount: 1 },
+        },
+      })
+      if (pending.kind !== 'indexed') throw new Error('expected an indexed result')
+      expect(pending.work.maxBufferedBytes).toBeLessThan(1024)
+      expect(index.getSource(candidate.path)).toMatchObject({ state: 'pending' })
+
+      await appendFile(candidate.path, tail.slice(-10))
+      const completed = await projector.projectSource(candidate)
+      expect(completed).toMatchObject({
+        kind: 'indexed',
+        action: 'append',
+        projection: { indexedBytes: Buffer.byteLength(first + tail), pendingTailBytes: 0, summary: { messageCount: 2 } },
+      })
+      expect(index.getSessionEntryLocators(candidate.path)!.entries[1]).toMatchObject({
+        byteStart: Buffer.byteLength(first),
+        byteLength: Buffer.byteLength(tail),
+      })
+    } finally { database.close() }
+  })
+
+  it('still rejects an oversized record whose retained metadata breaks the budget', async () => {
+    const root = await createTempDir('projector-skeleton-metadata')
+    const candidate = await createCandidate({
+      root,
+      projectPath: '-repo',
+      sessionId: 'long-uuid',
+      content: line({ ...user('Title', '2026-01-01T00:00:00Z'), uuid: 'u'.repeat(4097) }),
+    })
+    const database = openLocalIndexDatabase({ path: join(root, 'index.sqlite') })
+    try {
+      const projector = createSessionProjector({ database, index: createSessionIndex(database), scope: root, recordStreamingThresholdBytes: 1 })
+      await expect(projector.projectSource(candidate)).rejects.toMatchObject({ code: 'LOCAL_INDEX_SOURCE_LIMIT' })
+    } finally { database.close() }
+  })
+
+  it('projects oversized subagent activity records', async () => {
+    const root = await createTempDir('projector-skeleton-activity')
+    const content = [
+      line(user('Delegated task', '2026-01-01T00:00:00Z')),
+      line({
+        type: 'assistant',
+        uuid: 'a1',
+        requestId: 'req_1',
+        timestamp: '2026-01-01T00:00:01Z',
+        message: {
+          id: 'msg_1',
+          role: 'assistant',
+          model: 'claude-sonnet-5-5',
+          content: [{ type: 'tool_use', id: 't1', name: 'Write', input: { file_path: '/a', content: 'w'.repeat(4_000) } }],
+          usage: { input_tokens: 7, output_tokens: 9 },
+        },
+      }),
+    ].join('')
+    const candidate = await createCandidate({ root, projectPath: '-repo/parent/subagents', sessionId: 'agent-1', content })
+    const project = async (label: string, recordStreamingThresholdBytes?: number) => {
+      const database = openLocalIndexDatabase({ path: join(root, `${label}.sqlite`) })
+      try {
+        const projector = createSessionProjector({ database, index: createSessionIndex(database), scope: root, recordStreamingThresholdBytes })
+        const result = await projector.projectActivitySource(candidate)
+        if (result.kind !== 'indexed') throw new Error(`expected an indexed result, got ${result.kind}`)
+        return result.projection.activity
+      } finally { database.close() }
+    }
+
+    const parsed = await project('parsed')
+    expect(parsed?.tools).toEqual([expect.objectContaining({ name: 'Write', count: 1 })])
+    expect(await project('streamed', 256)).toEqual(parsed)
   })
 
   it('bounds locator and reducer growth for arbitrarily many tiny records', async () => {

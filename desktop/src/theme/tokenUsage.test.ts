@@ -31,6 +31,8 @@ const RUNTIME_INJECTED = new Set([
   '--trace-tree-width',
   '--touch-h5-viewport-height',
   '--line-start',
+  // The zoom of a Word document, set on its wrapper inside the sandboxed frame (docxFrame.ts).
+  '--docx-zoom',
 ])
 
 function collectSourceFiles(dir: string, out: string[] = []): string[] {

@@ -13,6 +13,9 @@ export const BUSINESS_ERROR_CODES = {
 export type BusinessErrorCode =
   (typeof BUSINESS_ERROR_CODES)[keyof typeof BUSINESS_ERROR_CODES]
 
+// Block types to strip from the single turn a rejection followed.
+// REQUEST_TOO_LARGE is deliberately absent: a byte limit says nothing about
+// which block was at fault, so normalizeMessagesForAPI resolves it history-wide.
 export const BUSINESS_ERROR_MEDIA_BLOCK_TYPES: Partial<
   Record<BusinessErrorCode, readonly ('document' | 'image')[]>
 > = {
@@ -22,5 +25,14 @@ export const BUSINESS_ERROR_MEDIA_BLOCK_TYPES: Partial<
   [BUSINESS_ERROR_CODES.IMAGE_TOO_LARGE]: ['image'],
   [BUSINESS_ERROR_CODES.IMAGE_UNSUPPORTED]: ['image'],
   [BUSINESS_ERROR_CODES.IMAGE_INVALID]: ['image'],
-  [BUSINESS_ERROR_CODES.REQUEST_TOO_LARGE]: ['document', 'image'],
 }
+
+/**
+ * Wording of the request-too-large error before it reported measured sizes.
+ * Transcripts persisted it (the oldest without a businessErrorCode), so history
+ * normalization must keep recognizing both the SDK and the interactive variant.
+ */
+export const LEGACY_REQUEST_TOO_LARGE_ERROR_MESSAGES: readonly string[] = [
+  'Request too large (max 20MB). Try with a smaller file.',
+  'Request too large (max 20MB). Double press esc to go back and try with a smaller file.',
+]

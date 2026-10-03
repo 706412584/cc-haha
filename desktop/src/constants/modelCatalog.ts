@@ -42,6 +42,14 @@ export const OFFICIAL_MODELS: ModelInfo[] = [
     supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   },
   {
+    id: 'claude-sonnet-5-5',
+    name: 'Sonnet 5.5',
+    description: 'Best combination of speed and intelligence',
+    context: '1m',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+  },
+  {
     id: 'claude-sonnet-5',
     name: 'Sonnet 5',
     description: 'Best combination of speed and intelligence',

@@ -4,6 +4,7 @@ import {
   buildPostCompactMessages,
   type CompactionResult,
   getCompactTimeoutMs,
+  stripImagesFromMessages,
   truncateHeadForPTLRetry,
 } from './compact.js'
 import { getCurrentUsage } from '../../utils/tokens.js'
@@ -402,5 +403,56 @@ describe('oversized compaction recovery (#1373)', () => {
     expect(second.length).toBeLessThan(first.length)
     expect(second.at(-1)).toBe(messages.at(-1))
     expect(second[0]?.type).toBe('user')
+  })
+})
+
+describe('stripImagesFromMessages', () => {
+  const image = {
+    type: 'image',
+    source: { type: 'base64', media_type: 'image/png', data: 'AAAA' },
+  }
+  const userWith = (content: unknown) =>
+    ({
+      ...makePreservedUser(),
+      uuid: crypto.randomUUID(),
+      message: { role: 'user', content },
+    }) as Message
+
+  test('replaces images and documents with markers, including inside tool results', () => {
+    const [stripped] = stripImagesFromMessages([
+      userWith([
+        { type: 'text', text: 'look' },
+        image,
+        {
+          type: 'document',
+          source: { type: 'base64', media_type: 'application/pdf', data: 'JVBERi0=' },
+        },
+        { type: 'tool_result', tool_use_id: 't1', content: [image, { type: 'text', text: 'caption' }] },
+      ]),
+    ])
+
+    expect((stripped as { message: { content: unknown } }).message.content).toEqual([
+      { type: 'text', text: 'look' },
+      { type: 'text', text: '[image]' },
+      { type: 'text', text: '[document]' },
+      {
+        type: 'tool_result',
+        tool_use_id: 't1',
+        content: [
+          { type: 'text', text: '[image]' },
+          { type: 'text', text: 'caption' },
+        ],
+      },
+    ])
+  })
+
+  test('returns messages without media untouched', () => {
+    const plain = userWith([{ type: 'text', text: 'plain' }])
+    const assistant = makePreservedAssistant()
+
+    const result = stripImagesFromMessages([plain, assistant])
+
+    expect(result[0]).toBe(plain)
+    expect(result[1]).toBe(assistant)
   })
 })

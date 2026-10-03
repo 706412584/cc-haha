@@ -1,0 +1,112 @@
+/*
+ * One PDF page: a sheet of paper, its canvas, and the transparent text layer that
+ * makes the text selectable and copyable.
+ *
+ * The `.textLayer` rules are the minimal subset of pdfjs-dist/web/pdf_viewer.css
+ * that canvas + TextLayer need (Apache-2.0, © Mozilla Foundation), scoped under
+ * `.cc-pdf-page` so nothing here can reach the rest of the app. The whole 6,000-line
+ * stylesheet is annotation, editor and toolbar UI this app does not ship, and its
+ * class names (`.page`, `.hidden`, `.dialog`) are generic enough to collide.
+ * `pdfPageStyles.test.ts` compares these rules with the installed pdfjs-dist, so a
+ * pdf.js upgrade that changes the text layer fails a test instead of shifting every
+ * selection by a few pixels.
+ */
+.cc-pdf-page {
+  position: relative;
+  overflow: hidden;
+  background: var(--color-document-paper);
+  /*
+   * The text layer positions itself from these. `--scale-factor` is set inline to
+   * the page's viewport scale; the rest are constants. `--scale-round-x/y` matter
+   * most: without them `round(down, …)` in the layer's own sizing is invalid and
+   * the whole layer collapses to nothing.
+   */
+  --user-unit: 1;
+  --total-scale-factor: calc(var(--scale-factor) * var(--user-unit));
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+}
+
+/*
+ * The canvas has the size of the sheet, whatever its backing store holds: pdf.js is
+ * drawn at up to twice the pixels for a sharp page on a dense screen, and it is this
+ * rule that shrinks them back. Not a child selector: the canvas sits in a container.
+ */
+.cc-pdf-page canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.cc-pdf-page .textLayer {
+  color-scheme: only light;
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  text-align: initial;
+  line-height: 1;
+  opacity: 1;
+  letter-spacing: normal;
+  word-spacing: normal;
+  -webkit-text-size-adjust: none;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  z-index: 0;
+  /* TextLayer sets --min-font-size on the container itself; these derive from it. */
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+
+.cc-pdf-page .textLayer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.cc-pdf-page .textLayer > :not(.markedContent),
+.cc-pdf-page .textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+
+.cc-pdf-page .textLayer .markedContent {
+  display: contents;
+}
+
+.cc-pdf-page .textLayer ::selection {
+  background: var(--color-document-selection);
+  color: transparent;
+}
+
+/* A line break is not text: selecting across one should not paint a highlight of its own. */
+.cc-pdf-page .textLayer br::selection {
+  background: transparent;
+}
+
+/* Keeps a drag selection from collapsing when the pointer leaves a span. */
+.cc-pdf-page .textLayer .endOfContent {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.cc-pdf-page .textLayer.selecting .endOfContent {
+  top: 0;
+}

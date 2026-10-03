@@ -1,5 +1,5 @@
 import { PublicAccessManager } from './services/publicAccess'
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, WebContentsView } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, systemPreferences, WebContentsView } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import path from 'node:path'
 import { ELECTRON_EVENT_CHANNELS, ELECTRON_INTERNAL_CHANNELS, ELECTRON_IPC_CHANNELS, type ElectronIpcChannel } from './ipc/channels'
@@ -65,6 +65,7 @@ import {
   startupWindowBackground,
   type AppliedAppearance,
 } from './services/nativeAppearance'
+import { createRendererUrlMatcher, installMicrophonePermissions } from './services/microphonePermissions'
 import { resolveRendererEntry } from './services/rendererEntry'
 import { installRendererLifecycle } from './services/rendererLifecycle'
 import { writeWindowSmokeSnapshot } from './services/windowSmoke'
@@ -928,6 +929,18 @@ async function createMainWindow() {
       mainWindow!.webContents.id,
     ),
   )
+  // Audio capture (dictation) is limited to application windows showing the app
+  // entry: the main window and the detached trace window, which renders the same
+  // chat input. Preview and workspace pages use their own partitions. Other
+  // permissions stay as before.
+  installMicrophonePermissions(mainWindow.webContents.session, {
+    isAppContents: contents => {
+      const owner = BrowserWindow.fromWebContents(contents)
+      return !!owner && !owner.isDestroyed()
+    },
+    isAppUrl: createRendererUrlMatcher(rendererEntry()),
+    systemPreferences,
+  })
   installMainWindowNavigationGuards(mainWindow.webContents, { openExternal: openExternalUrl })
   await installRendererContextMenu(mainWindow)
   installPreviewCleanupOnRendererNavigation(mainWindow.webContents, () => {

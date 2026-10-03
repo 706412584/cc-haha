@@ -7,10 +7,12 @@ import { CodeViewer } from './CodeViewer'
 import { DiffViewer } from './DiffViewer'
 import { TerminalChrome } from './TerminalChrome'
 import { CopyButton } from '@/components/ui/CopyButton'
+import { toolResultImagesFor } from '@/lib/toolResultContent'
 import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n'
 import { InlineImageGallery } from './InlineImageGallery'
 import { ImageGalleryModal } from './ImageGalleryModal'
+import { ToolResultImages } from './ToolResultImages'
 import { ImageGenerationBlock } from './ImageGenerationBlock'
 import { isImageGenerationToolName } from './imageGenerationTools'
 import type { AgentTaskNotification } from '../../types/chat'
@@ -159,6 +161,11 @@ export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, resu
   const stoppedSummary = status === 'stopped' && !result
     ? t('tool.stopped')
     : ''
+  // The text extractors below skip image blocks; this is what gives them a thumbnail.
+  const toolImages = useMemo(
+    () => toolResultImagesFor({ toolName, input, content: result?.content }),
+    [input, result?.content, toolName],
+  )
 
   const preview = useMemo(
     () => renderPreview(toolName, obj, result, t, isRow),
@@ -326,6 +333,19 @@ export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, resu
       </button>
 
       {SESSION_TOOL_NAMES.has(toolName) ? <SessionToolLinks input={input} result={result?.content} /> : null}
+
+      {/* Outside the disclosure on purpose: a picture the tool returned is the
+          answer, not a detail to open a panel for. */}
+      {toolImages.images.length > 0 || toolImages.dropped > 0 ? (
+        <ToolResultImages
+          images={toolImages.images}
+          omitted={toolImages.dropped}
+          originalPath={toolImages.originalPath}
+          toolName={toolName}
+          // Row: line up with the tool name (icon + gap), where the expanded rail's content also starts.
+          className={isRow ? 'pb-1.5 pl-[21px] pt-0.5' : compact ? 'px-3.5 pb-2.5' : 'px-4 pb-3'}
+        />
+      ) : null}
 
       {expandable && expanded && (
         <div
@@ -822,7 +842,6 @@ function renderResultOutput(
   t?: (key: TranslationKey, params?: Record<string, string | number>) => string,
   embedded = false,
 ) {
-  const imageBlocks = extractImageBlocks(result.content)
   const label = result.isError
     ? t?.('tool.errorOutput') ?? 'Error Output'
     : t?.('tool.toolOutput') ?? 'Tool Output'
@@ -830,7 +849,6 @@ function renderResultOutput(
   if (embedded) {
     return (
       <>
-        {imageBlocks.length > 0 && <ImageBlockGallery imageBlocks={imageBlocks} />}
         <InlineImageGallery text={text} allowRemoteImages />
         {text && (result.isError ? (
           <div data-tool-detail-surface="embedded" className="overflow-hidden bg-[var(--color-error-soft)]">
@@ -853,9 +871,6 @@ function renderResultOutput(
   }
   return (
     <>
-      {imageBlocks.length > 0 && (
-        <ImageBlockGallery imageBlocks={imageBlocks} />
-      )}
       <InlineImageGallery text={text} allowRemoteImages />
       {text && (
       <div

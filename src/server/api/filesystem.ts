@@ -11,6 +11,7 @@ import { getGlobalConfig } from '../../utils/config.js'
 import { execFileNoThrowWithCwd } from '../../utils/execFileNoThrow.js'
 import { findGitRoot, gitExe } from '../../utils/git.js'
 import { ripGrep } from '../../utils/ripgrep.js'
+import { expandTilde } from '../../utils/permissions/pathValidation.js'
 import { getInitialSettings } from '../../utils/settings/settings.js'
 import {
   canonicalizeFilesystemAccessPath,
@@ -119,7 +120,10 @@ async function handleServeFile(url: URL): Promise<Response> {
     return json({ error: 'Missing path parameter' }, 400)
   }
 
-  const resolvedPath = path.resolve(normalizeDriveRootPathForPlatform(filePath))
+  // A model writes `~/Pictures/chart.png` as readily as an absolute path; the
+  // other local file routes expand the alias, and the allow-list below is applied
+  // to the expanded path.
+  const resolvedPath = path.resolve(normalizeDriveRootPathForPlatform(expandTilde(filePath)))
   const canonicalPath = await canonicalizeExistingFilesystemPath(resolvedPath)
   if (!canonicalPath) {
     if (!isAllowedFilesystemPath(resolvedPath)) {
@@ -154,7 +158,10 @@ async function handleServeFile(url: URL): Promise<Response> {
       headers: {
         'Content-Type': mimeType,
         'Content-Length': String(stat.size),
-        'Cache-Control': 'private, max-age=3600',
+        // Revalidate every time. An hour of caching by URL meant a picture the agent
+        // regenerated under the same name (a chart it keeps refining) showed the old
+        // one until the cache expired.
+        'Cache-Control': 'private, no-cache',
       },
     })
   } catch {

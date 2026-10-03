@@ -164,6 +164,36 @@ describe('buildOpenAICodexFetch', () => {
     })
   })
 
+  test('routes GPT-6.1 Sol unchanged with its default low effort through Codex OAuth', async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = []
+    const codexFetch = buildOpenAICodexFetch(async (input, init) => {
+      calls.push({ url: String(input), body: readWireBody(init) })
+      return Response.json({
+        id: 'resp_sol_61',
+        object: 'response',
+        model: 'gpt-6.1-sol',
+        status: 'completed',
+        output: [],
+      })
+    }, 'test')
+
+    const response = await codexFetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'gpt-6.1-sol',
+        max_tokens: 64,
+        messages: [{ role: 'user', content: 'Say ok' }],
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    await response.text()
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toBe(OPENAI_CODEX_API_ENDPOINT)
+    expect(calls[0].body.model).toBe('gpt-6.1-sol')
+    expect(calls[0].body.reasoning).toEqual({ effort: 'low' })
+  })
+
   test('preserves optional Computer Use parameters in the final Codex OAuth request', async () => {
     const computerTools = buildComputerUseTools().filter(tool =>
       ['get_app_state', 'click'].includes(tool.name),

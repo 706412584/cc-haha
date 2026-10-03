@@ -339,11 +339,100 @@ export function getImageInvalidErrorMessage(): string {
     ? 'The image data was invalid. Re-create the image or continue with text.'
     : 'The image data was invalid. Double press esc to go back, replace the image, or continue with text.'
 }
-export function getRequestTooLargeErrorMessage(): string {
-  const limits = `max ${formatFileSize(PDF_TARGET_RAW_SIZE)}`
-  return getIsNonInteractiveSession()
-    ? `Request too large (${limits}). Try with a smaller file.`
-    : `Request too large (${limits}). Double press esc to go back and try with a smaller file.`
+// A 413 body can be a whole HTML page; keep enough to identify the server
+// (e.g. "nginx/1.18.0") without bloating the transcript.
+const REQUEST_TOO_LARGE_DETAIL_CHARS = 500
+
+/**
+ * Rough size of a request that was rejected as too large. Only measured on the
+ * 413 error path, never while sending. Base64 media dominates real payloads, so
+ * image/document data is counted by string length instead of re-serialized.
+ * `mediaBytes` is what replacing images and documents with placeholders removes.
+ */
+export type RequestPayloadSize = { totalBytes: number; mediaBytes: number }
+
+function measureContent(content: unknown): RequestPayloadSize {
+  if (typeof content === 'string') {
+    return { totalBytes: Buffer.byteLength(content), mediaBytes: 0 }
+  }
+  if (!Array.isArray(content)) {
+    return { totalBytes: 0, mediaBytes: 0 }
+  }
+  let totalBytes = 0
+  let mediaBytes = 0
+  for (const block of content) {
+    const size = measureBlock(block)
+    totalBytes += size.totalBytes
+    mediaBytes += size.mediaBytes
+  }
+  return { totalBytes, mediaBytes }
+}
+
+function measureBlock(block: unknown): RequestPayloadSize {
+  if (typeof block === 'string') return measureContent(block)
+  if (!block || typeof block !== 'object') {
+    return { totalBytes: 0, mediaBytes: 0 }
+  }
+  const { type, text, source, content } = block as {
+    type?: unknown
+    text?: unknown
+    source?: { data?: unknown; url?: unknown }
+    content?: unknown
+  }
+  if (type === 'image' || type === 'document') {
+    const bytes =
+      typeof source?.data === 'string'
+        ? source.data.length
+        : typeof source?.url === 'string'
+          ? source.url.length
+          : 0
+    return { totalBytes: bytes, mediaBytes: bytes }
+  }
+  if (type === 'text' && typeof text === 'string') return measureContent(text)
+  if (type === 'tool_result') return measureContent(content)
+  return { totalBytes: Buffer.byteLength(JSON.stringify(block)), mediaBytes: 0 }
+}
+
+/**
+ * Returns undefined instead of throwing: this runs while classifying an API
+ * failure, where a second failure would hide the first.
+ */
+export function measureRequestPayload(
+  messages: readonly (UserMessage | AssistantMessage)[],
+): RequestPayloadSize | undefined {
+  try {
+    let totalBytes = 0
+    let mediaBytes = 0
+    for (const message of messages) {
+      const size = measureContent(message.message.content)
+      totalBytes += size.totalBytes
+      mediaBytes += size.mediaBytes
+    }
+    return { totalBytes, mediaBytes }
+  } catch {
+    return undefined
+  }
+}
+
+export function getRequestTooLargeErrorMessage(
+  size?: RequestPayloadSize,
+): string {
+  const interactive = !getIsNonInteractiveSession()
+  const rejected =
+    'Request too large: your provider or relay rejected it (HTTP 413).'
+  const nextStep = interactive
+    ? 'run /compact or double press esc to go back past the large content'
+    : 'compact the conversation or start a new session'
+  const sentenceNextStep = nextStep.charAt(0).toUpperCase() + nextStep.slice(1)
+
+  if (!size) {
+    return `${rejected} The size limit is set by that endpoint. ${sentenceNextStep}.`
+  }
+  const total = formatFileSize(size.totalBytes)
+  if (size.mediaBytes === 0) {
+    return `${rejected} This conversation is about ${total} and none of it is images or documents. ${sentenceNextStep}; a relay can enforce a lower request size limit than its upstream provider.`
+  }
+  return `${rejected} This conversation is about ${total}, of which ${formatFileSize(size.mediaBytes)} is images or documents. Earlier images and documents are replaced with placeholders in the next request; if it still fails, ${nextStep}.`
 }
 export const OAUTH_ORG_NOT_ALLOWED_ERROR_MESSAGE =
   'Your account does not have access to Claude Code. Please run /login.'
@@ -984,12 +1073,20 @@ function buildAssistantMessageFromError(
     })
   }
 
-  // Check for request too large errors (413 status)
-  // This typically happens when a large PDF + conversation context exceeds the 32MB API limit
+  // 413 comes from whatever sits in front of the model: the API itself (32MB
+  // request limit) or a relay/gateway with its own, usually smaller, limit.
+  // Which one and what limit is unknown here, so report what was sent and keep
+  // the upstream's own words rather than claiming a number. No sourceModel on
+  // purpose: a byte limit belongs to the provider or relay, not to one model
+  // (normalizeMessagesForAPI relies on that to keep stripping after a switch).
   if (error instanceof APIError && error.status === 413) {
+    const size = options?.messagesForAPI
+      ? measureRequestPayload(options.messagesForAPI)
+      : undefined
     return createAssistantAPIErrorMessage({
-      content: getRequestTooLargeErrorMessage(),
+      content: getRequestTooLargeErrorMessage(size),
       error: 'invalid_request',
+      errorDetails: `request_too_large: ${(error.message ?? '').slice(0, REQUEST_TOO_LARGE_DETAIL_CHARS)}`,
       businessErrorCode: BUSINESS_ERROR_CODES.REQUEST_TOO_LARGE,
     })
   }

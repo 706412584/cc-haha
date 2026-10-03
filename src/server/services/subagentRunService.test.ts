@@ -587,7 +587,7 @@ describe('getSubagentRunByTool', () => {
     )
   })
 
-  it('returns child shell notifications without exposing notification turns or their response', async () => {
+  it('returns child shell notifications while hiding the notification turn but keeping the response to it', async () => {
     await setupTmpConfigDir()
     const sessionId = '12121212-bbbb-cccc-dddd-eeeeeeeeeeee'
     const projectDir = '-tmp-subagent-run'
@@ -639,7 +639,7 @@ describe('getSubagentRunByTool', () => {
         type: 'assistant',
         message: {
           role: 'assistant',
-          content: [{ type: 'text', text: 'Internal notification response' }],
+          content: [{ type: 'text', text: 'The child shell was stopped, continuing the review' }],
         },
         uuid: 'child-notification-response',
         timestamp: '2026-01-01T00:00:08.000Z',
@@ -648,9 +648,9 @@ describe('getSubagentRunByTool', () => {
 
     const result = await getSubagentRunByTool(sessionId, toolUseId)
 
-    expect(result?.messages).toHaveLength(2)
+    expect(result?.messages).toHaveLength(3)
     expect(JSON.stringify(result?.messages)).not.toContain('<task-notification>')
-    expect(JSON.stringify(result?.messages)).not.toContain('Internal notification response')
+    expect(JSON.stringify(result?.messages)).toContain('The child shell was stopped, continuing the review')
     expect(result?.taskNotifications).toEqual([{
       taskId: 'shell-task-1',
       toolUseId: 'shell.call:0',
@@ -659,7 +659,7 @@ describe('getSubagentRunByTool', () => {
       outputFile: '/tmp/shell-task-1.output',
       timestamp: '2026-01-01T00:00:07.000Z',
     }])
-    expect(result?.updatedAt).toBe('2026-01-01T00:00:07.000Z')
+    expect(result?.updatedAt).toBe('2026-01-01T00:00:08.000Z')
   })
 
   it('uses the live task id to resolve a running one-shot SubAgent transcript', async () => {
@@ -1677,7 +1677,7 @@ describe('getSubagentRunByAgentId', () => {
     expect(result?.canSendMessage).toBe(false)
   })
 
-  it('returns workflow-agent task notifications beside its filtered transcript', async () => {
+  it('returns workflow-agent task notifications beside its transcript without the notification turn', async () => {
     await setupTmpConfigDir()
     const sessionId = '90909090-bbbb-cccc-dddd-ffffffffffff'
     const projectDir = '-tmp-workflow-agent'
@@ -1702,7 +1702,7 @@ describe('getSubagentRunByAgentId', () => {
       },
       {
         type: 'assistant',
-        message: { role: 'assistant', content: 'Internal notification response' },
+        message: { role: 'assistant', content: 'The workflow check passed, moving on' },
         uuid: 'wf-notification-response',
         timestamp: '2026-01-01T00:00:07.000Z',
       },
@@ -1710,7 +1710,7 @@ describe('getSubagentRunByAgentId', () => {
 
     const result = await getSubagentRunByAgentId(sessionId, agentId)
 
-    expect(result?.messages.map(message => message.id)).toEqual(['wf-assistant'])
+    expect(result?.messages.map(message => message.id)).toEqual(['wf-assistant', 'wf-notification-response'])
     expect(result?.taskNotifications).toEqual([{
       taskId: 'wf-shell-task',
       toolUseId: 'wf-shell-tool',
@@ -1718,7 +1718,7 @@ describe('getSubagentRunByAgentId', () => {
       summary: 'Workflow check passed',
       timestamp: '2026-01-01T00:00:06.000Z',
     }])
-    expect(result?.updatedAt).toBe('2026-01-01T00:00:06.000Z')
+    expect(result?.updatedAt).toBe('2026-01-01T00:00:07.000Z')
   })
 
   it('returns null when no transcript exists for that agent', async () => {

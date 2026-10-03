@@ -6,8 +6,10 @@ import { ApiError } from '../middleware/errorHandler.js'
 import { readRecoverableJsonFile } from './recoverableJsonFile.js'
 import { ensurePersistentStorageUpgraded } from './persistentStorageMigrations.js'
 import { writeFileAtomic } from '../storage/atomicWrite.js'
+import { normalizeVoicePreferences } from './voice/preferences.js'
+import { DEFAULT_VOICE_PREFERENCES, type VoicePreferences } from './voice/types.js'
 
-const CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION = 5
+const CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION = 6
 const MAX_PROJECT_PREFERENCE_ENTRIES = 2_000
 const MAX_PROJECT_DISPLAY_NAME_ENTRIES = 2_000
 const MAX_PROJECT_DISPLAY_NAME_KEY_LENGTH = 4_096
@@ -54,6 +56,8 @@ export type DesktopPetPreferences = {
   lastSessionId: string | null
 }
 
+export type DesktopVoiceInputPreferences = VoicePreferences
+
 export type ProjectDisplayNames = Record<string, string>
 
 export type DesktopUiPreferences = {
@@ -61,6 +65,7 @@ export type DesktopUiPreferences = {
   sidebar: SidebarProjectPreferences
   profile: DesktopProfilePreferences
   pet: DesktopPetPreferences
+  voiceInput: DesktopVoiceInputPreferences
   projectDisplayNames: ProjectDisplayNames
   [key: string]: unknown
 }
@@ -105,6 +110,7 @@ function defaultPreferences(): DesktopUiPreferences {
     sidebar: { ...DEFAULT_SIDEBAR_PROJECT_PREFERENCES },
     profile: { ...DEFAULT_PROFILE_PREFERENCES },
     pet: { ...DEFAULT_PET_PREFERENCES },
+    voiceInput: { ...DEFAULT_VOICE_PREFERENCES },
     projectDisplayNames: createProjectDisplayNames(),
   }
 }
@@ -343,6 +349,7 @@ function normalizeDesktopUiPreferences(value: unknown): DesktopUiPreferences | n
     sidebar: normalizeSidebarProjectPreferences(record.sidebar),
     profile: normalizeProfilePreferences(record.profile),
     pet: normalizeDesktopPetPreferences(record.pet),
+    voiceInput: normalizeVoicePreferences(record.voiceInput),
     projectDisplayNames: normalizeProjectDisplayNames(record.projectDisplayNames),
   }
 }
@@ -450,6 +457,7 @@ export class DesktopUiPreferencesService {
         }),
         profile: normalizeProfilePreferences(preferences.profile),
         pet: normalizeDesktopPetPreferences(preferences.pet),
+        voiceInput: normalizeVoicePreferences(preferences.voiceInput),
         projectDisplayNames: normalizeProjectDisplayNames(preferences.projectDisplayNames),
       }
 
@@ -483,6 +491,7 @@ export class DesktopUiPreferencesService {
           avatarUpdatedAt: currentProfile.avatarUpdatedAt,
         },
         pet: normalizeDesktopPetPreferences(preferences.pet),
+        voiceInput: normalizeVoicePreferences(preferences.voiceInput),
         projectDisplayNames: normalizeProjectDisplayNames(preferences.projectDisplayNames),
       }
 
@@ -520,6 +529,7 @@ export class DesktopUiPreferencesService {
         sidebar: normalizeSidebarProjectPreferences(preferences.sidebar),
         profile: normalizeProfilePreferences(preferences.profile),
         pet: normalizeDesktopPetPreferences(preferences.pet),
+        voiceInput: normalizeVoicePreferences(preferences.voiceInput),
         projectDisplayNames,
       }
 
@@ -543,6 +553,33 @@ export class DesktopUiPreferencesService {
         profile: normalizeProfilePreferences(preferences.profile),
         pet: normalizeDesktopPetPreferences({
           ...currentPet,
+          ...patch,
+        }),
+        voiceInput: normalizeVoicePreferences(preferences.voiceInput),
+        projectDisplayNames: normalizeProjectDisplayNames(preferences.projectDisplayNames),
+      }
+
+      await this.writePreferences(nextPreferences)
+      return nextPreferences
+    })
+  }
+
+  async updateVoiceInputPreferences(voiceInput: unknown): Promise<DesktopUiPreferences> {
+    const filePath = this.getPreferencesPath()
+    return this.withWriteLock(filePath, async () => {
+      const { preferences } = await this.readPreferences()
+      const currentVoiceInput = normalizeVoicePreferences(preferences.voiceInput)
+      const patch = voiceInput && typeof voiceInput === 'object' && !Array.isArray(voiceInput)
+        ? voiceInput as Record<string, unknown>
+        : {}
+      const nextPreferences: DesktopUiPreferences = {
+        ...preferences,
+        schemaVersion: preferences.schemaVersion,
+        sidebar: normalizeSidebarProjectPreferences(preferences.sidebar),
+        profile: normalizeProfilePreferences(preferences.profile),
+        pet: normalizeDesktopPetPreferences(preferences.pet),
+        voiceInput: normalizeVoicePreferences({
+          ...currentVoiceInput,
           ...patch,
         }),
         projectDisplayNames: normalizeProjectDisplayNames(preferences.projectDisplayNames),
@@ -596,6 +633,7 @@ export class DesktopUiPreferencesService {
           avatarUpdatedAt: new Date().toISOString(),
         },
         pet: normalizeDesktopPetPreferences(preferences.pet),
+        voiceInput: normalizeVoicePreferences(preferences.voiceInput),
         projectDisplayNames: normalizeProjectDisplayNames(preferences.projectDisplayNames),
       }
 
@@ -623,6 +661,7 @@ export class DesktopUiPreferencesService {
           avatarUpdatedAt: null,
         },
         pet: normalizeDesktopPetPreferences(preferences.pet),
+        voiceInput: normalizeVoicePreferences(preferences.voiceInput),
         projectDisplayNames: normalizeProjectDisplayNames(preferences.projectDisplayNames),
       }
 

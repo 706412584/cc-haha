@@ -5,7 +5,9 @@ import * as path from 'path'
 import {
   buildGrokFetch,
   GROK_CLI_API_ENDPOINT,
+  GROK_CLI_MIN_VERSION,
   GROK_CLI_VERSION,
+  buildGrokUserAgent,
 } from './fetch.js'
 import { GROK_OAUTH_FILE_ENV_KEY } from './storage.js'
 import { GROK_OAUTH_TOKEN_ENDPOINT } from './client.js'
@@ -74,7 +76,9 @@ describe('Grok Responses fetch adapter', () => {
     expect(call?.headers.get('X-XAI-Token-Auth')).toBe('xai-grok-cli')
     expect(call?.headers.get('x-grok-client-version')).toBe(GROK_CLI_VERSION)
     expect(call?.headers.get('x-grok-client-mode')).toBe('interactive')
-    expect(call?.headers.get('User-Agent')).toBe(`xai-grok-workspace/${GROK_CLI_VERSION}`)
+    expect(call?.headers.get('User-Agent')).toBe(buildGrokUserAgent())
+    expect(call?.headers.get('x-grok-client-identifier')).toBe('grok-pager')
+    expect(call?.headers.get('x-authenticateresponse')).toBe('authenticate-response')
     expect(call?.headers.get('x-grok-model-override')).toBe('grok-4.5')
     expect(call?.body.model).toBe('grok-4.5')
     expect(call?.body.reasoning).toEqual({ effort: 'high' })
@@ -466,3 +470,17 @@ function liveModel(
     ...overrides,
   }
 }
+
+describe('grok CLI identity', () => {
+  test('advertised version meets the gateway minimum (426 otherwise)', () => {
+    const parse = (v: string) => v.split('.').map(Number)
+    const [a, b] = [parse(GROK_CLI_VERSION), parse(GROK_CLI_MIN_VERSION)]
+    expect(a[0] - b[0] || a[1] - b[1] || a[2] - b[2]).toBeGreaterThanOrEqual(0)
+  })
+
+  test('user agent follows the official interactive format per platform', () => {
+    expect(buildGrokUserAgent('1.0.46', 'darwin', 'arm64')).toBe('grok-pager/1.0.46 grok-shell/1.0.46 (macos; aarch64)')
+    expect(buildGrokUserAgent('1.0.46', 'linux', 'x64')).toBe('grok-pager/1.0.46 grok-shell/1.0.46 (linux; x86_64)')
+    expect(buildGrokUserAgent('1.0.46', 'win32', 'x64')).toBe('grok-pager/1.0.46 grok-shell/1.0.46 (windows; x86_64)')
+  })
+})

@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { useTranslation } from '../i18n'
-import { useMarketStore } from '../stores/marketStore'
+import { marketOwnerOf, marketSkillKey, useMarketStore } from '../stores/marketStore'
 import { useSkillStore } from '../stores/skillStore'
 import { useUIStore } from '../stores/uiStore'
 import { InstallConfirmDialog } from '../components/market/InstallConfirmDialog'
@@ -13,18 +13,25 @@ export function Market({ featured }: { featured?: ReactNode } = {}) {
   const t = useTranslation()
   const selectedId = useMarketStore((s) => s.selectedId)
   const installingIds = useMarketStore((s) => s.installingIds)
+  const detailCache = useMarketStore((s) => s.detailCache)
   const [confirmInstall, setConfirmInstall] = useState<NormalizedSkill | null>(null)
+  /** The ClawHub owner the pending install is pinned to (slugs are not unique there). */
+  const [confirmOwner, setConfirmOwner] = useState<string | undefined>(undefined)
   const [confirmUninstall, setConfirmUninstall] = useState<NormalizedSkill | null>(null)
 
-  const findSkill = (id: string): NormalizedSkill | null => {
+  /** `owner` narrows a ClawHub id to the card that was clicked; without it the first match wins. */
+  const findSkill = (id: string, owner?: string): NormalizedSkill | null => {
     const state = useMarketStore.getState()
-    if (state.detail?.id === id) return state.detail
-    return state.items.find((item) => item.id === id) ?? state.detailCache.get(id) ?? null
+    const matches = (skill: NormalizedSkill) => skill.id === id && (!owner || marketOwnerOf(skill) === owner)
+    if (state.detail && matches(state.detail)) return state.detail
+    return state.items.find(matches) ?? state.detailCache.get(marketSkillKey(id, owner)) ?? null
   }
 
-  const requestInstall = (id: string) => {
-    const skill = findSkill(id)
-    if (skill) setConfirmInstall(skill)
+  const requestInstall = (id: string, owner?: string) => {
+    const skill = findSkill(id, owner)
+    if (!skill) return
+    setConfirmOwner(owner)
+    setConfirmInstall(skill)
   }
 
   const requestUninstall = (id: string) => {
@@ -35,7 +42,7 @@ export function Market({ featured }: { featured?: ReactNode } = {}) {
   const runInstall = async () => {
     const skill = confirmInstall
     if (!skill) return
-    const ok = await useMarketStore.getState().install(skill.id)
+    const ok = await useMarketStore.getState().install(skill.id, confirmOwner)
     setConfirmInstall(null)
     if (ok) {
       useUIStore.getState().addToast({
@@ -87,6 +94,7 @@ export function Market({ featured }: { featured?: ReactNode } = {}) {
 
       <InstallConfirmDialog
         skill={confirmInstall}
+        detail={confirmInstall ? detailCache.get(marketSkillKey(confirmInstall.id, confirmOwner)) : null}
         open={confirmInstall !== null}
         installing={confirmInstall !== null && installingIds.has(confirmInstall.id)}
         onConfirm={() => void runInstall()}

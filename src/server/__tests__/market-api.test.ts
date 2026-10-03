@@ -60,19 +60,72 @@ describe('GET /api/market/skills', () => {
     const skillhubBody = await fixture('skillhub-list.json')
     stubUpstreams((url) => (url.includes('clawhub.ai') ? { body: clawhubBody } : { body: skillhubBody }))
 
-    const { status, body } = await call('/api/market/skills?limit=3')
+    const { status, body } = await call('/api/market/skills?scope=market&limit=3')
 
     expect(status).toBe(200)
+    expect(body.scope).toBe('market')
     expect(body.items.length).toBeGreaterThan(0)
     expect(body.sources.clawhub.status).toBe('ok')
     expect(body.sources.skillhub.status).toBe('ok')
     expect(typeof body.nextCursor === 'string' || body.nextCursor === null).toBe(true)
+    expect(body.categories).toBeUndefined()
   })
 
   it('rejects invalid filters with 400', async () => {
     expect((await call('/api/market/skills?source=evil')).status).toBe(400)
     expect((await call('/api/market/skills?security=hacked')).status).toBe(400)
     expect((await call('/api/market/skills?installed=nope')).status).toBe(400)
+    expect((await call('/api/market/skills?scope=everything')).status).toBe(400)
+  })
+
+  it('defaults to the curated catalog without touching upstream', async () => {
+    const upstreamCalls: string[] = []
+    stubUpstreams((url) => {
+      upstreamCalls.push(url)
+      return { status: 500, body: 'catalog must not fetch' }
+    })
+
+    const { status, body } = await call('/api/market/skills')
+
+    expect(status).toBe(200)
+    expect(upstreamCalls).toEqual([])
+    expect(body.scope).toBe('catalog')
+    expect(body.items.length).toBe(24)
+    expect(body.nextCursor).toBe('catalog:24')
+    expect(body.total).toBeGreaterThan(24)
+    expect(typeof body.catalogGeneratedAt).toBe('number')
+    expect(body.sources.clawhub).toEqual({ status: 'ok', fetchedAt: body.catalogGeneratedAt, fromCache: true })
+    expect(body.categories.length).toBeGreaterThan(0)
+    expect(Object.keys(body.categories[0]).sort()).toEqual(['count', 'key', 'name', 'nameEn'])
+    expect(body.items.every((item: any) => item.curated === true)).toBe(true)
+
+    const next = await call(`/api/market/skills?cursor=${body.nextCursor}`)
+    expect(next.body.items[0].id).not.toBe(body.items[0].id)
+  })
+
+  it('filters the catalog by category; an unknown or "all" category is not an error', async () => {
+    const all = await call('/api/market/skills?scope=catalog&limit=100')
+    const category = all.body.categories[0]
+
+    const filtered = await call(`/api/market/skills?category=${category.key}&limit=100`)
+    expect(filtered.status).toBe(200)
+    expect(filtered.body.total).toBe(category.count)
+    expect(filtered.body.items.every((item: any) => item.category === category.key)).toBe(true)
+
+    const unknown = await call('/api/market/skills?category=no-such-category')
+    expect(unknown.status).toBe(200)
+    expect(unknown.body.items).toEqual([])
+    expect(unknown.body.total).toBe(0)
+
+    expect((await call('/api/market/skills?category=all')).body.total).toBe(all.body.total)
+  })
+
+  it('searches the catalog locally with q', async () => {
+    const { status, body } = await call(`/api/market/skills?q=${encodeURIComponent('ＧＩＴ')}`)
+
+    expect(status).toBe(200)
+    expect(body.scope).toBe('catalog')
+    expect(body.items.some((item: any) => item.id === 'clawhub:' + 'g' + 'it')).toBe(true)
   })
 
   it('reports failed status when a provider is disabled via env', async () => {
@@ -80,7 +133,7 @@ describe('GET /api/market/skills', () => {
     const clawhubBody = await fixture('clawhub-list.json')
     stubUpstreams((url) => (url.includes('clawhub.ai') ? { body: clawhubBody } : undefined))
 
-    const { status, body } = await call('/api/market/skills?limit=3')
+    const { status, body } = await call('/api/market/skills?scope=market&limit=3')
 
     expect(status).toBe(200)
     expect(body.items.length).toBeGreaterThan(0)
@@ -92,7 +145,11 @@ describe('GET /api/market/skills/{source}/{slug}', () => {
   it('returns the detail payload', async () => {
     const detailBody = await fixture('clawhub-detail.json')
     const versionBody = await fixture('clawhub-version-detail.json')
-    stubUpstreams((url) => (url.includes('/versions/') ? { body: versionBody } : { body: detailBody }))
+    const upstreamCalls: string[] = []
+    stubUpstreams((url) => {
+      upstreamCalls.push(url)
+      return url.includes('/versions/') ? { body: versionBody } : { body: detailBody }
+    })
 
     const { status, body } = await call('/api/market/skills/clawhub/git')
 
@@ -101,6 +158,70 @@ describe('GET /api/market/skills/{source}/{slug}', () => {
     expect(body.skill.files.length).toBeGreaterThan(0)
     expect(body.skill.installState).toBe('installable')
     expect(body.sourceStatus.status).toBe('ok')
+    // The fixture skill is in the curated catalog: reads are pinned to its owner
+    // and the detail carries the editorial overlay.
+    expect(upstreamCalls.length).toBeGreaterThan(0)
+    expect(upstreamCalls.every((url) => new URL(url).searchParams.get('owner') === 'ivangdavila')).toBe(true)
+    expect(body.skill.curated).toBe(true)
+    expect(body.skill.category).toBe('dev')
+    expect(body.skill.pageUrl).toBe('https://clawhub.ai/ivangdavila/git')
+    expect(body.skill.changelog.version).toBe('1.0.8')
+  })
+
+  it('pins a catalog slug to the requested owner and skips the catalog overlay', async () => {
+    const detailBody = await fixture('clawhub-detail.json')
+    const versionBody = await fixture('clawhub-version-detail.json')
+    const upstreamCalls: string[] = []
+    stubUpstreams((url) => {
+      upstreamCalls.push(url)
+      if (url.includes('/versions/')) return { body: versionBody }
+      const detail = JSON.parse(detailBody)
+      detail.owner.handle = new URL(url).searchParams.get('owner')
+      return { body: JSON.stringify(detail) }
+    })
+
+    const copy = await call('/api/market/skills/clawhub/git?owner=other')
+
+    expect(copy.status).toBe(200)
+    expect(upstreamCalls.length).toBeGreaterThan(0)
+    expect(upstreamCalls.every((url) => new URL(url).searchParams.get('owner') === 'other')).toBe(true)
+    expect(copy.body.skill.author.handle).toBe('other')
+    expect(copy.body.skill.curated).toBeUndefined()
+    expect(copy.body.skill.category).toBeUndefined()
+    expect(copy.body.skill.pageUrl).toBe('https://clawhub.ai/other/git')
+
+    // The owner-pinned detail is cached apart from the catalog owner's one.
+    upstreamCalls.length = 0
+    const curated = await call('/api/market/skills/clawhub/git')
+    expect(upstreamCalls.length).toBeGreaterThan(0)
+    expect(upstreamCalls.every((url) => new URL(url).searchParams.get('owner') === 'ivangdavila')).toBe(true)
+    expect(curated.body.skill.curated).toBe(true)
+  })
+
+  it('ignores owner for SkillHub', async () => {
+    const detailBody = await fixture('skillhub-detail.json')
+    const upstreamCalls: string[] = []
+    stubUpstreams((url) => {
+      upstreamCalls.push(url)
+      return url.includes('/files') ? { body: '{"count":0,"files":[]}' } : { body: detailBody }
+    })
+
+    const { status } = await call('/api/market/skills/skillhub/pe-compliance-expert-pro?owner=someone')
+
+    expect(status).toBe(200)
+    expect(upstreamCalls.some((url) => new URL(url).searchParams.has('owner'))).toBe(false)
+  })
+
+  it('rejects an invalid owner with 400', async () => {
+    stubUpstreams(() => ({ status: 500, body: 'must not be called' }))
+    expect((await call('/api/market/skills/clawhub/git?owner=a%2Fb')).status).toBe(400)
+    expect((await call(`/api/market/skills/clawhub/git?owner=${'x'.repeat(65)}`)).status).toBe(400)
+    expect((await call('/api/market/skills/clawhub/git/file?path=SKILL.md&owner=bad%20owner')).status).toBe(400)
+    const install = await call('/api/market/install', {
+      method: 'POST',
+      body: JSON.stringify({ id: 'clawhub:git', owner: 42 }),
+    })
+    expect(install.status).toBe(400)
   })
 
   it('rejects an unknown source with 400', async () => {
@@ -122,6 +243,21 @@ describe('GET /api/market/skills/{source}/{slug}/file', () => {
     expect(body.file.content).toBe('# Hello world')
     expect(body.file.language).toBe('markdown')
     expect(body.file.truncated).toBe(false)
+  })
+
+  it('fetches a file for the requested owner and caches it per owner', async () => {
+    const upstreamCalls: string[] = []
+    stubUpstreams((url) => {
+      upstreamCalls.push(url)
+      return { body: `# by ${new URL(url).searchParams.get('owner')}` }
+    })
+
+    const copy = await call('/api/market/skills/clawhub/git/file?path=SKILL.md&owner=other')
+    const curated = await call('/api/market/skills/clawhub/git/file?path=SKILL.md')
+
+    expect(copy.body.file.content).toBe('# by other')
+    expect(curated.body.file.content).toBe('# by ivangdavila')
+    expect(upstreamCalls.length).toBe(2)
   })
 
   it('rejects unsafe paths', async () => {

@@ -1,10 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import { clawhubProvider, resetClawhubOwnerCacheForTests } from '../services/market/clawhubProvider.js'
+import {
+  clawhubOwnerFor,
+  clawhubProvider,
+  getClawhubOwnerHints,
+  resetClawhubOwnerCacheForTests,
+  setClawhubOwnerHints,
+  withClawhubOwner,
+} from '../services/market/clawhubProvider.js'
 import { skillhubProvider } from '../services/market/skillhubProvider.js'
 import { resetMarketCacheForTests } from '../services/market/cache.js'
-import { MarketUpstreamError } from '../services/market/types.js'
+import { MarketUpstreamError, meaningfulChangelog } from '../services/market/types.js'
 
 const FIXTURES = path.join(import.meta.dir, 'fixtures', 'market')
 
@@ -16,6 +23,7 @@ type FetchStub = (url: string) => { status?: number; body: string; contentType?:
 
 let requestedUrls: string[] = []
 let originalDisableProvidersEnv: string | undefined
+let originalOwnerHints: Array<[string, string]> = []
 const originalFetch = globalThis.fetch
 
 function stubFetch(handler: FetchStub) {
@@ -35,12 +43,17 @@ beforeEach(() => {
   requestedUrls = []
   resetMarketCacheForTests()
   resetClawhubOwnerCacheForTests()
+  // Importing marketService elsewhere in the same run injects catalog hints;
+  // provider tests start unpinned and restore whatever was there.
+  originalOwnerHints = getClawhubOwnerHints()
+  setClawhubOwnerHints([])
   originalDisableProvidersEnv = process.env.HAHA_MARKET_DISABLE_PROVIDERS
   delete process.env.HAHA_MARKET_DISABLE_PROVIDERS
 })
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+  setClawhubOwnerHints(originalOwnerHints)
   // Restore rather than delete: these are the developer's variables, not ours.
   if (originalDisableProvidersEnv === undefined) {
     delete process.env.HAHA_MARKET_DISABLE_PROVIDERS
@@ -200,6 +213,137 @@ describe('clawhubProvider', () => {
   })
 })
 
+describe('clawhubProvider owner pinning', () => {
+  const ambiguous = JSON.stringify({
+    code: 'AMBIGUOUS_SKILL_SLUG',
+    slug: 'git',
+    matches: [{ ownerHandle: 'early-copy' }, { ownerHandle: 'ivangdavila' }],
+  })
+
+  function ownerAwareUpstream(detailBody: string) {
+    stubFetch((url) => {
+      const parsed = new URL(url)
+      const owner = parsed.searchParams.get('owner')
+      if (owner !== 'ivangdavila' && owner !== 'early-copy') return { status: 409, body: ambiguous }
+      if (parsed.pathname.endsWith('/file')) return { body: `# by ${owner}`, contentType: 'text/markdown' }
+      if (parsed.pathname.includes('/versions/')) return { body: '{"version":{"files":[]}}' }
+      const detail = JSON.parse(detailBody)
+      detail.owner.handle = owner
+      return { body: JSON.stringify(detail) }
+    })
+  }
+
+  it('sends a catalog owner hint up front instead of taking the 409 first match', async () => {
+    ownerAwareUpstream(await fixture('clawhub-detail.json'))
+    setClawhubOwnerHints([['git', 'ivangdavila']])
+
+    const detail = await clawhubProvider.detail('git')
+
+    expect(detail.author.handle).toBe('ivangdavila')
+    expect(requestedUrls.length).toBeGreaterThan(0)
+    expect(requestedUrls.every((url) => new URL(url).searchParams.get('owner') === 'ivangdavila')).toBe(true)
+    expect(clawhubOwnerFor('git')).toBe('ivangdavila')
+  })
+
+  it('without a hint keeps resolving 409 to the first match', async () => {
+    ownerAwareUpstream(await fixture('clawhub-detail.json'))
+
+    const detail = await clawhubProvider.detail('git')
+
+    expect(detail.author.handle).toBe('early-copy')
+    expect(new URL(requestedUrls[0]!).searchParams.has('owner')).toBe(false)
+  })
+
+  it('throws instead of widening when a pinned owner still answers 409', async () => {
+    stubFetch(() => ({ status: 409, body: ambiguous }))
+    setClawhubOwnerHints([['git', 'gone-owner']])
+
+    const error = await clawhubProvider.fetchFile('git', 'SKILL.md').catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(MarketUpstreamError)
+    expect(String(error.message)).toContain('409')
+    // One request with the pinned owner, no retry with a guessed one.
+    expect(requestedUrls.length).toBe(1)
+    expect(new URL(requestedUrls[0]!).searchParams.get('owner')).toBe('gone-owner')
+  })
+
+  it('withClawhubOwner pins one operation over the catalog hint, for that slug only', async () => {
+    ownerAwareUpstream(await fixture('clawhub-detail.json'))
+    setClawhubOwnerHints([['git', 'ivangdavila']])
+
+    const file = await withClawhubOwner('git', 'early-copy', async () => {
+      expect(clawhubOwnerFor('git')).toBe('early-copy')
+      expect(clawhubOwnerFor('other-slug')).toBeUndefined()
+      return clawhubProvider.fetchFile('git', 'SKILL.md')
+    })
+
+    expect(file.content).toBe('# by early-copy')
+    // Outside the scope the hint applies again.
+    expect(clawhubOwnerFor('git')).toBe('ivangdavila')
+    expect((await clawhubProvider.fetchFile('git', 'SKILL.md')).content).toBe('# by ivangdavila')
+  })
+})
+
+describe('clawhubProvider detail extras', () => {
+  async function detailWith(mutate: (detail: any, version: any) => void) {
+    const detail = JSON.parse(await fixture('clawhub-detail.json'))
+    const version = JSON.parse(await fixture('clawhub-version-detail.json'))
+    mutate(detail, version)
+    stubFetch((url) => (url.includes('/versions/') ? { body: JSON.stringify(version) } : { body: JSON.stringify(detail) }))
+    return clawhubProvider.detail('git')
+  }
+
+  it('splits the scan into one report per scanner, each with its own verdict and summary', async () => {
+    const detail = await detailWith(() => {})
+
+    const [overall, ...scanners] = detail.securityReports!
+    expect(overall!.vendor).toBe('clawhub-scan')
+    expect(overall!.statusText).toBe('Clean (with warnings)')
+    expect(scanners.map((report) => [report.vendor, report.status])).toEqual([
+      ['VirusTotal', 'clean'],
+      ['skillspector', 'suspicious'],
+      ['LLM review', 'clean'],
+    ])
+    expect(scanners[0]!.reportUrl).toContain('virustotal.com')
+    expect(scanners[1]!.statusText).toBe('suspicious · CAUTION')
+    expect(scanners[1]!.reportUrl).toBeUndefined()
+    expect(scanners[2]!.summary).toMatch(/Git reference skill/)
+    // The overall scan status still decides the badge.
+    expect(detail.securityStatus).toBe('benign')
+  })
+
+  it('maps the latest version changelog and links the owner-qualified page', async () => {
+    const detail = await detailWith(() => {})
+
+    expect(detail.changelog).toEqual({
+      version: '1.0.8',
+      text: 'Simplified the skill name and kept the stateless activation guidance',
+      publishedAt: 1773255795217,
+    })
+    expect(detail.pageUrl).toBe('https://clawhub.ai/ivangdavila/git')
+  })
+
+  it('drops placeholder changelogs stamped by sync pipelines', async () => {
+    const detail = await detailWith((raw) => {
+      raw.latestVersion.changelog = 'Synced by the skillhub pipeline'
+    })
+
+    expect(detail.changelog).toBeUndefined()
+    expect(meaningfulChangelog('  synced by pipeline ')).toBeUndefined()
+    expect(meaningfulChangelog('   ')).toBeUndefined()
+    expect(meaningfulChangelog(42)).toBeUndefined()
+    expect(meaningfulChangelog(' Fixed the pipeline docs ')).toBe('Fixed the pipeline docs')
+  })
+
+  it('omits pageUrl when the detail has no owner', async () => {
+    const detail = await detailWith((raw) => {
+      raw.owner = null
+    })
+
+    expect(detail.pageUrl).toBeUndefined()
+  })
+})
+
 describe('skillhubProvider', () => {
   it('uses pageSize (not limit) and keyword (not q) — upstream silently ignores the wrong names', async () => {
     const body = await fixture('skillhub-search.json')
@@ -305,6 +449,26 @@ describe('skillhubProvider', () => {
     const result = await skillhubProvider.detail('pe-compliance-expert-pro')
 
     expect(result.securityStatus).toBe('flagged')
+  })
+
+  it('maps a meaningful latest-version changelog in detail', async () => {
+    const detailBody = await fixture('skillhub-detail.json')
+    stubFetch((url) => (url.includes('/files') ? { body: '{"count":0,"files":[]}' } : { body: detailBody }))
+
+    const detail = await skillhubProvider.detail('pe-compliance-expert-pro')
+
+    expect(detail.changelog).toEqual({ version: '1.0.2', text: '根据最新的监管要求进行skill的思考炼化', publishedAt: 1777381898516 })
+    expect(detail.pageUrl).toBeUndefined()
+  })
+
+  it('drops a pipeline placeholder changelog in detail', async () => {
+    const detail = JSON.parse(await fixture('skillhub-detail.json'))
+    detail.latestVersion.changelog = 'synced by clawhub pipeline'
+    stubFetch((url) => (url.includes('/files') ? { body: '{"count":0,"files":[]}' } : { body: JSON.stringify(detail) }))
+
+    const result = await skillhubProvider.detail('pe-compliance-expert-pro')
+
+    expect(result.changelog).toBeUndefined()
   })
 
   it('marks list items verified only via the verified field', async () => {

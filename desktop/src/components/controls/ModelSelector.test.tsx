@@ -114,13 +114,13 @@ describe('ModelSelector', () => {
       providers: [{
         id: 'provider-1m', presetId: 'custom', name: 'Provider 1M',
         apiFormat: 'anthropic', apiKey: 'fixture', baseUrl: 'http://127.0.0.1:9999',
-        models: { main: 'main-model', haiku: 'haiku-model', sonnet: 'sonnet-model', opus: 'opus-model' },
+        models: { main: 'main-model', fable: 'fable-model', haiku: 'haiku-model', sonnet: 'sonnet-model', opus: 'opus-model' },
         model1mSupport: { main: enabled, fable: enabled, haiku: enabled, sonnet: enabled, opus: enabled },
       }],
     })
     const runtimeChange = vi.fn()
     render(<ModelSelector runtimeKey="__draft__" onRuntimeSelectionChange={runtimeChange} />)
-    for (const slot of ['main', 'haiku', 'sonnet', 'opus']) {
+    for (const slot of ['main', 'fable', 'haiku', 'sonnet', 'opus']) {
       await clickByRole(/, Provider 1M$/)
       fireEvent.click(within(screen.getByTestId('model-selector-dropdown')).getByRole('button', { name: new RegExp(`^${slot}-model`) }))
       expect(runtimeChange).toHaveBeenLastCalledWith({
@@ -128,6 +128,34 @@ describe('ModelSelector', () => {
       })
       expect(screen.getByRole('button', { name: /High/ })).toBeInTheDocument()
     }
+  })
+
+  it('finds a separately configured Fable model by provider, role and model ID', async () => {
+    useSettingsStore.setState({ locale: 'en' })
+    useProviderStore.setState({
+      activeId: 'relay', hasLoadedProviders: true, isLoading: false,
+      providers: [{
+        id: 'relay', presetId: 'custom', name: 'AruHub',
+        apiFormat: 'anthropic', apiKey: 'fixture', baseUrl: 'http://127.0.0.1:9999',
+        models: {
+          main: 'claude-opus-5-5', fable: 'claude-fable-5-1',
+          haiku: 'claude-opus-5-5', sonnet: 'claude-opus-5-5', opus: 'claude-opus-5-5',
+        },
+      }],
+    })
+    const runtimeChange = vi.fn()
+    render(<ModelSelector runtimeKey="__draft__" onRuntimeSelectionChange={runtimeChange} />)
+    await clickByRole(/, AruHub$/)
+    const dropdown = within(screen.getByTestId('model-selector-dropdown'))
+    const search = dropdown.getByRole('searchbox', { name: 'Search models' })
+    for (const query of ['Aru', 'Fable Model', 'claude-fable-5-1']) {
+      fireEvent.change(search, { target: { value: query } })
+      expect(dropdown.getByRole('button', { name: /claude-fable-5-1/ })).toBeInTheDocument()
+    }
+    fireEvent.click(dropdown.getByRole('button', { name: /claude-fable-5-1/ }))
+    expect(runtimeChange).toHaveBeenLastCalledWith(expect.objectContaining({
+      providerId: 'relay', modelId: 'claude-fable-5-1',
+    }))
   })
 
   it.each(['unknown', 'mixed', 'anthropic'] as const)(
@@ -166,7 +194,7 @@ describe('ModelSelector', () => {
     },
   )
 
-  it('keeps the current Claude Official catalog visible when the API returns legacy settings models', async () => {
+  function renderClaudeOfficialWithLegacyModels() {
     const legacyModels: ModelInfo[] = [
       { id: 'claude-opus-4-7', name: 'Opus 4.7', description: 'Legacy Opus', context: '1m' },
       { id: 'claude-sonnet-4-6', name: 'Sonnet 4.6', description: 'Legacy Sonnet', context: '200k' },
@@ -196,6 +224,11 @@ describe('ModelSelector', () => {
 
     const onRuntimeChange = vi.fn()
     render(<ModelSelector runtimeKey="session-claude-legacy" onRuntimeSelectionChange={onRuntimeChange} />)
+    return onRuntimeChange
+  }
+
+  it('keeps the current Claude Official catalog visible when the API returns legacy settings models', async () => {
+    const onRuntimeChange = renderClaudeOfficialWithLegacyModels()
 
     await clickByRole(/Opus 4\.7/i)
 
@@ -203,11 +236,26 @@ describe('ModelSelector', () => {
     expect(screen.getByRole('button', { name: /Opus 5\.5/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^Opus 5 / })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Opus 4\.8/ })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Sonnet 5/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Sonnet 5\.5/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Sonnet 5 / })).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: /Opus 4\.7/ }).length).toBeGreaterThan(0)
     await clickByRole(/Opus 5\.5/)
     expect(onRuntimeChange).toHaveBeenCalledWith(expect.objectContaining({
       providerId: null, modelId: 'claude-opus-5-5',
+    }))
+  })
+
+  it('selects Sonnet 5.5 from the Claude Official catalog instead of the Sonnet 5 it supersedes', async () => {
+    const onRuntimeChange = renderClaudeOfficialWithLegacyModels()
+
+    await clickByRole(/Opus 4\.7/i)
+    await clickByRole(/Sonnet 5\.5/)
+
+    expect(onRuntimeChange).toHaveBeenCalledWith(expect.objectContaining({
+      providerId: null, modelId: 'claude-sonnet-5-5',
+    }))
+    expect(onRuntimeChange).not.toHaveBeenCalledWith(expect.objectContaining({
+      modelId: 'claude-sonnet-5',
     }))
   })
 

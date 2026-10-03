@@ -1,11 +1,14 @@
 /**
  * Skills Market REST API
  *
- * GET  /api/market/skills                       — aggregated list/search across sources
- *        ?q=&source=all|clawhub|skillhub&security=&installed=&cursor=&limit=
- * GET  /api/market/skills/{source}/{slug}       — full detail (description, files, security)
- * GET  /api/market/skills/{source}/{slug}/file  — file content ?path=SKILL.md
- * POST /api/market/install                      — body {id: "source:slug"}
+ * GET  /api/market/skills                       — curated catalog (default) or live list/search
+ *        ?scope=catalog|market&category=&q=&source=all|clawhub|skillhub&security=&installed=&cursor=&limit=
+ *        `category` applies to the catalog scope only; an unknown key yields an empty page.
+ * GET  /api/market/skills/{source}/{slug}       — full detail (description, files, security) ?owner=
+ * GET  /api/market/skills/{source}/{slug}/file  — file content ?path=SKILL.md&owner=
+ * POST /api/market/install                      — body {id: "source:slug", owner?}
+ *        `owner` pins a ClawHub slug (not unique across owners) to the copy the
+ *        reader picked; it is ignored for SkillHub.
  * POST /api/market/uninstall                    — body {id: "source:slug"}
  * GET  /api/market/status                       — per-source health
  */
@@ -21,9 +24,12 @@ import {
 } from '../services/market/marketService.js'
 import {
   MARKET_ERROR_CODES,
+  MARKET_OWNER_PATTERN,
+  MARKET_SCOPES,
   MARKET_SOURCES,
   MarketUpstreamError,
   parseSkillId,
+  type MarketScope,
   type MarketSource,
 } from '../services/market/types.js'
 
@@ -34,6 +40,12 @@ function parseSource(raw: string | null): 'all' | MarketSource {
   if (!raw || raw === 'all') return 'all'
   if (MARKET_SOURCES.includes(raw as MarketSource)) return raw as MarketSource
   throw ApiError.badRequest(`Invalid source: ${raw}`)
+}
+
+function parseScope(raw: string | null): MarketScope {
+  if (!raw) return 'catalog'
+  if (MARKET_SCOPES.includes(raw as MarketScope)) return raw as MarketScope
+  throw ApiError.badRequest(`Invalid scope: ${raw}`)
 }
 
 function parsePathSource(raw: string | undefined): MarketSource {
@@ -48,6 +60,14 @@ function parseSlug(raw: string | undefined): string {
     throw ApiError.badRequest(`Invalid skill slug: ${slug}`)
   }
   return slug
+}
+
+function parseOwner(raw: unknown, source: MarketSource): string | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined
+  if (typeof raw !== 'string' || !MARKET_OWNER_PATTERN.test(raw)) {
+    throw ApiError.badRequest(`Invalid owner: ${String(raw)}`)
+  }
+  return source === 'clawhub' ? raw : undefined
 }
 
 async function parseJsonBody(req: Request): Promise<Record<string, unknown>> {
@@ -83,9 +103,13 @@ export async function handleMarketApi(
       const installed = url.searchParams.get('installed') || 'all'
       if (!VALID_SECURITY.has(security)) throw ApiError.badRequest(`Invalid security filter: ${security}`)
       if (!VALID_INSTALLED.has(installed)) throw ApiError.badRequest(`Invalid installed filter: ${installed}`)
+      const scope = parseScope(url.searchParams.get('scope'))
+      const category = url.searchParams.get('category')?.trim()
 
       const result = await listMarketSkills({
         q: url.searchParams.get('q')?.trim() || undefined,
+        scope,
+        category: category && category !== 'all' ? category : undefined,
         source: parseSource(url.searchParams.get('source')),
         security,
         installed: installed as 'all' | 'installed' | 'installable',
@@ -98,7 +122,8 @@ export async function handleMarketApi(
     if (method === 'GET' && sub === 'skills' && segments[3] && segments[4] && !segments[5]) {
       const source = parsePathSource(segments[3])
       const slug = parseSlug(segments[4])
-      const { skill, sourceStatus } = await getMarketSkillDetail(source, slug)
+      const owner = parseOwner(url.searchParams.get('owner'), source)
+      const { skill, sourceStatus } = await getMarketSkillDetail(source, slug, { owner })
       return Response.json({ skill, sourceStatus })
     }
 
@@ -109,7 +134,8 @@ export async function handleMarketApi(
       if (!isValidMarketFilePath(filePath)) {
         throw ApiError.badRequest(`Invalid file path: ${filePath}`)
       }
-      const file = await getMarketFileContent(source, slug, filePath)
+      const owner = parseOwner(url.searchParams.get('owner'), source)
+      const file = await getMarketFileContent(source, slug, filePath, owner)
       return Response.json({ file })
     }
 
@@ -118,8 +144,9 @@ export async function handleMarketApi(
     }
 
     if (method === 'POST' && sub === 'install') {
-      const { source, slug } = parseIdFromBody(await parseJsonBody(req))
-      const result = await installMarketSkill(source, slug)
+      const body = await parseJsonBody(req)
+      const { source, slug } = parseIdFromBody(body)
+      const result = await installMarketSkill(source, slug, parseOwner(body.owner, source))
       return Response.json({ ok: true, installedPath: result.installedPath, skill: result.skill })
     }
 

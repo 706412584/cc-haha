@@ -318,6 +318,46 @@ describe('link affordance contrast', () => {
   }
 })
 
+describe('waiting-on-you mark', () => {
+  /**
+   * `SessionAttentionMark` is a filled triangle and nothing else: no fill
+   * behind it, no text beside it to carry the meaning if the shape were lost. A
+   * graphic that conveys state answers to WCAG 1.4.11, so it needs 3:1 against
+   * every ground it can sit on: the strip's trough (idle tabs, and sidebar rows
+   * at rest), paper (the active tab), and the fills a sidebar row takes when
+   * hovered or selected.
+   *
+   * It is drawn in `--color-on-warning-container`. The plain `--color-warning`
+   * measured 2.92:1 on warm-classic's hovered sidebar row and was the reason
+   * for the switch; the two are the same colour in the ink themes. If a palette
+   * tweak drops a ground below the line, fix the colour, not this number.
+   */
+  const MARK = '--color-on-warning-container'
+  const GROUNDS = [
+    '--color-surface-sidebar',
+    '--color-surface',
+    '--color-sidebar-item-hover',
+    '--color-sidebar-item-active',
+  ] as const
+
+  for (const [theme, selectors] of Object.entries(THEME_BLOCKS)) {
+    for (const ground of GROUNDS) {
+      it(`keeps the warning triangle visible on ${ground} in ${theme}`, () => {
+        // Dark's row fills are translucent; composite them on the trough they sit on.
+        const trough = parseColor(resolve('--color-surface-sidebar', selectors))
+        const fill = flatten(parseColor(resolve(ground, selectors)), trough)
+        const mark = flatten(parseColor(resolve(MARK, selectors)), fill)
+        const ratio = contrast(mark, fill)
+
+        expect(
+          Number(ratio.toFixed(2)),
+          `${theme}: ${MARK} on ${ground} is ${ratio.toFixed(2)}:1, needs ${AA_CONTROL_BOUNDARY}:1`,
+        ).toBeGreaterThanOrEqual(AA_CONTROL_BOUNDARY)
+      })
+    }
+  }
+})
+
 describe('tab strip outlines', () => {
   /**
    * The tab strip's trough is deliberately the sidebar's own ground rather

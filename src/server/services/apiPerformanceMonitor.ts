@@ -1,3 +1,4 @@
+import { setResponseHeaders } from '../middleware/responseHeaders.js'
 import { diagnosticsService, type DiagnosticEventInput } from './diagnosticsService.js'
 
 const DEFAULT_SLOW_REQUEST_MS = 1_000
@@ -105,11 +106,8 @@ export class ApiPerformanceMonitor {
         this.active.delete(id)
         const durationMs = this.now() - startedAt
         const cpu = this.cpuUsage(request.cpuStartedAt)
-        const headers = new Headers(response.headers)
-        headers.set('Server-Timing', `app;dur=${rounded(durationMs)}`)
-        headers.set('X-Request-Id', id)
         if (durationMs >= this.slowRequestMs && !path.startsWith('/api/diagnostics')) {
-          const declaredBytes = Number.parseInt(headers.get('content-length') ?? '', 10)
+          const declaredBytes = Number.parseInt(response.headers.get('content-length') ?? '', 10)
           this.report({
             type: 'api_request_slow',
             severity: 'warn',
@@ -132,10 +130,11 @@ export class ApiPerformanceMonitor {
             },
           })
         }
-        return new Response(response.body, {
-          status: response.status,
-          statusText: response.statusText,
-          headers,
+        // In place: every API response passes here, and a file served straight from
+        // disk stops being one the moment it is rebuilt from its body.
+        return setResponseHeaders(response, {
+          'Server-Timing': `app;dur=${rounded(durationMs)}`,
+          'X-Request-Id': id,
         })
       },
       fail: () => {

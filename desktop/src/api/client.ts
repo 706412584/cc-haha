@@ -483,7 +483,7 @@ function sanitizeDiagnosticValue(value: unknown): unknown {
  * image fires `error`). Fetching the bytes here and handing the DOM a blob URL
  * uses the credential path that already works for every other call.
  */
-export async function apiGetBlob(path: string, options?: ApiRequestOptions): Promise<Blob> {
+export async function apiGetBlob(path: string, options?: ApiRequestOptions & { cache?: RequestCache }): Promise<Blob> {
   const controller = new AbortController()
   const timeoutMs = options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
@@ -495,6 +495,7 @@ export async function apiGetBlob(path: string, options?: ApiRequestOptions): Pro
       method: 'GET',
       headers: buildHeaders(),
       signal: controller.signal,
+      ...(options?.cache ? { cache: options.cache } : {}),
     })
     if (!res.ok) {
       throw new ApiError(res.status, await res.text().catch(() => ''))

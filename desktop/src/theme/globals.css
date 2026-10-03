@@ -1826,6 +1826,16 @@
   --color-search-highlight-active: var(--cc-ac);
   --color-on-search-highlight-active: var(--cc-on-ac);
 
+  /* A document page. PDF and Word pages are white paper whatever the app theme:
+     inverting one would change what the document says — a highlighted passage, a
+     figure drawn on white. Only the surround around the page follows the theme. */
+  --color-document-paper: #FFFFFF;
+  --color-document-ink: #1A1A1A;
+  /* A selected passage of a document. The words are drawn on a canvas beneath the
+     transparent text that gets selected, so this has to let them show through:
+     the app's own selection colour is opaque and would blank what it covers. */
+  --color-document-selection: rgba(var(--cc-ac-rgb), 0.3);
+
   /* Misc */
   --color-window-close-hover: #C74436;
   --color-selection-bg: var(--cc-ac-border);

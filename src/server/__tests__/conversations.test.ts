@@ -4202,12 +4202,12 @@ describe('WebSocket Chat Integration', () => {
         sessionId,
         options: {
           providerId: null,
-          model: 'claude-sonnet-5',
+          model: 'claude-sonnet-5-5',
         },
       })
       await expect(sessionService.getSessionLaunchInfo(sessionId)).resolves.toMatchObject({
         runtimeProviderId: null,
-        runtimeModelId: 'claude-sonnet-5',
+        runtimeModelId: 'claude-sonnet-5-5',
       })
     } finally {
       conversationService.startSession = originalStartSession

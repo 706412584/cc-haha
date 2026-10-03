@@ -1,8 +1,8 @@
 import { Folder, GitBranch } from 'lucide-react'
-import { StatusDot } from '@/components/ui/Badge'
 import { Spinner } from '@/components/ui/Spinner'
 import type { TranslationKey } from '../../i18n'
 import type { SessionListItem } from '../../types/session'
+import { SessionAttentionMark } from './SessionAttentionMark'
 import { isWorktreeSession, type SidebarTaskGroup, type SidebarTaskGroupId } from './sidebarTaskGroups'
 
 /**
@@ -176,13 +176,9 @@ function SidebarTaskRow({
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium tracking-normal">{title}</span>
         <span className="ml-auto flex h-4 flex-shrink-0 items-center justify-end">
           {needsAttention ? (
-            <span
-              className="inline-flex h-4 w-4 items-center justify-center"
-              title={t('sidebar.sessionNeedsAttention')}
-            >
-              {/* 名字挂在 StatusDot 自己身上：它带 `role="status"`，裸 span 上的
-                  aria-label 多数读屏并不播报。 */}
-              <StatusDot tone="warning" pulse label={t('sidebar.sessionNeedsAttention')} />
+            <span className="inline-flex h-4 w-4 items-center justify-center">
+              {/* 与 tab 栏、项目视图共用同一个标志；名字与 title 都在它自己身上。 */}
+              <SessionAttentionMark label={t('sidebar.sessionNeedsAttention')} />
             </span>
           ) : isRunning ? (
             <span

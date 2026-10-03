@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { Button, type ButtonSize, type ButtonVariant } from './Button'
 
-const VARIANTS: ButtonVariant[] = ['primary', 'secondary', 'tonal', 'ghost', 'danger', 'danger-outline', 'link', 'inverse']
+const VARIANTS: ButtonVariant[] = ['primary', 'secondary', 'tonal', 'ghost', 'danger', 'danger-outline', 'danger-ghost', 'link', 'inverse']
 const SIZES: ButtonSize[] = ['xs', 'sm', 'base', 'md', 'lg']
 
 describe('Button', () => {

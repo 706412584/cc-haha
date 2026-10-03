@@ -35,6 +35,19 @@ If the folder is not a Git repository, the **Review** entry explains why it is u
 
 Any file can have its path copied, or be pushed back into the composer as context with **Add to chat**.
 
+### Previewing PDFs, Word, Excel, and images
+
+Reports, papers, and spreadsheets Claude produces no longer need another app to read. Select one in a Files tab, or click a link or file card that points at it in the conversation, and it opens right in the workspace:
+
+- **PDF** — scrolls continuously and zooms, with selectable text. It opens fitted to the panel width.
+- **Word (`.docx`)** — shows the text and basic layout. Equations and some shapes do not appear, and a note above the preview says so; when you need the exact layout, use **Open in system app** to open the original.
+- **Excel (`.xlsx`, `.xlsm`, `.xls`)** — one tab per worksheet, with each cell shown as Excel formats it. Charts, images, and formulas are not shown. A sheet shows at most its first 5,000 rows and 100 columns, and says so when it is cut off.
+- **Images** — fitted to the window, with zoom and drag. Hold `⌘` / `Ctrl` and scroll, or pinch on a trackpad, to zoom; double-click to switch between **Fit to window** and 100%.
+
+**Open in system app** at the top of the preview hands the original file to your system's default program. Files that are too large (PDFs over 100 MB, Word or Excel over 30 MB) and password-protected PDFs are not previewed; open them with the system app the same way. So are documents outside the workspace.
+
+When Claude rewrites a file you are previewing, the preview refreshes in place. If the file is caught half-written and cannot be read, the last good version stays on screen with a note that the refresh failed.
+
 ## Diff review: leaving a note on a line
 
 ![A read-only review of the HEAD commit with syntax-highlighted diff lines (Chinese interface)](../../images/app/en/workspace-diff.webp)

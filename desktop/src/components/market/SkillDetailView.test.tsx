@@ -216,3 +216,126 @@ describe('SkillDetailView', () => {
     expect(preview.className).not.toContain('max-h-[520px]')
   })
 })
+
+describe('SkillDetailView market extensions', () => {
+  it('keeps the installed-skill layout when none of the optional props are passed', async () => {
+    // The installed page passes none of them: source label above the title,
+    // default badges, actions in the side rail, and the rail on every tab.
+    renderView({ actions: <button type="button">Uninstall</button> })
+
+    expect(screen.getByText('ClawHub')).toBeInTheDocument()
+    expect(screen.queryByTestId('skill-detail-meta-line')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('skill-detail-stats')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('skill-detail-hero-actions')).not.toBeInTheDocument()
+    expect(within(screen.getByTestId('skill-detail-sidebar')).getByText('Uninstall')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('skill-detail-tab-files'))
+    expect(await screen.findByTestId('market-file-preview')).toBeInTheDocument()
+    expect(screen.getByTestId('skill-detail-sidebar')).toBeInTheDocument()
+  })
+
+  it('shows the version as a pill beside the title', () => {
+    renderView()
+
+    const heading = screen.getByRole('heading', { level: 1, name: 'Demo Skill' })
+    expect(heading.parentElement).toContainElement(screen.getByTestId('skill-detail-version'))
+    expect(screen.getByTestId('skill-detail-version')).toHaveTextContent('v1.0.0')
+  })
+
+  it('renders the meta line, custom chips and the stats strip', () => {
+    renderView({
+      metaLine: <span>by Alice · ClawHub</span>,
+      chips: <span data-testid="custom-chip">Featured</span>,
+      stats: [
+        { label: 'Downloads', value: '482.1k' },
+        { label: 'Files', value: '15' },
+      ],
+    })
+
+    expect(screen.getByTestId('skill-detail-meta-line')).toHaveTextContent('by Alice · ClawHub')
+    expect(screen.getByTestId('custom-chip')).toBeInTheDocument()
+    // Custom chips replace the default badge row rather than adding to it.
+    expect(screen.queryByTestId('security-badge-benign')).not.toBeInTheDocument()
+    const stats = screen.getByTestId('skill-detail-stats')
+    expect(within(stats).getByText('Downloads')).toBeInTheDocument()
+    expect(within(stats).getByText('482.1k')).toBeInTheDocument()
+  })
+
+  it('adds extra tabs with their badges and switches to them', () => {
+    renderView({
+      extraTabs: [
+        { key: 'security', label: 'Security report', badge: <span data-testid="flag-dot" />, content: <p>Scan results</p> },
+      ],
+    })
+
+    const securityTab = screen.getByRole('tab', { name: 'Security report' })
+    expect(within(securityTab).getByTestId('flag-dot')).toBeInTheDocument()
+
+    fireEvent.click(securityTab)
+    expect(securityTab).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByTestId('skill-detail-security')).toHaveTextContent('Scan results')
+    expect(screen.queryByTestId('skill-detail-overview')).not.toBeInTheDocument()
+  })
+
+  it('follows a controlled tab and reports clicks without switching by itself', () => {
+    const onTabChange = vi.fn()
+    const { rerender } = renderView({
+      activeTab: 'overview',
+      onTabChange,
+      extraTabs: [{ key: 'changelog', label: 'Changelog', content: <p>v2 notes</p> }],
+    })
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Changelog' }))
+    expect(onTabChange).toHaveBeenCalledWith('changelog')
+    expect(screen.getByTestId('skill-detail-overview')).toBeInTheDocument()
+
+    rerender(
+      <SkillDetailView
+        name="Demo Skill"
+        sourceLabel="ClawHub"
+        meta={[]}
+        description="# Body"
+        files={FILES}
+        loadFile={loadFileFromMemory}
+        onBack={vi.fn()}
+        backLabel="Back"
+        activeTab="changelog"
+        onTabChange={onTabChange}
+        extraTabs={[{ key: 'changelog', label: 'Changelog', content: <p>v2 notes</p> }]}
+      />,
+    )
+    expect(screen.getByTestId('skill-detail-changelog')).toHaveTextContent('v2 notes')
+  })
+
+  it('puts hero actions in the header and gives non-overview tabs the full width', () => {
+    renderView({
+      actionsPlacement: 'hero',
+      actions: <button type="button">Install</button>,
+      extraTabs: [{ key: 'security', label: 'Security report', content: <p>Scan results</p> }],
+    })
+
+    expect(within(screen.getByTestId('skill-detail-hero-actions')).getByText('Install')).toBeInTheDocument()
+    expect(within(screen.getByTestId('skill-detail-sidebar')).queryByText('Install')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Security report' }))
+    expect(screen.queryByTestId('skill-detail-sidebar')).not.toBeInTheDocument()
+  })
+
+  it('renders the overview lead above the document, the doc header and the side cards', () => {
+    renderView({
+      overviewLead: <div data-testid="lead-panel" />,
+      docHeader: <span>SKILL.md · 2 KB</span>,
+      sideCards: <section data-testid="side-card" />,
+      metaTitle: 'Info',
+    })
+
+    const lead = screen.getByTestId('lead-panel')
+    const overview = screen.getByTestId('skill-detail-overview')
+    expect(lead.compareDocumentPosition(overview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(within(overview).getByTestId('skill-detail-doc-header')).toHaveTextContent('SKILL.md · 2 KB')
+
+    const sidebar = screen.getByTestId('skill-detail-sidebar')
+    expect(within(sidebar).getByTestId('side-card')).toBeInTheDocument()
+    expect(within(sidebar).getByRole('heading', { name: 'Info' })).toBeInTheDocument()
+  })
+})

@@ -24,14 +24,6 @@ type Question = {
   multiSelect?: boolean
 }
 
-type AskUserInput = {
-  questions?: Question[]
-  question?: string
-  header?: string
-  options?: QuestionOption[]
-  multiSelect?: boolean
-}
-
 type Props = {
   sessionId?: string | null
   toolUseId: string
@@ -45,29 +37,51 @@ type Props = {
   supersededByUserMessage?: boolean
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+// The input is whatever the model emitted, and the transcript keeps it even when the
+// server rejected the call as invalid — so a card is rebuilt from it on every replay
+// (issue #1400: an option description that came back as an object threw React #31 and
+// took the whole app down, again on every launch). Only string fields are trusted,
+// because a non-string child throws while rendering; anything else is left out rather
+// than shown. That cleanup is display-only: the answer still travels with the
+// original input (see handleSubmit).
+
+function toOption(value: unknown): QuestionOption | null {
+  if (!isRecord(value) || typeof value.label !== 'string') return null
+  return typeof value.description === 'string'
+    ? { label: value.label, description: value.description }
+    : { label: value.label }
+}
+
+function toQuestion(value: unknown): Question | null {
+  if (!isRecord(value) || typeof value.question !== 'string') return null
+  return {
+    question: value.question,
+    header: typeof value.header === 'string' ? value.header : undefined,
+    options: Array.isArray(value.options)
+      ? value.options.flatMap((option) => toOption(option) ?? [])
+      : undefined,
+    multiSelect: value.multiSelect === true,
+  }
+}
+
 /**
  * Parse the AskUserQuestion input which may come in different shapes.
  */
 function parseInput(input: unknown): Question[] {
-  if (!input || typeof input !== 'object') return []
-  const obj = input as AskUserInput
+  if (!isRecord(input)) return []
 
   // Shape 1: { questions: [...] }
-  if (Array.isArray(obj.questions)) {
-    return obj.questions
+  if (Array.isArray(input.questions)) {
+    return input.questions.flatMap((question) => toQuestion(question) ?? [])
   }
 
   // Shape 2: { question: "...", options: [...] }
-  if (typeof obj.question === 'string') {
-    return [{
-      question: obj.question,
-      header: obj.header,
-      options: obj.options,
-      multiSelect: obj.multiSelect,
-    }]
-  }
-
-  return []
+  const single = toQuestion(input)
+  return single ? [single] : []
 }
 
 type QuestionSelections = Record<number, string[]>
@@ -100,7 +114,7 @@ export function AskUserQuestion({
   const sessionConnectionState = useChatStore((s) =>
     targetSessionId ? s.sessions[targetSessionId]?.connectionState : undefined)
   const t = useTranslation()
-  const questions = parseInput(input)
+  const questions = useMemo(() => parseInput(input), [input])
   const inputObject = (input && typeof input === 'object') ? input as Record<string, unknown> : {}
   // Read once instead of subscribing: this card writes the draft on every
   // change, and a subscription would feed its own writes back as re-renders.

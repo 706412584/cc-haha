@@ -27,6 +27,7 @@ import {
 } from '../../stores/projectDisplayNameStore'
 import { openDesktopNotificationTarget } from '../../lib/desktopNotificationNavigation'
 import { TabBar } from './TabBar'
+import { MobileAttentionDot } from './MobileAttentionDot'
 import { WorkspaceHeaderProvider } from './WorkspaceHeaderContext'
 import { StartupErrorView } from './StartupErrorView'
 import { useTabStore, SETTINGS_TAB_ID } from '../../stores/tabStore'
@@ -384,15 +385,20 @@ export function AppShell() {
             data-testid="mobile-session-header"
             className="mobile-app-header flex shrink-0 items-center gap-3 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2"
           >
-            <IconButton
-              data-testid="mobile-sidebar-toggle"
-              icon={effectiveSidebarOpen ? 'close' : 'menu'}
-              label={effectiveSidebarOpen ? t('sidebar.collapse') : t('sidebar.expand')}
-              onClick={toggleEffectiveSidebar}
-              size="2xl"
-              aria-controls="sidebar-shell"
-              aria-expanded={effectiveSidebarOpen}
-            />
+            <span className="relative inline-flex shrink-0">
+              <IconButton
+                data-testid="mobile-sidebar-toggle"
+                icon={effectiveSidebarOpen ? 'close' : 'menu'}
+                label={effectiveSidebarOpen ? t('sidebar.collapse') : t('sidebar.expand')}
+                onClick={toggleEffectiveSidebar}
+                size="2xl"
+                aria-controls="sidebar-shell"
+                aria-expanded={effectiveSidebarOpen}
+              />
+              {/* 手机没有 tab 栏，抽屉是切换会话的唯一入口，也是等待标志唯一能被
+                  找到的地方：别的会话在等人时，在汉堡按钮上提一下。 */}
+              <MobileAttentionDot activeSessionId={activeTabId} />
+            </span>
             {activeTab?.type === 'settings' ? (
               <h1 className="min-w-0 flex-1 truncate text-[15px] font-bold leading-tight text-[var(--color-text-primary)]">{t('sidebar.settings')}</h1>
             ) : (

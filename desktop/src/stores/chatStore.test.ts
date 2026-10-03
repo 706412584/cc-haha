@@ -4036,7 +4036,158 @@ describe('chatStore history mapping', () => {
     ])
   })
 
-  it('filters task-notification turns and resumes at the next real user message', () => {
+  it('hides the task-notification message but keeps every model reply that follows it', () => {
+    const notice = (taskId: string, toolUseId: string, name: string) =>
+      `<task-notification>\n<task-id>${taskId}</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<status>completed</status>\n<summary>Background command "Background sleep then write ${name}" completed (exit code 0)</summary>\n</task-notification>`
+    const messages: MessageEntry[] = [
+      { id: 'user-real-1', type: 'user', timestamp: '2026-09-29T06:41:00.000Z', content: '启动两个后台命令' },
+      {
+        id: 'assistant-dispatched',
+        type: 'assistant',
+        timestamp: '2026-09-29T06:41:03.000Z',
+        content: [{ type: 'text', text: '已派发' }],
+      },
+      { id: 'notice-alpha', type: 'user', timestamp: '2026-09-29T06:42:25.000Z', content: notice('bt1', 'call_alpha', 'alpha') },
+      {
+        id: 'assistant-alpha',
+        type: 'assistant',
+        timestamp: '2026-09-29T06:42:27.000Z',
+        content: [{ type: 'text', text: 'alpha 任务完成：ALPHA_DONE' }],
+      },
+      { id: 'notice-bravo', type: 'user', timestamp: '2026-09-29T06:43:55.000Z', content: notice('bt2', 'call_bravo', 'bravo') },
+      {
+        id: 'assistant-bravo',
+        type: 'assistant',
+        timestamp: '2026-09-29T06:43:57.000Z',
+        content: [{ type: 'text', text: 'bravo 任务完成：BRAVO_DONE' }],
+      },
+      { id: 'user-real-2', type: 'user', timestamp: '2026-09-29T06:50:00.000Z', content: '继续' },
+      {
+        id: 'assistant-real-2',
+        type: 'assistant',
+        timestamp: '2026-09-29T06:50:02.000Z',
+        content: [{ type: 'text', text: '好的' }],
+      },
+    ]
+
+    const mapped = mapHistoryMessagesToUiMessages(messages)
+
+    expect(mapped.map((message) => [message.type, 'content' in message ? message.content : undefined])).toEqual([
+      ['user_text', '启动两个后台命令'],
+      ['assistant_text', '已派发'],
+      ['assistant_text', 'alpha 任务完成：ALPHA_DONE'],
+      ['assistant_text', 'bravo 任务完成：BRAVO_DONE'],
+      ['user_text', '继续'],
+      ['assistant_text', '好的'],
+    ])
+    expect(JSON.stringify(mapped)).not.toContain('<task-notification>')
+  })
+
+  it('keeps thinking, tool calls and tool results the model produces after a task notification', () => {
+    const messages: MessageEntry[] = [
+      { id: 'user-real-1', type: 'user', timestamp: '2026-09-29T07:00:00.000Z', content: '构建项目' },
+      {
+        id: 'assistant-started',
+        type: 'assistant',
+        timestamp: '2026-09-29T07:00:01.000Z',
+        content: [{ type: 'text', text: '构建已在后台启动' }],
+      },
+      {
+        id: 'notice-build',
+        type: 'user',
+        timestamp: '2026-09-29T07:03:00.000Z',
+        content: '<task-notification>\n<task-id>build-task</task-id>\n<tool-use-id>toolu_build</tool-use-id>\n<status>failed</status>\n<summary>Background command "npm run build" failed with exit code 2</summary>\n</task-notification>',
+      },
+      {
+        id: 'assistant-thinking',
+        type: 'assistant',
+        timestamp: '2026-09-29T07:03:02.000Z',
+        content: [{ type: 'thinking', thinking: '构建失败，先看日志。' }],
+      },
+      {
+        id: 'assistant-tool',
+        type: 'tool_use',
+        timestamp: '2026-09-29T07:03:03.000Z',
+        content: [{ type: 'tool_use', id: 'toolu_fix_1', name: 'Bash', input: { command: 'tail -n 20 build.log' } }],
+      },
+      {
+        id: 'tool-result',
+        type: 'tool_result',
+        timestamp: '2026-09-29T07:03:04.000Z',
+        content: [{ type: 'tool_result', tool_use_id: 'toolu_fix_1', content: 'error TS2322: type mismatch' }],
+      },
+      {
+        id: 'assistant-fix',
+        type: 'assistant',
+        timestamp: '2026-09-29T07:03:06.000Z',
+        content: [{ type: 'text', text: '类型错误，正在修复。' }],
+      },
+    ]
+
+    const mapped = mapHistoryMessagesToUiMessages(messages)
+
+    expect(mapped.map((message) => message.type)).toEqual([
+      'user_text',
+      'assistant_text',
+      'thinking',
+      'tool_use',
+      'tool_result',
+      'assistant_text',
+    ])
+    expect(mapped[3]).toMatchObject({ toolUseId: 'toolu_fix_1', toolName: 'Bash' })
+    expect(mapped[4]).toMatchObject({ toolUseId: 'toolu_fix_1' })
+    expect(mapped[5]).toMatchObject({ content: '类型错误，正在修复。' })
+    expect(JSON.stringify(mapped)).not.toContain('<task-notification>')
+  })
+
+  it('keeps a notification follow-up turn that is stored as raw assistant and user transcript blocks', () => {
+    const messages: MessageEntry[] = [
+      {
+        id: 'notice-raw',
+        type: 'user',
+        timestamp: '2026-09-29T07:10:00.000Z',
+        content: '<task-notification>\n<task-id>raw-task</task-id>\n<tool-use-id>toolu_raw</tool-use-id>\n<status>completed</status>\n<summary>Background command completed</summary>\n</task-notification>',
+      },
+      {
+        id: 'assistant-raw',
+        type: 'assistant',
+        timestamp: '2026-09-29T07:10:02.000Z',
+        content: [
+          { type: 'thinking', thinking: '读取输出文件。' },
+          { type: 'text', text: '先看一下输出。' },
+          { type: 'tool_use', name: 'Read', id: 'toolu_read_1', input: { file_path: '/tmp/out.txt' } },
+        ],
+      },
+      {
+        id: 'user-tool-result',
+        type: 'user',
+        timestamp: '2026-09-29T07:10:03.000Z',
+        content: [{ type: 'tool_result', tool_use_id: 'toolu_read_1', content: 'all green' }],
+      },
+      {
+        id: 'assistant-raw-final',
+        type: 'assistant',
+        timestamp: '2026-09-29T07:10:04.000Z',
+        content: [{ type: 'text', text: '全部通过。' }],
+      },
+    ]
+
+    const mapped = mapHistoryMessagesToUiMessages(messages)
+
+    expect(mapped.map((message) => message.type)).toEqual([
+      'thinking',
+      'assistant_text',
+      'tool_use',
+      'tool_result',
+      'assistant_text',
+    ])
+    expect(mapped[4]).toMatchObject({ content: '全部通过。' })
+    expect(JSON.stringify(mapped)).not.toContain('<task-notification>')
+  })
+
+  it('keeps even a no-action reply to a stale task notification rather than hiding model output', () => {
+    // The transcript cannot tell a filler reply from a useful one, so it never
+    // guesses: only the injected notification prompt is hidden.
     const messages: MessageEntry[] = [
       {
         id: 'user-real-1',
@@ -4083,16 +4234,19 @@ describe('chatStore history mapping', () => {
         content: '项目创建好了',
       },
       {
+        type: 'assistant_text',
+        content: '旧后台任务通知，无需处理',
+      },
+      {
         id: 'user-real-2',
         type: 'user_text',
         content: '继续真实问题',
       },
     ])
     expect(JSON.stringify(mapped)).not.toContain('<task-notification>')
-    expect(JSON.stringify(mapped)).not.toContain('旧后台任务通知')
   })
 
-  it('resumes notification suppression at the tool call that follows the acknowledgement', () => {
+  it('hides only the notification record and keeps the model reply that follows it', () => {
     const messages: MessageEntry[] = [
       {
         id: 'user-real-1',
@@ -4130,8 +4284,9 @@ describe('chatStore history mapping', () => {
     const serialized = JSON.stringify(mapped)
 
     expect(serialized).not.toContain('<task-notification>')
-    expect(serialized).not.toContain('后台命令完成了，我继续推进')
-    // The resumed work after the tool call must survive the mapping.
+    // Only the queued notification record is plumbing; the acknowledgement, the
+    // tool call and the work after it are all real conversation.
+    expect(serialized).toContain('后台命令完成了，我继续推进')
     expect(serialized).toContain('找到根因了')
   })
 
@@ -13473,8 +13628,8 @@ describe('chatStore history mapping', () => {
       expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toHaveLength(2)
     })
 
-    // The task_notification that should suppress this output arrived while
-    // the renderer was disconnected, so only the late follow-up is observed.
+    // Whatever started this turn (a task_notification, for example) arrived
+    // while the renderer was disconnected, so only its late thinking is observed.
     useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
       type: 'thinking',
       text: 'orphan background follow-up thinking',
@@ -13704,7 +13859,213 @@ describe('chatStore history mapping', () => {
     ]))
   })
 
-  it('suppresses assistant output for a task-notification-only follow-up turn', () => {
+  it('shows the model reply to a background command completion as soon as its turn ends, and keeps it after the transcript reload', async () => {
+    // Replays a callback turn captured from a real desktop server (issue #1389):
+    // the task_notification lands while the session is idle, then the CLI starts
+    // a follow-up turn on its own and answers it. Nothing here comes from the user.
+    const send = (message: ServerMessage) =>
+      useChatStore.getState().handleServerMessage(TEST_SESSION_ID, message)
+    vi.mocked(sessionsApi.getFullHistory).mockResolvedValue({
+      messages: [
+        {
+          id: 'user-1',
+          type: 'user',
+          timestamp: '2026-09-29T06:41:00.000Z',
+          content: 'Start the background commands',
+        },
+        {
+          id: 'assistant-dispatched',
+          type: 'assistant',
+          timestamp: '2026-09-29T06:41:03.000Z',
+          content: [{ type: 'text', text: '已派发' }],
+        },
+        {
+          id: 'assistant-callback',
+          type: 'assistant',
+          timestamp: '2026-09-29T06:42:29.000Z',
+          content: [{ type: 'text', text: 'alpha 任务完成：ALPHA_DONE' }],
+        },
+      ],
+    })
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
+          messages: [
+            { id: 'user-1', type: 'user_text', content: 'Start the background commands', timestamp: 1 },
+            { id: 'assistant-dispatched', type: 'assistant_text', content: '已派发', timestamp: 2 },
+          ],
+        }),
+      },
+    })
+
+    send({
+      type: 'system_notification',
+      subtype: 'task_notification',
+      data: {
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'bt1uz0yz1',
+        tool_use_id: 'call_00_ddp9AzDwk9lWwuLP9pom8301',
+        status: 'completed',
+        output_file: '/tmp/bt1uz0yz1.output',
+        summary: 'Background command "Background sleep 25 then write alpha" completed (exit code 0)',
+      },
+    })
+    send({
+      type: 'system_notification',
+      subtype: 'init',
+      message: 'Model: deepseek-flash[1m]',
+      data: { model: 'deepseek-flash[1m]' },
+    })
+    send({
+      type: 'system_notification',
+      subtype: 'slash_commands',
+      data: [{ name: 'update-config', description: 'Configure the harness' }],
+    })
+    send({ type: 'status', state: 'thinking', attemptStart: true })
+    send({ type: 'status', state: 'thinking', verb: 'Thinking' })
+    send({ type: 'content_start', blockType: 'text' })
+    for (const text of ['alpha', ' ', '任务', '完成', '：', 'AL', 'P', 'HA', '_D', 'ONE']) {
+      send({ type: 'content_delta', text })
+    }
+    send({
+      type: 'message_complete',
+      usage: { input_tokens: 249, output_tokens: 11, cache_read_tokens: 30592 },
+      timing: { duration_ms: 500, duration_api_ms: 3026, ttft_ms: 0, decode_ms: 0 },
+    })
+
+    // The reply must not wait for a transcript round trip to become visible.
+    const live = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(live?.chatState).toBe('idle')
+    expect(live?.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'assistant_text', content: 'alpha 任务完成：ALPHA_DONE' }),
+      expect.objectContaining({
+        type: 'background_task',
+        task: expect.objectContaining({ taskId: 'bt1uz0yz1', status: 'completed' }),
+      }),
+    ]))
+    // The desktop notification previews the same reply the transcript shows.
+    expect(notifyDesktopMock).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Claude Code Haha 已完成回复',
+      body: expect.stringContaining('alpha 任务完成'),
+    }))
+
+    // The authoritative reload carries the same reply and must not duplicate it.
+    await vi.waitFor(() => {
+      expect(sessionsApi.getFullHistory).toHaveBeenCalled()
+      const settled = useChatStore.getState().sessions[TEST_SESSION_ID]
+      expect(settled?.historyStatus).toBe('ready')
+      expect(settled?.messages.filter((message) => message.type === 'assistant_text')
+        .map((message) => message.type === 'assistant_text' ? message.content : ''))
+        .toEqual(['已派发', 'alpha 任务完成：ALPHA_DONE'])
+    })
+  })
+
+  it('shows the thinking and tool work the model performs in response to a background task notification', async () => {
+    const send = (message: ServerMessage) =>
+      useChatStore.getState().handleServerMessage(TEST_SESSION_ID, message)
+    const notification = [
+      '<task-notification>',
+      '<task-id>build-task</task-id>',
+      '<tool-use-id>toolu_build</tool-use-id>',
+      '<status>failed</status>',
+      '<summary>Background command "npm run build" failed with exit code 2</summary>',
+      '</task-notification>',
+    ].join('\n')
+    vi.mocked(sessionsApi.getFullHistory).mockResolvedValue({
+      messages: [
+        { id: 'user-1', type: 'user', timestamp: '2026-09-29T07:00:00.000Z', content: 'Build the project' },
+        {
+          id: 'assistant-started',
+          type: 'assistant',
+          timestamp: '2026-09-29T07:00:01.000Z',
+          content: [{ type: 'text', text: 'Build started in the background' }],
+        },
+        { id: 'notification-user', type: 'user', timestamp: '2026-09-29T07:03:00.000Z', content: notification },
+        {
+          id: 'assistant-thinking',
+          type: 'assistant',
+          timestamp: '2026-09-29T07:03:02.000Z',
+          content: [{ type: 'thinking', thinking: 'The build failed, so I will read its log.' }],
+        },
+        {
+          id: 'assistant-tool',
+          type: 'tool_use',
+          timestamp: '2026-09-29T07:03:03.000Z',
+          content: [{ type: 'tool_use', id: 'toolu_fix_1', name: 'Bash', input: { command: 'tail -n 20 build.log' } }],
+        },
+        {
+          id: 'tool-result',
+          type: 'tool_result',
+          timestamp: '2026-09-29T07:03:04.000Z',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_fix_1', content: 'error TS2322: type mismatch' }],
+        },
+        {
+          id: 'assistant-fix',
+          type: 'assistant',
+          timestamp: '2026-09-29T07:03:06.000Z',
+          content: [{ type: 'text', text: 'The build fails on a type error; fixing it now.' }],
+        },
+      ],
+    })
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
+          messages: [
+            { id: 'user-1', type: 'user_text', content: 'Build the project', timestamp: 1 },
+            { id: 'assistant-started', type: 'assistant_text', content: 'Build started in the background', timestamp: 2 },
+          ],
+        }),
+      },
+    })
+
+    send({
+      type: 'system_notification',
+      subtype: 'task_notification',
+      data: {
+        task_id: 'build-task',
+        tool_use_id: 'toolu_build',
+        status: 'failed',
+        summary: 'Background command "npm run build" failed with exit code 2',
+      },
+    })
+    send({ type: 'status', state: 'thinking', attemptStart: true })
+    send({ type: 'thinking', text: 'The build failed, so I will read its log.' })
+    send({ type: 'content_start', blockType: 'tool_use', toolName: 'Bash', toolUseId: 'toolu_fix_1' })
+    send({
+      type: 'tool_use_complete',
+      toolName: 'Bash',
+      toolUseId: 'toolu_fix_1',
+      input: { command: 'tail -n 20 build.log' },
+    })
+    send({ type: 'tool_result', toolUseId: 'toolu_fix_1', content: 'error TS2322: type mismatch', isError: false })
+    send({ type: 'content_start', blockType: 'text' })
+    send({ type: 'content_delta', text: 'The build fails on a type error; fixing it now.' })
+    send({ type: 'message_complete', usage: { input_tokens: 40, output_tokens: 22 } })
+
+    const expectFollowUpWork = (messages: UIMessage[] | undefined) => {
+      expect(messages).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'thinking', content: 'The build failed, so I will read its log.' }),
+        expect.objectContaining({ type: 'tool_use', toolUseId: 'toolu_fix_1', toolName: 'Bash' }),
+        expect.objectContaining({ type: 'tool_result', toolUseId: 'toolu_fix_1' }),
+        expect.objectContaining({ type: 'assistant_text', content: 'The build fails on a type error; fixing it now.' }),
+      ]))
+    }
+    expectFollowUpWork(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages)
+
+    await vi.waitFor(() => {
+      const settled = useChatStore.getState().sessions[TEST_SESSION_ID]
+      expect(settled?.historyStatus).toBe('ready')
+      expectFollowUpWork(settled?.messages)
+      expect(JSON.stringify(settled?.messages)).not.toContain('<task-notification>')
+    })
+  })
+
+  it('shows the thinking and reply of a follow-up turn started only by a task notification', () => {
+    // Even a reply that says "nothing more to add" is model output: the store
+    // cannot tell it from a useful one, so it never hides it.
     useChatStore.setState({
       sessions: {
         [TEST_SESSION_ID]: makeSession({
@@ -13752,17 +14113,20 @@ describe('chatStore history mapping', () => {
           status: 'completed',
         },
       },
+      {
+        type: 'thinking',
+        content: "The earlier monitoring command has already been handled by subsequent work, so there's nothing more to add here.",
+      },
+      {
+        type: 'assistant_text',
+        content: '那是早前的监控命令收尾通知，已被后续的多核压测取代，无需处理。交付已全部完成并验证通过。',
+      },
     ])
-    expect(session?.messages).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'thinking' }),
-      expect.objectContaining({ type: 'assistant_text' }),
-      expect.objectContaining({ type: 'system', content: 'Completed in 11m 58s' }),
-    ]))
     expect(session?.chatState).toBe('idle')
     expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'idle')
   })
 
-  it('does not suppress foreground skill output when a background task completes', () => {
+  it('keeps foreground skill output visible when a background task completes mid-turn', () => {
     useChatStore.setState({
       sessions: {
         [TEST_SESSION_ID]: makeSession({
@@ -13806,8 +14170,6 @@ describe('chatStore history mapping', () => {
         summary: 'Older background task completed',
       },
     })
-
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.suppressNextTaskNotificationResponse).not.toBe(true)
 
     useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
       type: 'content_start',

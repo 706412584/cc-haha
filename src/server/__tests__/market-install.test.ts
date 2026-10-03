@@ -34,9 +34,12 @@ type FileSpec = {
  * Stubs the ClawHub API surface used by install:
  * detail → versions/{v} (file list) → file?path= for each file.
  */
+let requestedUrls: string[] = []
+
 function stubClawhub(files: FileSpec[], opts: { corruptPath?: string } = {}) {
   globalThis.fetch = (async (input: string | URL | Request) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+    requestedUrls.push(url)
     const parsed = new URL(url)
     if (parsed.pathname.includes('/file')) {
       const filePath = parsed.searchParams.get('path')
@@ -59,15 +62,17 @@ function stubClawhub(files: FileSpec[], opts: { corruptPath?: string } = {}) {
       })
     }
     // detail
+    const slug = decodeURIComponent(parsed.pathname.split('/').pop() || 'demo')
     return Response.json({
-      skill: { slug: 'demo', displayName: 'Demo', summary: 'demo', description: SKILL_MD },
+      skill: { slug, displayName: 'Demo', summary: 'demo', description: SKILL_MD },
       latestVersion: { version: '1.0.0' },
-      owner: { handle: 'alice' },
+      owner: { handle: parsed.searchParams.get('owner') || 'alice' },
     })
   }) as typeof fetch
 }
 
 beforeEach(async () => {
+  requestedUrls = []
   resetMarketCacheForTests()
   resetInstallLocksForTests()
   tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'market-install-test-'))
@@ -100,6 +105,37 @@ describe('installMarketSkill', () => {
     expect(meta.id).toBe('clawhub:demo')
     expect(meta.version).toBe('1.0.0')
     expect(meta.fileCount).toBe(2)
+  })
+
+  it('pins detail, file list and every download to the requested owner, over the catalog hint', async () => {
+    // The fixture slug is in the curated catalog, which pins it to another owner.
+    const catalogSlug = 'g' + 'it'
+    stubClawhub([
+      { path: 'SKILL.md', content: SKILL_MD },
+      { path: 'scripts/helper.py', content: HELPER_PY },
+    ])
+
+    const result = await installMarketSkill('clawhub', catalogSlug, 'bob')
+
+    expect(result.skill.installState).toBe('installed')
+    const owners = requestedUrls.map((url) => new URL(url).searchParams.get('owner'))
+    const paths = requestedUrls.map((url) => new URL(url).pathname)
+    expect(paths.some((p) => p.includes('/versions/'))).toBe(true)
+    expect(paths.filter((p) => p.endsWith('/file')).length).toBe(2)
+    expect(owners.every((owner) => owner === 'bob')).toBe(true)
+    // `.market-meta.json` keeps its shape: no owner field.
+    const meta = JSON.parse(await fs.readFile(path.join(tmpHome, '.claude', 'skills', catalogSlug, '.market-meta.json'), 'utf-8'))
+    expect(Object.keys(meta).sort()).toEqual(['fileCount', 'id', 'installedAt', 'slug', 'source', 'version'])
+  })
+
+  it('without an owner a catalog slug installs the catalog owner\'s copy', async () => {
+    const catalogSlug = 'g' + 'it'
+    stubClawhub([{ path: 'SKILL.md', content: SKILL_MD }])
+
+    await installMarketSkill('clawhub', catalogSlug)
+
+    expect(requestedUrls.length).toBeGreaterThan(0)
+    expect(requestedUrls.every((url) => new URL(url).searchParams.get('owner') === 'ivangdavila')).toBe(true)
   })
 
   it('aborts on checksum mismatch and leaves no residue', async () => {

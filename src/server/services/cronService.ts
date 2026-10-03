@@ -9,7 +9,9 @@ import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as os from 'os'
 import * as crypto from 'crypto'
+import { stripBOM } from '../../utils/jsonRead.js'
 import { ApiError } from '../middleware/errorHandler.js'
+import { isBlankFileContent } from './blankFileContent.js'
 
 export type TaskNotificationConfig = {
   enabled: boolean
@@ -159,11 +161,18 @@ export class CronService {
   // 内部: 文件读写
   // ---------------------------------------------------------------------------
 
-  /** 读取任务 JSON 文件。文件不存在时返回空列表。 */
+  /**
+   * 读取任务 JSON 文件。文件不存在、或内容为空（空白 / 全 NUL，见 isBlankFileContent）
+   * 时返回空列表；带 UTF-8 BOM 的文件（PowerShell 5.x 默认写入）照常解析。
+   * 有实际内容却无法解析时仍然抛错：此时文件可能还能人工恢复，绝不能让后续写入悄悄覆盖它。
+   */
   private async readTasksFile(): Promise<TasksFile> {
     try {
       const raw = await fs.readFile(this.getTasksFilePath(), 'utf-8')
-      const parsed = JSON.parse(raw) as TasksFile
+      if (isBlankFileContent(raw)) {
+        return { tasks: [] }
+      }
+      const parsed = JSON.parse(stripBOM(raw)) as TasksFile
       // 兼容异常格式
       if (!Array.isArray(parsed.tasks)) {
         return { tasks: [] }

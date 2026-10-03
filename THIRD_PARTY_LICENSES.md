@@ -10,6 +10,19 @@ This project includes code and binaries from the following open source projects.
 - License: dual-licensed under MIT or the Unlicense
 - License texts: bundled beside the executable under `ripgrep-licenses/`
 
+## pdf.js
+
+- Project: pdf.js (https://github.com/mozilla/pdf.js), distributed as `pdfjs-dist`
+- Included as: the PDF engine and its worker, loaded when a PDF is opened in the workspace, and the run-time data files it reads, emitted beside the app under `assets/pdfjs-<version>/`
+- Adapted in: `desktop/src/components/workspace/surfaces/document/pdfPage.css` (the text-layer rules of `web/pdf_viewer.css`)
+- Version: 6.3.289
+- License: Apache-2.0
+- Bundled data files, each folder shipped unmodified with its own license files:
+  - `cmaps/`: character maps, Copyright 1990-2009 Adobe Systems Incorporated (BSD-style license, `cmaps/LICENSE`)
+  - `standard_fonts/`: Foxit fonts (Copyright PDFium Authors, BSD-3-Clause, `LICENSE_FOXIT`) and Liberation Sans fonts (Liberation Font License, GNU GPL v2 with a font exception, `LICENSE_LIBERATION`), kept as separate data files
+  - `wasm/`: image decoders OpenJPEG (BSD-2-Clause), JBIG2 from PDFium (BSD-3-Clause) and qcms (MIT), with pdf.js' wrappers for them; each license is in a `LICENSE_*` file beside the decoder
+  - `iccs/`: an ICC colour profile (CC0 1.0, `iccs/LICENSE`)
+
 ## claude-tap
 
 - Project: claude-tap (https://github.com/liaohch3/claude-tap)

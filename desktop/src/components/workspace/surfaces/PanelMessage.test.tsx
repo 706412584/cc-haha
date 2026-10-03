@@ -41,4 +41,33 @@ describe('PanelMessage', () => {
     expect(container.firstElementChild?.className).toContain('py-2')
     expect(container.firstElementChild?.className).not.toContain('py-8')
   })
+
+  describe('action', () => {
+    it('renders the action next to the message, not inside the live region', () => {
+      // A screen reader should announce "File is too large", not "File is too large
+      // Open in system app" as one sentence — the button is reached by tabbing.
+      render(<PanelMessage icon="database" message="File is too large" action={<button type="button">Open in system app</button>} />)
+
+      const status = screen.getByRole('status')
+      expect(status).toHaveTextContent('File is too large')
+      expect(status).not.toHaveTextContent('Open in system app')
+      expect(screen.getByRole('button', { name: 'Open in system app' })).toBeInTheDocument()
+    })
+
+    it('leaves the markup of a message without an action exactly as it was', () => {
+      const { container } = render(<PanelMessage icon="error" message="Plain" />)
+
+      // The message row is the root: existing callers and layouts depend on it.
+      expect(container.firstElementChild).toHaveAttribute('role', 'status')
+      expect(container.firstElementChild?.className).toContain('py-8')
+    })
+
+    it('trades the bottom padding for the action so the pair keeps one rhythm', () => {
+      const { container } = render(<PanelMessage icon="error" message="Failed" action={<button type="button">Retry</button>} />)
+
+      const row = container.querySelector('[role="status"]')
+      expect(row?.className).toContain('pb-3')
+      expect(row?.className).not.toContain('py-8')
+    })
+  })
 })

@@ -37,6 +37,24 @@ class MemoryStorage implements Storage {
 }
 
 function installStorage(name: 'localStorage' | 'sessionStorage'): void {
+  // StorageEvent validates storageArea against jsdom's Storage implementation.
+  // Node's experimental global accessor shadows window[name], so use jsdom's
+  // backing instance when it is available.
+  try {
+    const browserStorage =
+      (window as unknown as Record<string, Storage | undefined>)[`_${name}`] ?? window[name]
+    if (browserStorage instanceof window.Storage) {
+      Object.defineProperty(globalThis, name, {
+        value: browserStorage,
+        configurable: true,
+        writable: true,
+      })
+      return
+    }
+  } catch {
+    // An opaque jsdom origin may not expose storage; use the in-memory fallback.
+  }
+
   let usable = false
   try {
     const existing = (globalThis as Record<string, unknown>)[name] as Storage | undefined

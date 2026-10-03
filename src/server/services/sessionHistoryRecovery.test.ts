@@ -104,16 +104,16 @@ test('launch metadata, title, work directory and metadata appends never material
 })
 
 
-test('history pages preserve cross-page notification suppression and sidechain ownership, and index only appended bytes', async () => {
+test('history pages hide the notification turn but keep its reply, preserve sidechain ownership, and index only appended bytes', async () => {
   const notification = '<task-notification><task-id>task</task-id><tool-use-id>agent</tool-use-id><status>completed</status></task-notification>'
   await writeFile(file, [
     entry('assistant', 'owner', [{ type: 'tool_use', id: 'agent', name: 'Agent', input: {} }]),
     entry('assistant', 'child', 'child response', { isSidechain: true, parentUuid: 'owner' }),
     entry('user', 'notice', notification),
-    entry('assistant', 'hidden', 'internal notification response'),
+    entry('assistant', 'reply', 'the agent finished, here is the result'),
   ].map(value => JSON.stringify(value)).join('\n') + '\n')
   const latest = await service.getSessionHistoryPage(id, { limit: 1 })
-  expect(latest.messages).toEqual([])
+  expect(latest.messages).toMatchObject([{ id: 'reply' }])
   expect(latest.page.contextScanBytes).toBeGreaterThan(0)
   const noticePage = await service.getSessionHistoryPage(id, { limit: 1, cursor: latest.page.nextCursor! })
   expect(noticePage.messages).toEqual([])
@@ -177,3 +177,130 @@ test('a multi-megabyte foreground tool output preserves complete paged messages 
   expect(recovery.omittedRecords).toBe(0)
   expect((await service.getSessionLaunchInfo(id))?.transcriptMessageCount).toBe(160)
 })
+
+test('activity overflow does not invalidate complete workspace evidence', async () => {
+  const activity = Array.from({ length: 2050 }, (_, index) => entry('assistant', `agent-${index}`, [
+    { type: 'tool_use', id: `agent-${index}`, name: 'Agent', input: { description: 'activity only', prompt: 'inspect' } },
+  ]))
+  await writeFile(file, [...activity,
+    entry('assistant', 'write', [{ type: 'tool_use', id: 'write', name: 'Write', input: { file_path: '/tmp/file', content: 'complete workspace evidence' } }]),
+  ].map(value => JSON.stringify(value)).join('\n') + '\n')
+  const recovery = await service.getSessionHistoryRecovery(id)
+  expect(recovery.status).toBe('incomplete')
+  expect(recovery.completeness?.activity).toBe(false)
+  expect(recovery.completeness?.workspace).toBe(true)
+  expect(recovery.messages).toHaveLength(2048)
+  expect(recovery.messages.some(message => message.id === 'write')).toBe(true)
+})
+
+test('workspace evidence discarded by the shared record budget remains incomplete', async () => {
+  const activity = Array.from({ length: 2050 }, (_, index) => entry('assistant', `agent-${index}`, [
+    { type: 'tool_use', id: `agent-${index}`, name: 'Agent', input: {} },
+  ]))
+  await writeFile(file, [
+    entry('assistant', 'write', [{ type: 'tool_use', id: 'write', name: 'Write', input: { file_path: '/tmp/file', content: 'must not be silently lost' } }]),
+    ...activity,
+  ].map(value => JSON.stringify(value)).join('\n') + '\n')
+  const recovery = await service.getSessionHistoryRecovery(id)
+  expect(recovery.completeness?.activity).toBe(false)
+  expect(recovery.completeness?.workspace).toBe(false)
+  expect(recovery.messages).toHaveLength(2048)
+  expect(recovery.messages.some(message => message.id === 'write')).toBe(false)
+})
+
+test('the byte budget marks only discarded activity incomplete', async () => {
+  await writeFile(file, Array.from({ length: 800 }, (_, index) => JSON.stringify(entry('assistant', `agent-${index}`, [
+    { type: 'tool_use', id: `agent-${index}`, name: 'Agent', input: { description: 'x'.repeat(4096) } },
+  ]))).join('\n') + '\n')
+  const recovery = await service.getSessionHistoryRecovery(id)
+  expect(recovery.completeness?.activity).toBe(false)
+  expect(recovery.completeness?.workspace).toBe(true)
+  expect(recovery.messages.length).toBeLessThan(800)
+  expect(recovery.messages.reduce((bytes, message) => bytes + Buffer.byteLength(JSON.stringify(message)), 0)).toBeLessThanOrEqual(3 * 1024 * 1024)
+})
+
+test('workspace-only overflow does not mark activity incomplete', async () => {
+  await writeFile(file, Array.from({ length: 2050 }, (_, index) => JSON.stringify(entry('assistant', `write-${index}`, [
+    { type: 'tool_use', id: `write-${index}`, name: 'Write', input: { file_path: '/tmp/file', content: 'bounded' } },
+  ]))).join('\n') + '\n')
+  const recovery = await service.getSessionHistoryRecovery(id)
+  expect(recovery.completeness?.workspace).toBe(false)
+  expect(recovery.completeness?.activity).toBe(true)
+  expect(recovery.messages).toHaveLength(2048)
+})
+
+for (const order of ['write-agent', 'agent-write'] as const) {
+  for (const overflow of [false, true]) {
+    test(`mixed ${order} replacement stays incomplete (overflow=${overflow})`, async () => {
+      const write = { type: 'tool_use', id: 'mixed-write', name: 'Write', input: { file_path: '/tmp/file', content: 'must not disappear' } }
+      const agent = { type: 'tool_use', id: 'mixed-agent', name: 'Agent', input: { description: 'inspect' } }
+      const tail = overflow ? Array.from({ length: 2050 }, (_, index) => entry('assistant', `agent-${index}`, [
+        { type: 'tool_use', id: `agent-${index}`, name: 'Agent', input: {} },
+      ])) : []
+      await writeFile(file, [
+        entry('assistant', 'mixed', order === 'write-agent' ? [write, agent] : [agent, write]),
+        ...tail,
+      ].map(value => JSON.stringify(value)).join('\n') + '\n')
+      const recovery = await service.getSessionHistoryRecovery(id)
+      expect(recovery.status).toBe('incomplete')
+      expect(recovery.completeness?.workspace).toBe(false)
+      expect(recovery.omittedRecords).toBeGreaterThan(0)
+    })
+  }
+}
+
+test('activity-only discarded rows do not reset an earlier oversized workspace failure', async () => {
+  await writeFile(file, [
+    entry('assistant', 'large-write', [{ type: 'tool_use', id: 'large-write', name: 'Write', input: { file_path: '/tmp/file', content: 'x'.repeat(128 * 1024) } }]),
+    ...Array.from({ length: 2050 }, (_, index) => entry('assistant', `agent-${index}`, [
+      { type: 'tool_use', id: `agent-${index}`, name: 'Agent', input: {} },
+    ])),
+  ].map(value => JSON.stringify(value)).join('\n') + '\n')
+  const recovery = await service.getSessionHistoryRecovery(id)
+  expect(recovery.completeness?.workspace).toBe(false)
+  expect(recovery.completeness?.activity).toBe(false)
+})
+
+for (const tailCount of [2045, 2046]) {
+  test(`equal-ordinal workspace and background evidence is conservative at the cap (${tailCount})`, async () => {
+    await writeFile(file, [
+      entry('assistant', 'mixed', [
+        { type: 'tool_use', id: 'write', name: 'Write', input: { file_path: '/tmp/file', content: 'retained' } },
+        { type: 'tool_use', id: 'shell', name: 'Bash', input: { command: 'sleep 1', run_in_background: true } },
+      ]),
+      entry('user', 'result', [{ type: 'tool_result', tool_use_id: 'shell', content: 'background' }], { toolUseResult: { backgroundTaskId: 'task' } }),
+      ...Array.from({ length: tailCount }, (_, index) => entry('assistant', `agent-${index}`, [
+        { type: 'tool_use', id: `agent-${index}`, name: 'Agent', input: {} },
+      ])),
+    ].map(value => JSON.stringify(value)).join('\n') + '\n')
+    const recovery = await service.getSessionHistoryRecovery(id)
+    expect(recovery.completeness?.workspace).toBe(tailCount === 2045)
+    expect(recovery.messages).toHaveLength(2048)
+    if (tailCount === 2045) {
+      expect(recovery.messages.some(message => message.id === 'mixed')).toBe(true)
+      expect(recovery.messages.some(message => message.id === 'mixed:background:shell')).toBe(true)
+    }
+  })
+}
+
+for (const order of ['shell-write', 'write-shell'] as const) {
+  test(`mixed tool results preserve lost activity across workspace overflow (${order})`, async () => {
+    const shellResult = { type: 'tool_result', tool_use_id: 'shell', content: 'background' }
+    const writeResult = { type: 'tool_result', tool_use_id: 'write', content: 'written' }
+    await writeFile(file, [
+      ...Array.from({ length: 2050 }, (_, index) => entry('assistant', `old-write-${index}`, [
+        { type: 'tool_use', id: `old-write-${index}`, name: 'Write', input: { file_path: '/tmp/file', content: 'old' } },
+      ])),
+      entry('assistant', 'calls', [
+        { type: 'tool_use', id: 'shell', name: 'Bash', input: { command: 'sleep 1', run_in_background: true } },
+        { type: 'tool_use', id: 'write', name: 'Write', input: { file_path: '/tmp/file', content: 'latest' } },
+      ]),
+      entry('user', 'results', order === 'shell-write' ? [shellResult, writeResult] : [writeResult, shellResult], { toolUseResult: { backgroundTaskId: 'task' } }),
+    ].map(value => JSON.stringify(value)).join('\n') + '\n')
+    const recovery = await service.getSessionHistoryRecovery(id)
+    expect(recovery.completeness?.workspace).toBe(false)
+    expect(recovery.completeness?.activity).toBe(false)
+    expect(recovery.messages.some(message => message.id === 'results')).toBe(true)
+    expect(recovery.messages).toHaveLength(2048)
+  })
+}

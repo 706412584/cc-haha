@@ -19,7 +19,13 @@ vi.mock('../api/sessions', () => ({
   },
 }))
 
-import { useWorkspaceContentStore } from './workspaceContentStore'
+import {
+  documentBlobKey,
+  fetchDocumentBlob,
+  peekDocumentBlob,
+  resetDocumentBlobCacheForTests,
+} from '../lib/workspace/documentBlobCache'
+import { useWorkspaceContentStore, workspaceFileKey } from './workspaceContentStore'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -336,5 +342,148 @@ describe('status probe', () => {
     store().clearSession(SESSION)
     await store().loadStatus(SESSION)
     expect(mocks.getWorkspaceStatus).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('document previews', () => {
+  it('carries a document type and its version, and no payload, into the entry', async () => {
+    mocks.getWorkspaceFile.mockResolvedValue({
+      state: 'ok',
+      path: 'out/thesis.pdf',
+      previewType: 'pdf',
+      mimeType: 'application/pdf',
+      language: 'pdf',
+      size: 5,
+      version: '1759140000000-5',
+    })
+
+    await store().loadFile(SESSION, 'out/thesis.pdf')
+
+    expect(store().getFile(SESSION, 'out/thesis.pdf')).toMatchObject({
+      state: 'ok',
+      previewType: 'pdf',
+      version: '1759140000000-5',
+      mimeType: 'application/pdf',
+    })
+    expect(store().getFile(SESSION, 'out/thesis.pdf')?.content).toBeUndefined()
+  })
+
+  it('picks up a new version on a forced reload, which is what tells a viewer to fetch again', async () => {
+    mocks.getWorkspaceFile.mockResolvedValueOnce({ state: 'ok', path: 'a.docx', previewType: 'docx', language: 'docx', size: 5, version: 'v1' })
+    mocks.getWorkspaceFile.mockResolvedValueOnce({ state: 'ok', path: 'a.docx', previewType: 'docx', language: 'docx', size: 7, version: 'v2' })
+
+    await store().loadFile(SESSION, 'a.docx')
+    await store().loadFile(SESSION, 'a.docx', { force: true })
+
+    expect(store().getFile(SESSION, 'a.docx')?.version).toBe('v2')
+  })
+
+  it('reports too_large for a document with its metadata intact, so the panel can still offer the file', async () => {
+    mocks.getWorkspaceFile.mockResolvedValue({ state: 'too_large', path: 'big.xlsx', previewType: 'xlsx', language: 'xlsx', size: 99, version: 'v' })
+
+    await store().loadFile(SESSION, 'big.xlsx')
+
+    expect(store().getFile(SESSION, 'big.xlsx')).toMatchObject({ state: 'too_large', previewType: 'xlsx', size: 99 })
+  })
+})
+
+describe('file view state', () => {
+  it('keeps the zoom when only the scroll position is written', () => {
+    store().setFileZoom(SESSION, 'a.pdf', 1.5)
+
+    store().setFileView(SESSION, 'a.pdf', { scrollTop: 120, scrollLeft: 4 })
+
+    // The scroll handlers write only the scroll fields: replacing would silently
+    // reset a zoom the reader chose.
+    expect(store().fileViewByKey[workspaceFileKey(SESSION, 'a.pdf')]).toEqual({ scrollTop: 120, scrollLeft: 4, zoom: 1.5 })
+  })
+
+  it('keeps the scroll position when the zoom changes', () => {
+    store().setFileView(SESSION, 'a.pdf', { scrollTop: 120, scrollLeft: 4, revealNonce: 3 })
+
+    store().setFileZoom(SESSION, 'a.pdf', 2)
+
+    expect(store().fileViewByKey[workspaceFileKey(SESSION, 'a.pdf')]).toEqual({
+      scrollTop: 120,
+      scrollLeft: 4,
+      revealNonce: 3,
+      zoom: 2,
+    })
+  })
+
+  it('starts a view at the origin when the first thing recorded is a zoom', () => {
+    store().setFileZoom(SESSION, 'a.pdf', 0.5)
+
+    expect(store().fileViewByKey[workspaceFileKey(SESSION, 'a.pdf')]).toEqual({ scrollTop: 0, scrollLeft: 0, zoom: 0.5 })
+  })
+
+  it('does not create an entry just to record the default zoom', () => {
+    store().setFileZoom(SESSION, 'a.pdf', undefined)
+
+    expect(store().fileViewByKey[workspaceFileKey(SESSION, 'a.pdf')]).toBeUndefined()
+  })
+
+  it('clears a stored zoom without disturbing the scroll position', () => {
+    store().setFileView(SESSION, 'a.pdf', { scrollTop: 9, scrollLeft: 1 })
+    store().setFileZoom(SESSION, 'a.pdf', 3)
+
+    store().setFileZoom(SESSION, 'a.pdf', undefined)
+
+    expect(store().fileViewByKey[workspaceFileKey(SESSION, 'a.pdf')]).toEqual({ scrollTop: 9, scrollLeft: 1, zoom: undefined })
+  })
+
+  it('remembers the worksheet a workbook was left on, beside its scroll position and zoom', () => {
+    store().setFileView(SESSION, 'a.xlsx', { scrollTop: 30, scrollLeft: 2 })
+    store().setFileZoom(SESSION, 'a.xlsx', 1.25)
+
+    store().setFileSheet(SESSION, 'a.xlsx', '结果')
+
+    expect(store().fileViewByKey[workspaceFileKey(SESSION, 'a.xlsx')]).toEqual({ scrollTop: 30, scrollLeft: 2, zoom: 1.25, sheet: '结果' })
+  })
+
+  it('starts a view at the origin when the first thing recorded is a worksheet', () => {
+    store().setFileSheet(SESSION, 'a.xlsx', 'Second')
+
+    expect(store().fileViewByKey[workspaceFileKey(SESSION, 'a.xlsx')]).toEqual({ scrollTop: 0, scrollLeft: 0, sheet: 'Second' })
+  })
+
+  it('keeps the worksheet when only the scroll position is written', () => {
+    store().setFileSheet(SESSION, 'a.xlsx', 'Second')
+
+    store().setFileView(SESSION, 'a.xlsx', { scrollTop: 77, scrollLeft: 0 })
+
+    expect(store().fileViewByKey[workspaceFileKey(SESSION, 'a.xlsx')]?.sheet).toBe('Second')
+  })
+
+  it('gives a file and its view the same key however they are read', () => {
+    expect(workspaceFileKey('s', 'a/b.pdf')).toBe('s::a/b.pdf')
+  })
+})
+
+describe('held document bytes', () => {
+  const held = (session: string, path: string) =>
+    peekDocumentBlob(documentBlobKey(session, path, 'v1'))
+
+  beforeEach(async () => {
+    resetDocumentBlobCacheForTests()
+    for (const [session, path] of [[SESSION, 'a.pdf'], [SESSION, 'b.pdf'], ['session-b', 'a.pdf']] as const) {
+      await fetchDocumentBlob(session, path, 'v1', async () => new Blob(['x']))
+    }
+  })
+
+  it('lets go of a file the workspace forgets', () => {
+    store().forgetFile(SESSION, 'a.pdf')
+
+    expect(held(SESSION, 'a.pdf')).toBeUndefined()
+    expect(held(SESSION, 'b.pdf')).toBeDefined()
+    expect(held('session-b', 'a.pdf')).toBeDefined()
+  })
+
+  it('lets go of everything a closed session held, and nothing another session held', () => {
+    store().clearSession(SESSION)
+
+    expect(held(SESSION, 'a.pdf')).toBeUndefined()
+    expect(held(SESSION, 'b.pdf')).toBeUndefined()
+    expect(held('session-b', 'a.pdf')).toBeDefined()
   })
 })

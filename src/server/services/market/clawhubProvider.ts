@@ -7,8 +7,12 @@
  *  - GET /api/v1/skills/{slug}                        → {skill, latestVersion, owner, metadata, moderation}
  *  - GET /api/v1/skills/{slug}/versions/{v}           → {version:{license, files[], security}}
  *  - GET /api/v1/skills/{slug}/file?path=             → raw file text
+ *
+ * Slugs are not unique: every per-skill endpoint accepts `?owner=`, and without
+ * it a shared slug answers 409 AMBIGUOUS_SKILL_SLUG. See `clawhubOwnerFor`.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { parseFrontmatter } from '../../../utils/frontmatterParser.js'
 import {
   getProviderBase,
@@ -21,6 +25,7 @@ import {
   MARKET_ERROR_CODES,
   MARKET_LIMITS,
   MarketUpstreamError,
+  meaningfulChangelog,
   skillId,
   type MarketProvider,
   type NormalizedSkill,
@@ -57,7 +62,7 @@ type ClawhubSearchResult = {
 
 type ClawhubDetail = {
   skill: ClawhubListItem
-  latestVersion?: { version?: string; license?: string }
+  latestVersion?: { version?: string; license?: string; changelog?: string; createdAt?: number }
   owner?: { handle?: string; displayName?: string; image?: string }
   moderation?: unknown
 }
@@ -67,19 +72,74 @@ type ClawhubVersionDetail = {
     version?: string
     license?: string
     files?: Array<{ path: string; size: number; sha256?: string; contentType?: string }>
-    security?: { status?: string; hasWarnings?: boolean; virustotalUrl?: string }
+    security?: ClawhubSecurity
   }
 }
 
-// ClawHub slugs are not unique across owners. Ambiguous slugs return
-// 409 AMBIGUOUS_SKILL_SLUG with candidate owners; disambiguate via ?owner=
-// (first match = primary listing) and remember the resolution.
+type ClawhubScanner = {
+  status?: string
+  normalizedStatus?: string
+  recommendation?: string
+  summary?: string
+}
+
+type ClawhubSecurity = {
+  status?: string
+  hasWarnings?: boolean
+  virustotalUrl?: string
+  scanners?: { vt?: ClawhubScanner; skillspector?: ClawhubScanner; llm?: ClawhubScanner }
+}
+
+/** Public skill pages; links shown to readers, independent of the API base override. */
+const CLAWHUB_SITE = 'https://clawhub.ai'
+
+// ClawHub slugs are not unique across owners. Every per-skill read is made for
+// one owner, chosen in this order:
+//  1. the owner one operation was explicitly run with (`withClawhubOwner`);
+//  2. the owner the curated catalog pins for that slug (`setClawhubOwnerHints`);
+//  3. an owner resolved earlier for the slug (remembered below).
+// A pinned owner (1 or 2) is never widened: a 409 for it is an error. Without
+// one, 409 AMBIGUOUS_SKILL_SLUG resolves to the first match (the primary
+// listing) and that resolution is remembered.
 const ownerCache = new Map<string, string>()
 
+/** Owners the curated catalog pins: a catalog card names the exact skill it recommends. */
+const ownerHints = new Map<string, string>()
+
+/** The owner one detail/file/install operation was asked for. */
+const requestedOwner = new AsyncLocalStorage<{ slug: string; owner: string }>()
+
+export function setClawhubOwnerHints(hints: Iterable<readonly [string, string]>): void {
+  ownerHints.clear()
+  for (const [slug, owner] of hints) ownerHints.set(slug, owner)
+}
+
+export function getClawhubOwnerHints(): Array<[string, string]> {
+  return [...ownerHints]
+}
+
+/** Run one operation pinned to `owner` for `slug`; without an owner it runs unpinned. */
+export function withClawhubOwner<T>(slug: string, owner: string | undefined, operation: () => Promise<T>): Promise<T> {
+  if (!owner) return operation()
+  return requestedOwner.run({ slug, owner }, operation)
+}
+
+function pinnedClawhubOwner(slug: string): string | undefined {
+  const requested = requestedOwner.getStore()
+  if (requested?.slug === slug) return requested.owner
+  return ownerHints.get(slug)
+}
+
+/** The owner a read of `slug` will use right now, if one is known before asking upstream. */
+export function clawhubOwnerFor(slug: string): string | undefined {
+  return pinnedClawhubOwner(slug) ?? ownerCache.get(slug)
+}
+
 async function clawhubFetch(url: URL, slug: string): Promise<Response> {
-  const cachedOwner = ownerCache.get(slug)
-  if (cachedOwner && !url.searchParams.has('owner')) {
-    url.searchParams.set('owner', cachedOwner)
+  const pinnedOwner = pinnedClawhubOwner(slug)
+  const knownOwner = pinnedOwner ?? ownerCache.get(slug)
+  if (knownOwner && !url.searchParams.has('owner')) {
+    url.searchParams.set('owner', knownOwner)
   }
   const res = await providerFetch('clawhub', url.toString())
   if (res.status !== 409) return res
@@ -87,7 +147,10 @@ async function clawhubFetch(url: URL, slug: string): Promise<Response> {
   const body = (await res.json().catch(() => null)) as
     | { code?: string; matches?: Array<{ ownerHandle?: string }> }
     | null
-  const resolvedOwner = body?.code === 'AMBIGUOUS_SKILL_SLUG' ? body.matches?.[0]?.ownerHandle : undefined
+  // A pinned owner that still answers 409 is not a guess we may widen.
+  const resolvedOwner = !pinnedOwner && body?.code === 'AMBIGUOUS_SKILL_SLUG'
+    ? body.matches?.[0]?.ownerHandle
+    : undefined
   if (!resolvedOwner) {
     throw new MarketUpstreamError('clawhub', MARKET_ERROR_CODES.upstreamError, `clawhub responded 409 for ${url.pathname}`)
   }
@@ -113,24 +176,47 @@ async function clawhubFetchJson<T>(url: URL, slug: string): Promise<T> {
   }
 }
 
-function mapSecurity(security?: { status?: string; hasWarnings?: boolean; virustotalUrl?: string }): {
+/**
+ * ClawHub's scan of one version: an overall status plus per-scanner verdicts
+ * (VirusTotal, skillspector, an LLM review). The overall status decides the
+ * badge; each scanner becomes its own report so the reader sees which one
+ * objected and why.
+ */
+function mapSecurity(security?: ClawhubSecurity): {
   status: SecurityStatus
   reports: SecurityReport[]
-} {  if (!security?.status) return { status: 'unknown', reports: [] }
+} {
+  if (!security?.status) return { status: 'unknown', reports: [] }
   const clean = security.status === 'clean'
-  return {
-    status: clean ? 'benign' : 'flagged',
-    reports: [
-      {
-        vendor: 'clawhub-scan',
-        status: security.status,
-        statusText: clean
-          ? security.hasWarnings ? 'Clean (with warnings)' : 'Clean'
-          : `Scan status: ${security.status}`,
-        reportUrl: security.virustotalUrl,
-      },
-    ],
+  const reports: SecurityReport[] = [
+    {
+      vendor: 'clawhub-scan',
+      status: security.status,
+      statusText: clean
+        ? security.hasWarnings ? 'Clean (with warnings)' : 'Clean'
+        : `Scan status: ${security.status}`,
+      reportUrl: security.virustotalUrl,
+    },
+  ]
+  const scanners: Array<[string, ClawhubScanner | undefined]> = [
+    ['VirusTotal', security.scanners?.vt],
+    ['skillspector', security.scanners?.skillspector],
+    ['LLM review', security.scanners?.llm],
+  ]
+  for (const [vendor, scanner] of scanners) {
+    const status = scanner?.normalizedStatus || scanner?.status
+    if (typeof status !== 'string' || !status) continue
+    const recommendation = typeof scanner?.recommendation === 'string' ? scanner.recommendation : ''
+    const summary = typeof scanner?.summary === 'string' && scanner.summary ? scanner.summary : undefined
+    reports.push({
+      vendor,
+      status,
+      statusText: recommendation ? `${status} · ${recommendation}` : status,
+      ...(summary ? { summary } : {}),
+      ...(vendor === 'VirusTotal' && security.virustotalUrl ? { reportUrl: security.virustotalUrl } : {}),
+    })
   }
+  return { status: clean ? 'benign' : 'flagged', reports }
 }
 
 function normalizeListItem(item: ClawhubListItem): NormalizedSkill {
@@ -260,9 +346,16 @@ export const clawhubProvider: MarketProvider = {
     }
 
     const item = normalizeListItem(data.skill)
+    const owner = data.owner?.handle
+    const changelog = meaningfulChangelog(data.latestVersion?.changelog)
+    const publishedAt = data.latestVersion?.createdAt
     return {
       ...item,
       version,
+      ...(changelog
+        ? { changelog: { version, text: changelog, publishedAt: typeof publishedAt === 'number' ? publishedAt : undefined } }
+        : {}),
+      ...(owner ? { pageUrl: `${CLAWHUB_SITE}/${encodeURIComponent(owner)}/${encodeURIComponent(item.slug)}` } : {}),
       author: {
         handle: data.owner?.handle || '',
         displayName: data.owner?.displayName,

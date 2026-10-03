@@ -34,6 +34,16 @@ if (process.argv[2] === '--computer-use-repl-worker') {
   process.exit(0)
 }
 
+// Local speech recognition runs in this same executable, relaunched by the
+// server's voice recognizer. Like the worker above it must stay isolated: it
+// reads its private configuration from the environment, loads the downloaded
+// sherpa-onnx runtime by absolute path, and needs none of the desktop modes.
+if (process.argv[2] === '--voice-worker') {
+  const { runVoiceWorker } = await import('../../src/server/services/voice/sensevoice/worker')
+  await runVoiceWorker()
+  process.exit(0)
+}
+
 type AdapterConfigShape = Awaited<
   ReturnType<typeof import('../../adapters/common/config.ts')['loadConfig']>
 >

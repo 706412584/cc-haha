@@ -305,6 +305,13 @@ function makeChatSessionState(overrides: Partial<PerSessionState> = {}): PerSess
   }
 }
 
+// 一条挂起的授权请求，形状与 store 里的一致：`pendingPermission` 是最新一条的镜像，
+// `pendingPermissions` 是全集。
+const openRequest: Partial<PerSessionState> = {
+  pendingPermission: { requestId: 'r1', toolName: 'Bash', toolUseId: 'tu-1', input: {} },
+  pendingPermissions: { r1: { requestId: 'r1', toolName: 'Bash', toolUseId: 'tu-1', input: {} } },
+}
+
 function createDeferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason?: unknown) => void
@@ -608,6 +615,75 @@ describe('Sidebar', () => {
 
     expect(screen.getByRole('button', { name: /Alpha hidden/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Collapse display' })).toBeInTheDocument()
+  })
+
+  describe('a folded project with a session waiting on the user', () => {
+    // Eleven sessions against a six-row preview: the last two are past the fold.
+    function seedFoldedProject() {
+      const base = new Date('2026-05-15T10:00:00.000Z').getTime()
+      useSessionStore.setState({
+        sessions: Array.from({ length: 11 }, (_, index) => (
+          makeSession(
+            `alpha-${index + 1}`,
+            index === 10 ? 'Alpha waiting' : index === 9 ? 'Alpha folded' : `Alpha ${index + 1}`,
+            '/workspace/alpha',
+            new Date(base - index * 1000).toISOString(),
+          )
+        )),
+      })
+    }
+
+    it('keeps the waiting row on screen while its quiet neighbour stays folded away', () => {
+      seedFoldedProject()
+      useChatStore.setState({
+        sessions: { 'alpha-11': makeChatSessionState({ chatState: 'tool_executing', ...openRequest }) },
+      } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+      render(<Sidebar />)
+
+      // On a phone the dot on the menu button points at this row, and there is no
+      // tab strip to fall back on: a row folded out of the drawer would end the
+      // signal one step short.
+      const waitingRow = screen.getByRole('button', { name: /Alpha waiting/ })
+      expect(within(waitingRow).getByLabelText('Waiting for your approval')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /Alpha folded/ })).not.toBeInTheDocument()
+    })
+
+    it('folds the row away again once it stops waiting', () => {
+      seedFoldedProject()
+      useChatStore.setState({
+        sessions: { 'alpha-11': makeChatSessionState({ chatState: 'tool_executing', ...openRequest }) },
+      } as Partial<ReturnType<typeof useChatStore.getState>>)
+      render(<Sidebar />)
+      expect(screen.getByRole('button', { name: /Alpha waiting/ })).toBeInTheDocument()
+
+      act(() => {
+        useChatStore.setState({
+          sessions: {
+            'alpha-11': makeChatSessionState({ chatState: 'tool_executing', pendingPermission: null, pendingPermissions: {} }),
+          },
+        } as Partial<ReturnType<typeof useChatStore.getState>>)
+      })
+
+      expect(screen.queryByRole('button', { name: /Alpha waiting/ })).not.toBeInTheDocument()
+    })
+
+    it('keeps the open session and a waiting one visible together, in list order', () => {
+      seedFoldedProject()
+      useTabStore.setState({
+        tabs: [{ sessionId: 'alpha-10', title: 'Alpha folded', type: 'session', status: 'idle' }],
+        activeTabId: 'alpha-10',
+      })
+      useChatStore.setState({
+        sessions: { 'alpha-11': makeChatSessionState({ chatState: 'tool_executing', ...openRequest }) },
+      } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+      render(<Sidebar />)
+
+      const rows = screen.getAllByRole('button', { name: /^Alpha / }).map((row) => row.textContent ?? '')
+      expect(rows.at(-2)).toContain('Alpha folded')
+      expect(rows.at(-1)).toContain('Alpha waiting')
+    })
   })
 
   it('does not show a fold control when a project is at or below the collapse threshold', () => {
@@ -2953,7 +3029,9 @@ describe('Sidebar', () => {
       seedSessions()
       useChatStore.setState({
         sessions: {
-          'today-1': makeChatSessionState({ chatState: 'permission_pending' }),
+          // chatState 故意不是 'permission_pending'：`status` 消息会在卡片还开着时
+          // 把它改成别的，只看 chatState 的实现在这里会熄灯。
+          'today-1': makeChatSessionState({ chatState: 'tool_executing', ...openRequest }),
         },
       } as Partial<ReturnType<typeof useChatStore.getState>>)
 
@@ -2964,6 +3042,71 @@ describe('Sidebar', () => {
       const waitingRow = within(runningGroup).getByRole('button', { name: /Today Session/ })
       expect(within(waitingRow).getByLabelText('Waiting for your approval')).toBeInTheDocument()
       expect(within(waitingRow).queryByLabelText('Session running')).not.toBeInTheDocument()
+    })
+
+    it('does not call a session waiting from chatState alone, since no card exists for it', async () => {
+      seedSessions()
+      useChatStore.setState({
+        sessions: {
+          'today-1': makeChatSessionState({ chatState: 'permission_pending' }),
+        },
+      } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+      render(<Sidebar />)
+      await act(async () => { toggleBell() })
+
+      const runningGroup = screen.getByTestId('sidebar-task-group-running')
+      const row = within(runningGroup).getByRole('button', { name: /Today Session/ })
+      expect(within(row).queryByLabelText('Waiting for your approval')).not.toBeInTheDocument()
+      expect(within(row).getByLabelText('Session running')).toBeInTheDocument()
+    })
+
+    it('marks a waiting session in the project view too, in place of the running spinner', () => {
+      seedSessions()
+      // 没有为它开 tab：侧边栏要能标出没有 tab 的会话，tab 栏那边看不到它。
+      useChatStore.setState({
+        sessions: {
+          'today-1': makeChatSessionState({ chatState: 'tool_executing', ...openRequest }),
+          'yesterday-1': makeChatSessionState({ chatState: 'thinking' }),
+        },
+      } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+      render(<Sidebar />)
+
+      const waitingRow = screen.getByRole('button', { name: /Today Session/ })
+      expect(within(waitingRow).getByLabelText('Waiting for your approval')).toBeInTheDocument()
+      expect(within(waitingRow).queryByLabelText('Session running')).not.toBeInTheDocument()
+
+      // 只是在跑、没有在等的会话仍然转圈。
+      const busyRow = screen.getByRole('button', { name: /^Yesterday Session/ })
+      expect(within(busyRow).getByLabelText('Session running')).toBeInTheDocument()
+      expect(within(busyRow).queryByLabelText('Waiting for your approval')).not.toBeInTheDocument()
+    })
+
+    it('hands a project-view row back to the spinner once the request is answered', () => {
+      seedSessions()
+      useChatStore.setState({
+        sessions: {
+          'today-1': makeChatSessionState({ chatState: 'tool_executing', ...openRequest }),
+        },
+      } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+      render(<Sidebar />)
+      expect(within(screen.getByRole('button', { name: /Today Session/ })).getByLabelText('Waiting for your approval'))
+        .toBeInTheDocument()
+
+      // 往返：授权被处理后标志要撤掉，会话还在跑，所以回到转圈。
+      act(() => {
+        useChatStore.setState({
+          sessions: {
+            'today-1': makeChatSessionState({ chatState: 'tool_executing', pendingPermission: null, pendingPermissions: {} }),
+          },
+        } as Partial<ReturnType<typeof useChatStore.getState>>)
+      })
+
+      const row = screen.getByRole('button', { name: /Today Session/ })
+      expect(within(row).queryByLabelText('Waiting for your approval')).not.toBeInTheDocument()
+      expect(within(row).getByLabelText('Session running')).toBeInTheDocument()
     })
 
     it('lights the bell when the organize menu picks by time, because they are one state', async () => {

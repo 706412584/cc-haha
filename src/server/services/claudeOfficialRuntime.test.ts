@@ -23,10 +23,33 @@ describe('Claude official runtime model selection', () => {
     })
   }
 
-  test('selects Opus 5.5 for Max and preserves the Sonnet default for other subscriptions', () => {
+  function useProSubscription() {
+    tokenSpy.mockResolvedValue({
+      accessToken: 'fake-access-token',
+      refreshToken: null,
+      expiresAt: null,
+      scopes: [],
+      subscriptionType: 'pro',
+    })
+  }
+
+  test('selects Opus 5.5 for Max and Sonnet 5.5 for other subscriptions', () => {
     expect(getClaudeOfficialDefaultModelId('max')).toBe('claude-opus-5-5')
-    expect(getClaudeOfficialDefaultModelId('pro')).toBe('claude-sonnet-5')
-    expect(getClaudeOfficialDefaultModelId(null)).toBe('claude-sonnet-5')
+    expect(getClaudeOfficialDefaultModelId('pro')).toBe('claude-sonnet-5-5')
+    expect(getClaudeOfficialDefaultModelId(null)).toBe('claude-sonnet-5-5')
+  })
+
+  test('resolves Sonnet aliases and the unset default to Sonnet 5.5', async () => {
+    useProSubscription()
+    for (const model of [undefined, 'sonnet', 'sonnet[1m]', 'SONNET:1m', 'claude-sonnet-5-5[1m]']) {
+      expect(await resolveClaudeOfficialRuntimeModel(model)).toBe('claude-sonnet-5-5')
+    }
+  })
+
+  test('preserves an explicitly selected Sonnet 5 instead of rewriting it to Sonnet 5.5', async () => {
+    useProSubscription()
+    expect(await resolveClaudeOfficialRuntimeModel('claude-sonnet-5')).toBe('claude-sonnet-5')
+    expect(await resolveClaudeOfficialRuntimeModel('claude-sonnet-5[1m]')).toBe('claude-sonnet-5')
   })
 
   test('resolves Opus aliases and legacy defaults to Opus 5.5', async () => {

@@ -1348,6 +1348,26 @@ for (const disableAdaptive of [false, true]) {
   }, 10_000)
 }
 
+for (const disableAdaptive of [false, true]) {
+  test(`Sonnet 5.5 never sends disabled thinking, with optional adaptive disabled=${disableAdaptive}`, async () => {
+    const { content, requests } = await captureQueryRequest({
+      model: 'claude-sonnet-5-5',
+      configureCapabilityOverrides: false,
+      globalThinkingEnabled: false,
+      env: {
+        CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: disableAdaptive ? '1' : undefined,
+        CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1',
+      },
+    })
+    expect(content).toContainEqual({ type: 'text', text: 'OK' })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.model).toBe('claude-sonnet-5-5')
+    expect(requests[0]?.thinking).toEqual({ type: 'adaptive' })
+    expect(requests[0]?.max_tokens).toBe(128_000)
+    expect(requests[0]?.output_config).toEqual({ effort: 'medium' })
+  }, 10_000)
+}
+
 test('Opus 5.5 respects an explicit third-party capability opt-out', async () => {
   const { requests } = await captureQueryRequest({
     model: 'claude-opus-5-5',

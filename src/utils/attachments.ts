@@ -2212,6 +2212,11 @@ export async function getChangedFiles(
       const fileState = toolUseContext.readFileState.get(filePath)
       if (!fileState) return null
 
+      // PDF changes have no attachment representation below. An automatic
+      // Read would silently refresh overwrite authorization without showing
+      // the new document to the model, including after a prior Write.
+      if (isPDFExtension(parse(filePath).ext)) return null
+
       // TODO: Implement offset/limit support for changed files
       if (fileState.offset !== undefined || fileState.limit !== undefined) {
         return null

@@ -47,6 +47,22 @@ const SMOKE_MODEL_ID = 'desktop-ui-smoke-model'
 export const DESKTOP_UI_SMOKE_LOCALE = 'en'
 export const DESKTOP_UI_SMOKE_ALLOW_SELECTOR = 'button[aria-label^="Allow: "]'
 
+/**
+ * The tab of a session stopped on a decision only the user can make.
+ * `data-attention` is set on the tab by TabBar; the strip is the only place it
+ * appears, so the selector is anchored there.
+ */
+export const DESKTOP_UI_SMOKE_ATTENTION_TAB = '[data-testid="tab-bar"] [data-attention="true"]'
+
+/**
+ * True while that tab carries the warning mark and has *not* also been given the
+ * running dot. A session parked on a permission card is "running" by chatState
+ * too, and the running dot said the one thing that is not true of it.
+ */
+export const DESKTOP_UI_SMOKE_ATTENTION_PROBE =
+  `(() => { const tab = document.querySelector('${DESKTOP_UI_SMOKE_ATTENTION_TAB}'); ` +
+  `return !!tab && !!tab.querySelector('[role="img"]') && !tab.querySelector('[aria-label="Session running"]') })()`
+
 export function buildDesktopUiSmokeBootstrap(sessionId: string) {
   return [
     `localStorage.setItem('cc-haha-locale', ${JSON.stringify(DESKTOP_UI_SMOKE_LOCALE)})`,
@@ -262,7 +278,13 @@ export async function executeDeterministicDesktopSmoke(
       throw new Error('the tool wrote the fixture file before the permission dialog was answered')
     }
     await browserStep(['screenshot', join(artifactDir, 'permission-dialog.png')], { allowFailure: true })
+    // While the dialog is open the session's tab has to say the session is
+    // waiting on the person, not running, and has to stop saying it once the
+    // request is answered. A marker derived from anything but the open request
+    // gets one of those two wrong.
+    await browserStep(['wait', '--fn', DESKTOP_UI_SMOKE_ATTENTION_PROBE], { timeoutMs: 15_000 })
     await browserStep(['click', DESKTOP_UI_SMOKE_ALLOW_SELECTOR], { timeoutMs: 20_000 })
+    await browserStep(['wait', '--fn', `!document.querySelector('${DESKTOP_UI_SMOKE_ATTENTION_TAB}')`], { timeoutMs: 20_000 })
 
     await pollUntil(
       async () => existsSync(target) && readFileSync(target, 'utf8') === TARGET_CONTENT,

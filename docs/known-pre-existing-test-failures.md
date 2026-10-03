@@ -253,3 +253,35 @@ Bun 的 `fs.watch` 在 Linux 与 Windows 上都把 rename 的目标事件丢掉�
 - `src/utils/noKeyValueNudges.test.ts`（0 pass / 1 fail，架构分歧）
 
 「1 红 55 绿」类文件（agentToolUtils、tasks、ws-memory-events 等）**不 quarantine**——不值当丢覆盖，靠本清单记录即可。
+
+## 上游 v0.6.8 新增文件在 Windows 本地的失败（非合并引入）
+
+以下文件由上游 v0.6.8 引入，其**源码与测试与本仓库逐字节相同**（仅行尾差异），
+失败原因均为 Windows 本地环境，CI（Linux/macOS）上应通过：
+
+- `electron/services/microphonePermissions.test.ts > tolerates percent-encoding differences, and drive-letter case only on Windows`
+  — 用例传入 POSIX 绝对路径 `/Applications/My App/dist/index.html`，在 Windows 上
+  `pathToFileURL` 会解析成带盘符的路径，`darwin` 分支的比较因此不成立。
+- `src/__tests__/documentEngineImports.test.ts > imports a document engine only dynamically, or as a type`
+  — 扫描器用 `path.relative` 得到反斜杠分隔的相对路径，与 `ENTRY_POINTS` 里正斜杠的
+  `components/workspace/surfaces/document/pdf.worker.ts` 比较时不相等。
+- `src/__tests__/documentEngineImports.test.ts > reaches every document viewer through a lazy import…`
+  — 同一原因：`file.endsWith('document/documentViewers.ts')` 在 Windows 上不匹配。
+
+## coverage-checks 的负载型 flaky（仅覆盖率任务红，非合并引入）
+
+`coverage-checks` 与常规任务跑的是同一批测试，但 root 侧每个测试文件都带 v8 插桩单独起进程、
+desktop 侧整套带插桩并发，负载显著高于 `desktop-checks` / `server-checks`。下列失败只在这个任务里出现：
+
+- `desktop/src/lib/workspace/officeZipGuard.test.ts > an archive that lies about its sizes > is stopped at the limit, not after inflating everything it holds`
+  — 断言 `performance.now() - started < 250`（毫秒级墙钟预算）。插桩后实测 303–395 ms，本仓库三次采样
+  （2026-10-02 CI、2026-10-01 上游两次）全部超时；不带插桩时约 82 ms 稳定通过。
+  **处置**：已加入 `scripts/quality-gate/coverage.ts` 的 `desktopCoverageExcludes`（只影响覆盖率计分，
+  `desktop-checks` 仍照跑该文件）。上游自己的 coverage 任务在同一断言上同样红，属上游测试写法，非本仓库回归。
+- `src/server/__tests__/conversations.test.ts > WebSocket Chat Integration > should return initial context for a prewarmed empty session on the first inspection request`
+  — 该用例走 `contextOnly` 检查，服务端等待窗口是本仓库 v0.5.32 起刻意收紧的
+  `INSPECTION_CONTEXT_TIMEOUT_MS = 5_000`（上游为 20 s）。插桩高负载下 mock CLI 的
+  `get_context_usage` 响应偶尔超过 5 s，用例报 `body.context` 为 undefined（实测 5211 ms 即 5 s 超时 + 开销）。
+  **判定**：负载型偶发。2026-09-29 v0.6.7 合并的 coverage 任务同一用例 306 ms 通过；本地单跑 5/5 通过；
+  `server-checks` 全量也通过。**处置**：重跑该 job，不改生产代码（5 s 是刻意的桌面端 UX 行为，
+  为 CI 放宽会回退用户可见的快速回退语义）。

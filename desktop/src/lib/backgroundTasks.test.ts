@@ -6,6 +6,7 @@ import {
   hasRunningBackgroundTasks,
   hasRunningSubagentTasks,
   isVisibleSessionBackgroundTask,
+  listRunningBackgroundTasks,
 } from './backgroundTasks'
 import { translate } from '../i18n'
 
@@ -41,6 +42,48 @@ describe('hasRunningBackgroundTasks', () => {
     expect(isVisibleSessionBackgroundTask(teammate)).toBe(false)
     expect(hasRunningBackgroundTasks({ teammate })).toBe(false)
     expect(hasRunningSubagentTasks({ teammate })).toBe(false)
+  })
+})
+
+describe('listRunningBackgroundTasks', () => {
+  it('lists user-started tasks that are still running, in insertion order', () => {
+    const tasks = {
+      shell: task('shell', { taskType: 'local_bash' }),
+      agent: task('agent', { taskType: 'local_agent' }),
+      workflow: task('workflow', { taskType: 'local_workflow' }),
+    }
+    expect(listRunningBackgroundTasks(tasks).map((entry) => entry.taskId)).toEqual(['shell', 'agent', 'workflow'])
+  })
+
+  it('leaves out finished tasks, AutoDream and teammate runtime containers', () => {
+    const tasks = {
+      shell: task('shell', { taskType: 'local_bash' }),
+      completed: task('completed', { taskType: 'local_bash', status: 'completed' }),
+      failed: task('failed', { taskType: 'local_bash', status: 'failed' }),
+      stopped: task('stopped', { taskType: 'local_bash', status: 'stopped' }),
+      dream: task('dream', { taskType: 'dream' }),
+      teammate: task('teammate', { taskType: 'in_process_teammate' }),
+    }
+    expect(listRunningBackgroundTasks(tasks).map((entry) => entry.taskId)).toEqual(['shell'])
+  })
+
+  it('is empty for a missing task record', () => {
+    expect(listRunningBackgroundTasks(undefined)).toEqual([])
+    expect(listRunningBackgroundTasks({})).toEqual([])
+  })
+
+  it('agrees with hasRunningBackgroundTasks about what counts as running', () => {
+    const records: Array<Record<string, BackgroundAgentTask>> = [
+      {},
+      { dream: task('dream', { taskType: 'dream' }) },
+      { teammate: task('teammate', { taskType: 'in_process_teammate' }) },
+      { done: task('done', { status: 'completed' }) },
+      { shell: task('shell', { taskType: 'local_bash' }) },
+      { shell: task('shell', { taskType: 'local_bash' }), dream: task('dream', { taskType: 'dream' }) },
+    ]
+    for (const record of records) {
+      expect(listRunningBackgroundTasks(record).length > 0).toBe(hasRunningBackgroundTasks(record))
+    }
   })
 })
 

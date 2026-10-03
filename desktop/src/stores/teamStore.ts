@@ -1425,8 +1425,8 @@ export const useTeamStore = create<TeamStore>((set, get) => ({
             ),
           },
         }))
-        // Mapping the complete durable transcript preserves suppression state
-        // across cursor pages (for example task-notification follow-up blocks).
+        // Mapping the complete durable transcript keeps state that spans entries
+        // intact across cursor pages (for example a goal command and its output).
         // Pending local sends are merged back only after that projection.
         const transcriptMessages = mapHistoryMessagesToUiMessages(
           mergedEntries,

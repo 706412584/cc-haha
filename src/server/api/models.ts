@@ -91,6 +91,14 @@ const DEFAULT_MODELS = [
     supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   },
   {
+    id: 'claude-sonnet-5-5',
+    name: 'Sonnet 5.5',
+    description: 'Best combination of speed and intelligence',
+    context: '1m',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+  },
+  {
     id: 'claude-sonnet-5',
     name: 'Sonnet 5',
     description: 'Best combination of speed and intelligence',
@@ -108,7 +116,10 @@ const DEFAULT_MODELS = [
 
 const EFFORT_LEVELS = MODEL_REASONING_EFFORTS
 
-const DEFAULT_MODEL = 'claude-opus-5'
+// Standalone sessions (no provider, no Claude OAuth) start the CLI without an explicit model, so the
+// CLI's own default runs. Keep this in step with what the `opus` alias resolves to there
+// (getDefaultOpusModel) so the UI names the model that actually runs.
+const DEFAULT_MODEL = 'claude-opus-5-5'
 const DEFAULT_EFFORT = 'max'
 
 const settingsService = new SettingsService()

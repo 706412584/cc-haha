@@ -113,9 +113,12 @@ export function resolveSpecifier(
   specifier: string,
   fileSet: ReadonlySet<string>,
 ): string | null {
-  const base = specifier.startsWith('@/')
-    ? join(rootDir, 'desktop', 'src', specifier.slice(2))
-    : resolve(join(rootDir, dirname(fromFile)), specifier)
+  // A Vite query (`./pdf.worker?worker`, `./chunk?url`) names the same module as the
+  // bare path: a change to that module must still select its importer's checks.
+  const bare = specifier.replace(/\?.*$/, '')
+  const base = bare.startsWith('@/')
+    ? join(rootDir, 'desktop', 'src', bare.slice(2))
+    : resolve(join(rootDir, dirname(fromFile)), bare)
 
   const candidates: string[] = [base]
   for (const extension of RESOLUTION_EXTENSIONS) {

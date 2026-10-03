@@ -339,6 +339,63 @@ describe('filesystem API', () => {
     })).rejects.toMatchObject({ name: 'AbortError' })
   })
 
+  describe('serving an image to the chat', () => {
+    // A 1x1 PNG.
+    const PNG = Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de0000000c49444154789c63606060000000040001f61738550000000049454e44ae426082', 'hex')
+
+    async function homeFixture(): Promise<string> {
+      const dir = await fsp.mkdtemp(path.join(os.homedir(), 'claude-filesystem-test-'))
+      cleanupDirs.add(dir)
+      return dir
+    }
+
+    it('asks the browser to revalidate, so a picture rewritten under the same name is not stale for an hour', async () => {
+      const dir = await homeFixture()
+      await fsp.writeFile(path.join(dir, 'chart.png'), PNG)
+
+      const res = await handleFilesystemRoute(
+        '/api/filesystem/file',
+        makeUrl('/api/filesystem/file', { path: path.join(dir, 'chart.png') }),
+      )
+
+      expect(res.status).toBe(200)
+      expect(res.headers.get('Cache-Control')).toBe('private, no-cache')
+    })
+
+    it('expands a home-relative path, as the other local file routes do', async () => {
+      const dir = await homeFixture()
+      await fsp.writeFile(path.join(dir, 'chart.png'), PNG)
+
+      const res = await handleFilesystemRoute(
+        '/api/filesystem/file',
+        makeUrl('/api/filesystem/file', { path: `~/${path.basename(dir)}/chart.png` }),
+      )
+
+      expect(res.status).toBe(200)
+      expect(res.headers.get('Content-Type')).toBe('image/png')
+      expect(Buffer.from(await res.arrayBuffer()).equals(PNG)).toBe(true)
+    })
+
+    it('still keeps a home-relative path inside the allowed roots', async () => {
+      // A picture that really exists, outside $HOME, the temp directories and every
+      // registered root, reached by climbing out of the home directory. A missing
+      // file would answer 404 with or without the allow-list, and prove nothing.
+      const externalDir = await makeExternalFixtureDir()
+      if (!externalDir) return
+      cleanupDirs.add(externalDir)
+      const outside = path.join(externalDir, 'secret.png')
+      await fsp.writeFile(outside, PNG)
+
+      const res = await handleFilesystemRoute(
+        '/api/filesystem/file',
+        makeUrl('/api/filesystem/file', { path: `~/${path.relative(os.homedir(), outside)}` }),
+      )
+
+      expect(res.status).toBe(403)
+      expect((await res.json() as { error: string }).error).toContain('outside allowed directory')
+    })
+  })
+
   it('accepts /private/tmp aliases on macOS for browsing and file serving', async () => {
     if (process.platform !== 'darwin') return
 

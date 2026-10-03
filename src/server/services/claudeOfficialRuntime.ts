@@ -3,7 +3,7 @@ import type { ModelMapping } from '../types/provider.js'
 import { hahaOAuthService } from './hahaOAuthService.js'
 
 export const CLAUDE_OFFICIAL_OPUS_MODEL_ID = 'claude-opus-5-5'
-export const CLAUDE_OFFICIAL_SONNET_MODEL_ID = 'claude-sonnet-5'
+export const CLAUDE_OFFICIAL_SONNET_MODEL_ID = 'claude-sonnet-5-5'
 
 export const CLAUDE_OFFICIAL_DEFAULT_MODELS: ModelMapping = {
   main: CLAUDE_OFFICIAL_OPUS_MODEL_ID,

@@ -1,16 +1,26 @@
 /**
  * Skills Market — aggregation service.
  *
- * Merges the two upstream providers into a single paginated feed with
- * cross-source dedupe, per-source health/degradation reporting, TTL caching
- * (stale-while-error), and locally-computed install state.
+ * The default `catalog` scope pages through the curated snapshot shipped with
+ * the app (no network). The `market` scope merges the two upstream providers
+ * into a single paginated feed with cross-source dedupe, per-source
+ * health/degradation reporting, TTL caching (stale-while-error), and
+ * locally-computed install state.
  */
 
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { getClaudeConfigHomeDir } from '../../../utils/envUtils.js'
 import { marketCache, getSourceHealth, MARKET_TTL } from './cache.js'
-import { clawhubProvider } from './clawhubProvider.js'
+import {
+  catalogCategories,
+  catalogClawhubOwners,
+  catalogEntryFor,
+  catalogEntryToSkill,
+  filterCatalog,
+  getCatalog,
+} from './catalog/catalog.js'
+import { clawhubProvider, setClawhubOwnerHints, withClawhubOwner } from './clawhubProvider.js'
 import { skillhubProvider } from './skillhubProvider.js'
 import {
   MARKET_LIMITS,
@@ -21,6 +31,7 @@ import {
   type MarketFileContent,
   type MarketListResult,
   type MarketProvider,
+  type MarketScope,
   type MarketSource,
   type NormalizedSkill,
   type NormalizedSkillDetail,
@@ -34,6 +45,10 @@ const providers: Record<MarketSource, MarketProvider> = {
   clawhub: clawhubProvider,
   skillhub: skillhubProvider,
 }
+
+// Catalog entries name an exact ClawHub owner; detail, files and install must
+// resolve the same skill the card showed.
+setClawhubOwnerHints(catalogClawhubOwners())
 
 // ─── Cursor (opaque, merges both providers' pagination) ─────────────────────
 
@@ -154,6 +169,27 @@ export async function annotateInstallState<T extends NormalizedSkill>(skill: T):
   return { ...skill, installState: 'not-installable', notInstallableReason: 'name-conflict' }
 }
 
+/**
+ * Install state for a whole page: one `readdir` of the skills directory, then
+ * the per-skill check only for slugs that already have a directory (which is
+ * where installed vs. name-conflict is decided).
+ */
+export async function annotateInstallStates<T extends NormalizedSkill>(items: T[]): Promise<T[]> {
+  let existing: Set<string>
+  try {
+    existing = new Set(await fs.readdir(getMarketSkillsDir()))
+  } catch {
+    existing = new Set()
+  }
+  return Promise.all(items.map((item) => {
+    const dirName = sanitizeDirName(item.slug)
+    if (dirName && !existing.has(dirName)) {
+      return { ...item, installState: 'installable' as const, notInstallableReason: undefined, installedInfo: undefined }
+    }
+    return annotateInstallState(item)
+  }))
+}
+
 /** File-level installability checks — only possible once the file list is known. */
 export function applyFileLimits(detail: NormalizedSkillDetail): NormalizedSkillDetail {
   const files = detail.files.map((f) => ({ ...f, tooBig: f.size > MARKET_LIMITS.maxFileSize }))
@@ -207,6 +243,10 @@ export function dedupeSkills(items: NormalizedSkill[]): NormalizedSkill[] {
 
 export type MarketListParams = {
   q?: string
+  /** Defaults to `catalog`. */
+  scope?: MarketScope
+  /** Catalog category key; ignored by the `market` scope. */
+  category?: string
   source: 'all' | MarketSource
   security?: string
   installed?: 'all' | 'installed' | 'installable'
@@ -255,6 +295,11 @@ async function fetchProviderPage(
 }
 
 export async function listMarketSkills(params: MarketListParams): Promise<MarketListResult> {
+  if (params.scope !== 'market') return listCatalogSkills(params)
+  return listLiveMarketSkills(params)
+}
+
+async function listLiveMarketSkills(params: MarketListParams): Promise<MarketListResult> {
   const cursor = decodeCursor(params.cursor)
   const isFirstPage = !params.cursor
   const activeSources = params.source === 'all' ? MARKET_SOURCES : [params.source]
@@ -292,7 +337,7 @@ export async function listMarketSkills(params: MarketListParams): Promise<Market
 
   merged = dedupeSkills(merged)
   merged.sort((a, b) => b.stats.downloads - a.stats.downloads)
-  merged = await Promise.all(merged.map((item) => annotateInstallState(item)))
+  merged = await annotateInstallStates(merged.map(markCurated))
 
   if (params.security && params.security !== 'all') {
     merged = merged.filter((item) => item.securityStatus === params.security)
@@ -305,22 +350,128 @@ export async function listMarketSkills(params: MarketListParams): Promise<Market
     )
   }
 
-  return { items: merged, nextCursor: encodeCursor(nextCursor), sources }
+  return { scope: 'market', items: merged, nextCursor: encodeCursor(nextCursor), sources }
+}
+
+/**
+ * Mark a live result that is a curated catalog skill. ClawHub slugs are shared
+ * across owners, so a ClawHub result only counts when its owner is the one the
+ * catalog pins (list payloads carry no owner and are never marked).
+ */
+function markCurated(item: NormalizedSkill): NormalizedSkill {
+  const entry = catalogEntryFor(item.source, item.slug)
+  if (!entry) return item
+  if (item.source === 'clawhub' && item.author.handle !== entry.owner) return item
+  return { ...item, curated: true, featured: entry.featured === true ? true : undefined, category: entry.category }
+}
+
+// ─── Curated catalog ─────────────────────────────────────────────────────────
+
+const CATALOG_CURSOR_PREFIX = 'catalog:'
+
+/**
+ * One page of the curated catalog.
+ *
+ * Everything is local, so every filter — security and installed included —
+ * runs before pagination: a page is always full until the list is exhausted,
+ * which keeps infinite scroll from stalling on a filtered-out page.
+ */
+export async function listCatalogSkills(params: MarketListParams): Promise<MarketListResult> {
+  const catalog = getCatalog()
+  let items = await annotateInstallStates(
+    filterCatalog({ q: params.q, category: params.category, source: params.source }).map(catalogEntryToSkill),
+  )
+  if (params.security && params.security !== 'all') {
+    items = items.filter((item) => item.securityStatus === params.security)
+  }
+  if (params.installed && params.installed !== 'all') {
+    items = items.filter((item) =>
+      params.installed === 'installed' ? item.installState === 'installed' : item.installState !== 'installed',
+    )
+  }
+  const raw = params.cursor?.startsWith(CATALOG_CURSOR_PREFIX) ? params.cursor.slice(CATALOG_CURSOR_PREFIX.length) : ''
+  const offset = Math.max(0, Number.parseInt(raw, 10) || 0)
+  const end = offset + params.limit
+  // Provenance of every catalog answer: one snapshot, read when it was generated.
+  const status: SourceStatusInfo = { status: 'ok', fetchedAt: catalog.generatedAt, fromCache: true }
+  return {
+    scope: 'catalog',
+    items: items.slice(offset, end),
+    nextCursor: end < items.length ? `${CATALOG_CURSOR_PREFIX}${end}` : null,
+    sources: { clawhub: status, skillhub: { ...status } },
+    total: items.length,
+    categories: catalogCategories(),
+    catalogGeneratedAt: catalog.generatedAt,
+  }
+}
+
+/**
+ * Overlay the catalog's editorial fields on a live detail.
+ *
+ * Upstream stays authoritative for everything it owns (version, files,
+ * security, stats); the catalog only adds what upstream does not have — the
+ * category, the editor's pick, the reader-facing zh-CN summary, fallback tags
+ * and the note explaining a flagged verdict the catalog accepted.
+ */
+export function withCatalogMetadata(detail: NormalizedSkillDetail, requestedOwner?: string): NormalizedSkillDetail {
+  const entry = catalogEntryFor(detail.source, detail.slug)
+  if (!entry) return detail
+  if (detail.source === 'clawhub') {
+    // A different owner's copy of a catalog slug is not the curated skill.
+    const owner = requestedOwner || detail.author.handle
+    if (owner && owner !== entry.owner) return detail
+  }
+  const summaryEn = detail.summary || entry.summaryEn
+  return {
+    ...detail,
+    category: entry.category,
+    featured: entry.featured === true ? true : undefined,
+    curated: true,
+    summary: entry.summary || detail.summary,
+    ...(summaryEn ? { summaryEn } : {}),
+    tags: detail.tags.length > 0 ? detail.tags : [...entry.tags],
+    ...(detail.securityStatus === 'flagged' && entry.securityNote ? { securityNote: entry.securityNote } : {}),
+  }
 }
 
 // ─── Detail / file content ───────────────────────────────────────────────────
 
+/**
+ * The ClawHub owner a request names (the card it came from). SkillHub slugs
+ * are unique, so an owner there means nothing and is dropped.
+ */
+function requestOwner(source: MarketSource, owner: string | undefined): string | undefined {
+  return source === 'clawhub' && owner ? owner : undefined
+}
+
+/** Run a whole detail/file/install operation pinned to the requested owner. */
+export function withMarketOwner<T>(
+  source: MarketSource,
+  slug: string,
+  owner: string | undefined,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return withClawhubOwner(slug, requestOwner(source, owner), operation)
+}
+
+function ownerCacheSuffix(source: MarketSource, owner: string | undefined): string {
+  const pinned = requestOwner(source, owner)
+  return pinned ? `@${pinned}` : ''
+}
+
 export async function getMarketSkillDetail(
   source: MarketSource,
   slug: string,
+  options: { owner?: string } = {},
 ): Promise<{ skill: NormalizedSkillDetail; sourceStatus: SourceStatusInfo }> {
-  const cacheKey = `detail:${source}:${slug}`
+  const owner = requestOwner(source, options.owner)
+  const cacheKey = `detail:${source}:${slug}${ownerCacheSuffix(source, owner)}`
   let detail = marketCache.get<NormalizedSkillDetail>(cacheKey)
   let sourceStatus: SourceStatusInfo = { status: 'ok', fetchedAt: Date.now(), fromCache: true }
 
   if (!detail) {
     try {
-      detail = await providers[source].detail(slug)
+      detail = await withMarketOwner(source, slug, owner, () => providers[source].detail(slug))
       marketCache.set(cacheKey, detail, MARKET_TTL.detail)
       sourceStatus = { status: 'ok', fetchedAt: Date.now(), fromCache: false }
     } catch (error) {
@@ -336,7 +487,7 @@ export async function getMarketSkillDetail(
     }
   }
 
-  const annotated = applyFileLimits(await annotateInstallState(detail))
+  const annotated = applyFileLimits(await annotateInstallState(withCatalogMetadata(detail, owner)))
   return { skill: annotated, sourceStatus }
 }
 
@@ -351,12 +502,13 @@ export async function getMarketFileContent(
   source: MarketSource,
   slug: string,
   filePath: string,
+  owner?: string,
 ): Promise<MarketFileContent> {
-  const cacheKey = `file:${source}:${slug}:${filePath}`
+  const cacheKey = `file:${source}:${slug}${ownerCacheSuffix(source, owner)}:${filePath}`
   const cached = marketCache.get<MarketFileContent>(cacheKey)
   if (cached) return cached
 
-  const fetched = await providers[source].fetchFile(slug, filePath)
+  const fetched = await withMarketOwner(source, slug, owner, () => providers[source].fetchFile(slug, filePath))
   let content = fetched.content
   let truncated = false
   if (Buffer.byteLength(content, 'utf-8') > MARKET_LIMITS.previewTruncateBytes) {
@@ -384,8 +536,12 @@ export function getMarketStatus(): Record<MarketSource, SourceStatusInfo> {
 }
 
 /** Look up a single skill (used by install) — detail path, bypassing list. */
-export async function resolveMarketSkill(source: MarketSource, slug: string): Promise<NormalizedSkillDetail> {
-  const { skill } = await getMarketSkillDetail(source, slug)
+export async function resolveMarketSkill(
+  source: MarketSource,
+  slug: string,
+  owner?: string,
+): Promise<NormalizedSkillDetail> {
+  const { skill } = await getMarketSkillDetail(source, slug, { owner })
   return skill
 }
 

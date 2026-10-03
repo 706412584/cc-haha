@@ -17,8 +17,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
  */
 export const CATALOG_COLUMN_FLOOR = 340
 export const CATALOG_GAP = 18
-/** `SkillCard`'s `min-h-[232px]`. */
-export const CATALOG_CARD_MIN_HEIGHT = 232
+/** `SkillCard`'s `min-h-[208px]`. */
+export const CATALOG_CARD_MIN_HEIGHT = 208
 
 /**
  * `min(100%, …)` rather than the floor verbatim: the same bundle serves the

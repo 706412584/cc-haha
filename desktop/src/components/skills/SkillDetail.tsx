@@ -99,8 +99,10 @@ export function SkillDetail({ embedded = false }: { embedded?: boolean }) {
       void fetchSkills(selectedSkillContext || undefined)
       // Keep the market list in sync when it has this skill loaded.
       const market = useMarketStore.getState()
-      const detailCache = new Map(market.detailCache)
-      detailCache.delete(marketMeta.id)
+      // ClawHub entries are cached per owner, so drop every copy of this id.
+      const detailCache = new Map(
+        [...market.detailCache].filter(([, cached]) => cached.id !== marketMeta.id),
+      )
       useMarketStore.setState({
         detailCache,
         items: market.items.map((item) =>

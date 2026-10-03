@@ -1,6 +1,36 @@
 import { describe, expect, it } from 'vitest'
 import { classifyPreviewLink } from './previewLinkRouter'
 
+describe('classifyPreviewLink for a document the workspace can draw', () => {
+  it('opens a listed document in the workspace, not the system application', () => {
+    expect(classifyPreviewLink('out/thesis.pdf')).toMatchObject({ kind: 'file-preview', path: 'out/thesis.pdf' })
+    expect(classifyPreviewLink('/Users/x/thesis.PDF')).toMatchObject({ kind: 'file-preview', path: '/Users/x/thesis.PDF' })
+    expect(classifyPreviewLink('file:///Users/x/thesis.pdf')).toMatchObject({ kind: 'file-preview' })
+  })
+
+  it('opens a Word document in the workspace too', () => {
+    expect(classifyPreviewLink('out/thesis.docx')).toMatchObject({ kind: 'file-preview', path: 'out/thesis.docx' })
+    expect(classifyPreviewLink('/Users/x/Thesis.DOCX')).toMatchObject({ kind: 'file-preview' })
+  })
+
+  it.each(['out/budget.xlsx', 'out/macros.xlsm', 'out/legacy.xls', '/Users/x/Budget.XLSX'])(
+    'opens the Excel workbook %s in the workspace too',
+    (path) => {
+      expect(classifyPreviewLink(path)).toMatchObject({ kind: 'file-preview', path })
+    },
+  )
+
+  it('carries a line suffix through, as for any file', () => {
+    expect(classifyPreviewLink('out/thesis.pdf:3')).toMatchObject({ kind: 'file-preview', path: 'out/thesis.pdf', line: 3 })
+  })
+
+  it('still sends formats the workspace cannot draw to the system application', () => {
+    for (const path of ['reports/launch.pptx', 'reports/legacy.doc', 'exports/archive.zip', 'media/clip.mp4']) {
+      expect(classifyPreviewLink(path).kind).toBe('system-file')
+    }
+  })
+})
+
 describe('classifyPreviewLink', () => {
   it('classifies loopback urls as browser-localhost', () => {
     expect(classifyPreviewLink('http://localhost:5173/').kind).toBe('browser-localhost')
@@ -27,10 +57,9 @@ describe('classifyPreviewLink', () => {
     // surface would just dump the source as plain text.
     expect(classifyPreviewLink('/Users/x/app.ts').kind).toBe('file-preview')
   })
-  it('routes office and archive files to their system application instead of the code preview', () => {
-    expect(classifyPreviewLink('reports/brief.docx')).toMatchObject({ kind: 'system-file', path: 'reports/brief.docx' })
-    expect(classifyPreviewLink('reports/budget.xlsx').kind).toBe('system-file')
-    expect(classifyPreviewLink('reports/launch.pptx').kind).toBe('system-file')
+  it('routes office files the workspace cannot draw, and archives, to their system application instead of the code preview', () => {
+    expect(classifyPreviewLink('reports/launch.pptx')).toMatchObject({ kind: 'system-file', path: 'reports/launch.pptx' })
+    expect(classifyPreviewLink('reports/legacy.doc').kind).toBe('system-file')
     expect(classifyPreviewLink('exports/archive.zip').kind).toBe('system-file')
   })
   it('reads the line suffix the system prompt asks the model to write', () => {

@@ -532,7 +532,8 @@ function isExternalUrl(candidate: string): boolean {
   return /^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)
 }
 
-function isWithinWorkDir(candidatePath: string, workDir: string): boolean {
+/** Whether an absolute path sits inside `workDir` (drive-letter and case aware). */
+export function isWithinWorkDir(candidatePath: string, workDir: string): boolean {
   const relativePath = relativeFilePath(workDir, candidatePath)
 
   return relativePath === '' || (!relativePath.startsWith('..') && !isAbsoluteFilePath(relativePath))
