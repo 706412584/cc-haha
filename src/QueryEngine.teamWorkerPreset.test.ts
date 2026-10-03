@@ -100,7 +100,8 @@ test('a released worker gets the shared team-memory section appended to its pres
   try {
     await submit(engine().instance)
     const prompt = queryOptions.systemPrompt.join('\n')
-    expect(prompt).toContain('fixture')
+    // The preset stays first — memory is an addition, never a replacement.
+    expect(prompt.indexOf('fixture')).toBeLessThan(prompt.indexOf('Shared team memory'))
     expect(prompt).toContain('Shared team memory')
     expect(prompt).toContain('shared by every member of this team')
   } finally {

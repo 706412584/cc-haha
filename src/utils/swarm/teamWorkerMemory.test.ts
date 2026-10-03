@@ -5,7 +5,12 @@ import { join, sep } from 'node:path'
 import { buildTeamWorkerMemoryPrompt, getTeamWorkerMemoryDir, isTeamWorkerMemoryEnabled } from './teamWorkerMemory.js'
 import { getAutoMemPath } from '../../memdir/paths.js'
 
-const saved = { home: process.env.HOME, config: process.env.CLAUDE_CONFIG_DIR, team: process.env.CC_HAHA_TEAM_MEMORY }
+const saved = {
+  home: process.env.HOME,
+  config: process.env.CLAUDE_CONFIG_DIR,
+  team: process.env.CC_HAHA_TEAM_MEMORY,
+  autoMemory: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY,
+}
 let root: string
 
 beforeEach(() => {
@@ -13,6 +18,7 @@ beforeEach(() => {
   process.env.HOME = root
   process.env.CLAUDE_CONFIG_DIR = join(root, '.claude')
   delete process.env.CC_HAHA_TEAM_MEMORY
+  delete process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
 })
 
 afterEach(() => {
@@ -22,6 +28,8 @@ afterEach(() => {
   else process.env.CLAUDE_CONFIG_DIR = saved.config
   if (saved.team === undefined) delete process.env.CC_HAHA_TEAM_MEMORY
   else process.env.CC_HAHA_TEAM_MEMORY = saved.team
+  if (saved.autoMemory === undefined) delete process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
+  else process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = saved.autoMemory
   rmSync(root, { recursive: true, force: true })
 })
 
@@ -39,8 +47,7 @@ test('the prompt names the shared directory and its guidance, and creates the di
   expect(prompt).toContain('Shared team memory')
   expect(prompt).toContain('shared by every member of this team')
   expect(prompt).toContain('Task status belongs in the shared task list')
-  // The directory is created fire-and-forget; give the microtask a tick.
-  await Bun.sleep(20)
+  // mkdir is awaited inside the builder, so the directory exists on return.
   expect(existsSync(teamDir)).toBe(true)
 })
 

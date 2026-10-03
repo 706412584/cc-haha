@@ -40,6 +40,12 @@ export function isTeamWorkerMemoryEnabled(): boolean {
 /**
  * The shared directory, with a trailing separator like getAutoMemPath().
  * Exported for tests and for the write-permission carve-out check.
+ *
+ * Deliberately the same path convention as upstream's `getTeamMemPath()`
+ * (src/memdir/teamMemPaths.ts) so a future upstream merge that revives the
+ * server-synced system lands on the same directory instead of forking it.
+ * That module stays inert here (TEAMMEM build flag + GrowthBook gate), which
+ * is why this file re-derives the path instead of importing it.
  */
 export function getTeamWorkerMemoryDir(): string {
   return (join(getAutoMemPath(), 'team') + sep).normalize('NFC')
@@ -50,15 +56,18 @@ export function getTeamWorkerMemoryDir(): string {
  * memory: where it is, what belongs there, and how to keep the index. Returns
  * null when the feature is off.
  *
- * Synchronous by design — QueryEngine builds its system prompt inside an
- * async path but before the first model call; the directory is created
- * fire-and-forget here (FileWriteTool also mkdirs a missing parent, so the
- * model's first write cannot lose a race).
+ * The directory is created before returning, so the model's first write cannot
+ * race the mkdir. Note the content boundary: MEMORY.md is model-written and
+ * this section lands in every member's system prompt, so a member can seed
+ * instructions that later members read. That is the same trust model as the
+ * existing auto-memory directory (one machine, one user, the file already
+ * reaches normal sessions through the user context) — but it is why the
+ * guidance says not to store secrets or anything the user marked private.
  */
 export async function buildTeamWorkerMemoryPrompt(): Promise<string | null> {
   if (!isTeamWorkerMemoryEnabled()) return null
   const memoryDir = getTeamWorkerMemoryDir()
-  void ensureMemoryDirExists(memoryDir)
+  await ensureMemoryDirExists(memoryDir)
 
   const entrypoint = join(memoryDir, ENTRYPOINT_NAME)
   const fs = getFsImplementation()
