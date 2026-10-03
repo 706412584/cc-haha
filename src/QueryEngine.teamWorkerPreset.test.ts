@@ -88,6 +88,26 @@ test('approved worker initializes preset only on first released headless task an
   expect(mcpCalls).toBe(1)
   expect(skillCalls).toBe(1)
 })
+// Regression: a worker's approved preset arrives as a custom system prompt, so
+// the default prompt's memory section never runs for it. Without the shared
+// team-memory section the members could never accumulate project knowledge.
+// This suite runs under --bare (CLAUDE_CODE_SIMPLE), which correctly disables
+// memory, so the flag is cleared for this test to model a real worker session
+// (with a stub key, since --bare is also what skips the auth check).
+test('a released worker gets the shared team-memory section appended to its preset', async () => {
+  delete process.env.CLAUDE_CODE_SIMPLE
+  process.env.ANTHROPIC_API_KEY = 'fixture-key'
+  try {
+    await submit(engine().instance)
+    const prompt = queryOptions.systemPrompt.join('\n')
+    expect(prompt).toContain('fixture')
+    expect(prompt).toContain('Shared team memory')
+    expect(prompt).toContain('shared by every member of this team')
+  } finally {
+    delete process.env.ANTHROPIC_API_KEY
+    process.env.CLAUDE_CODE_SIMPLE = '1'
+  }
+})
 test('ordinary headless agents retain project context and do not activate worker presets', async () => {
   delete process.env.CC_HAHA_TEAM_WORKER
   const normal = engine()
@@ -96,6 +116,7 @@ test('ordinary headless agents retain project context and do not activate worker
   expect(skillCalls).toBe(0)
   expect(queryOptions.userContext.claudeMd).toBe('private project instructions')
   expect(normal.state().sessionHooks.size).toBe(0)
+  expect(queryOptions.systemPrompt.join('\n')).not.toContain('Shared team memory')
 })
 
 test('missing MCP or skill fails the released task before reaching the model', async () => {
