@@ -11,9 +11,43 @@
  */
 
 import { teamPlanActionSchema, teamPlanPatchRequestSchema, teamPlanService } from '../services/teamPlanService.js'
-import { TeamPlanError } from '../../utils/swarm/teamPlanStore.js'
+import { readTeamPlan, TeamPlanError } from '../../utils/swarm/teamPlanStore.js'
+import { ConversationStartupError } from '../services/conversationService.js'
 import { teamService } from '../services/teamService.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
+import { ensureCliSessionStartedForControl } from '../ws/handler.js'
+
+/**
+ * The plan card is durable and can be approved long after the conversation
+ * that proposed it — after an app restart, or once an idle session's CLI has
+ * been reclaimed. Worker launch needs a live leader (it receives the runtime
+ * snapshot and coordinates the members), so start it before approving rather
+ * than failing with "Team leader must be connected before launching", a dead
+ * end the card has no way out of. Only a plan genuinely awaiting review for
+ * the requesting session may spawn a process; anything else is left for
+ * approve() to reject with its own error.
+ */
+async function ensureLeaderStartedForApproval(
+  teamName: string,
+  sessionId: string,
+  requestUrl: URL,
+): Promise<void> {
+  const pending = await readTeamPlan(teamName)
+  if (pending?.sessionId !== sessionId || pending.state !== 'review_pending') return
+  try {
+    await ensureCliSessionStartedForControl(sessionId, requestUrl, 'team_approval')
+  } catch (error) {
+    // A startup refusal has a reason the user can act on ("provider changed",
+    // "working directory is gone"); surface it instead of the generic 500.
+    // conversationService already recorded the failure as `cli_start_failed`
+    // diagnostics, so this does not hide it from the diagnostics panel. Every
+    // other error keeps errorResponse's own handling (diagnostics, 499 aborts).
+    if (error instanceof ConversationStartupError) {
+      throw new ApiError(500, error.message, error.code)
+    }
+    throw error
+  }
+}
 
 export async function handleTeamsApi(
   req: Request,
@@ -42,7 +76,10 @@ export async function handleTeamsApi(
       const parsed = teamPlanActionSchema.safeParse(raw)
       if (!parsed.success) throw ApiError.badRequest('Invalid team plan action')
       const action = segments[4]
-      if (action === 'approve') return Response.json({ plan: await teamPlanService.approve(teamName, parsed.data) })
+      if (action === 'approve') {
+        await ensureLeaderStartedForApproval(teamName, parsed.data.sessionId, new URL(req.url))
+        return Response.json({ plan: await teamPlanService.approve(teamName, parsed.data) })
+      }
       if (action === 'return' || action === 'cancel' || action === 'retry') return Response.json({ plan: await teamPlanService.action(teamName, action, parsed.data) })
       throw ApiError.badRequest('Unknown team plan action')
     }
