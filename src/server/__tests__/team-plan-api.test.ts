@@ -132,6 +132,24 @@ test('approving a pending plan starts the leader CLI before launching, and only 
     const replayed = await request('POST', '/api/teams/leader-connect/plan/approve', approveBody)
     expect(replayed.status).toBe(200)
     expect(ensured).toHaveLength(1)
+
+    // A startup refusal surfaces its actionable reason instead of the generic
+    // 500, and a plan whose leader cannot start stays reviewable.
+    const { ConversationStartupError } = await import('../services/conversationService.js')
+    await writeTeamFileAsync('leader-refused', { name: 'leader-refused', createdAt: 2, leadAgentId: 'lead', leadSessionId: 'leader-2', members: [] })
+    const refusedDraft = await ensureTeamDraft('leader-refused', 'leader-2', route, { agentCatalog: { general: { systemPrompt: 'preset' } }, members: [{ id: 'worker', name: 'worker', agentType: 'general', prompt: 'work', runtime: route }], tasks: [{ id: 't1', subject: 'task', ownerId: 'worker', dependencies: [] }] })
+    const refusedPending = await submitTeamPlan('leader-refused', { sessionId: 'leader-2', planId: refusedDraft.planId, incarnationId: refusedDraft.incarnationId, expectedRevision: refusedDraft.revision })
+    const ensureSpy = spies[0]!
+    ensureSpy.mockImplementation(async () => { throw new ConversationStartupError('Working directory does not exist', 'WORKDIR_INVALID') })
+    const refused = await request('POST', '/api/teams/leader-refused/plan/approve', { sessionId: 'leader-2', planId: refusedPending.planId, incarnationId: refusedPending.incarnationId, expectedRevision: refusedPending.revision, requestId: 'refused' })
+    expect(refused.status).toBe(500)
+    expect((await refused.json()).message).toBe('Working directory does not exist')
+
+    // Any other failure keeps errorResponse's own handling (generic 500).
+    ensureSpy.mockImplementation(async () => { throw new Error('fixture transport exploded') })
+    const exploded = await request('POST', '/api/teams/leader-refused/plan/approve', { sessionId: 'leader-2', planId: refusedPending.planId, incarnationId: refusedPending.incarnationId, expectedRevision: refusedPending.revision, requestId: 'exploded' })
+    expect(exploded.status).toBe(500)
+    expect((await exploded.json()).error).toBe('INTERNAL_ERROR')
   } finally {
     spies.forEach(spy => spy.mockRestore())
     if (oldHome === undefined) delete process.env.HOME
