@@ -217,7 +217,7 @@ export async function resumeTeamPlan(
   teamName: string,
   identity: TeamPlanIdentity,
   requestId: string,
-  options: { confirmTaskIds?: string[] } = {},
+  options: { confirmTaskIds?: string[]; fallbackOutcomes?: NonNullable<TeamPlanRecord['taskOutcomes']> } = {},
 ): Promise<{ plan: TeamPlanRecord; committed: boolean }> {
   if (!requestId.trim()) throw new TeamPlanError('requestId is required', 400)
   return locked(teamName, async () => {
@@ -228,7 +228,9 @@ export async function resumeTeamPlan(
     const snapshot = plan.approvedSnapshot
     if (!snapshot) throw new TeamPlanError('The interrupted team has no approved roster to resume', 409)
 
-    const outcomes = plan.taskOutcomes ?? {}
+    // A plan interrupted before outcomes were captured carries none; the caller
+    // supplies them from the live task list so completed work is not re-run.
+    const outcomes = plan.taskOutcomes ?? options.fallbackOutcomes ?? {}
     const confirmed = new Set(options.confirmTaskIds ?? [])
     const runTaskIds: string[] = []
     const heldTaskIds: string[] = []
@@ -250,6 +252,9 @@ export async function resumeTeamPlan(
       state: 'launching',
       revision: plan.revision + 1,
       updatedAt: now,
+      // Persist what the decision was based on when the plan itself had none:
+      // a later resume of a failed attempt must not fall back to "all run".
+      ...(plan.taskOutcomes ? {} : options.fallbackOutcomes ? { taskOutcomes: options.fallbackOutcomes } : {}),
       // Held tasks keep their in-progress state in the task list, so dependents
       // stay blocked. Confirmed ones are reset to pending by the launch path so
       // a fresh worker can claim them.

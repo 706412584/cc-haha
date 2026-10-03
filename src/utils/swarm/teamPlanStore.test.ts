@@ -190,6 +190,30 @@ test('resume annotates the snapshot, skips completed tasks and refuses an all-do
     .rejects.toThrow('nothing to resume')
 })
 
+// Regression: a plan interrupted before outcomes were captured (legacy, or a
+// build that never wrote them) carries no `taskOutcomes`. Resuming it must not
+// read every task as "never started" — the caller supplies outcomes captured
+// from the live task list, and they are frozen onto the record for later resumes.
+test('resume accepts caller-captured outcomes for a plan that has none', async () => {
+  const base = await draft()
+  const plan = await replaceTeamPlan('review', identity(base), { tasks: [...base.tasks, { id: 't2', subject: 'second task', ownerId: 'worker', dependencies: [] }] })
+  const [doneId, openId] = [plan.tasks[0]!.id, plan.tasks[1]!.id]
+  const snapshot = { revision: plan.revision, members: plan.members, tasks: plan.tasks, leaderRuntime: plan.leaderRuntime, approvedAt: 1, requestId: 'approved' }
+  const legacy: TeamPlanRecord = {
+    ...plan, state: 'interrupted', revision: plan.revision + 1, approvedSnapshot: snapshot,
+  }
+  await writeFile(join(getTeamDir('review'), 'plan.json'), JSON.stringify(legacy))
+
+  const after = await resumeTeamPlan('review', { ...identity(plan), expectedRevision: legacy.revision }, 'resume-legacy', {
+    fallbackOutcomes: { [doneId]: { status: 'completed', capturedAt: 2 }, [openId]: { status: 'pending', capturedAt: 2 } },
+  })
+  expect(after.plan.state).toBe('launching')
+  expect(after.plan.approvedSnapshot?.tasks.find(t => t.id === doneId)?.resumeState).toBe('done')
+  expect(after.plan.resume?.runTaskIds).toEqual([openId])
+  // Frozen in the same write, so a later resume of a failed attempt reuses it.
+  expect(after.plan.taskOutcomes?.[doneId]?.status).toBe('completed')
+})
+
 test('resume holds a mid-flight task unless it is explicitly confirmed', async () => {
   const base = await draft()
   const plan = await replaceTeamPlan('review', identity(base), { tasks: [...base.tasks, { id: 't2', subject: 'second task', ownerId: 'worker', dependencies: [] }] })

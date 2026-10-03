@@ -92,12 +92,19 @@ test('approving a pending plan starts the leader CLI before launching, and only 
   process.env.HOME = root
   process.env.CLAUDE_CONFIG_DIR = root
   const ensured: Array<{ sessionId: string; url: string; reason?: string }> = []
+  const resumed: Array<{ teamName: string; confirmTaskIds: string[] }> = []
   const runtime = new TeamPlanService({ validate: async plan => plan, launch: async () => ({ memberIds: {} }), stop: async () => {} })
   const spies = [
     spyOn(handler, 'ensureCliSessionStartedForControl').mockImplementation(async (sessionId: string, requestUrl: URL, reason?: string) => { ensured.push({ sessionId, url: requestUrl.toString(), reason }) }),
     spyOn(teamPlanService, 'getForSession').mockImplementation(id => runtime.getForSession(id)),
     spyOn(teamPlanService, 'approve').mockImplementation((name, action) => runtime.approve(name, action)),
     spyOn(teamPlanService, 'action').mockImplementation((name, kind, action) => runtime.action(name, kind, action)),
+    // The route forwards confirmTaskIds to the service; capture the call
+    // instead of running a real resume (which would launch workers).
+    spyOn(teamPlanService, 'resume').mockImplementation(async (name, _action, confirmTaskIds = []) => {
+      resumed.push({ teamName: name, confirmTaskIds })
+      return { plan: null as never }
+    }),
   ]
   const request = async (method: string, pathname: string, body?: unknown) => {
     const req = new Request(`http://localhost${pathname}`, { method, ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) })
@@ -150,6 +157,33 @@ test('approving a pending plan starts the leader CLI before launching, and only 
     const exploded = await request('POST', '/api/teams/leader-refused/plan/approve', { sessionId: 'leader-2', planId: refusedPending.planId, incarnationId: refusedPending.incarnationId, expectedRevision: refusedPending.revision, requestId: 'exploded' })
     expect(exploded.status).toBe(500)
     expect((await exploded.json()).error).toBe('INTERNAL_ERROR')
+
+    // Resume re-launches workers, so it gets the same live-leader treatment,
+    // gated on the state resume actually expects (interrupted), and the
+    // confirmed mid-flight task ids reach the service.
+    ensureSpy.mockImplementation(async (sessionId: string, requestUrl: URL, reason?: string) => { ensured.push({ sessionId, url: requestUrl.toString(), reason }) })
+    const { writeFile } = await import('node:fs/promises')
+    const { getTeamDir } = await import('../../utils/swarm/teamHelpers.js')
+    await writeTeamFileAsync('leader-resume', { name: 'leader-resume', createdAt: 3, leadAgentId: 'lead', leadSessionId: 'leader-3', members: [] })
+    const resumeDraft = await ensureTeamDraft('leader-resume', 'leader-3', route, { agentCatalog: { general: { systemPrompt: 'preset' } }, members: [{ id: 'worker', name: 'worker', agentType: 'general', prompt: 'work', runtime: route }], tasks: [{ id: 't1', subject: 'task', ownerId: 'worker', dependencies: [] }] })
+    const interruptedPlan = {
+      ...resumeDraft, state: 'interrupted', revision: resumeDraft.revision + 1,
+      approvedSnapshot: { revision: resumeDraft.revision, members: resumeDraft.members, tasks: resumeDraft.tasks, leaderRuntime: resumeDraft.leaderRuntime, approvedAt: 1, requestId: 'approved' },
+      taskOutcomes: { t1: { status: 'in_progress', interrupted: true, capturedAt: 1 } },
+    }
+    await writeFile(join(getTeamDir('leader-resume'), 'plan.json'), JSON.stringify(interruptedPlan))
+    const before = ensured.length
+    const resumeBody = { sessionId: 'leader-3', planId: interruptedPlan.planId, incarnationId: interruptedPlan.incarnationId, expectedRevision: interruptedPlan.revision, requestId: 'resume-1', confirmTaskIds: ['t1'] }
+    expect((await request('POST', '/api/teams/leader-resume/plan/resume', resumeBody)).status).toBe(200)
+    expect(ensured.length).toBe(before + 1)
+    expect(ensured.at(-1)!.sessionId).toBe('leader-3')
+    expect(resumed).toEqual([{ teamName: 'leader-resume', confirmTaskIds: ['t1'] }])
+
+    // A resume request against a plan that is not interrupted spawns nothing.
+    await writeFile(join(getTeamDir('leader-resume'), 'plan.json'), JSON.stringify({ ...interruptedPlan, state: 'running', revision: interruptedPlan.revision + 1 }))
+    const wrongState = ensured.length
+    await request('POST', '/api/teams/leader-resume/plan/resume', { ...resumeBody, expectedRevision: interruptedPlan.revision + 1, requestId: 'resume-2' })
+    expect(ensured.length).toBe(wrongState)
   } finally {
     spies.forEach(spy => spy.mockRestore())
     if (oldHome === undefined) delete process.env.HOME

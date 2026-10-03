@@ -74,6 +74,32 @@ test('cold server observes durable pending launch as interrupted instead of repl
   expect((await service.getForSession('session'))?.state).toBe('interrupted')
 })
 
+// Regression: an interrupted plan from before outcomes were captured (or one
+// whose capture never ran) has no `taskOutcomes`. Reading it used to report
+// every task as "never started", so the card offered to re-run finished work
+// and never surfaced the mid-flight tasks resume must ask the user to confirm.
+test('reading an interrupted plan without outcomes backfills them from the task list', async () => {
+  const plan = await ready()
+  await approveTeamPlan('review', identity(plan), 'request', plan)
+  // A plan that ran has a materialized task row; this one finished before the
+  // crash, which is exactly what the backfill must skip on a later resume.
+  const { mutateTeamPlan } = await import('../../utils/swarm/teamPlanStore.js')
+  const { createTask, updateTask, getCanonicalTeamTaskListId } = await import('../../utils/tasks.js')
+  const listId = getCanonicalTeamTaskListId('review')
+  const taskId = await createTask(listId, { subject: 'fixture task', description: '', status: 'pending', blocks: [], blockedBy: [], metadata: { teamPlanId: plan.planId, teamPlanTaskId: 't1' } })
+  await updateTask(listId, taskId, { status: 'completed' })
+  const interrupted = await mutateTeamPlan('review', { ...plan, expectedRevision: (await readTeamPlan('review'))!.revision }, current => ({
+    ...current, state: 'interrupted', taskOutcomes: undefined,
+  }))
+  expect(interrupted.taskOutcomes).toBeUndefined()
+
+  const service = new TeamPlanService({ validate: async item => item, launch: async () => ({ memberIds: {} }), stop: async () => {} })
+  const read = await service.getForSession('session')
+  expect(read?.taskOutcomes?.t1?.status).toBe('completed')
+  // Persisted: a second read does not depend on the capture running again.
+  expect((await readTeamPlan('review'))?.taskOutcomes?.t1?.status).toBe('completed')
+})
+
 test('UI update only edits allocation, freezes catalog preset and marks human route', async () => {
   const plan = await ready()
   const withCatalog = await replaceTeamPlan('review', identity(plan), { agentCatalog: { specialist: { systemPrompt: 'specialist system', tools: ['Read'] } } })

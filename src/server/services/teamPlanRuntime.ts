@@ -204,9 +204,16 @@ export async function launchTeamPlanRuntime(plan: TeamPlanRecord): Promise<{ mem
           if (!team || team.createdAt !== createdAt) throw new Error('Team generation changed during launch')
           for (const entry of members) {
             const existing = team.members.find(old => old.name === entry.name)
-            // A resumed team re-registers members a previous run left behind as
-            // `terminated`. A live member with the same name is a real conflict.
-            if (existing && existing.terminated !== true) throw new Error(`Member already exists: ${entry.name}`)
+            // A resumed team re-registers members a previous run left behind.
+            // That covers both `terminated` entries and stale ones a crash left
+            // reading `isActive: true` with no live session: the member's session
+            // is the truth, so a name held by a session that no longer exists is
+            // not a conflict. A name held by a LIVE session still is — that is
+            // the real double-registration case this guard exists for.
+            const stale = existing !== undefined &&
+              (existing.terminated === true ||
+                (existing.sessionId ? !conversationService.hasSession(existing.sessionId) : true))
+            if (existing && !stale) throw new Error(`Member already exists: ${entry.name}`)
             if (existing) team.members = team.members.filter(old => old !== existing)
             team.members.push({ agentId: `${entry.name}@${plan.teamName}`, name: entry.name, agentType: entry.agentType,
               model: entry.runtime.modelId, providerId: entry.runtime.providerId, providerName: typeof entry.providerName === 'string' ? entry.providerName : undefined, effortLevel: entry.runtime.effortLevel,

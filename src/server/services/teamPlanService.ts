@@ -39,6 +39,21 @@ export class TeamPlanService {
     if (plan?.state === 'running' && this.runtime.isRunning && !await this.runtime.isRunning(plan.planId)) {
       return this.interrupt(plan, 'The worker runtime was interrupted. Started work will not be replayed.')
     }
+    // An interrupted plan from before outcomes were captured has none, which
+    // reads as "every task never started": the card would offer to re-run
+    // finished work and hide the mid-flight tasks the user must confirm. The
+    // task list still holds the truth, so backfill the frozen outcomes here —
+    // the read path that already repairs lost launches. Persisted, so later
+    // polls and the resume itself see the same snapshot.
+    if (plan?.state === 'interrupted' && !plan.taskOutcomes) {
+      const { captureTaskOutcomes } = await import('./teamPlanRuntime.js')
+      const taskOutcomes = await captureTaskOutcomes(plan).catch(() => undefined)
+      if (taskOutcomes) {
+        return mutateTeamPlan(plan.teamName, { ...plan, expectedRevision: plan.revision }, current => (
+          current.taskOutcomes ? current : { ...current, taskOutcomes }
+        )).catch(() => plan)
+      }
+    }
     return plan
   }
   /**
@@ -113,7 +128,24 @@ export class TeamPlanService {
    */
   async resume(teamName: string, action: TeamPlanAction, confirmTaskIds: string[] = []): Promise<TeamPlanRecord> {
     const { resumeTeamPlan } = await import('../../utils/swarm/teamPlanStore.js')
-    const { plan, committed } = await resumeTeamPlan(teamName, action, action.requestId, { confirmTaskIds })
+    // Plans interrupted before this feature existed (or by a build that never
+    // captured outcomes) carry no frozen `taskOutcomes`. Without them every
+    // task reads as "never started" and a resume would re-run work that already
+    // finished. The task list still holds the truth for those plans, so capture
+    // it here and hand it to the store, which freezes it in the same write that
+    // commits the resume — capturing it as a separate mutation would bump the
+    // revision and invalidate the client's expectedRevision.
+    const existing = await readTeamPlan(teamName)
+    const fallbackOutcomes = existing?.planId === action.planId &&
+      existing.state === 'interrupted' &&
+      !existing.taskOutcomes &&
+      existing.tasks.length > 0
+      ? await (await import('./teamPlanRuntime.js')).captureTaskOutcomes(existing).catch(() => undefined)
+      : undefined
+    const { plan, committed } = await resumeTeamPlan(teamName, action, action.requestId, {
+      confirmTaskIds,
+      ...(fallbackOutcomes ? { fallbackOutcomes } : {}),
+    })
     if (committed) this.start(plan)
     return plan
   }
