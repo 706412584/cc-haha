@@ -354,9 +354,21 @@ export class QueryEngine {
         ? await loadMemoryPrompt()
         : null
 
+    // Team workers run with an approved preset as their custom system prompt,
+    // so the default prompt's memory section never runs for them — without
+    // this, the shared team-memory directory would exist but no member would
+    // ever read or write it. Code Council keeps this half local-only: upstream
+    // gates it on the TEAMMEM build flag plus a server-sync OAuth check, both
+    // of which are off in this fork.
+    const workerMemoryPrompt =
+      customPrompt !== undefined && workerAgent !== undefined && !hasAutoMemPathOverride()
+        ? await (await import('./utils/swarm/teamWorkerMemory.js')).buildTeamWorkerMemoryPrompt()
+        : null
+
     const systemPrompt = asSystemPrompt([
       ...(customPrompt !== undefined ? [customPrompt] : defaultSystemPrompt),
       ...(memoryMechanicsPrompt ? [memoryMechanicsPrompt] : []),
+      ...(workerMemoryPrompt ? [workerMemoryPrompt] : []),
       ...(appendSystemPrompt ? [appendSystemPrompt] : []),
     ])
 
