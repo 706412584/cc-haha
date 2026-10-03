@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { approveTeamPlan, deleteTeamPlan, ensureTeamDraft, findTeamPlanForSession, readTeamPlan, replaceTeamPlan, stageMember, submitTeamPlan } from './teamPlanStore.js'
+import { approveTeamPlan, deleteTeamPlan, ensureTeamDraft, findTeamPlanForSession, readTeamPlan, replaceTeamPlan, resumeTeamPlan, stageMember, submitTeamPlan } from './teamPlanStore.js'
 import { getTeamDir, writeTeamFileAsync } from './teamHelpers.js'
 import type { TeamPlanRecord } from '../../shared/teamPlan.js'
 let root: string
@@ -160,4 +160,99 @@ test('disband removes a settled plan but refuses to erase one that is still runn
   await writeFile(join(getTeamDir('review'), 'plan.json'), JSON.stringify({ ...plan, state: 'interrupted' }))
   await deleteTeamPlan('review')
   expect(await readTeamPlan('review')).toBeNull()
+})
+
+test('resume annotates the snapshot, skips completed tasks and refuses an all-done plan', async () => {
+  const base = await draft()
+  const plan = await replaceTeamPlan('review', identity(base), { tasks: [...base.tasks, { id: 't2', subject: 'second task', ownerId: 'worker', dependencies: [] }] })
+  const [doneId, openId] = [plan.tasks[0]!.id, plan.tasks[1]!.id]
+  const snapshot = { revision: plan.revision, members: plan.members, tasks: plan.tasks, leaderRuntime: plan.leaderRuntime, approvedAt: 1, requestId: 'approved' }
+  const interrupted: TeamPlanRecord = {
+    ...plan, state: 'interrupted', revision: plan.revision + 1, approvedSnapshot: snapshot,
+    taskOutcomes: { [doneId]: { status: 'completed', capturedAt: 1 } },
+  }
+  await writeFile(join(getTeamDir('review'), 'plan.json'), JSON.stringify(interrupted))
+
+  const after = await resumeTeamPlan('review', { ...identity(plan), expectedRevision: interrupted.revision }, 'resume-1')
+  expect(after.plan.state).toBe('launching')
+  expect(after.plan.approvedSnapshot?.revision).toBe(interrupted.revision)
+  expect(after.plan.approvedSnapshot?.tasks.find(t => t.id === doneId)?.resumeState).toBe('done')
+  expect(after.plan.approvedSnapshot?.tasks.find(t => t.id === openId)?.resumeState).toBe('run')
+  expect(after.plan.resume?.runTaskIds).toEqual([openId])
+
+  // Every task completed -> nothing to resume.
+  const allDone: TeamPlanRecord = {
+    ...interrupted, revision: after.plan.revision + 1,
+    taskOutcomes: { [doneId]: { status: 'completed', capturedAt: 1 }, [openId]: { status: 'completed', capturedAt: 1 } },
+  }
+  await writeFile(join(getTeamDir('review'), 'plan.json'), JSON.stringify(allDone))
+  await expect(resumeTeamPlan('review', { ...identity(plan), expectedRevision: allDone.revision }, 'resume-2'))
+    .rejects.toThrow('nothing to resume')
+})
+
+// Regression: a plan interrupted before outcomes were captured (legacy, or a
+// build that never wrote them) carries no `taskOutcomes`. Resuming it must not
+// read every task as "never started" — the caller supplies outcomes captured
+// from the live task list, and they are frozen onto the record for later resumes.
+test('resume accepts caller-captured outcomes for a plan that has none', async () => {
+  const base = await draft()
+  const plan = await replaceTeamPlan('review', identity(base), { tasks: [...base.tasks, { id: 't2', subject: 'second task', ownerId: 'worker', dependencies: [] }] })
+  const [doneId, openId] = [plan.tasks[0]!.id, plan.tasks[1]!.id]
+  const snapshot = { revision: plan.revision, members: plan.members, tasks: plan.tasks, leaderRuntime: plan.leaderRuntime, approvedAt: 1, requestId: 'approved' }
+  const legacy: TeamPlanRecord = {
+    ...plan, state: 'interrupted', revision: plan.revision + 1, approvedSnapshot: snapshot,
+  }
+  await writeFile(join(getTeamDir('review'), 'plan.json'), JSON.stringify(legacy))
+
+  const after = await resumeTeamPlan('review', { ...identity(plan), expectedRevision: legacy.revision }, 'resume-legacy', {
+    fallbackOutcomes: { [doneId]: { status: 'completed', capturedAt: 2 }, [openId]: { status: 'pending', capturedAt: 2 } },
+  })
+  expect(after.plan.state).toBe('launching')
+  expect(after.plan.approvedSnapshot?.tasks.find(t => t.id === doneId)?.resumeState).toBe('done')
+  expect(after.plan.resume?.runTaskIds).toEqual([openId])
+  // Frozen in the same write, so a later resume of a failed attempt reuses it.
+  expect(after.plan.taskOutcomes?.[doneId]?.status).toBe('completed')
+})
+
+test('resume holds a mid-flight task unless it is explicitly confirmed', async () => {
+  const base = await draft()
+  const plan = await replaceTeamPlan('review', identity(base), { tasks: [...base.tasks, { id: 't2', subject: 'second task', ownerId: 'worker', dependencies: [] }] })
+  const [heldId, openId] = [plan.tasks[0]!.id, plan.tasks[1]!.id]
+  const snapshot = { revision: plan.revision, members: plan.members, tasks: plan.tasks, leaderRuntime: plan.leaderRuntime, approvedAt: 1, requestId: 'approved' }
+  const interrupted: TeamPlanRecord = {
+    ...plan, state: 'interrupted', revision: plan.revision + 1, approvedSnapshot: snapshot,
+    taskOutcomes: { [heldId]: { status: 'in_progress', interrupted: true, capturedAt: 1 } },
+  }
+  await writeFile(join(getTeamDir('review'), 'plan.json'), JSON.stringify(interrupted))
+
+  const held = await resumeTeamPlan('review', { ...identity(plan), expectedRevision: interrupted.revision }, 'r-held')
+  expect(held.plan.approvedSnapshot?.tasks.find(t => t.id === heldId)?.resumeState).toBe('held')
+  expect(held.plan.resume?.heldTaskIds).toEqual([heldId])
+  expect(held.plan.resume?.runTaskIds).toEqual([openId])
+
+  await writeFile(join(getTeamDir('review'), 'plan.json'), JSON.stringify({
+    ...interrupted, revision: held.plan.revision + 1,
+  }))
+  const confirmed = await resumeTeamPlan('review', { ...identity(plan), expectedRevision: held.plan.revision + 1 }, 'r-confirm', { confirmTaskIds: [heldId] })
+  expect(confirmed.plan.approvedSnapshot?.tasks.find(t => t.id === heldId)?.resumeState).toBe('run')
+  expect(confirmed.plan.resume?.heldTaskIds).toEqual([])
+  expect(confirmed.plan.resume?.runTaskIds).toEqual([heldId, openId])
+})
+
+test('resume refuses when every remaining task is held and none is confirmed', async () => {
+  const plan = await draft()
+  const taskId = plan.tasks[0]!.id
+  const snapshot = { revision: plan.revision, members: plan.members, tasks: plan.tasks, leaderRuntime: plan.leaderRuntime, approvedAt: 1, requestId: 'approved' }
+  await writeFile(join(getTeamDir('review'), 'plan.json'), JSON.stringify({
+    ...plan, state: 'interrupted', revision: plan.revision + 1, approvedSnapshot: snapshot,
+    taskOutcomes: { [taskId]: { status: 'in_progress', interrupted: true, capturedAt: 1 } },
+  }))
+  await expect(resumeTeamPlan('review', { ...identity(plan), expectedRevision: plan.revision + 1 }, 'r-none'))
+    .rejects.toThrow('nothing to resume')
+})
+
+test('resume refuses a plan that is not interrupted', async () => {
+  const plan = await draft()
+  await expect(resumeTeamPlan('review', { ...identity(plan), expectedRevision: plan.revision }, 'r-bad'))
+    .rejects.toThrow('Only an interrupted team can resume')
 })

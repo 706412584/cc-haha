@@ -155,6 +155,21 @@ export async function launchTeamPlanRuntime(plan: TeamPlanRecord): Promise<{ mem
       await writeTeamFileAsync(plan.teamName, team)
     })
     taskMapping = await materializeTasks(plan)
+    // A resume must release a task the user confirmed even if a previous worker
+    // left it in_progress and still owns it — otherwise the fresh worker cannot
+    // claim it (`claimTask` refuses an `in_progress` row it does not own).
+    const confirmedHeld = plan.resume
+      ? new Set(plan.resume.runTaskIds.filter(id => (plan.taskOutcomes?.[id]?.interrupted ?? false)))
+      : new Set<string>()
+    if (confirmedHeld.size > 0) {
+      await withTaskListLifecycleLock(getCanonicalTeamTaskListId(plan.teamName), async () => {
+        for (const planTaskId of confirmedHeld) {
+          const taskId = taskMapping[planTaskId]
+          if (!taskId) continue
+          await updateTask(getCanonicalTeamTaskListId(plan.teamName), taskId, { status: 'pending', owner: undefined })
+        }
+      })
+    }
     await startTeamWorkersBarrier(members, async member => {
       if (launch.stopped || !conversationService.hasSession(plan.sessionId)) throw new Error('Team launch cancelled')
       const id = randomUUID()
@@ -188,7 +203,18 @@ export async function launchTeamPlanRuntime(plan: TeamPlanRecord): Promise<{ mem
           const team = readTeamFile(plan.teamName)
           if (!team || team.createdAt !== createdAt) throw new Error('Team generation changed during launch')
           for (const entry of members) {
-            if (team.members.some(old => old.name === entry.name)) throw new Error(`Member already exists: ${entry.name}`)
+            const existing = team.members.find(old => old.name === entry.name)
+            // A resumed team re-registers members a previous run left behind.
+            // That covers both `terminated` entries and stale ones a crash left
+            // reading `isActive: true` with no live session: the member's session
+            // is the truth, so a name held by a session that no longer exists is
+            // not a conflict. A name held by a LIVE session still is — that is
+            // the real double-registration case this guard exists for.
+            const stale = existing !== undefined &&
+              (existing.terminated === true ||
+                (existing.sessionId ? !conversationService.hasSession(existing.sessionId) : true))
+            if (existing && !stale) throw new Error(`Member already exists: ${entry.name}`)
+            if (existing) team.members = team.members.filter(old => old !== existing)
             team.members.push({ agentId: `${entry.name}@${plan.teamName}`, name: entry.name, agentType: entry.agentType,
               model: entry.runtime.modelId, providerId: entry.runtime.providerId, providerName: typeof entry.providerName === 'string' ? entry.providerName : undefined, effortLevel: entry.runtime.effortLevel,
               planMemberId: entry.id, joinedAt: Date.now(), tmuxPaneId: '', cwd: plan.workDir, subscriptions: [],
@@ -212,7 +238,12 @@ export async function launchTeamPlanRuntime(plan: TeamPlanRecord): Promise<{ mem
           text: JSON.stringify(createIdleNotification(member.name, { idleReason: failed ? 'failed' : 'available', summary: typeof message.result === 'string' ? message.result.slice(0, 1000) : undefined })),
         }, plan.teamName)
       })
-      const assigned = approved.tasks.filter(task => task.ownerId === member.id).map(task => ({ ...task, id: taskMapping[task.id], dependencies: task.dependencies.map(dep => taskMapping[dep]) }))
+      // `held` (mid-flight, not confirmed) and `done` (already completed) tasks
+      // are never handed to a worker on resume — re-running them could repeat
+      // side effects the previous run already performed.
+      const assigned = approved.tasks
+        .filter(task => task.ownerId === member.id && task.resumeState !== 'held' && task.resumeState !== 'done')
+        .map(task => ({ ...task, id: taskMapping[task.id], dependencies: task.dependencies.map(dep => taskMapping[dep]) }))
       await withTaskListLifecycleLock(getCanonicalTeamTaskListId(plan.teamName), async () => {
         const latest = await readTeamPlan(plan.teamName)
         if (launch.stopped || !latest || latest.planId !== plan.planId || latest.incarnationId !== plan.incarnationId || latest.state !== 'launching' || latest.revision !== plan.revision || latest.approvedSnapshot?.requestId !== approved.requestId) throw new Error('Team launch authorization has been revoked')
@@ -282,6 +313,30 @@ export function isTeamPlanRuntimeActive(planId: string): boolean {
 }
 
 /**
+ * Snapshot each plan task's progress at the moment the runtime was interrupted.
+ *
+ * The task list is the source of truth while a team runs, but it cannot answer
+ * "did this die halfway?" once a held task is reset to `pending`. Freezing the
+ * outcome onto the plan record keeps resume decisions reproducible. The
+ * `teamRuntimeInterrupted` marker is only corroboration: `stopTeamPlanRuntime`
+ * returns early with no in-memory launch (the server-restart case), so the
+ * marker is not always written.
+ */
+export async function captureTaskOutcomes(plan: TeamPlanRecord): Promise<NonNullable<TeamPlanRecord['taskOutcomes']>> {
+  const rows = await listTasks(getCanonicalTeamTaskListId(plan.teamName))
+  const now = Date.now()
+  const outcomes: NonNullable<TeamPlanRecord['taskOutcomes']> = {}
+  for (const task of plan.tasks) {
+    const row = rows.find(entry => entry.metadata?.teamPlanId === plan.planId && entry.metadata?.teamPlanTaskId === task.id)
+      ?? rows.find(entry => entry.id === task.id)
+    const status = row?.status === 'completed' ? 'completed' : row?.status === 'in_progress' ? 'in_progress' : 'pending'
+    const interrupted = status === 'in_progress' || row?.metadata?.teamRuntimeInterrupted === true
+    outcomes[task.id] = { status, ...(interrupted ? { interrupted: true } : {}), capturedAt: now }
+  }
+  return outcomes
+}
+
+/**
  * Stop every launch belonging to a team by name, regardless of which session
  * asked. Used by the explicit disband path, where the caller knows the team but
  * not necessarily the parent session that owns the launch.
@@ -291,8 +346,9 @@ export async function stopTeamPlanRuntimesForTeam(teamName: string): Promise<voi
   await Promise.all(owned.map(([planId]) => stopTeamPlanRuntime(planId)))
   const plan = await readTeamPlan(teamName)
   if (plan && (plan.state === 'launching' || plan.state === 'running')) {
+    const taskOutcomes = await captureTaskOutcomes(plan)
     await mutateTeamPlan(teamName, { ...plan, expectedRevision: plan.revision }, current => ({
-      ...current, state: 'interrupted',
+      ...current, state: 'interrupted', taskOutcomes,
       launch: { ...current.launch, status: 'failed', executionStarted: true, error: 'The user disbanded the team.' },
     })).catch(error => {
       console.error('[TeamPlanRuntime] disbanded plan changed concurrently', error)
@@ -312,8 +368,12 @@ export async function stopTeamPlanRuntimesForParent(parentSessionId: string): Pr
   if (plan?.state === 'launching' || plan?.state === 'running') {
     const running = plan.state === 'running'
     const executionStarted = hadReleasedWork || running
+    // Only a run that released work can be resumed; a cancelled startup has
+    // nothing to skip, so it needs no outcome snapshot.
+    const taskOutcomes = executionStarted ? await captureTaskOutcomes(plan) : undefined
     await mutateTeamPlan(plan.teamName, { ...plan, expectedRevision: plan.revision }, current => ({
       ...current, state: executionStarted ? 'interrupted' : 'cancelled',
+      ...(taskOutcomes ? { taskOutcomes } : {}),
       launch: { ...current.launch, status: 'failed', executionStarted, error: running ? 'The user stopped the running team.' : 'The user stopped team startup.' },
     })).catch(error => {
       // A concurrent approval/cancellation changes the revision; the second

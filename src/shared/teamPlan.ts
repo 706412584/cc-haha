@@ -51,6 +51,27 @@ export const teamPlanTaskSchema = z.object({
   description: z.string().optional(),
   ownerId: z.string().optional(),
   dependencies: z.array(z.string()),
+  /**
+   * How this task participates in a resume. Written only onto the tasks inside
+   * a reissued `approvedSnapshot`:
+   *   run  — release to a worker on resume
+   *   held — was mid-flight when the runtime died; do not auto-run
+   *   done — already completed; never re-release
+   */
+  resumeState: z.enum(['run', 'held', 'done']).optional(),
+}).passthrough()
+
+/**
+ * A task's outcome at the moment the runtime was interrupted. Frozen onto the
+ * plan record because it is not reproducible: once a held task is reset to
+ * `pending`, the task list can no longer tell "never started" from "died
+ * halfway". Optional so plans written before this field still parse.
+ */
+export const teamPlanTaskOutcomeSchema = z.object({
+  status: z.enum(['pending', 'in_progress', 'completed']),
+  /** Was `in_progress` at death, so re-running may repeat partial side effects. */
+  interrupted: z.boolean().optional(),
+  capturedAt: z.number(),
 }).passthrough()
 export const teamPlanRecordSchema = z.object({
   schemaVersion: z.literal(1),
@@ -82,11 +103,21 @@ export const teamPlanRecordSchema = z.object({
     error: z.string().optional(),
     memberIds: z.record(z.string(), z.string()).optional(),
   }).passthrough().optional(),
+  /** Per-plan-task outcome captured when the runtime was interrupted. */
+  taskOutcomes: z.record(z.string(), teamPlanTaskOutcomeSchema).optional(),
+  resume: z.object({
+    requestId: z.string().min(1),
+    resumedAt: z.number(),
+    attempt: z.number().int().positive(),
+    runTaskIds: z.array(z.string()),
+    heldTaskIds: z.array(z.string()),
+  }).passthrough().optional(),
 }).passthrough()
 export type TeamPlanAgentSnapshot = z.infer<typeof teamPlanAgentSnapshotSchema>
 export type TeamPlanRuntime = z.infer<typeof teamPlanRuntimeSchema>
 export type TeamPlanMember = z.infer<typeof teamPlanMemberSchema>
 export type TeamPlanTask = z.infer<typeof teamPlanTaskSchema>
+export type TeamPlanTaskOutcome = z.infer<typeof teamPlanTaskOutcomeSchema>
 export type TeamPlanRecord = z.infer<typeof teamPlanRecordSchema>
 export type TeamPlanIdentity = Pick<TeamPlanRecord, 'planId' | 'sessionId' | 'incarnationId'> & { expectedRevision: number }
 export type TeamPlanPatch = Partial<Pick<TeamPlanRecord, 'members' | 'tasks' | 'leaderRuntime' | 'feedback' | 'agentCatalog'>>

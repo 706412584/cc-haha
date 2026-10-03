@@ -106,3 +106,52 @@ describe('team worker ready barrier', () => {
     expect(stopped).toEqual(['a', 'b'])
   })
 })
+
+describe('captureTaskOutcomes', () => {
+  const saved = { home: process.env.HOME, config: process.env.CLAUDE_CONFIG_DIR }
+  let root: string
+  const teamName = 'capture-team'
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'team-capture-'))
+    process.env.HOME = root
+    process.env.CLAUDE_CONFIG_DIR = root
+    await writeTeamFileAsync(teamName, { name: teamName, createdAt: 1, leadAgentId: `team-lead@${teamName}`, leadSessionId: 's', members: [] } as never)
+  })
+  afterEach(async () => {
+    if (saved.home === undefined) delete process.env.HOME
+    else process.env.HOME = saved.home
+    if (saved.config === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = saved.config
+    await rm(root, { recursive: true, force: true })
+  })
+
+  test('records completed, in-progress and untouched tasks, flagging mid-flight ones', async () => {
+    const { createTask, updateTask, getCanonicalTeamTaskListId } = await import('../../utils/tasks.js')
+    const listId = getCanonicalTeamTaskListId(teamName)
+    const plan = { planId: 'p1', teamName, tasks: [{ id: 'T1' }, { id: 'T2' }, { id: 'T3' }] } as never
+    for (const id of ['T1', 'T2', 'T3']) {
+      await createTask(listId, { subject: id, description: '', status: 'pending', blocks: [], blockedBy: [], metadata: { teamPlanId: 'p1', teamPlanTaskId: id } })
+    }
+    const rows = await import('../../utils/tasks.js').then(m => m.listTasks(listId))
+    const byPlanId = (id: string) => rows.find(r => r.metadata?.teamPlanTaskId === id)!.id
+    await updateTask(listId, byPlanId('T1'), { status: 'completed' })
+    await updateTask(listId, byPlanId('T2'), { status: 'in_progress', owner: 'worker' })
+
+    const { captureTaskOutcomes } = await import('./teamPlanRuntime.js')
+    const outcomes = await captureTaskOutcomes(plan)
+    expect(outcomes.T1).toMatchObject({ status: 'completed' })
+    expect(outcomes.T1?.interrupted).toBeUndefined()
+    expect(outcomes.T2).toMatchObject({ status: 'in_progress', interrupted: true })
+    expect(outcomes.T3).toMatchObject({ status: 'pending' })
+    expect(outcomes.T3?.interrupted).toBeUndefined()
+  })
+
+  test('treats a task marked teamRuntimeInterrupted as mid-flight even when it reads pending', async () => {
+    const tasks = await import('../../utils/tasks.js')
+    const listId = tasks.getCanonicalTeamTaskListId(teamName)
+    await tasks.createTask(listId, { subject: 'T1', description: '', status: 'pending', blocks: [], blockedBy: [], metadata: { teamPlanId: 'p1', teamPlanTaskId: 'T1', teamRuntimeInterrupted: true } })
+    const { captureTaskOutcomes } = await import('./teamPlanRuntime.js')
+    const outcomes = await captureTaskOutcomes({ planId: 'p1', teamName, tasks: [{ id: 'T1' }] } as never)
+    expect(outcomes.T1?.interrupted).toBe(true)
+  })
+})

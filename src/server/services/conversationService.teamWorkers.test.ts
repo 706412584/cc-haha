@@ -268,6 +268,13 @@ test('approved roster launches, materializes canonical tasks, wakes an idle memb
     plan.approvedSnapshot.revision = 5
     plan.approvedSnapshot.requestId = 'final-approval'
     await writeFile(join(getTeamDir(teamName), 'plan.json'), JSON.stringify(plan))
+    // A crash leaves members reading `isActive: true` with no live session —
+    // exactly what a resume finds. That name is free; only a LIVE session with
+    // the same name is a real conflict.
+    await writeTeamFileAsync(teamName, {
+      ...readTeamFile(teamName)!,
+      members: [{ agentId: `reader@${teamName}`, name: 'reader', agentType: 'research', joinedAt: 1, isActive: true, sessionId: 'crashed-session', tmuxPaneId: '', subscriptions: [], backendType: 'process' }],
+    } as never)
     const result = await launchTeamPlanRuntime(plan)
     expect(result.memberIds.m1).toBeTruthy()
     expect((await listTasks(taskListId))[0]?.owner).toBe('reader')

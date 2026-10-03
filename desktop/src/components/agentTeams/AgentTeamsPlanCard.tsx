@@ -41,6 +41,8 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
   const [feedback, setFeedback] = useState('')
   const [stoppingPlanId, setStoppingPlanId] = useState<string | null>(null)
   const [disbanding, setDisbanding] = useState(false)
+  const [confirmingResume, setConfirmingResume] = useState(false)
+  const [confirmedTaskIds, setConfirmedTaskIds] = useState<string[]>([])
   const currentLeaderSelection = useSessionRuntimeStore(state => state.selections[sessionId])
   const plan = entry?.plan
 
@@ -74,6 +76,18 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
   const canStop = approved || Boolean(plan.parentPlanId)
   const canDisband = !approved
   const editable = plan.state === 'review_pending' && !entry.busy && !entry.conflict
+
+  // Resume summary. The plan record carries what died; the live workbench
+  // snapshot fills in anything captured before this feature existed.
+  const outcomes = plan.taskOutcomes
+  const doneCount = tasks.filter(task => outcomes?.[task.id]?.status === 'completed').length
+  const heldTaskIds = tasks.filter(task => outcomes?.[task.id]?.interrupted).map(task => task.id)
+  const canResume = plan.state === 'interrupted' && doneCount < tasks.length
+  const submitResume = (confirmTaskIds: string[]) => {
+    void act(sessionId, 'resume', undefined, confirmTaskIds)
+    setConfirmingResume(false)
+    setConfirmedTaskIds([])
+  }
   const runtimeName = (runtime: TeamPlanRuntime) => {
     const provider = runtime.providerId === CLAUDE_OFFICIAL_PROVIDER_ID
       ? t('teamPlan.official')
@@ -117,6 +131,10 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
             setStoppingPlanId(plan.planId)
             useChatStore.getState().stopGeneration(sessionId)
           }}>{stoppingPlanId === plan.planId ? t('teamPlan.stopping') : t('teamPlan.stop')}</Button> : null}
+          {canResume ? <Button data-testid="team-plan-resume" variant="secondary" disabled={entry.busy} onClick={() => {
+            if (heldTaskIds.length === 0) submitResume([])
+            else { setConfirmedTaskIds([]); setConfirmingResume(true) }
+          }}>{t('teamPlan.resume')}</Button> : null}
           {canDisband ? <Button data-testid="team-plan-disband" variant="ghost" loading={disbanding} onClick={() => {
             setDisbanding(true)
             void useTeamStore.getState().disbandTeam(plan.teamName, sessionId, plan.incarnationId).finally(() => setDisbanding(false))
@@ -258,6 +276,36 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
               </details>}
             </div>
           </div>
+        </div>
+      </Modal>
+      <Modal open={confirmingResume} onClose={() => setConfirmingResume(false)} title={t('teamPlan.resumeTitle')} width={560} typography="interface" footer={(
+        <div className="flex w-full items-center justify-end gap-2">
+          <Button variant="ghost" onClick={() => setConfirmingResume(false)}>{t('teamPlan.close')}</Button>
+          <Button data-testid="team-plan-resume-confirm" variant="secondary" loading={entry.busy} onClick={() => submitResume(confirmedTaskIds)}>
+            {t('teamPlan.resumeConfirm', { count: confirmedTaskIds.length })}
+          </Button>
+        </div>
+      )}>
+        <p className="text-sm text-[var(--color-text-secondary)]">{t('teamPlan.resumeHint', { done: doneCount, held: heldTaskIds.length })}</p>
+        <div className="mt-4 space-y-2">
+          {heldTaskIds.map(taskId => {
+            const task = tasks.find(row => row.id === taskId)
+            const checked = confirmedTaskIds.includes(taskId)
+            return (
+              <label key={taskId} className="flex items-start gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] p-3 text-sm">
+                <input
+                  type="checkbox"
+                  data-testid={`team-plan-resume-task-${taskId}`}
+                  checked={checked}
+                  onChange={() => setConfirmedTaskIds(current => checked ? current.filter(id => id !== taskId) : [...current, taskId])}
+                />
+                <span className="min-w-0">
+                  <span className="block truncate font-medium text-[var(--color-text-primary)]">{task?.subject ?? taskId}</span>
+                  <span className="mt-0.5 block text-xs text-[var(--color-warning)]">{t('teamPlan.resumeHeldWarning')}</span>
+                </span>
+              </label>
+            )
+          })}
         </div>
       </Modal>
     </section>

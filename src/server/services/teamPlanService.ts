@@ -17,6 +17,8 @@ export type TeamPlanRuntimeAdapter = {
   stop(planId: string): Promise<void>
   isRunning?(planId: string): boolean | Promise<boolean>
   notifyLeader?(plan: TeamPlanRecord, kind: 'approved' | 'returned' | 'cancelled'): Promise<void>
+  /** Freeze per-task outcomes from the live task list; absent in minimal test adapters. */
+  captureOutcomes?(plan: TeamPlanRecord): Promise<NonNullable<TeamPlanRecord['taskOutcomes']>>
 }
 const defaultRuntime: TeamPlanRuntimeAdapter = {
   isRunning: async id => (await import('./teamPlanRuntime.js')).isTeamPlanRuntimeActive(id),
@@ -24,6 +26,7 @@ const defaultRuntime: TeamPlanRuntimeAdapter = {
   launch: async plan => (await import('./teamPlanRuntime.js')).launchTeamPlanRuntime(plan),
   notifyLeader: async (plan, kind) => { await (await import('./teamPlanRuntime.js')).notifyTeamPlanLeader(plan, kind) },
   stop: async id => { await (await import('./teamPlanRuntime.js')).stopTeamPlanRuntime(id) },
+  captureOutcomes: async plan => (await import('./teamPlanRuntime.js')).captureTaskOutcomes(plan),
 }
 
 /** Only trusted HTTP/UI actions call approve; model tools import the draft store only. */
@@ -34,12 +37,47 @@ export class TeamPlanService {
     const plan = await findTeamPlanForSession(sessionId)
     // A server restart lost ownership of an unfinished launch. Never silently replay it.
     if (plan?.state === 'launching' && !this.launches.has(plan.planId)) {
-      return mutateTeamPlan(plan.teamName, { ...plan, expectedRevision: plan.revision }, current => ({ ...current, state: 'interrupted', launch: { ...current.launch, status: 'failed', error: 'Launch ownership was lost. Work may have started and will not be replayed.' } }))
+      return this.interrupt(plan, 'Launch ownership was lost. Work may have started and will not be replayed.')
     }
     if (plan?.state === 'running' && this.runtime.isRunning && !await this.runtime.isRunning(plan.planId)) {
-      return mutateTeamPlan(plan.teamName, { ...plan, expectedRevision: plan.revision }, current => ({ ...current, state: 'interrupted', launch: { ...current.launch, status: 'failed', error: 'The worker runtime was interrupted. Started work will not be replayed.' } }))
+      return this.interrupt(plan, 'The worker runtime was interrupted. Started work will not be replayed.')
+    }
+    // An interrupted plan from before outcomes were captured has none, which
+    // reads as "every task never started": the card would offer to re-run
+    // finished work and hide the mid-flight tasks the user must confirm. The
+    // task list still holds the truth, so backfill the frozen outcomes here —
+    // the read path that already repairs lost launches. Persisted, so later
+    // polls and the resume itself see the same snapshot.
+    if (plan?.state === 'interrupted' && !plan.taskOutcomes) {
+      const taskOutcomes = await this.captureOutcomes(plan).catch(error => {
+        console.warn('[TeamPlanService] Could not capture task outcomes for an interrupted plan', error)
+        return undefined
+      })
+      if (taskOutcomes) {
+        return mutateTeamPlan(plan.teamName, { ...plan, expectedRevision: plan.revision }, current => (
+          current.taskOutcomes ? current : { ...current, taskOutcomes }
+        )).catch(() => plan)
+      }
     }
     return plan
+  }
+
+  private async captureOutcomes(plan: TeamPlanRecord): Promise<NonNullable<TeamPlanRecord['taskOutcomes']>> {
+    const capture = this.runtime.captureOutcomes ?? (async item => (await import('./teamPlanRuntime.js')).captureTaskOutcomes(item))
+    return capture(plan)
+  }
+  /**
+   * Freeze the interrupted plan together with its per-task outcomes, so a later
+   * resume can tell "never started" from "died halfway" without relying on the
+   * task list, which cannot represent that distinction once reset.
+   */
+  private async interrupt(plan: TeamPlanRecord, error: string): Promise<TeamPlanRecord> {
+    const { captureTaskOutcomes } = await import('./teamPlanRuntime.js')
+    const taskOutcomes = await captureTaskOutcomes(plan).catch(() => undefined)
+    return mutateTeamPlan(plan.teamName, { ...plan, expectedRevision: plan.revision }, current => ({
+      ...current, state: 'interrupted', ...(taskOutcomes ? { taskOutcomes } : {}),
+      launch: { ...current.launch, status: 'failed', error },
+    }))
   }
   async update(teamName: string, identity: TeamPlanIdentity, patch: { members?: Array<{ id: string; agentType?: string; runtime?: TeamPlanRecord['leaderRuntime'] }>; tasks?: Array<{ id: string; ownerId: string }> }): Promise<TeamPlanRecord> {
     const current = await readTeamPlan(teamName)
@@ -73,7 +111,9 @@ export class TeamPlanService {
       await this.runtime.stop(plan.planId).catch(() => {})
       const current = await readTeamPlan(plan.teamName)
       if (!current || current.planId !== plan.planId || current.state !== 'launching') return
-      await mutateTeamPlan(plan.teamName, { ...current, expectedRevision: current.revision }, item => ({ ...item, state: error && typeof error === 'object' && 'executionStarted' in error && error.executionStarted === true ? 'interrupted' : 'launch_failed', launch: { ...item.launch, status: 'failed', error: error instanceof Error ? error.message : String(error) } }))
+      const started = error && typeof error === 'object' && 'executionStarted' in error && error.executionStarted === true
+      if (started) return await this.interrupt(current, error instanceof Error ? error.message : String(error))
+      await mutateTeamPlan(plan.teamName, { ...current, expectedRevision: current.revision }, item => ({ ...item, state: 'launch_failed', launch: { ...item.launch, status: 'failed', error: error instanceof Error ? error.message : String(error) } }))
     }).finally(() => { this.launches.delete(plan.planId) })
     this.launches.set(plan.planId, operation)
     void operation.catch(() => {})
@@ -91,6 +131,42 @@ export class TeamPlanService {
     const result = await approveTeamPlan(teamName, action, action.requestId, validated)
     if (result.committed) this.start(result.plan)
     return result.plan
+  }
+  /**
+   * Resume an interrupted team on its unfinished tasks. `confirmTaskIds` names
+   * the mid-flight tasks the user accepts re-running; the rest are held back.
+   */
+  async resume(teamName: string, action: TeamPlanAction, confirmTaskIds: string[] = []): Promise<TeamPlanRecord> {
+    const { resumeTeamPlan } = await import('../../utils/swarm/teamPlanStore.js')
+    // Plans interrupted before this feature existed (or by a build that never
+    // captured outcomes) carry no frozen `taskOutcomes`. Without them every
+    // task reads as "never started" and a resume would re-run work that already
+    // finished. The task list still holds the truth for those plans, so capture
+    // it here and hand it to the store, which freezes it in the same write that
+    // commits the resume — capturing it as a separate mutation would bump the
+    // revision and invalidate the client's expectedRevision.
+    const existing = await readTeamPlan(teamName)
+    const fallbackOutcomes = existing &&
+      existing.planId === action.planId &&
+      existing.state === 'interrupted' &&
+      !existing.taskOutcomes &&
+      existing.tasks.length > 0
+      ? await this.captureOutcomes(existing).catch(error => {
+          // No outcomes means every task would be released as "never started",
+          // re-running finished work. Refuse rather than guess; the caller can
+          // retry once the task list is readable.
+          throw new TeamPlanError(
+            `Cannot resume: the task list is unavailable (${error instanceof Error ? error.message : String(error)})`,
+            409,
+          )
+        })
+      : undefined
+    const { plan, committed } = await resumeTeamPlan(teamName, action, action.requestId, {
+      confirmTaskIds,
+      ...(fallbackOutcomes ? { fallbackOutcomes } : {}),
+    })
+    if (committed) this.start(plan)
+    return plan
   }
   async action(teamName: string, kind: 'return' | 'cancel' | 'retry', action: TeamPlanAction): Promise<TeamPlanRecord> {
     if (kind === 'retry') {

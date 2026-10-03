@@ -74,6 +74,84 @@ test('cold server observes durable pending launch as interrupted instead of repl
   expect((await service.getForSession('session'))?.state).toBe('interrupted')
 })
 
+// Regression: a plan interrupted before outcomes were captured (or one whose
+// capture never ran) has no `taskOutcomes`; resuming it used to re-run every
+// task, including finished work. The service captures from the live task list
+// and the store freezes them in the same write as the resume commit.
+test('resuming a legacy plan without outcomes captures them before releasing work', async () => {
+  const plan = await ready()
+  const twoTasks = await replaceTeamPlan('review', identity(plan), { tasks: [...plan.tasks, { id: 't2', subject: 'second task', ownerId: 'worker', dependencies: [] }] })
+  const submitted = await submitTeamPlan('review', identity(twoTasks))
+  await approveTeamPlan('review', identity(submitted), 'request', submitted)
+  const { mutateTeamPlan } = await import('../../utils/swarm/teamPlanStore.js')
+  const { createTask, updateTask, getCanonicalTeamTaskListId } = await import('../../utils/tasks.js')
+  const listId = getCanonicalTeamTaskListId('review')
+  const doneRow = await createTask(listId, { subject: 'fixture task', description: '', status: 'pending', blocks: [], blockedBy: [], metadata: { teamPlanId: submitted.planId, teamPlanTaskId: 't1' } })
+  await updateTask(listId, doneRow, { status: 'completed' })
+  const legacy = await mutateTeamPlan('review', { ...submitted, expectedRevision: (await readTeamPlan('review'))!.revision }, current => ({
+    ...current, state: 'interrupted', taskOutcomes: undefined,
+  }))
+  expect(legacy.taskOutcomes).toBeUndefined()
+
+  const service = new TeamPlanService({ validate: async item => item, launch: async () => ({ memberIds: {} }), stop: async () => {} })
+  const resumed = await service.resume('review', { ...identity(legacy), requestId: 'resume-legacy' })
+  expect(resumed.state).toBe('launching')
+  // The finished task was skipped and frozen onto the record for later attempts.
+  expect(resumed.resume?.runTaskIds).toEqual(['t2'])
+  expect(resumed.taskOutcomes?.t1?.status).toBe('completed')
+})
+
+// Regression: an interrupted plan from before outcomes were captured (or one
+// whose capture never ran) has no `taskOutcomes`. Reading it used to report
+// every task as "never started", so the card offered to re-run finished work
+// and never surfaced the mid-flight tasks resume must ask the user to confirm.
+test('reading an interrupted plan without outcomes backfills them from the task list', async () => {
+  const plan = await ready()
+  await approveTeamPlan('review', identity(plan), 'request', plan)
+  // A plan that ran has a materialized task row; this one finished before the
+  // crash, which is exactly what the backfill must skip on a later resume.
+  const { mutateTeamPlan } = await import('../../utils/swarm/teamPlanStore.js')
+  const { createTask, updateTask, getCanonicalTeamTaskListId } = await import('../../utils/tasks.js')
+  const listId = getCanonicalTeamTaskListId('review')
+  const taskId = await createTask(listId, { subject: 'fixture task', description: '', status: 'pending', blocks: [], blockedBy: [], metadata: { teamPlanId: plan.planId, teamPlanTaskId: 't1' } })
+  await updateTask(listId, taskId, { status: 'completed' })
+  const interrupted = await mutateTeamPlan('review', { ...plan, expectedRevision: (await readTeamPlan('review'))!.revision }, current => ({
+    ...current, state: 'interrupted', taskOutcomes: undefined,
+  }))
+  expect(interrupted.taskOutcomes).toBeUndefined()
+
+  const service = new TeamPlanService({ validate: async item => item, launch: async () => ({ memberIds: {} }), stop: async () => {} })
+  const read = await service.getForSession('session')
+  expect(read?.taskOutcomes?.t1?.status).toBe('completed')
+  // Persisted: a second read does not depend on the capture running again.
+  expect((await readTeamPlan('review'))?.taskOutcomes?.t1?.status).toBe('completed')
+})
+
+test('a capture failure leaves the interrupted plan readable and refuses to resume', async () => {
+  const plan = await ready()
+  await approveTeamPlan('review', identity(plan), 'request', plan)
+  const { mutateTeamPlan } = await import('../../utils/swarm/teamPlanStore.js')
+  const legacy = await mutateTeamPlan('review', { ...plan, expectedRevision: (await readTeamPlan('review'))!.revision }, current => ({
+    ...current, state: 'interrupted', taskOutcomes: undefined,
+  }))
+
+  const service = new TeamPlanService({
+    validate: async item => item,
+    launch: async () => ({ memberIds: {} }),
+    stop: async () => {},
+    captureOutcomes: async () => { throw new Error('task list unavailable') },
+  })
+  // The read degrades to the record as-is rather than failing the request.
+  const read = await service.getForSession('session')
+  expect(read?.state).toBe('interrupted')
+  expect(read?.taskOutcomes).toBeUndefined()
+  // The resume refuses instead of releasing every task as "never started",
+  // which would re-run finished work.
+  await expect(service.resume('review', { ...identity(legacy), requestId: 'resume-no-outcomes' }))
+    .rejects.toThrow('Cannot resume: the task list is unavailable')
+  expect((await readTeamPlan('review'))?.state).toBe('interrupted')
+})
+
 test('UI update only edits allocation, freezes catalog preset and marks human route', async () => {
   const plan = await ready()
   const withCatalog = await replaceTeamPlan('review', identity(plan), { agentCatalog: { specialist: { systemPrompt: 'specialist system', tools: ['Read'] } } })

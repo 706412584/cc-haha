@@ -202,6 +202,78 @@ export async function isTeamExecutionApproved(teamName: string, memberName?: str
   return false
 }
 
+/**
+ * Re-launch an interrupted team, running only the tasks that did not finish.
+ *
+ * Mirrors `approveTeamPlan`'s authorization shape — state `launching` plus an
+ * `approvedSnapshot` at `revision - 1` — so `launchTeamPlanRuntime`'s guard and
+ * durable re-check pass unchanged. The difference is what gets released:
+ * `completed` tasks are annotated `done`, tasks that were mid-flight when the
+ * runtime died are `held` (never auto-run — they may already have written files
+ * or run commands), and everything else is `run`. A held task is released only
+ * when the caller confirms it by id.
+ */
+export async function resumeTeamPlan(
+  teamName: string,
+  identity: TeamPlanIdentity,
+  requestId: string,
+  options: { confirmTaskIds?: string[]; fallbackOutcomes?: NonNullable<TeamPlanRecord['taskOutcomes']> } = {},
+): Promise<{ plan: TeamPlanRecord; committed: boolean }> {
+  if (!requestId.trim()) throw new TeamPlanError('requestId is required', 400)
+  return locked(teamName, async () => {
+    const plan = await requireCurrent(teamName, identity)
+    if (plan.resume?.requestId === requestId) return { plan, committed: false }
+    if (plan.revision !== identity.expectedRevision) throw new TeamPlanError('Plan changed; refresh before resuming')
+    if (plan.state !== 'interrupted') throw new TeamPlanError('Only an interrupted team can resume')
+    const snapshot = plan.approvedSnapshot
+    if (!snapshot) throw new TeamPlanError('The interrupted team has no approved roster to resume', 409)
+
+    // A plan interrupted before outcomes were captured carries none; the caller
+    // supplies them from the live task list so completed work is not re-run.
+    const outcomes = plan.taskOutcomes ?? options.fallbackOutcomes ?? {}
+    const confirmed = new Set(options.confirmTaskIds ?? [])
+    const runTaskIds: string[] = []
+    const heldTaskIds: string[] = []
+    const tasks = plan.tasks.map(task => {
+      const outcome = outcomes[task.id]
+      if (outcome?.status === 'completed') return { ...task, resumeState: 'done' as const }
+      if (outcome?.interrupted && !confirmed.has(task.id)) {
+        heldTaskIds.push(task.id)
+        return { ...task, resumeState: 'held' as const }
+      }
+      runTaskIds.push(task.id)
+      return { ...task, resumeState: 'run' as const }
+    })
+    if (runTaskIds.length === 0) throw new TeamPlanError('Every task already finished; there is nothing to resume', 409)
+
+    const now = Date.now()
+    const next: TeamPlanRecord = {
+      ...plan,
+      state: 'launching',
+      revision: plan.revision + 1,
+      updatedAt: now,
+      // Persist what the decision was based on when the plan itself had none:
+      // a later resume of a failed attempt must not fall back to "all run".
+      ...(plan.taskOutcomes ? {} : options.fallbackOutcomes ? { taskOutcomes: options.fallbackOutcomes } : {}),
+      // Held tasks keep their in-progress state in the task list, so dependents
+      // stay blocked. Confirmed ones are reset to pending by the launch path so
+      // a fresh worker can claim them.
+      approvedSnapshot: {
+        revision: plan.revision,
+        members: structuredClone(snapshot.members),
+        tasks: structuredClone(tasks),
+        leaderRuntime: structuredClone(plan.leaderRuntime),
+        approvedAt: now,
+        requestId,
+      },
+      resume: { requestId, resumedAt: now, attempt: (plan.resume?.attempt ?? 0) + 1, runTaskIds, heldTaskIds },
+      launch: { ...plan.launch, status: 'pending' },
+    }
+    await writePlan(next)
+    return { plan: next, committed: true }
+  })
+}
+
 export async function approveTeamPlan(teamName: string, identity: TeamPlanIdentity, requestId: string, validated: TeamPlanRecord): Promise<{ plan: TeamPlanRecord; committed: boolean }> {
   if (!requestId.trim()) throw new TeamPlanError('requestId is required', 400)
   return locked(teamName, async () => {

@@ -25,6 +25,8 @@ e2e-*.png
 
 # Local/generated artifacts
 artifacts/
+# Downloaded CI coverage reports (gh run download)
+cov-*/
 
 # Desktop build output
 desktop/dist/
