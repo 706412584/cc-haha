@@ -120,7 +120,7 @@ it.each([true, false])('shows beta details on focus without overflowing narrow f
 // ---------------------------------------------------------------------------
 
 type TunnelDiagnostics = {
-  status: 'idle' | 'starting' | 'running' | 'error'
+  status: 'idle' | 'starting' | 'running' | 'reconnecting' | 'error'
   url: string | null
   mode: 'quick' | 'named' | null
   error: string | null
@@ -205,6 +205,63 @@ describe('H5AccessSettings tunnel provider + cloudflared download', () => {
     expect(tunnelSection().getByTestId('h5-access-tunnel-provider')).toHaveTextContent('Unknown')
     // Unknown must not offer a downgrade that would be a no-op or a wrong guess.
     expect(tunnelSection().queryByTestId('h5-access-tunnel-switch-route')).toBeNull()
+  })
+
+  it('warns that the free Pinggy route expires after 60 minutes', () => {
+    seedH5Tunnel({ tunnel: { ...runningCloudflare, provider: 'pinggy' }, hostStatus: null })
+    render(<H5AccessSettings />)
+    expect(tunnelSection().getByTestId('h5-access-tunnel-pinggy-expiry')).toHaveTextContent('60 minutes')
+  })
+
+  it('does not show the Pinggy expiry warning on a Cloudflare tunnel', () => {
+    seedH5Tunnel({ tunnel: runningCloudflare, hostStatus: null })
+    render(<H5AccessSettings />)
+    expect(tunnelSection().queryByTestId('h5-access-tunnel-pinggy-expiry')).toBeNull()
+  })
+
+  it('surfaces a reconnecting tunnel with its provider instead of a dead URL', () => {
+    seedH5Tunnel({
+      tunnel: {
+        status: 'reconnecting',
+        url: null,
+        mode: 'quick',
+        error: 'pinggy exited unexpectedly (code=1, signal=null)',
+        hasToken: false,
+        provider: 'pinggy',
+      },
+      hostStatus: null,
+    })
+    render(<H5AccessSettings />)
+    // The provider badge survives the degraded state so the user can tell which
+    // route died (and that it was the 60-minute-capped one).
+    expect(tunnelSection().getByTestId('h5-access-tunnel-provider')).toHaveTextContent('Pinggy')
+    expect(tunnelSection().getByTestId('h5-access-tunnel-status')).toHaveTextContent('reconnecting')
+    expect(tunnelSection().getByTestId('h5-access-tunnel-pinggy-expiry')).toBeInTheDocument()
+  })
+
+  it('stops (does not restart) a tunnel that is reconnecting', async () => {
+    seedH5Tunnel({
+      tunnel: {
+        status: 'reconnecting',
+        url: null,
+        mode: 'quick',
+        error: 'cloudflare exited unexpectedly (code=1, signal=null)',
+        hasToken: false,
+        provider: 'cloudflare',
+      },
+      hostStatus: null,
+    })
+    const stop = vi.spyOn(useSettingsStore.getState(), 'stopH5Tunnel').mockResolvedValue()
+    const start = vi.spyOn(useSettingsStore.getState(), 'startH5Tunnel').mockResolvedValue()
+    render(<H5AccessSettings />)
+
+    // While reconnecting the toggle must offer Stop — otherwise the only control
+    // for a dead tunnel would silently spawn a second one.
+    fireEvent.click(tunnelSection().getByTestId('h5-access-tunnel-toggle'))
+    await waitFor(() => expect(stop).toHaveBeenCalled())
+    expect(start).not.toHaveBeenCalled()
+    // Mode is locked so a reconnect cannot be desynced from a mid-flight change.
+    expect(tunnelSection().getByLabelText('Tunnel mode')).toBeDisabled()
   })
 
   it('shows a determinate download progress bar while cloudflared is downloading', async () => {

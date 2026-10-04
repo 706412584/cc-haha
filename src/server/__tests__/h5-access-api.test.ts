@@ -318,6 +318,28 @@ describe('/api/h5-access', () => {
     expect(heartbeatBody.tunnel.provider).toBe('pinggy')
   })
 
+  test('tunnel/report accepts the reconnecting status while preserving the provider', async () => {
+    await api('POST', '/api/h5-access/enable')
+    await api('POST', '/api/h5-access/tunnel/report', {
+      body: { url: 'https://x.a.pinggy.io', status: 'running', provider: 'pinggy' },
+    })
+
+    // The desktop main process reconnects an unexpectedly-exited provider; the
+    // new status must survive the report whitelist or the UI would freeze on a
+    // stale "running" while the URL is already dead.
+    const response = await api('POST', '/api/h5-access/tunnel/report', {
+      body: { status: 'reconnecting', provider: 'pinggy', error: 'pinggy exited unexpectedly' },
+    })
+    expect(response.status).toBe(200)
+    const body = await response.json() as {
+      tunnel: { status: string; provider: string | null; url: string | null }
+    }
+    expect(body.tunnel.status).toBe('reconnecting')
+    expect(body.tunnel.provider).toBe('pinggy')
+    // A status-only report never wipes the last known URL on the server mirror.
+    expect(body.tunnel.url).toBe('https://x.a.pinggy.io')
+  })
+
   test('tunnel/clear resets the provider to null', async () => {
     await api('POST', '/api/h5-access/enable')
     await api('POST', '/api/h5-access/tunnel/report', {

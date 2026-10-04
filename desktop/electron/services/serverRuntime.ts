@@ -67,7 +67,7 @@ export type TunnelDownloadStatus = {
 }
 
 export type TunnelStatus = {
-  status: 'idle' | 'starting' | 'running' | 'error'
+  status: 'idle' | 'starting' | 'running' | 'reconnecting' | 'error'
   url: string | null
   mode: H5TunnelMode | null
   error: string | null
@@ -86,6 +86,16 @@ const TUNNEL_HEALTH_INITIAL_DELAY_MS = 15_000
 const TUNNEL_HEALTH_INTERVAL_MS = 30_000
 const TUNNEL_HEALTH_TIMEOUT_MS = 10_000
 const TUNNEL_HEALTH_FAILURE_THRESHOLD = 3
+
+/**
+ * Reconnect budget for a provider that exits unexpectedly (e.g. the Pinggy free
+ * tier's hard 60-minute cap). Backoff is short because the tunnel is a live
+ * feature the user is actively looking at; a provider that lived longer than
+ * `TUNNEL_RECONNECT_STABLE_MS` earns a fresh budget on its next start.
+ */
+const TUNNEL_RECONNECT_LIMIT = 3
+const TUNNEL_RECONNECT_STABLE_MS = 60_000
+const TUNNEL_RECONNECT_BACKOFF_MS = [1_000, 3_000, 8_000] as const
 
 type ServerRuntimeOptions = {
   onServerUnavailable?: () => void
@@ -113,6 +123,12 @@ type ServerRuntimeDeps = {
   waitForServer: typeof waitForServer
   writeLastServerPort: typeof writeLastServerPort
   createSystemProxyBridge: (resolveSystemProxy: (url: string) => Promise<string>) => SystemProxyBridgeLike
+  /**
+   * Build an undici dispatcher that routes a request through the userspace proxy
+   * bridge, for the *public* tunnel health probe. Returns null when no proxy
+   * dispatcher is available, in which case the probe falls back to plain fetch.
+   */
+  createProxyDispatcher: (proxyUrl: string) => Promise<unknown | null>
   ensureCloudflaredBinary: typeof ensureCloudflaredBinary
   createCloudflareTunnel: typeof createCloudflareTunnel
   createPinggyTunnel: typeof createPinggyTunnel
@@ -128,9 +144,38 @@ const DEFAULT_SERVER_RUNTIME_DEPS: ServerRuntimeDeps = {
   waitForServer,
   writeLastServerPort,
   createSystemProxyBridge: resolveSystemProxy => new SystemProxyBridge(resolveSystemProxy),
+  createProxyDispatcher: createUndiciProxyDispatcher,
   ensureCloudflaredBinary,
   createCloudflareTunnel,
   createPinggyTunnel,
+}
+
+type UndiciModule = { ProxyAgent?: new (url: string) => unknown }
+
+// undici is present in the desktop dependency tree but is not a declared direct
+// dependency. Load it through a widened specifier so a future install that drops
+// it degrades to a direct connection instead of breaking the type-check or
+// module load — same policy as the https-proxy-agent import in
+// cloudflaredBinary.ts.
+let undiciModulePromise: Promise<UndiciModule | null> | null = null
+function loadUndiciModule(): Promise<UndiciModule | null> {
+  if (!undiciModulePromise) {
+    const specifier: string = 'undici'
+    undiciModulePromise = import(specifier)
+      .then(module => module as unknown as UndiciModule)
+      .catch(() => null)
+  }
+  return undiciModulePromise
+}
+
+async function createUndiciProxyDispatcher(proxyUrl: string): Promise<unknown | null> {
+  const undici = await loadUndiciModule()
+  if (!undici?.ProxyAgent) return null
+  try {
+    return new undici.ProxyAgent(proxyUrl)
+  } catch {
+    return null
+  }
 }
 
 const AUTOMATIC_RESTART_LIMIT = 3
@@ -221,6 +266,8 @@ export class ElectronServerRuntime {
   private readonly petAccessToken = randomBytes(32).toString('base64url')
   private sidecarEnvPromise: Promise<NodeJS.ProcessEnv> | null = null
   private systemProxyBridge: SystemProxyBridgeLike | null = null
+  /** Bridge URL cached for the public health probe; cleared with the bridge. */
+  private systemProxyBridgeUrl: string | null = null
   private server: ActiveServer | null = null
   private adapters: SidecarChild[] = []
   private tunnel: { instance: TunnelProviderInstance, mode: H5TunnelMode } | null = null
@@ -228,6 +275,21 @@ export class ElectronServerRuntime {
   private tunnelGeneration = 0
   private tunnelHealthTimer: ReturnType<typeof setTimeout> | null = null
   private tunnelHealthFailures = 0
+  /** Last successful start options, reused to reconnect an exited provider. */
+  private tunnelLastOptions: TunnelStartOptions | null = null
+  private tunnelReconnectAttempts = 0
+  private tunnelReconnectTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * Bumped on any user-initiated start/stop. An in-flight reconnect sequence
+   * captures this and aborts if it changes, so a pending retry can never
+   * resurrect a tunnel the user just stopped. Distinct from `tunnelGeneration`,
+   * which the reconnect's own restart bumps on purpose.
+   */
+  private tunnelReconnectEpoch = 0
+  /** When the current provider instance started, for the stable-window reset. */
+  private tunnelStartedAt = 0
+  /** Cached proxy dispatcher for the public health probe; null until resolved. */
+  private tunnelProxyDispatcher: Promise<unknown | null> | null = null
   /**
    * Set once a public health probe succeeds, cleared when a new tunnel starts.
    * A later failure is then known to be a regression of a URL that *was* live,
@@ -316,6 +378,8 @@ export class ElectronServerRuntime {
   }
 
   stopAll(sync = false) {
+    this.tunnelReconnectEpoch += 1
+    this.tunnelLastOptions = null
     this.stopTunnelProcess(sync)
     this.onServerUnavailable?.()
     ++this.lifecycleGeneration
@@ -357,7 +421,24 @@ export class ElectronServerRuntime {
    * Cloudflare-only and uses the user's configured domain (namedUrl).
    */
   async startTunnel(options: TunnelStartOptions): Promise<TunnelStatus> {
+    // A user-initiated start supersedes any pending reconnect and earns a fresh
+    // reconnect budget. Remember the options so an unexpected exit can replay it.
+    this.tunnelReconnectEpoch += 1
+    this.clearTunnelReconnectTimer()
+    this.tunnelReconnectAttempts = 0
+    this.tunnelLastOptions = options
+    return this.runTunnelStart(options)
+  }
+
+  private async runTunnelStart(options: TunnelStartOptions): Promise<TunnelStatus> {
+    const epoch = this.tunnelReconnectEpoch
     const serverUrl = await this.getServerUrl()
+    // `getServerUrl` can suspend while the server is (re)starting. A pending
+    // reconnect's own start does not bump the epoch, so without this re-check a
+    // user-initiated stop landing in that window would be overwritten and the
+    // tunnel resurrected. (The generation guard below only covers the window
+    // after `stopTunnelProcess` has run.)
+    if (epoch !== this.tunnelReconnectEpoch) return this.getTunnelStatus()
     const port = Number(new URL(serverUrl).port) || 0
 
     // Replace any existing tunnel so a mode switch / restart is clean.
@@ -366,6 +447,9 @@ export class ElectronServerRuntime {
     // A fresh tunnel's URL has not served anything yet; re-verify before any
     // failure is allowed to degrade it.
     this.tunnelExternallyVerified = false
+    // Reset the stable-window clock: it is only set once the provider is up, so
+    // a start that never reaches `running` cannot look like a long-lived one.
+    this.tunnelStartedAt = 0
     this.tunnelState = { status: 'starting', url: null, mode: options.mode, error: null, provider: null, download: null }
 
     const env = await this.resolveSidecarBaseEnv()
@@ -414,6 +498,7 @@ export class ElectronServerRuntime {
           return null
         }
         this.tunnel = { instance, mode: options.mode }
+        this.tunnelStartedAt = this.deps.now()
         this.tunnelState = {
           status: 'running',
           url: instance.url,
@@ -541,7 +626,9 @@ export class ElectronServerRuntime {
 
   /**
    * Attach the unexpected-exit handler to a running provider process. Guarded by
-   * generation + instance identity so a stale exit cannot clobber a newer tunnel.
+   * generation + instance identity so a stale exit cannot clobber a newer tunnel
+   * — and so a user-initiated stop (which bumps the generation first) never
+   * triggers a reconnect.
    */
   private watchProviderExit(instance: TunnelProviderInstance, context: {
     generation: number
@@ -552,16 +639,90 @@ export class ElectronServerRuntime {
       if (context.generation !== this.tunnelGeneration || this.tunnel?.instance !== instance) return
       this.clearTunnelHealthTimer()
       this.tunnel = null
+      const reason = `${instance.provider} exited unexpectedly (code=${code}, signal=${signal})`
+      // A provider that had been *healthy* past the stable window (e.g. Pinggy's
+      // free 60-minute cap) earns a fresh reconnect budget; a fast crash-loop
+      // does not. Require `running`: a tunnel already degraded to `error` by the
+      // health probe must not keep resetting its budget and retry forever.
+      if (this.tunnelState.status === 'running'
+        && this.deps.now() - this.tunnelStartedAt >= TUNNEL_RECONNECT_STABLE_MS) {
+        this.tunnelReconnectAttempts = 0
+      }
+      this.scheduleTunnelReconnect({
+        mode: context.mode,
+        serverUrl: context.serverUrl,
+        provider: instance.provider,
+        reason,
+      })
+    })
+  }
+
+  /**
+   * Reconnect an unexpectedly-exited tunnel with a short backoff. Keeps
+   * `provider` populated so the settings page can explain *which* route died
+   * (notably Pinggy's 60-minute cap). Gives up after
+   * `TUNNEL_RECONNECT_LIMIT` attempts and settles into the terminal error state.
+   */
+  private scheduleTunnelReconnect(context: {
+    mode: H5TunnelMode
+    serverUrl: string
+    provider: H5TunnelProvider
+    reason: string
+  }) {
+    const options = this.tunnelLastOptions
+    const attempt = this.tunnelReconnectAttempts
+    if (!options || attempt >= TUNNEL_RECONNECT_LIMIT) {
       this.tunnelState = {
         status: 'error',
         url: null,
         mode: context.mode,
-        error: `${instance.provider} exited unexpectedly (code=${code}, signal=${signal})`,
-        provider: null,
+        error: context.reason,
+        provider: context.provider,
         download: null,
       }
       void this.clearTunnelOnServer(context.serverUrl).then(() => this.reportTunnel(context.serverUrl))
-    })
+      return
+    }
+
+    this.tunnelReconnectAttempts = attempt + 1
+    const delayMs = TUNNEL_RECONNECT_BACKOFF_MS[Math.min(attempt, TUNNEL_RECONNECT_BACKOFF_MS.length - 1)]!
+    this.tunnelState = {
+      status: 'reconnecting',
+      url: null,
+      mode: context.mode,
+      error: context.reason,
+      provider: context.provider,
+      download: null,
+    }
+    // Report the degraded state now; the successful reconnect re-reports running.
+    void this.clearTunnelOnServer(context.serverUrl).then(() => this.reportTunnel(context.serverUrl))
+
+    const epoch = this.tunnelReconnectEpoch
+    this.clearTunnelReconnectTimer()
+    this.tunnelReconnectTimer = this.setTimeoutFn(() => {
+      this.tunnelReconnectTimer = null
+      if (epoch !== this.tunnelReconnectEpoch) return
+      // Reuse the original options (provider pin included) so a manual route
+      // switch is honoured on reconnect.
+      void this.runTunnelStart(options).then(status => {
+        if (epoch !== this.tunnelReconnectEpoch) return
+        if (status.status === 'running') return
+        // The provider could not come back (start failed, or it crashed again);
+        // keep retrying until the budget is spent.
+        this.scheduleTunnelReconnect(context)
+      }).catch(() => {
+        if (epoch !== this.tunnelReconnectEpoch) return
+        this.scheduleTunnelReconnect(context)
+      })
+    }, delayMs)
+    this.tunnelReconnectTimer.unref?.()
+  }
+
+  private clearTunnelReconnectTimer() {
+    if (this.tunnelReconnectTimer !== null) {
+      this.clearTimeoutFn(this.tunnelReconnectTimer)
+      this.tunnelReconnectTimer = null
+    }
   }
 
   /** Directory holding the Pinggy identity key + known-hosts, beside the cloudflared cache. */
@@ -570,6 +731,10 @@ export class ElectronServerRuntime {
   }
 
   async stopTunnel(): Promise<TunnelStatus> {
+    // User-initiated stop: cancel any in-flight reconnect for good.
+    this.tunnelReconnectEpoch += 1
+    this.tunnelReconnectAttempts = 0
+    this.tunnelLastOptions = null
     this.stopTunnelProcess()
     this.tunnelState = { status: 'idle', url: null, mode: null, error: null, provider: null, download: null }
     if (this.server) {
@@ -586,8 +751,13 @@ export class ElectronServerRuntime {
 
   private stopTunnelProcess(sync = false) {
     this.tunnelGeneration += 1
+    // Cancel any pending reconnect. The epoch is bumped only by user-initiated
+    // actions (see startTunnel/stopTunnel/stopAll); an internal restart during a
+    // reconnect must NOT bump it, or the retry chain would cancel itself.
+    this.clearTunnelReconnectTimer()
     this.clearTunnelHealthTimer()
     this.tunnelExternallyVerified = false
+    this.tunnelStartedAt = 0
     if (this.tunnel) {
       const instance = this.tunnel.instance
       this.tunnel = null
@@ -602,6 +772,33 @@ export class ElectronServerRuntime {
       this.tunnelHealthTimer = null
     }
     this.tunnelHealthFailures = 0
+  }
+
+  /**
+   * Probe the *public* tunnel URL. Node's global fetch does not honor
+   * HTTP(S)_PROXY, so on a machine behind a system proxy the plain probe can
+   * never reach the public host — the health check would be permanently
+   * inconclusive. When the userspace bridge is up, route the probe through it
+   * with an undici dispatcher; otherwise fall back to the injected fetch.
+   *
+   * Only ever used for the public URL — the loopback report/clear calls must
+   * stay direct.
+   */
+  private async probePublicTunnelUrl(input: URL, init: RequestInit): Promise<Response> {
+    const proxyUrl = this.systemProxyBridgeUrl
+    if (!proxyUrl) return this.fetchFn(input, init)
+    if (!this.tunnelProxyDispatcher) {
+      this.tunnelProxyDispatcher = this.deps.createProxyDispatcher(proxyUrl)
+    }
+    let dispatcher: unknown | null = null
+    try {
+      dispatcher = await this.tunnelProxyDispatcher
+    } catch {
+      dispatcher = null
+    }
+    if (!dispatcher) return this.fetchFn(input, init)
+    // `dispatcher` is an undici extension absent from the DOM RequestInit type.
+    return this.fetchFn(input, { ...init, dispatcher } as RequestInit)
   }
 
   private scheduleTunnelHealthCheck(context: {
@@ -627,17 +824,28 @@ export class ElectronServerRuntime {
 
     let failureReason: string | null = null
     try {
-      const response = await this.fetchFn(new URL('/health', context.tunnelUrl), {
+      const response = await this.probePublicTunnelUrl(new URL('/health', context.tunnelUrl), {
         method: 'GET',
         headers: { 'Cache-Control': 'no-cache' },
         redirect: 'manual',
         signal: AbortSignal.timeout(TUNNEL_HEALTH_TIMEOUT_MS),
       })
+      // A proxy that cannot reach the tunnel edge answers with a gateway error
+      // rather than throwing. That is a proxy condition, not evidence the tunnel
+      // is down, so treat it like the transport-error path below and stay
+      // inconclusive — otherwise a proxy outage would tear down a healthy tunnel.
+      if (response.status === 502 || response.status === 503 || response.status === 504) {
+        if (context.generation === this.tunnelGeneration && this.tunnel?.instance.child === context.child) {
+          this.scheduleTunnelHealthCheck(context, TUNNEL_HEALTH_INTERVAL_MS)
+        }
+        return
+      }
       if (!response.ok) failureReason = `HTTP ${response.status}`
     } catch {
-      // The main-process fetch may not share Electron's system/PAC proxy while
-      // cloudflared does. A network error is therefore inconclusive: retry it,
-      // but only an actual non-2xx response may tear down a running tunnel.
+      // The probe failed at the transport layer. On a machine behind a system
+      // proxy the main-process fetch cannot reach the public URL at all, so a
+      // network error is inconclusive: retry it, but only an actual non-2xx
+      // response may tear down a running tunnel.
       if (context.generation === this.tunnelGeneration && this.tunnel?.instance.child === context.child) {
         this.scheduleTunnelHealthCheck(context, TUNNEL_HEALTH_INTERVAL_MS)
       }
@@ -1143,10 +1351,16 @@ export class ElectronServerRuntime {
       if (this.systemProxyBridge !== bridge) {
         throw new Error('system proxy bridge startup was stopped')
       }
+      // Remember the URL so the public tunnel health probe can route through
+      // the same bridge the sidecars use.
+      this.systemProxyBridgeUrl = bridgeUrl
+      this.tunnelProxyDispatcher = null
       return applyRuntimeEnv(withSystemProxyBridgeEnv(baseEnv, bridgeUrl))
     } catch (error) {
       if (this.systemProxyBridge === bridge) {
         this.systemProxyBridge = null
+        this.systemProxyBridgeUrl = null
+        this.tunnelProxyDispatcher = null
         await bridge.stop().catch(() => {})
       }
       const message = error instanceof Error ? error.message : String(error)
@@ -1167,6 +1381,8 @@ export class ElectronServerRuntime {
   private stopSystemProxyBridge(): void {
     const bridge = this.systemProxyBridge
     this.systemProxyBridge = null
+    this.systemProxyBridgeUrl = null
+    this.tunnelProxyDispatcher = null
     this.sidecarEnvPromise = null
     if (bridge) void bridge.stop()
   }

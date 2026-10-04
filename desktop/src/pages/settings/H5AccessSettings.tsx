@@ -171,9 +171,19 @@ export function H5AccessSettings() {
   const h5TunnelAvailable = h5AccessApi.tunnelAvailable()
   const h5TunnelState = h5AccessDiagnostics?.tunnel
   const h5TunnelRunning = h5TunnelState?.status === 'running'
+  // A provider that exited unexpectedly is retried by the main process; the UI
+  // keeps polling and shows the reconnect instead of a frozen dead URL.
+  const h5TunnelReconnecting = h5TunnelState?.status === 'reconnecting'
+  // "Occupied" covers every state where a tunnel process exists or is being
+  // brought up, so the toggle offers Stop (cancelling a reconnect) and the mode
+  // controls stay locked instead of silently spawning a second tunnel.
+  const h5TunnelOccupied = h5TunnelRunning || h5TunnelReconnecting || h5TunnelState?.status === 'starting'
   // Provider: prefer the host-direct report, fall back to the server mirror.
   // A missing value on both is "unknown", never assumed to be Cloudflare.
   const h5TunnelProvider = readTunnelProvider(h5HostTunnelStatus) ?? readTunnelProvider(h5TunnelState)
+  // Pinggy's free tier hard-caps a tunnel at 60 minutes. Warn whenever Pinggy is
+  // the live route — including while it is reconnecting after that cap hit.
+  const h5TunnelPinggyActive = h5TunnelProvider === 'pinggy' && (h5TunnelRunning || h5TunnelReconnecting)
   const h5TunnelDownload = h5HostTunnelStatus?.download ?? null
   const h5TunnelDownloading = h5TunnelDownload?.state === 'downloading'
   const h5TunnelDownloadFailed = h5TunnelDownload?.state === 'failed'
@@ -182,7 +192,7 @@ export function H5AccessSettings() {
   // already fallen back to Pinggy. Quick mode only: the main process refuses
   // Pinggy for a named tunnel (the domain is bound in Cloudflare), so offering
   // the button there would guarantee a failure toast.
-  const h5TunnelCanSwitchRoute = h5TunnelRunning
+  const h5TunnelCanSwitchRoute = (h5TunnelRunning || h5TunnelReconnecting)
     && h5TunnelProvider === 'cloudflare'
     && h5TunnelState?.mode !== 'named'
   const h5AccessUrl = h5Access.publicBaseUrl
@@ -217,7 +227,8 @@ export function H5AccessSettings() {
   }, [])
 
   useEffect(() => {
-    if (!h5TunnelAvailable || (h5TunnelState?.status !== 'starting' && h5TunnelState?.status !== 'running')) return
+    const status = h5TunnelState?.status
+    if (!h5TunnelAvailable || (status !== 'starting' && status !== 'running' && status !== 'reconnecting')) return
     const interval = window.setInterval(() => {
       void fetchH5Access()
     }, 10_000)
@@ -240,7 +251,8 @@ export function H5AccessSettings() {
     const active = h5ActionRunning ||
       h5TunnelDownloading ||
       h5TunnelState?.status === 'starting' ||
-      h5TunnelState?.status === 'running'
+      h5TunnelState?.status === 'running' ||
+      h5TunnelState?.status === 'reconnecting'
     if (!active) return
     const intervalMs = h5ActionRunning || h5TunnelDownloading ? 2_000 : 10_000
     const interval = window.setInterval(refreshH5HostTunnelStatus, intervalMs)
@@ -325,7 +337,7 @@ export function H5AccessSettings() {
 
   const handleH5TunnelToggle = async () => {
     await runH5Action(async () => {
-      if (h5TunnelRunning) {
+      if (h5TunnelOccupied) {
         await stopH5Tunnel()
         return
       }
@@ -569,7 +581,7 @@ export function H5AccessSettings() {
                   <span className="text-sm font-medium text-[var(--color-text-primary)]">
                     {t('settings.general.h5AccessTunnelTitle')}
                   </span>
-                  {h5TunnelRunning && (
+                  {(h5TunnelRunning || h5TunnelReconnecting) && (
                     <Badge tone="neutral" size="sm" bordered data-testid="h5-access-tunnel-provider">
                       {t('settings.general.h5AccessTunnelProvider')}
                       {': '}
@@ -590,7 +602,7 @@ export function H5AccessSettings() {
                     aria-label={t('settings.general.h5AccessTunnelMode')}
                     className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-sm text-[var(--color-text-primary)]"
                     value={h5TunnelMode}
-                    disabled={h5TunnelRunning || h5ActionRunning}
+                    disabled={h5TunnelOccupied || h5ActionRunning}
                     onChange={(event) => setH5TunnelMode(event.target.value === 'named' ? 'named' : 'quick')}
                   >
                     <option value="quick">{t('settings.general.h5AccessTunnelModeQuick')}</option>
@@ -598,16 +610,26 @@ export function H5AccessSettings() {
                   </select>
                   <Button
                     size="sm"
-                    variant={h5TunnelRunning ? 'secondary' : 'primary'}
+                    variant={h5TunnelOccupied ? 'secondary' : 'primary'}
                     loading={h5ActionRunning}
                     onClick={() => void handleH5TunnelToggle()}
                     data-testid="h5-access-tunnel-toggle"
                   >
-                    {h5TunnelRunning
+                    {h5TunnelOccupied
                       ? t('settings.general.h5AccessTunnelStop')
                       : t('settings.general.h5AccessTunnelStart')}
                   </Button>
                 </div>
+
+                {h5TunnelPinggyActive && (
+                  <p
+                    data-testid="h5-access-tunnel-pinggy-expiry"
+                    role="status"
+                    className="mt-2 text-xs leading-5 text-[var(--color-warning)]"
+                  >
+                    {t('settings.general.h5AccessTunnelPinggyExpiry')}
+                  </p>
+                )}
 
                 {h5TunnelCanSwitchRoute && (
                   <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -627,7 +649,7 @@ export function H5AccessSettings() {
                   </div>
                 )}
 
-                {h5TunnelMode === 'named' && !h5TunnelRunning && (
+                {h5TunnelMode === 'named' && !h5TunnelOccupied && (
                   <div className="mt-3">
                     <Input
                       id="h5-access-tunnel-token"
@@ -702,6 +724,11 @@ export function H5AccessSettings() {
                     className="mt-3 text-xs leading-5 text-[var(--color-text-secondary)]"
                   >
                     {h5TunnelState.status === 'starting' && t('settings.general.h5AccessTunnelStarting')}
+                    {h5TunnelState.status === 'reconnecting' && (
+                      <span className="text-[var(--color-warning)]">
+                        {t('settings.general.h5AccessTunnelReconnecting')}
+                      </span>
+                    )}
                     {h5TunnelState.status === 'running' && h5TunnelState.url && (
                       <span className="break-all">
                         {t('settings.general.h5AccessTunnelRunning')} {h5TunnelState.url}

@@ -1004,6 +1004,8 @@ type TeamStore = {
   /** Hide a team's header strip for one session. Purely a view convenience. */
   hideTeamStrip: (sessionId: string, incarnationId?: string) => void
   isTeamStripHidden: (sessionId: string, incarnationId?: string) => boolean
+  /** Un-hide a team's header strip for one session. Purely a view convenience. */
+  showTeamStrip: (sessionId: string, incarnationId?: string) => void
   /** Stop the team's workers and remove the team. Returns false on failure. */
   disbandTeam: (teamName: string, sessionId: string, incarnationId?: string) => Promise<boolean>
 
@@ -1739,6 +1741,13 @@ export const useTeamStore = create<TeamStore>((set, get) => ({
 
   isTeamStripHidden: (sessionId, incarnationId) =>
     hiddenTeamStrips.has(hiddenTeamStripKey(sessionId, incarnationId)),
+
+  showTeamStrip: (sessionId, incarnationId) => {
+    hiddenTeamStrips.delete(hiddenTeamStripKey(sessionId, incarnationId))
+    // Force the selector to re-run: the Set is module-local, so zustand has no
+    // other way to know a subscribed component's answer changed.
+    set(state => ({ workbenchesBySession: { ...state.workbenchesBySession } }))
+  },
 
   disbandTeam: async (teamName, sessionId, incarnationId) => {
     try {

@@ -139,7 +139,7 @@ export type H5AccessSettings = {
 export type H5HostStaleness = 'ok' | 'unreachable' | 'proxy' | 'unset'
 
 export type H5TunnelMode = 'quick' | 'named'
-export type H5TunnelStatus = 'idle' | 'starting' | 'running' | 'error'
+export type H5TunnelStatus = 'idle' | 'starting' | 'running' | 'reconnecting' | 'error'
 export type H5TunnelProvider = 'cloudflare' | 'pinggy'
 
 export type H5TunnelDiagnostics = {

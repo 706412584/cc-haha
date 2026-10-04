@@ -3316,6 +3316,13 @@ describe('ActiveSession task polling', () => {
     // team reusing the name both keep their strip.
     expect(useTeamStore.getState().isTeamStripHidden('other-session', 'inc-1')).toBe(false)
     expect(useTeamStore.getState().isTeamStripHidden(sessionId, 'inc-2')).toBe(false)
+
+    // Hiding is not a dead end: the restore control brings the strip back.
+    act(() => {
+      fireEvent.click(screen.getByTestId('agent-teams-strip-show'))
+    })
+    expect(screen.getByTestId('agent-teams-strip')).toBeInTheDocument()
+    expect(useTeamStore.getState().isTeamStripHidden(sessionId, 'inc-1')).toBe(false)
   })
 
   it('updates the Team workbench without leaking its DAG, roster, or transcript spawns into main Activity', async () => {

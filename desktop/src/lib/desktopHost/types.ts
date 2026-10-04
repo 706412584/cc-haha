@@ -395,7 +395,7 @@ export type DesktopTunnelDownloadStatus = {
 }
 
 export type DesktopTunnelStatus = {
-  status: 'idle' | 'starting' | 'running' | 'error'
+  status: 'idle' | 'starting' | 'running' | 'reconnecting' | 'error'
   url: string | null
   mode: DesktopTunnelMode | null
   error: string | null

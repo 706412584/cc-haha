@@ -2868,6 +2868,8 @@ export const zh: Record<TranslationKey, string> = {
   'settings.general.h5AccessTunnelTokenStored': '已儲存隧道 token。貼上新的可替換。',
   'settings.general.h5AccessTunnelStarting': '正在啟動隧道…',
   'settings.general.h5AccessTunnelRunning': '隧道已上線：',
+  'settings.general.h5AccessTunnelReconnecting': '隧道已中斷，正在重新連線…',
+  'settings.general.h5AccessTunnelPinggyExpiry': 'Pinggy 免費線路 60 分鐘後會失效，斷線後可切換到 Cloudflare 或重新啟動隧道。',
   'settings.general.h5AccessTunnelError': '隧道啟動失敗。',
   'settings.general.h5AccessTunnelProvider': '線路提供方',
   'settings.general.h5AccessTunnelProviderCloudflare': 'Cloudflare',
@@ -3950,6 +3952,7 @@ export const zh: Record<TranslationKey, string> = {
   'agentTeams.strip.label': '團隊',
 
   'agentTeams.strip.hide': '隱藏團隊狀態',
+  'agentTeams.strip.show': '顯示團隊狀態',
   // ─── Session Activity ──────────────────────────────────────
   'session.activity.tasksProgress': '任務進度 {completed}/{total}',
   'session.activity.section.team': '團隊',
