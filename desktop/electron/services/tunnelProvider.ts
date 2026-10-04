@@ -32,7 +32,7 @@ export type H5TunnelProvider = 'cloudflare' | 'pinggy'
  * `H5TunnelStatus` in src/server/services/h5AccessService.ts — the literal
  * values must stay in lockstep with it.
  */
-export type H5TunnelStatus = 'idle' | 'starting' | 'running' | 'error'
+export type H5TunnelStatus = 'idle' | 'starting' | 'running' | 'reconnecting' | 'error'
 
 /** A started tunnel: which provider, its public URL, and how to stop it. */
 export type TunnelProviderInstance = {

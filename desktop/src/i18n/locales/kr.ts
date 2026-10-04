@@ -2867,6 +2867,8 @@ export const kr: Record<TranslationKey, string> = {
   'settings.general.h5AccessTunnelTokenStored': '터널 토큰이 저장되어 있습니다. 새 토큰을 붙여넣으면 교체됩니다.',
   'settings.general.h5AccessTunnelStarting': '터널을 시작하는 중...',
   'settings.general.h5AccessTunnelRunning': '터널이 활성화됨:',
+  'settings.general.h5AccessTunnelReconnecting': '터널이 끊어졌습니다. 다시 연결하는 중…',
+  'settings.general.h5AccessTunnelPinggyExpiry': '무료 Pinggy 경로는 60분 후 만료됩니다. 끊기면 Cloudflare로 전환하거나 터널을 다시 시작하세요.',
   'settings.general.h5AccessTunnelError': '터널을 시작하지 못했습니다.',
   'settings.general.h5AccessTunnelProvider': '공급자',
   'settings.general.h5AccessTunnelProviderCloudflare': 'Cloudflare',
@@ -3949,6 +3951,7 @@ export const kr: Record<TranslationKey, string> = {
   'agentTeams.strip.label': '팀',
 
   'agentTeams.strip.hide': '팀 상태 숨기기',
+  'agentTeams.strip.show': '팀 상태 표시',
   // ─── Session Activity ──────────────────────────────────────
   'session.activity.tasksProgress': '작업 진행률 {completed}/{total}',
   'session.activity.section.team': '팀',

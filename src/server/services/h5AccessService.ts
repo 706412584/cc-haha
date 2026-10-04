@@ -262,7 +262,7 @@ function normalizePublicBaseUrl(input: unknown): string | null {
 }
 
 export type H5TunnelMode = 'quick' | 'named'
-export type H5TunnelStatus = 'idle' | 'starting' | 'running' | 'error'
+export type H5TunnelStatus = 'idle' | 'starting' | 'running' | 'reconnecting' | 'error'
 export type H5TunnelProvider = 'cloudflare' | 'pinggy'
 
 export type H5TunnelRuntimeState = {

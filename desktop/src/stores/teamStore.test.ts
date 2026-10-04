@@ -1972,6 +1972,31 @@ describe('teamStore disband and strip visibility', () => {
     expect(isTeamStripHidden('session-a', 'inc-2')).toBe(false)
   })
 
+  it('shows a hidden strip again, scoped to one session and incarnation', () => {
+    const { hideTeamStrip, showTeamStrip, isTeamStripHidden } = useTeamStore.getState()
+    hideTeamStrip('session-a', 'inc-1')
+    hideTeamStrip('session-b', 'inc-1')
+    hideTeamStrip('session-a', 'inc-2')
+    expect(isTeamStripHidden('session-a', 'inc-1')).toBe(true)
+
+    // The hidden Set is module-local, so clearing it is not enough: the store
+    // must also publish a new slice or subscribed components never re-render and
+    // the strip stays gone. Assert that observable side effect, not just the Set.
+    let notifications = 0
+    const unsubscribe = useTeamStore.subscribe(() => { notifications += 1 })
+    try {
+      showTeamStrip('session-a', 'inc-1')
+      expect(notifications).toBeGreaterThan(0)
+    } finally {
+      unsubscribe()
+    }
+
+    expect(isTeamStripHidden('session-a', 'inc-1')).toBe(false)
+    // Un-hiding one session/incarnation leaves every other key hidden.
+    expect(isTeamStripHidden('session-b', 'inc-1')).toBe(true)
+    expect(isTeamStripHidden('session-a', 'inc-2')).toBe(true)
+  })
+
   it('disbands a team and hides its strip on success', async () => {
     const { teamsApi } = await import('../api/teams')
     vi.mocked(teamsApi.disband).mockResolvedValue({ ok: true })

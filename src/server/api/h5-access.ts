@@ -129,7 +129,7 @@ export async function handleH5AccessApi(
           // rather than clearing it — clearing is done via tunnel/clear.
           const url = typeof body.url === 'string' ? body.url : undefined
           const status = body.status === 'starting' || body.status === 'running'
-            || body.status === 'error' || body.status === 'idle'
+            || body.status === 'reconnecting' || body.status === 'error' || body.status === 'idle'
             ? body.status
             : undefined
           const mode = body.mode === 'quick' || body.mode === 'named'

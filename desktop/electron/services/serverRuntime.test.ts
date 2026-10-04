@@ -69,6 +69,13 @@ const harness = String.raw`
   const CF_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i
   const PINGGY_URL_RE = /https:\/\/[a-z0-9][a-z0-9.-]*\.(?:pinggy\.link|pinggy-free\.link|pinggy\.online)/i
 
+  function getState() {
+    return { ...state }
+  }
+  function setState(patch) {
+    Object.assign(state, patch)
+  }
+
   function makeChild(pid) {
     return Object.assign(new EventEmitter(), {
       stdout: new EventEmitter(),
@@ -336,8 +343,21 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
     `)
   })
 
-  it('clears the server URL when the active cloudflared exits unexpectedly', async () => {
+  it('reconnects an unexpectedly-exited cloudflared and clears the dead server URL', async () => {
     await expectIsolatedPass(String.raw`
+      const scheduled = []
+      const setTimeoutFn = (fn, delay) => {
+        scheduled.push({ fn, delay })
+        return scheduled.length
+      }
+      const clearTimeoutFn = () => {}
+      // Health probes use 15s/30s; reconnect backoff is <= 8s. Pick by delay so
+      // the shared timer queue cannot hand us the wrong callback.
+      const takeReconnect = () => {
+        const index = scheduled.findIndex((entry) => entry.delay <= 8000)
+        return index < 0 ? null : scheduled.splice(index, 1)[0].fn
+      }
+
       await withRuntime(async (runtime) => {
         const urlsHit = []
         globalThis.fetch = async (url, init) => {
@@ -355,16 +375,128 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
         child.emit('exit', 1, null)
         await new Promise((resolve) => setTimeout(resolve, 10))
 
-        assert(urlsHit.some((url) => url.endsWith('/api/h5-access/tunnel/clear')), 'unexpected exit did not clear the server URL')
+        assert(urlsHit.some((url) => url.endsWith('/api/h5-access/tunnel/clear')), 'unexpected exit did not clear the dead server URL')
         assertEqual(runtime.getTunnelStatus(), {
-          status: 'error',
+          status: 'reconnecting',
           url: null,
           mode: 'quick',
           error: 'cloudflare exited unexpectedly (code=1, signal=null)',
-          provider: null,
+          provider: 'cloudflare',
           download: null,
-        }, 'unexpected exit status mismatch')
-      })
+        }, 'unexpected exit should degrade to reconnecting with the provider preserved')
+
+        // Drive the scheduled reconnect: a fresh provider spawns and the tunnel
+        // returns to running with the new URL.
+        const reconnect = takeReconnect()
+        assert(reconnect, 'no reconnect was scheduled')
+        reconnect()
+        const child1 = await waitForTunnelChild(1)
+        child1.emitUrl('https://reconnected.trycloudflare.com')
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        assertEqual(runtime.getTunnelStatus().status, 'running', 'reconnect did not restore a running tunnel')
+        assertEqual(runtime.getTunnelStatus().url, 'https://reconnected.trycloudflare.com', 'reconnect URL mismatch')
+      }, { setTimeoutFn, clearTimeoutFn })
+    `)
+  })
+
+  it('gives up with the provider preserved after the reconnect budget is spent', async () => {
+    await expectIsolatedPass(String.raw`
+      const scheduled = []
+      const setTimeoutFn = (fn, delay) => {
+        scheduled.push({ fn, delay })
+        return scheduled.length
+      }
+      const clearTimeoutFn = () => {}
+      const takeReconnect = () => {
+        const index = scheduled.findIndex((entry) => entry.delay <= 8000)
+        return index < 0 ? null : scheduled.splice(index, 1)[0].fn
+      }
+
+      await withRuntime(async (runtime) => {
+        globalThis.fetch = async () => new Response(null, { status: 200 })
+
+        const started = runtime.startTunnel({ mode: 'quick' })
+        const child0 = await waitForTunnelChild(0)
+        child0.emitUrl('https://loop-0.trycloudflare.com')
+        await started
+
+        // Each reconnect comes back briefly, then dies again — burning one slot
+        // of the 3-attempt budget per cycle.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const current = await waitForTunnelChild(attempt)
+          current.emit('exit', 1, null)
+          await new Promise((resolve) => setTimeout(resolve, 5))
+          const reconnect = takeReconnect()
+          assert(reconnect, 'reconnect ' + attempt + ' was not scheduled')
+          reconnect()
+          const next = await waitForTunnelChild(attempt + 1)
+          next.emitUrl('https://loop-' + (attempt + 1) + '.trycloudflare.com')
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+
+        // Budget spent: the next exit settles into the terminal error state
+        // without scheduling another reconnect, and keeps the provider for the UI.
+        const last = await waitForTunnelChild(3)
+        last.emit('exit', 1, null)
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        assertEqual(runtime.getTunnelStatus().status, 'error', 'exhausted budget should settle into error')
+        assertEqual(runtime.getTunnelStatus().provider, 'cloudflare', 'terminal error should preserve the provider')
+        assertEqual(takeReconnect(), null, 'no reconnect should be scheduled after the budget is spent')
+      }, { setTimeoutFn, clearTimeoutFn })
+    `)
+  })
+
+  it('does not resurrect a stopped tunnel when a pending reconnect was mid-start', async () => {
+    await expectIsolatedPass(String.raw`
+      const scheduled = []
+      const setTimeoutFn = (fn, delay) => {
+        scheduled.push({ fn, delay })
+        return scheduled.length
+      }
+      const clearTimeoutFn = () => {}
+      const takeReconnect = () => {
+        const index = scheduled.findIndex((entry) => entry.delay <= 8000)
+        return index < 0 ? null : scheduled.splice(index, 1)[0].fn
+      }
+      const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+      await withRuntime(async (runtime) => {
+        globalThis.fetch = async () => new Response(null, { status: 200 })
+
+        const started = runtime.startTunnel({ mode: 'quick' })
+        const child0 = await waitForTunnelChild(0)
+        child0.emitUrl('https://before-stop.trycloudflare.com')
+        await started
+
+        // Make the reconnect's own start suspend inside getServerUrl (as it does
+        // while the server sidecar is restarting), so a user Stop can land in
+        // that window.
+        let releaseGate
+        const gate = new Promise((resolve) => { releaseGate = resolve })
+        const originalGetServerUrl = runtime.getServerUrl.bind(runtime)
+        let gated = false
+        runtime.getServerUrl = async () => {
+          if (!gated) { gated = true; await gate }
+          return originalGetServerUrl()
+        }
+
+        child0.emit('exit', 1, null)
+        await tick(5)
+        const reconnect = takeReconnect()
+        assert(reconnect, 'reconnect was not scheduled')
+        reconnect()
+        await tick(5)
+
+        // The user stops the tunnel while the reconnect is suspended.
+        await runtime.stopTunnel()
+        assertEqual(runtime.getTunnelStatus().status, 'idle', 'stop should settle to idle')
+
+        // Release the suspended reconnect: it must abort, not spawn a new provider.
+        releaseGate()
+        await tick(40)
+        assertEqual(runtime.getTunnelStatus().status, 'idle', 'a stopped tunnel must not be resurrected by a stale reconnect')
+        assertEqual(state.tunnelChildren.length, 1, 'no new provider should spawn after the user stopped')
+      }, { setTimeoutFn, clearTimeoutFn })
     `)
   })
 
@@ -675,8 +807,15 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
     `)
   })
 
-  it('reports the pinggy provider when a fallback tunnel exits unexpectedly', async () => {
+  it('preserves the pinggy provider when a fallback tunnel exits unexpectedly', async () => {
     await expectIsolatedPass(String.raw`
+      const scheduled = []
+      const setTimeoutFn = (fn) => {
+        scheduled.push(fn)
+        return scheduled.length
+      }
+      const clearTimeoutFn = () => {}
+
       await withRuntime(async (runtime) => {
         state.cloudflareFails = true
         const started = runtime.startTunnel({ mode: 'quick' })
@@ -687,14 +826,14 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
         child.emit('exit', 1, null)
         await new Promise((resolve) => setTimeout(resolve, 10))
         assertEqual(runtime.getTunnelStatus(), {
-          status: 'error',
+          status: 'reconnecting',
           url: null,
           mode: 'quick',
           error: 'pinggy exited unexpectedly (code=1, signal=null)',
-          provider: null,
+          provider: 'pinggy',
           download: null,
         }, 'pinggy unexpected exit status mismatch')
-      })
+      }, { setTimeoutFn, clearTimeoutFn })
     `)
   })
 

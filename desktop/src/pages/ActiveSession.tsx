@@ -1,7 +1,7 @@
 import { AgentTeamsPlanCard } from '@/components/agentTeams/AgentTeamsPlanCard'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
-import { ArrowLeft, GitFork, Target, MessageCircleQuestion } from 'lucide-react'
+import { ArrowLeft, GitFork, Target, MessageCircleQuestion, Eye } from 'lucide-react'
 import { IconButton } from '@/components/ui/IconButton'
 import { openSideChat } from '@/lib/workspace/openSideChat'
 import {
@@ -1228,6 +1228,26 @@ export function ActiveSession({ sessionId, active = true }: { sessionId?: string
                         agentTeamsSnapshot.team.name,
                       )}
                     />
+                  ) : agentTeamsSnapshot && teamStripHidden ? (
+                    <button
+                      type="button"
+                      data-testid="agent-teams-strip-show"
+                      onClick={() => useTeamStore.getState().showTeamStrip(
+                        activeTabId,
+                        agentTeamsSnapshot.team.incarnationId,
+                      )}
+                      title={t('agentTeams.strip.show')}
+                      aria-label={t('agentTeams.strip.show')}
+                      className={[
+                        'mt-2 flex w-full max-w-full items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2.5 py-1.5 text-left text-[var(--color-text-tertiary)] transition-colors',
+                        'hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-secondary)]',
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]',
+                        showRightPanel ? 'text-[11px]' : 'text-[12px]',
+                      ].join(' ')}
+                    >
+                      <Eye size={showRightPanel ? 12 : 13} strokeWidth={2.25} aria-hidden="true" className="shrink-0" />
+                      <span className="shrink-0 font-medium">{t('agentTeams.strip.show')}</span>
+                    </button>
                   ) : null}
                   {soloPipelineModeForActive && activeTabId ? (
                     <SoloCouncilPanel

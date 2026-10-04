@@ -2869,6 +2869,8 @@ export const jp: Record<TranslationKey, string> = {
   'settings.general.h5AccessTunnelTokenStored': 'トンネルトークンが保存されています。新しいものを貼り付けると置き換えられます。',
   'settings.general.h5AccessTunnelStarting': 'トンネルを開始しています...',
   'settings.general.h5AccessTunnelRunning': 'トンネルが稼働中:',
+  'settings.general.h5AccessTunnelReconnecting': 'トンネルが切断されました。再接続しています…',
+  'settings.general.h5AccessTunnelPinggyExpiry': '無料の Pinggy 回線は 60 分で失効します。切断後は Cloudflare に切り替えるか、トンネルを再起動してください。',
   'settings.general.h5AccessTunnelError': 'トンネルの開始に失敗しました。',
   'settings.general.h5AccessTunnelProvider': 'プロバイダー',
   'settings.general.h5AccessTunnelProviderCloudflare': 'Cloudflare',
@@ -3951,6 +3953,7 @@ export const jp: Record<TranslationKey, string> = {
   'agentTeams.strip.label': 'チーム',
 
   'agentTeams.strip.hide': 'チーム表示を隠す',
+  'agentTeams.strip.show': 'チーム表示を再表示',
   // ─── Session Activity ──────────────────────────────────────
   'session.activity.tasksProgress': 'タスク進捗 {completed}/{total}',
   'session.activity.section.team': 'チーム',

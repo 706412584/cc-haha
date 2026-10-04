@@ -2869,6 +2869,8 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   'settings.general.h5AccessTunnelTokenStored': 'A tunnel token is saved. Paste a new one to replace it.',
   'settings.general.h5AccessTunnelStarting': 'Starting the tunnel...',
   'settings.general.h5AccessTunnelRunning': 'Tunnel is live at',
+  'settings.general.h5AccessTunnelReconnecting': 'The tunnel dropped and is reconnecting…',
+  'settings.general.h5AccessTunnelPinggyExpiry': 'The free Pinggy route expires after 60 minutes — switch to Cloudflare or restart the tunnel when it drops.',
   'settings.general.h5AccessTunnelError': 'The tunnel failed to start.',
   'settings.general.h5AccessTunnelProvider': 'Provider',
   'settings.general.h5AccessTunnelProviderCloudflare': 'Cloudflare',
@@ -3982,6 +3984,7 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   'agentTeams.strip.label': 'Team',
 
   'agentTeams.strip.hide': 'Hide team status',
+  'agentTeams.strip.show': 'Show team status',
   // ─── Session Activity ──────────────────────────────────────
   'session.activity.tasksProgress': 'Task progress {completed}/{total}',
   'session.activity.section.team': 'Team',
