@@ -43,6 +43,7 @@ import {
 import {
   ASK_USER_QUESTION_CLARIFY_MESSAGE,
   ASK_USER_QUESTION_CLARIFY_WITH_QUESTIONS_PREFIX,
+  ASK_USER_QUESTION_NO_ANSWER_MESSAGE,
   PLAN_REJECTION_MESSAGE,
   PLAN_REJECTION_WITH_REASON_PREFIX,
   REJECT_MESSAGE,
@@ -79,6 +80,16 @@ import {
 } from '../../utils/imageResizer.js'
 
 const MAX_CAPTURED_PROCESS_LINES = 80
+
+/**
+ * Hard deadline for an unanswered question, independent of the auto-answer
+ * setting. Auto-answering is best-effort — it can be off, or fail to decide —
+ * and nothing else expires a pending question, so without this a question the
+ * user walks away from keeps the CLI blocked forever.
+ */
+const QUESTION_DEADLINE_MS = 10 * 60_000
+/** Upper bound for the user's `timeoutMinutes`; a question must never hang forever. */
+const QUESTION_DEADLINE_MAX_MS = 30 * 60_000
 const MAX_CAPTURED_SDK_MESSAGES = 40
 const MAX_CAPTURED_SDK_SUMMARY = 20
 export const MAX_CAPTURED_SDK_MESSAGE_BYTES = 64 * 1024
@@ -225,6 +236,18 @@ type TrackedPermissionRequest = {
   autoAnswerCancelled?: boolean
   autoAnswerCreatedAt?: number
   autoAnswerGeneration?: number
+  /**
+   * Backstop that fires regardless of the auto-answer setting. Nothing else in
+   * the runtime expires a pending question, so without it a question the user
+   * never answers (and auto-answer is off or fails) blocks the CLI forever.
+   */
+  questionDeadlineTimer?: ReturnType<typeof setTimeout>
+  /**
+   * Resolved deadline for this request, cached so a re-arm (user interaction)
+   * can stay synchronous — an async re-arm could race and leave an earlier
+   * timer armed to fire mid-answer.
+   */
+  questionDeadlineMinutes?: number
 }
 
 function stripAutomaticQuestionMarker(input: Record<string, unknown>): Record<string, unknown> {
@@ -443,9 +466,109 @@ export class ConversationService {
     request?.autoAnswerAbortController?.abort()
   }
 
+  /**
+   * Every path that settles a question — an answer, a manual cancel, a session
+   * stop — must clear the deadline too, or the backstop would later deny a
+   * request that is already gone (harmless but noisy) or one that was answered.
+   */
+  private clearQuestionDeadline(request: TrackedPermissionRequest | undefined): void {
+    if (request?.questionDeadlineTimer) clearTimeout(request.questionDeadlineTimer)
+    if (request) request.questionDeadlineTimer = undefined
+  }
+
+  /**
+   * Arm the backstop for a question. Runs for *every* AskUserQuestion request,
+   * whether or not auto-answering is enabled: the point is that a question can
+   * never outlive `QUESTION_DEADLINE_MS`, so the CLI is never blocked on an
+   * answer that will not come.
+   */
+  private async scheduleQuestionDeadline(
+    sessionId: string,
+    session: SessionProcess,
+    requestId: string,
+    request: TrackedPermissionRequest,
+  ): Promise<void> {
+    if (request.toolName !== 'AskUserQuestion') return
+    const timeoutMinutes = await this.resolveQuestionDeadlineMinutes()
+    // Settings reads are async, so the request may have been answered or replaced
+    // while we waited; re-check before arming.
+    if (this.sessions.get(sessionId) !== session ||
+      session.pendingPermissionRequests.get(requestId) !== request) return
+    request.questionDeadlineMinutes = timeoutMinutes
+    this.armQuestionDeadline(sessionId, session, requestId, request)
+  }
+
+  /** Synchronous arm/re-arm; uses the cached deadline so interaction cannot race. */
+  private armQuestionDeadline(
+    sessionId: string,
+    session: SessionProcess,
+    requestId: string,
+    request: TrackedPermissionRequest,
+  ): void {
+    if (request.toolName !== 'AskUserQuestion') return
+    this.clearQuestionDeadline(request)
+    const minutes = request.questionDeadlineMinutes ?? Math.round(QUESTION_DEADLINE_MS / 60_000)
+    request.questionDeadlineTimer = setTimeout(() => {
+      request.questionDeadlineTimer = undefined
+      this.expireUnansweredQuestion(sessionId, session, requestId, request)
+    }, minutes * 60_000)
+    request.questionDeadlineTimer.unref?.()
+  }
+
+  /**
+   * Close a question nobody answered. Denying (rather than leaving it pending)
+   * is what unblocks the CLI; `buildDenyMessage` carries the "no option was
+   * selected" instruction so silence is never read as approval.
+   */
+  private expireUnansweredQuestion(
+    sessionId: string,
+    session: SessionProcess,
+    requestId: string,
+    request: TrackedPermissionRequest,
+  ): void {
+    if (this.sessions.get(sessionId) !== session ||
+      session.pendingPermissionRequests.get(requestId) !== request) return
+    this.clearAutoAnswerWait(request)
+    const timeoutMinutes = request.questionDeadlineMinutes ?? Math.round(QUESTION_DEADLINE_MS / 60_000)
+    console.info(`[ConversationService] Unanswered question expired after ${timeoutMinutes} minutes: session=${sessionId} request=${requestId}`)
+    const resolved = this.respondToPermission(sessionId, requestId, false, undefined, undefined, ASK_USER_QUESTION_NO_ANSWER_MESSAGE)
+    // `respondToPermission` only writes to the CLI. The desktop clears a question
+    // card from a pushed `permission_resolved`, so without this the card would
+    // linger, still clickable, after the request is already gone — the same
+    // "looks stuck" symptom this deadline exists to remove. The auto-allow path
+    // pushes the same event for the same reason.
+    if (resolved) {
+      this.notifyOutputCallbacks(sessionId, session.outputCallbacks, {
+        type: 'control_response',
+        response: { request_id: requestId, response: { behavior: 'deny' } },
+      })
+    }
+  }
+
+  /**
+   * How long an unanswered question may wait. The user's `timeoutMinutes`
+   * setting wins when it is longer than the default, so picking 30 minutes is
+   * not cut short at 10; `QUESTION_DEADLINE_MAX_MS` still caps it, because the
+   * whole point of this backstop is that a question can never hang forever.
+   * Falls back to the default when settings cannot be read.
+   */
+  private async resolveQuestionDeadlineMinutes(): Promise<number> {
+    try {
+      const settings = normalizeAutoQuestionSettings(
+        (await new SettingsService().getUserSettings()).autoQuestion,
+      )
+      const configuredMs = settings.timeoutMinutes * 60_000
+      const effectiveMs = Math.min(Math.max(configuredMs, QUESTION_DEADLINE_MS), QUESTION_DEADLINE_MAX_MS)
+      return Math.round(effectiveMs / 60_000)
+    } catch {
+      return Math.round(QUESTION_DEADLINE_MS / 60_000)
+    }
+  }
+
   private clearSessionAutoAnswerWaits(session: SessionProcess): void {
     for (const request of session.pendingPermissionRequests.values()) {
       this.clearAutoAnswerWait(request)
+      this.clearQuestionDeadline(request)
     }
   }
 
@@ -458,6 +581,11 @@ export class ConversationService {
     console.info(`[ConversationService] Automatic answer cancelled by user activity: session=${sessionId} request=${requestId}`)
     request.autoAnswerCancelled = true
     request.autoAnswerGeneration = (request.autoAnswerGeneration ?? 0) + 1
+    // Restart the idle clock rather than clearing it: an answer being composed
+    // right now must not be yanked away at the deadline, but a question the user
+    // clicked once and then abandoned must still expire instead of hanging.
+    const session = this.sessions.get(sessionId)
+    if (session) this.armQuestionDeadline(sessionId, session, requestId, request)
   }
 
   /** Apply setting changes to questions that are already waiting. */
@@ -1102,6 +1230,8 @@ export class ConversationService {
     if (session?.autoResolvedRequestIds?.has(requestId)) return false
     const pendingRequest = session?.pendingPermissionRequests.get(requestId)
     this.clearAutoAnswerWait(pendingRequest)
+    // The question is settled now, so the deadline must not fire against it later.
+    this.clearQuestionDeadline(pendingRequest)
     if (session) {
       session.pendingPermissionRequests.delete(requestId)
     }
@@ -1583,8 +1713,13 @@ export class ConversationService {
               : undefined,
             autoAnswerCreatedAt: Date.now(),
           }
-          this.clearAutoAnswerWait(session.pendingPermissionRequests.get(msg.request_id))
+          const replaced = session.pendingPermissionRequests.get(msg.request_id)
+          this.clearAutoAnswerWait(replaced)
+          this.clearQuestionDeadline(replaced)
           session.pendingPermissionRequests.set(msg.request_id, request)
+          // Independent of the auto-answer setting: a question must never be able
+          // to block the CLI forever, whichever way auto-answering is configured.
+          void this.scheduleQuestionDeadline(sessionId, session, msg.request_id, request)
           void this.scheduleAutoQuestionAnswer(sessionId, session, msg.request_id, request)
         }
         if (
