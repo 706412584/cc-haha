@@ -151,7 +151,7 @@ describe('automatic AskUserQuestion answers', () => {
     }
   })
 
-  it('reports an undecidable model response and leaves the question pending', async () => {
+  it('denies an undecidable question instead of leaving the session stuck', async () => {
     await fs.writeFile(path.join(configDir, 'settings.json'), JSON.stringify({
       autoQuestion: { enabled: true, timeoutMinutes: 1 },
     }))
@@ -159,12 +159,80 @@ describe('automatic AskUserQuestion answers', () => {
     const info = spyOn(console, 'info').mockImplementation(() => {})
     try {
       const { service, session, request, sent } = createPendingService()
+      // A question with no explicit recommendation: the model is the only path,
+      // and a failed decision must not leave the CLI waiting forever — nothing
+      // else in the runtime ever expires a pending permission request.
+      ;(request as any).input.questions[0].options[0].label = 'Local'
       await (service as any).autoAnswerQuestion('session-1', session, 'req-1', request)
       expect(decisionMock).toHaveBeenCalledTimes(1)
+      // The request was answered with a denial, so it is no longer pending.
+      expect(sent).toHaveLength(1)
+      expect(sent[0].response.response.behavior).toBe('deny')
+      expect(service.getPendingPermissionRequests('session-1')).toHaveLength(0)
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('reason=no_answer_available'))
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  it('answers a recommended question locally without calling the model', async () => {
+    await fs.writeFile(path.join(configDir, 'settings.json'), JSON.stringify({
+      autoQuestion: { enabled: true, timeoutMinutes: 1 },
+    }))
+    const info = spyOn(console, 'info').mockImplementation(() => {})
+    // The beforeEach mock replaces the whole decision function, which is where
+    // the deterministic path lives. Restore the real one for this test.
+    decisionMock.mockRestore()
+    let modelCalled = false
+    const realFetch = globalThis.fetch
+    globalThis.fetch = async () => { modelCalled = true; throw new Error('model must not be called for a recommended question') }
+    try {
+      const { service, session, request, sent } = createPendingService()
+      // The fixture's question carries "(Recommended)" on its first option, so
+      // the deterministic path resolves it with zero model calls — a reasoning
+      // model that burns its budget cannot defeat this.
+      await (service as any).autoAnswerQuestion('session-1', session, 'req-1', request)
+      expect(modelCalled).toBe(false)
+      expect(sent).toHaveLength(1)
+      expect(sent[0].response.response.behavior).toBe('allow')
+      expect(sent[0].response.response.updatedInput.answers).toEqual({ 'Which scope?': 'Local (Recommended)' })
+      expect(service.getPendingPermissionRequests('session-1')).toHaveLength(0)
+      expect(info).not.toHaveBeenCalledWith(expect.stringContaining('reason=no_answer_available'))
+    } finally {
+      globalThis.fetch = realFetch
+      info.mockRestore()
+    }
+  })
+
+  it('does not deny a question the user cancelled while the decision was in flight', async () => {
+    await fs.writeFile(path.join(configDir, 'settings.json'), JSON.stringify({
+      autoQuestion: { enabled: true, timeoutMinutes: 1 },
+    }))
+    decisionMock.mockResolvedValue(null)
+    let releaseHistory!: () => void
+    let enteredHistory!: () => void
+    const entered = new Promise<void>((resolve) => { enteredHistory = resolve })
+    const history = spyOn(sessionService, 'getSessionHistoryPage').mockImplementation(async () => {
+      enteredHistory()
+      await new Promise<void>((resolve) => { releaseHistory = resolve })
+      return { messages: [] } as never
+    })
+    const info = spyOn(console, 'info').mockImplementation(() => {})
+    try {
+      const { service, session, request, sent } = createPendingService()
+      ;(request as any).input.questions[0].options[0].label = 'Local'
+      const deciding = (service as any).autoAnswerQuestion('session-1', session, 'req-1', request)
+      await entered
+      // The user touches the card while the model decision is suspended: the
+      // deny must not fire over that interaction.
+      service.cancelAutoQuestionAnswer('session-1', 'req-1')
+      releaseHistory()
+      await deciding
       expect(sent).toHaveLength(0)
       expect(service.getPendingPermissionRequests('session-1')).toHaveLength(1)
-      expect(info).toHaveBeenCalledWith(expect.stringContaining('reason=no_valid_model_answer'))
+      expect(info).not.toHaveBeenCalledWith(expect.stringContaining('reason=no_answer_available'))
     } finally {
+      history.mockRestore()
       info.mockRestore()
     }
   })

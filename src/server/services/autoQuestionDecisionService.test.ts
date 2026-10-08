@@ -9,6 +9,7 @@ import { hahaOpenAIOAuthService } from './hahaOpenAIOAuthService.js'
 import { hahaGrokOAuthService } from './hahaGrokOAuthService.js'
 import {
   decideAutoQuestionAnswers,
+  getRecommendedQuestionAnswers,
   type AutoQuestion,
 } from './autoQuestionDecisionService.js'
 
@@ -49,7 +50,7 @@ describe('autoQuestionDecisionService', () => {
     await fs.rm(configDir, { recursive: true, force: true })
   })
 
-  test('asks the session Haiku model for every question including explicit recommendations', async () => {
+  test('resolves explicit recommendations without a model call and asks only about the rest', async () => {
     const bodies: Array<Record<string, any>> = []
     const headers: Headers[] = []
     const server = Bun.serve({
@@ -59,7 +60,7 @@ describe('autoQuestionDecisionService', () => {
         headers.push(req.headers)
         bodies.push(await req.json() as Record<string, any>)
         return Response.json({
-          content: [{ type: 'text', text: '{"answers":[{"questionIndex":0,"optionLabels":["Use cache (Recommended)"]},{"questionIndex":1,"optionLabels":["JSON"]}]}' }],
+          content: [{ type: 'text', text: '{"answers":[{"questionIndex":0,"optionLabels":["JSON"]}]}' }],
         })
       },
     })
@@ -79,15 +80,34 @@ describe('autoQuestionDecisionService', () => {
         'Which approach?': 'Use cache (Recommended)',
         'Which format?': 'JSON',
       })
+      // Only the un-recommended question reached the model; the recommended one
+      // was resolved locally. A reasoning-model outage therefore cannot block it.
       expect(bodies).toHaveLength(1)
+      const prompt = bodies[0]?.messages?.[0]?.content
+      expect(prompt).not.toContain('Use cache (Recommended)')
+      expect(prompt).toContain('Which format?')
       expect(bodies[0]?.model).toBe('small-test')
       expect(bodies[0]?.thinking).toEqual({ type: 'disabled' })
       expect(bodies[0]?.messages?.[0]?.content).toContain('machine readable output')
-      expect(bodies[0]?.messages?.[0]?.content).toContain('Which approach?')
       expect(headers[0]?.get('x-api-key')).toBe('fake-key')
     } finally {
       server.stop(true)
     }
+  })
+
+  test('getRecommendedQuestionAnswers matches only a single marked option', () => {
+    expect(getRecommendedQuestionAnswers([recommended])).toEqual({ 'Which approach?': 'Use cache (Recommended)' })
+    expect(getRecommendedQuestionAnswers([undecided])).toEqual({})
+    // Two marked options is ambiguous: resolve nothing locally.
+    expect(getRecommendedQuestionAnswers([{
+      question: 'Ambiguous?',
+      options: [{ label: 'A (Recommended)' }, { label: 'B (Recommended)' }],
+    }])).toEqual({})
+    // A recommended label that does not exactly carry the contract suffix.
+    expect(getRecommendedQuestionAnswers([{
+      question: 'Suffix?',
+      options: [{ label: '选项 A（推荐）' }, { label: 'B' }],
+    }])).toEqual({})
   })
 
   test('passes natural-language recommendations to the model and never invents answers locally', async () => {
@@ -126,11 +146,13 @@ describe('autoQuestionDecisionService', () => {
       for (const invalid of [
         { answers: [{ questionIndex: 0, optionLabels: ['Invented answer'] }] },
         { answers: [] },
-        { answers: [{ questionIndex: 0, optionLabels: ['Use cache (Recommended)', 'Fetch again'] }] },
+        { answers: [{ questionIndex: 0, optionLabels: ['JSON', 'Markdown'] }] },
       ]) {
         modelText = JSON.stringify(invalid)
+        // An un-recommended question must reach the model, and an unusable model
+        // response must leave it unanswered (null), never invented locally.
         expect(await decideAutoQuestionAnswers({
-          questions: [recommended], conversationText: '', providerId: provider.id,
+          questions: [undecided], conversationText: '', providerId: provider.id,
           signal: new AbortController().signal,
         })).toBeNull()
       }
