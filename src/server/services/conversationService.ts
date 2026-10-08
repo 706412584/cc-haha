@@ -72,7 +72,7 @@ import {
 import { readTraceCaptureSettings } from './traceCaptureService.js'
 import { logError } from '../../utils/log.js'
 import { normalizeAutoQuestionSettings } from '../../shared/autoQuestionSettings.js'
-import { decideAutoQuestionAnswers, type AutoQuestion } from './autoQuestionDecisionService.js'
+import { decideAutoQuestionAnswers, takeLastAutoQuestionAttempt, type AutoQuestion } from './autoQuestionDecisionService.js'
 import {
   createImageMetadataText,
   maybeResizeAndDownsampleImageBuffer,
@@ -557,9 +557,27 @@ export class ConversationService {
         sessionId,
         signal: controller.signal,
       })
-      if (!answers) return skip('no_valid_model_answer')
+      // Supersession check first, shared by both outcomes: the user may have
+      // cancelled the auto-answer (card activity) or answered by hand while the
+      // decision was in flight. A deny must not fire over that interaction any
+      // more than an allow may.
       if (request.autoAnswerCancelled || controller.signal.aborted || this.sessions.get(sessionId) !== session ||
         session.pendingPermissionRequests.get(requestId) !== request) return
+      if (!answers) {
+        // Nothing the model returned could be used. Leaving the question pending
+        // here is what made sessions hang forever: nothing else in the runtime
+        // ever expires a pending permission request, so the CLI would keep
+        // waiting on an answer that was never coming. Deny instead — the request
+        // is answered, the CLI is unblocked, and the model is told to stop and
+        // wait for the user (see `buildDenyMessage` for AskUserQuestion).
+        const attempt = takeLastAutoQuestionAttempt()
+        const detail = attempt
+          ? ` stop_reason=${attempt.stopReason ?? 'unknown'} content_length=${attempt.textLength}`
+          : ' model call failed or was skipped'
+        console.info(`[ConversationService] Automatic answer denied: session=${sessionId} request=${requestId} reason=no_answer_available${detail}`)
+        this.respondToPermission(sessionId, requestId, false)
+        return
+      }
       if (!normalizeAutoQuestionSettings(
         (await new SettingsService().getUserSettings()).autoQuestion,
       ).enabled || controller.signal.aborted) return

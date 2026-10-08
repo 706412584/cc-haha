@@ -31,6 +31,13 @@ import {
 const MODEL_TIMEOUT_MS = 15_000
 const MAX_OUTPUT_TOKENS = 512
 const MAX_CONTEXT_CHARS = 6_000
+/**
+ * AskUserQuestion is told to end a recommended option's label with this marker
+ * (`src/tools/AskUserQuestionTool/prompt.ts`). The suffix is a contract with the
+ * model that produces the questions, not a UI decoration — it is what lets a
+ * recommended choice be resolved without spending a model call.
+ */
+const RECOMMENDED_SUFFIX = '(Recommended)'
 
 export type AutoQuestion = {
   question: string
@@ -47,7 +54,28 @@ export type AutoQuestionDecisionInput = {
   signal: AbortSignal
 }
 
-/** Ask the session's small model to choose among the supplied options. */
+/**
+ * Match only a single recommendation explicitly marked in an option label.
+ * Deterministic: no model call, so it cannot be defeated by a reasoning model
+ * burning the output budget on thinking before it emits any answer.
+ */
+export function getRecommendedQuestionAnswers(questions: AutoQuestion[]): Record<string, string> {
+  return Object.fromEntries(questions.flatMap((question) => {
+    const recommended = question.options.filter((option) =>
+      option.label.endsWith(RECOMMENDED_SUFFIX),
+    )
+    return recommended.length === 1
+      ? [[question.question, recommended[0]!.label]]
+      : []
+  }))
+}
+
+/**
+ * Resolve every question that carries an explicit recommendation first, and ask
+ * the session's small model only about what is left. A failed or ambiguous model
+ * response leaves the remaining questions unanswered; the caller decides what
+ * that means (see `autoAnswerQuestion`, which must never leave a request stuck).
+ */
 export async function decideAutoQuestionAnswers({
   questions,
   conversationText,
@@ -57,19 +85,46 @@ export async function decideAutoQuestionAnswers({
 }: AutoQuestionDecisionInput): Promise<Record<string, string> | null> {
   if (signal.aborted || !areQuestionsValid(questions)) return null
 
+  const recommendedAnswers = getRecommendedQuestionAnswers(questions)
+  const unresolved = questions.filter((question) =>
+    !Object.prototype.hasOwnProperty.call(recommendedAnswers, question.question),
+  )
+  if (unresolved.length === 0) return recommendedAnswers
+
   try {
-    const response = await askSmallModel({
-      questions,
+    const attempt = await askSmallModel({
+      questions: unresolved,
       conversationText,
       providerId,
       sessionId,
       signal,
     })
-    if (!response || signal.aborted) return null
-    return parseModelAnswers(response, questions)
+    if (!attempt || signal.aborted) return null
+    const selected = parseModelAnswers(attempt.text, unresolved)
+    if (selected) return { ...recommendedAnswers, ...selected }
+    // A reasoning model that ran out of budget returns no text at all; record why
+    // so the failure is diagnosable instead of reading as a vague "no answer".
+    lastAttempt = { ...attempt, parsed: false }
+    return null
   } catch {
     return null
   }
+}
+
+/**
+ * Diagnostic for the most recent failed model attempt, set only when the model
+ * answered but nothing usable could be parsed from it. Read purely for logging.
+ */
+let lastAttempt: { stopReason: string | null; textLength: number; parsed: boolean } | null = null
+
+export function takeLastAutoQuestionAttempt(): {
+  stopReason: string | null
+  textLength: number
+  parsed: boolean
+} | null {
+  const attempt = lastAttempt
+  lastAttempt = null
+  return attempt
 }
 
 function areQuestionsValid(questions: AutoQuestion[]): boolean {
@@ -163,7 +218,25 @@ async function askSmallModel({
   providerId,
   sessionId,
   signal,
-}: AutoQuestionDecisionInput): Promise<string | null> {
+}: AutoQuestionDecisionInput): Promise<{ text: string | null; stopReason: string | null; textLength: number } | null> {
+  const raw = await askSmallModelRaw({
+    questions,
+    conversationText,
+    providerId,
+    sessionId,
+    signal,
+  })
+  if (raw === null) return null
+  return raw
+}
+
+async function askSmallModelRaw({
+  questions,
+  conversationText,
+  providerId,
+  sessionId,
+  signal,
+}: AutoQuestionDecisionInput): Promise<{ text: string | null; stopReason: string | null; textLength: number } | null> {
   if (providerId === null) {
     return askClaudeOfficial(questions, conversationText, signal)
   }
@@ -257,7 +330,7 @@ async function askAnthropic(
   body: AnthropicRequest,
   networkSettings: NetworkSettings,
   signal: AbortSignal,
-): Promise<string | null> {
+): Promise<{ text: string | null; stopReason: string | null; textLength: number } | null> {
   const send = (withThinking: boolean) => fetch(url, {
     method: 'POST',
     headers,
@@ -271,7 +344,7 @@ async function askAnthropic(
   }
   if (!response.ok || signal.aborted) return null
   const data: unknown = await response.json()
-  return extractAnthropicText(data)
+  return describeAnthropicAttempt(data)
 }
 
 async function askThroughProxy(
@@ -279,7 +352,7 @@ async function askThroughProxy(
   sessionId: string | undefined,
   body: AnthropicRequest,
   signal: AbortSignal,
-): Promise<string | null> {
+): Promise<{ text: string | null; stopReason: string | null; textLength: number } | null> {
   const url = `http://127.0.0.1/proxy/providers/${encodeURIComponent(providerId)}/v1/messages`
   const send = (withThinking: boolean) => handleProxyRequest(
     new Request(url, {
@@ -299,7 +372,7 @@ async function askThroughProxy(
   }
   if (!response.ok || signal.aborted) return null
   const data: unknown = await response.json()
-  return extractAnthropicText(data)
+  return describeAnthropicAttempt(data)
 }
 
 async function askOpenAIOfficial(
@@ -333,7 +406,9 @@ async function askOpenAIOfficial(
   })
   if (!response.ok || !response.body || signal.aborted) return null
   const result = await openaiResponsesStreamToAnthropicResponse(response.body, mappedModel)
-  return result.content.find((block) => block.type === 'text')?.text ?? null
+  const text = result.content.find((block) => block.type === 'text')?.text ?? null
+  const stopReason = result.stop_reason ?? null
+  return { text, stopReason, textLength: text?.length ?? 0 }
 }
 
 async function askGrokOfficial(
@@ -363,10 +438,30 @@ async function askGrokOfficial(
   })
   if (!response.ok || !response.body || signal.aborted) return null
   const result = await openaiResponsesStreamToAnthropicResponse(response.body, model)
-  return result.content.find((block) => block.type === 'text')?.text ?? null
+  const text = result.content.find((block) => block.type === 'text')?.text ?? null
+  const stopReason = result.stop_reason ?? null
+  return { text, stopReason, textLength: text?.length ?? 0 }
 }
 
-function extractAnthropicText(data: unknown): string | null {
+/**
+ * The response text plus the stop reason. Reasoning models can spend the whole
+ * `max_tokens` budget on thinking and return no text at all; without the stop
+ * reason that surfaces as an opaque "no answer", which is indistinguishable
+ * from the model simply refusing to answer.
+ */
+function describeAnthropicAttempt(data: unknown): {
+  text: string | null
+  stopReason: string | null
+  textLength: number
+} {
+  const text = joinAnthropicText(data)
+  const stopReason = isRecord(data) && typeof data.stop_reason === 'string'
+    ? data.stop_reason
+    : null
+  return { text: text || null, stopReason, textLength: text?.length ?? 0 }
+}
+
+function joinAnthropicText(data: unknown): string | null {
   if (!isRecord(data) || !Array.isArray(data.content)) return null
   const text = data.content
     .filter((block): block is { type: 'text'; text: string } =>
