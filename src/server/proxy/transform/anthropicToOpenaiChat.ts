@@ -136,7 +136,12 @@ export function anthropicToOpenaiChat(
       result.reasoning_effort = 'high'
     }
     if (options.passThinkingToggle) {
-      result.thinking = { type: body.thinking.type }
+      // Anthropic's adaptive thinking has no OpenAI-gateway equivalent; most
+      // compatible upstreams only accept enabled/disabled and 400 on anything
+      // else. `enabled` is the closest match: the model still decides how much
+      // to think, and reasoning_effort below steers the depth.
+      const thinkingType = body.thinking.type === 'adaptive' ? 'enabled' : body.thinking.type
+      result.thinking = { type: thinkingType }
     }
   }
   const outputConfigEffort = normalizeOpenAIReasoningEffort(body.output_config?.effort)
