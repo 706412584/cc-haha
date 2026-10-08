@@ -49,6 +49,14 @@ export const ASK_USER_QUESTION_EXPIRED_ANSWER_PREFIX = `The user is answering th
     That prompt had already stopped waiting for an answer, so these answers are arriving as this message.
     Treat them as their answers to those questions and continue.`
 
+// The question went unanswered past its deadline and nobody is going to answer
+// it: the user never interacted, and automatic answering was either off or
+// could not decide. The request must be closed so the CLI stops waiting, and the
+// model must be told not to treat silence as approval of any option.
+export const ASK_USER_QUESTION_NO_ANSWER_MESSAGE = `The user did not answer these questions before the request expired.
+    No option was selected, so do not assume any answer was chosen.
+    Ask the user directly in your reply if you still need this information.`
+
 // Approving a plan with a cross-provider execution model forces a CLI restart
 // (provider env is fixed at process spawn): approve → interrupt → restart →
 // the session sits idle with the plan approved. This synthetic follow-up starts

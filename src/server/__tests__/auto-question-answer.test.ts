@@ -61,9 +61,32 @@ describe('automatic AskUserQuestion answers', () => {
       pendingOutbound: [],
       pendingPermissionRequests: new Map([['req-1', request]]),
       outputCallbacks: [(message: unknown) => callbacks.push(message)],
+      // Required by retainSdkMessage on the SDK-payload path.
+      sdkMessages: [] as unknown[],
+      sdkMessageBytes: 0,
     }
     ;(service as any).sessions.set('session-1', session)
     return { service, session, request, sent, callbacks }
+  }
+
+  /**
+   * Arming the deadline resolves the timeout from settings first, so it lands a
+   * few microtasks later. Poll instead of sleeping a fixed interval: a fixed
+   * sleep is flaky on a slow runner and would report a false failure.
+   */
+  async function waitForQuestionDeadline(
+    service: ConversationService,
+    sessionId: string,
+    requestId: string,
+    timeoutMs = 1_000,
+  ): Promise<any> {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      const tracked = (service as any).sessions.get(sessionId)?.pendingPermissionRequests.get(requestId)
+      if (tracked?.questionDeadlineTimer) return tracked
+      if (Date.now() > deadline) return tracked
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
   }
 
   it('keeps old settings without the new field disabled and preserves unknown data', async () => {
@@ -321,6 +344,106 @@ describe('automatic AskUserQuestion answers', () => {
     await scheduling
 
     expect((request as any).autoAnswerTimer).toBeUndefined()
+  })
+
+  it('arms the unanswered-question deadline even when automatic answering is disabled', async () => {
+    await fs.writeFile(path.join(configDir, 'settings.json'), JSON.stringify({
+      autoQuestion: { enabled: false, timeoutMinutes: 5 },
+    }))
+    const { service, session } = createPendingService()
+    session.pendingPermissionRequests.clear()
+
+    // Drive the real creation path so this test fails if the backstop stops
+    // being wired there — calling the scheduler directly would pass regardless.
+    service.handleSdkPayload('session-1', JSON.stringify({
+      type: 'control_request',
+      request_id: 'req-deadline',
+      request: {
+        subtype: 'can_use_tool',
+        tool_name: 'AskUserQuestion',
+        input: { questions: [{ question: 'Which scope?', options: [{ label: 'Local' }, { label: 'Global' }] }] },
+      },
+    }), session.sdkSocket as never)
+
+    // Arming resolves the deadline from settings first, so wait for the timer
+    // rather than a fixed sleep — a slow runner would otherwise fail this.
+    const tracked = await waitForQuestionDeadline(service, 'session-1', 'req-deadline')
+    expect(tracked.questionDeadlineTimer).toBeDefined()
+    // Auto-answering stays off: no auto-answer timer is armed for it.
+    expect(tracked.autoAnswerTimer).toBeUndefined()
+  })
+
+  it('denies an unanswered question and pushes the resolution to the client', async () => {
+    await fs.writeFile(path.join(configDir, 'settings.json'), JSON.stringify({
+      autoQuestion: { enabled: false, timeoutMinutes: 5 },
+    }))
+    const info = spyOn(console, 'info').mockImplementation(() => {})
+    try {
+      const { service, session, request, sent, callbacks } = createPendingService()
+      await (service as any).scheduleQuestionDeadline('session-1', session, 'req-1', request)
+      ;(service as any).expireUnansweredQuestion('session-1', session, 'req-1', request)
+
+      // The CLI is unblocked: the request is answered (as a denial) and dropped.
+      expect(service.getPendingPermissionRequests('session-1')).toHaveLength(0)
+      expect(sent).toHaveLength(1)
+      const response = sent[0].response.response
+      expect(response.behavior).toBe('deny')
+      // Silence must never read as approval of an option.
+      expect(response.message).toContain('did not answer')
+      // Without this push the desktop card would linger, still clickable, after
+      // the request is already gone — the exact "looks stuck" symptom.
+      expect(callbacks.some((message) => message?.type === 'control_response')).toBe(true)
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('Unanswered question expired'))
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  it('honours a longer configured timeout instead of cutting it off at the default', async () => {
+    await fs.writeFile(path.join(configDir, 'settings.json'), JSON.stringify({
+      autoQuestion: { enabled: true, timeoutMinutes: 30 },
+    }))
+    const { service, session, request } = createPendingService()
+    await (service as any).scheduleQuestionDeadline('session-1', session, 'req-1', request)
+
+    // Picking 30 minutes in settings must not be denied at the 10-minute default.
+    expect((request as any).questionDeadlineMinutes).toBe(30)
+  })
+
+  it('does not expire a question that was already answered', async () => {
+    await fs.writeFile(path.join(configDir, 'settings.json'), JSON.stringify({
+      autoQuestion: { enabled: false, timeoutMinutes: 5 },
+    }))
+    const { service, session, request, sent } = createPendingService()
+    await (service as any).scheduleQuestionDeadline('session-1', session, 'req-1', request)
+
+    // Answer first; the stale deadline must then be a no-op.
+    service.respondToPermission('session-1', 'req-1', true, undefined, { ...request.input, answers: { 'Which scope?': 'Global' } })
+    const sentAfterAnswer = sent.length
+    ;(service as any).expireUnansweredQuestion('session-1', session, 'req-1', request)
+
+    expect((request as any).questionDeadlineTimer).toBeUndefined()
+    expect(sent).toHaveLength(sentAfterAnswer)
+  })
+
+  it('restarts the deadline clock when the user interacts, instead of disarming it', async () => {
+    await fs.writeFile(path.join(configDir, 'settings.json'), JSON.stringify({
+      autoQuestion: { enabled: true, timeoutMinutes: 5 },
+    }))
+    const { service, session, request } = createPendingService()
+    void (service as any).scheduleQuestionDeadline('session-1', session, 'req-1', request)
+    // Wait for the settings-resolved arm before capturing it; capturing an
+    // unresolved `undefined` would make the comparison below meaningless.
+    const armed = await waitForQuestionDeadline(service, 'session-1', 'req-1')
+    const first = armed.questionDeadlineTimer
+
+    service.cancelAutoQuestionAnswer('session-1', 'req-1')
+
+    // Re-armed (not cleared): an abandoned question still expires, while an
+    // answer being composed is not yanked away at the old deadline.
+    const second = (request as any).questionDeadlineTimer
+    expect(second).toBeDefined()
+    expect(second).not.toBe(first)
   })
 
   it('leaves an unmarked question open when the session provider cannot be identified', async () => {
