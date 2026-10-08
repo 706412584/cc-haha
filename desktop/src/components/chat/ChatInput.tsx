@@ -1310,6 +1310,10 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
       ref={shellRef}
       data-testid="chat-input-shell"
       data-session-id={activeTabId ?? undefined}
+      // The H5 toolbar scrolls horizontally (globals.css), and that overflow
+      // clips the capability menu that pops above it. The menu-open state lets
+      // the H5 CSS release the clip while any anchored menu is up.
+      data-capability-menu-open={plusMenuOpen || undefined}
       className={
         isHeroComposer
           ? `bg-[var(--color-surface)] ${isMobileComposer ? 'px-4 pb-3' : 'px-8 pb-4'}`

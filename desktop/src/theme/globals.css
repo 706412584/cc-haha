@@ -2389,6 +2389,14 @@ html[data-touch-h5] .mobile-composer-toolbar__actions {
   scrollbar-width: none;
 }
 
+/* The anchored capability menu pops above this toolbar; an overflow clip on
+   the scrolling toolbar cuts it to a sliver (the "gray box" report). While a
+   menu is open, release the clip — the toolbar content fits by definition,
+   because the menu is what pushed the release. */
+html[data-touch-h5] [data-capability-menu-open] .mobile-composer-toolbar__tools {
+  overflow: visible;
+}
+
 html[data-touch-h5] .mobile-composer-toolbar__tools::-webkit-scrollbar,
 html[data-touch-h5] .mobile-composer-toolbar__actions::-webkit-scrollbar {
   display: none;

@@ -189,6 +189,31 @@ describe('anthropicToOpenaiChat', () => {
     expect(anthropicToOpenaiChat(req, { passThinkingToggle: true }).thinking).toEqual({ type: 'disabled' })
   })
 
+  test('rewrites adaptive thinking to enabled for chat gateways that reject it', () => {
+    const req: AnthropicRequest = {
+      model: 'u2-flash',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'Hi' }],
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high' },
+    }
+
+    const result = anthropicToOpenaiChat(req, { passThinkingToggle: true })
+    expect(result.thinking).toEqual({ type: 'enabled' })
+    expect(result.reasoning_effort).toBe('high')
+  })
+
+  test('keeps enabled thinking type verbatim through the thinking toggle', () => {
+    const req: AnthropicRequest = {
+      model: 'deepseek-v4-flash',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'Hi' }],
+      thinking: { type: 'enabled', budget_tokens: 4096 },
+    }
+
+    expect(anthropicToOpenaiChat(req, { passThinkingToggle: true }).thinking).toEqual({ type: 'enabled' })
+  })
+
   test('maps output_config effort to reasoning_effort for OpenAI-compatible chat providers', () => {
     const req: AnthropicRequest = {
       model: 'longcat',
