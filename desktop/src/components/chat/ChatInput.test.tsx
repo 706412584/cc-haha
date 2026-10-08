@@ -2780,6 +2780,13 @@ describe('ChatInput file mentions', () => {
     expect(screen.queryByText('Run')).not.toBeInTheDocument()
     expect(screen.getByTestId('chat-input-shell')).toHaveClass('mobile-composer-shell', 'px-3')
     expect(screen.getByTestId('chat-input-shell').className).toContain('safe-area-inset-bottom')
+    // The H5 toolbar scroll clip (globals.css) releases only while the menu is
+    // up — otherwise it shears the capability menu to a sliver.
+    expect(screen.getByTestId('chat-input-shell')).not.toHaveAttribute('data-capability-menu-open')
+    fireEvent.click(screen.getByRole('button', { name: 'Open composer tools' }))
+    expect(screen.getByTestId('chat-input-shell')).toHaveAttribute('data-capability-menu-open')
+    fireEvent.click(screen.getByRole('button', { name: 'Open composer tools' }))
+    expect(screen.getByTestId('chat-input-shell')).not.toHaveAttribute('data-capability-menu-open')
     // `glass-panel--composer` carries the composer step of the shadow scale.
     // The phone branch used to swap it for a `shadow-[…]` utility, which loses
     // to `.glass-panel`'s own `box-shadow` on stylesheet order — so the phone
