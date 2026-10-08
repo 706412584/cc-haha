@@ -69,6 +69,26 @@ describe('automatic AskUserQuestion answers', () => {
     return { service, session, request, sent, callbacks }
   }
 
+  /**
+   * Arming the deadline resolves the timeout from settings first, so it lands a
+   * few microtasks later. Poll instead of sleeping a fixed interval: a fixed
+   * sleep is flaky on a slow runner and would report a false failure.
+   */
+  async function waitForQuestionDeadline(
+    service: ConversationService,
+    sessionId: string,
+    requestId: string,
+    timeoutMs = 1_000,
+  ): Promise<any> {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      const tracked = (service as any).sessions.get(sessionId)?.pendingPermissionRequests.get(requestId)
+      if (tracked?.questionDeadlineTimer) return tracked
+      if (Date.now() > deadline) return tracked
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+  }
+
   it('keeps old settings without the new field disabled and preserves unknown data', async () => {
     await fs.writeFile(path.join(configDir, 'settings.json'), JSON.stringify({ futureField: { keep: true } }))
     const { service, session, request, sent } = createPendingService()
@@ -344,10 +364,10 @@ describe('automatic AskUserQuestion answers', () => {
         input: { questions: [{ question: 'Which scope?', options: [{ label: 'Local' }, { label: 'Global' }] }] },
       },
     }), session.sdkSocket as never)
-    await new Promise((resolve) => setTimeout(resolve, 5))
 
-    const tracked = (service as any).sessions.get('session-1').pendingPermissionRequests.get('req-deadline')
-    expect(tracked).toBeDefined()
+    // Arming resolves the deadline from settings first, so wait for the timer
+    // rather than a fixed sleep — a slow runner would otherwise fail this.
+    const tracked = await waitForQuestionDeadline(service, 'session-1', 'req-deadline')
     expect(tracked.questionDeadlineTimer).toBeDefined()
     // Auto-answering stays off: no auto-answer timer is armed for it.
     expect(tracked.autoAnswerTimer).toBeUndefined()
@@ -411,8 +431,11 @@ describe('automatic AskUserQuestion answers', () => {
       autoQuestion: { enabled: true, timeoutMinutes: 5 },
     }))
     const { service, session, request } = createPendingService()
-    ;(service as any).scheduleQuestionDeadline('session-1', session, 'req-1', request)
-    const first = (request as any).questionDeadlineTimer
+    void (service as any).scheduleQuestionDeadline('session-1', session, 'req-1', request)
+    // Wait for the settings-resolved arm before capturing it; capturing an
+    // unresolved `undefined` would make the comparison below meaningless.
+    const armed = await waitForQuestionDeadline(service, 'session-1', 'req-1')
+    const first = armed.questionDeadlineTimer
 
     service.cancelAutoQuestionAnswer('session-1', 'req-1')
 
