@@ -9,8 +9,29 @@ type Check = {
 const rootDir = process.cwd()
 const checks: Check[] = [
   {
+    title: 'Data directory relocation metadata and legacy attachment aliases',
+    command: ['bun', 'test', './src/utils/storageMigrationMetadata.test.ts', './src/utils/storageRelocations.test.ts'],
+  },
+  {
+    title: 'Desktop data migration journal recovery and credential namespace copy',
+    command: ['bun', 'run', 'test', '--', '--run', 'electron/services/dataMigration.test.ts', 'electron/services/migrationCredentials.test.ts'],
+    cwd: 'desktop',
+  },
+  {
     title: 'Agent Teams plan sidecar compatibility and approval recovery',
     command: ['bun', 'test', './src/utils/swarm/teamPlanStore.test.ts', './src/server/services/teamPlanService.test.ts'],
+  },
+  {
+    title: 'Agent Teams legacy mailbox migration to unread inbox plus history',
+    command: ['bun', 'test', './src/utils/teammateMailbox.test.ts', '--test-name-pattern', 'legacy inbox files'],
+  },
+  {
+    title: 'Agent Teams members recorded before deferred instructions rehydrate as already instructed',
+    command: ['bun', 'test', './src/server/services/teamPlanRuntime.supervisor.test.ts', '--test-name-pattern', 'written before deferred instructions'],
+  },
+  {
+    title: 'Agent Teams teammate resume from agent metadata written before the teammate fields',
+    command: ['bun', 'test', './src/utils/swarm/inProcessRunner.resume.test.ts', '--test-name-pattern', 'metadata written before'],
   },
   {
     title: 'Session collaboration state migration and recovery',

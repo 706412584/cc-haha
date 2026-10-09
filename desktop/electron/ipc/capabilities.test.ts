@@ -9,6 +9,24 @@ import {
 } from './capabilities'
 
 describe('Electron IPC capabilities', () => {
+  it('validates migration paths and identities and keeps migration IPC unavailable to pet windows', () => {
+    expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.migrationPrepare, { targetDir: 'D:\\cc-haha-data' })).toBe(true)
+    for (const payload of [undefined, {}, { targetDir: '' }, { targetDir: '   ' }, { targetDir: 2 }, { targetDir: 'bad\u0000path' }, { targetDir: 'D:\\data', sourceDir: 'C:\\data' }]) {
+      expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.migrationPrepare, payload)).toBe(false)
+    }
+    for (const channel of [ELECTRON_IPC_CHANNELS.migrationStart, ELECTRON_IPC_CHANNELS.migrationCancel]) {
+      expect(validateElectronIpcPayload(channel, { id: 'migration-1' })).toBe(true)
+      for (const payload of [undefined, {}, { id: '' }, { id: '../other' }, { id: 'x'.repeat(201) }, { id: 'migration-1', targetDir: 'D:\\data' }]) {
+        expect(validateElectronIpcPayload(channel, payload)).toBe(false)
+      }
+    }
+    expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.migrationStatus, undefined)).toBe(true)
+    expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.migrationStatus, {})).toBe(false)
+    for (const channel of [ELECTRON_IPC_CHANNELS.migrationPrepare, ELECTRON_IPC_CHANNELS.migrationStart, ELECTRON_IPC_CHANNELS.migrationStatus, ELECTRON_IPC_CHANNELS.migrationCancel]) {
+      expect(isElectronIpcChannelAllowedForPetWindow(channel)).toBe(false)
+    }
+  })
+
   it('restricts public access credentials and consent to validated desktop IPC', () => {
     expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.publicAccessSaveCredential, 'fake-token')).toBe(true)
     for (const value of ['', 'a b', 'x'.repeat(4097), {}, null]) {
@@ -51,31 +69,23 @@ describe('Electron IPC capabilities', () => {
     }
   })
 
-  it('accepts optional initial browser visibility without widening the create payload', () => {
+  it('requires the renderer guest id on create and accepts no geometry', () => {
     const channel = ELECTRON_IPC_CHANNELS.workspaceBrowserCreate
-    const identity = { tabId: 'wb-1', storageId: 'store-1' }
+    const identity = { tabId: 'wb-1', storageId: 'store-1', webContentsId: 7 }
     expect(validateElectronIpcPayload(channel, identity)).toBe(true)
-    expect(validateElectronIpcPayload(channel, { ...identity, visible: false })).toBe(true)
-    expect(validateElectronIpcPayload(channel, { ...identity, visible: true })).toBe(true)
-    for (const visible of ['false', 0, null, {}]) {
-      expect(validateElectronIpcPayload(channel, { ...identity, visible })).toBe(false)
+    expect(validateElectronIpcPayload(channel, { ...identity, url: 'https://example.com/' })).toBe(true)
+    for (const webContentsId of [undefined, 0, -1, 1.5, '7', Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(validateElectronIpcPayload(channel, { ...identity, webContentsId })).toBe(false)
     }
-    expect(validateElectronIpcPayload(channel, { ...identity, visible: false, unknown: true })).toBe(false)
+    // Pages are drawn by the renderer now; the old native-view options are gone.
+    expect(validateElectronIpcPayload(channel, { ...identity, visible: false })).toBe(false)
+    expect(validateElectronIpcPayload(channel, { ...identity, bounds: { x: 0, y: 0, width: 1, height: 1 } })).toBe(false)
   })
 
   it('has a validator for every exposed invoke channel', () => {
     expect(Object.keys(ELECTRON_IPC_VALIDATORS).sort()).toEqual(
       Object.values(ELECTRON_IPC_CHANNELS).sort(),
     )
-  })
-
-  it('limits presentation snapshots to a single browser page id', () => {
-    const channel = ELECTRON_IPC_CHANNELS.workspaceBrowserSnapshot
-    expect(validateElectronIpcPayload(channel, { tabId: 'wb-1' })).toBe(true)
-    for (const payload of [{}, { tabId: '' }, { tabId: 'wb-1', kind: 'full' }, { tabId: 'wb-1', url: 'https://example.com' }]) {
-      expect(validateElectronIpcPayload(channel, payload)).toBe(false)
-    }
-    expect(isElectronIpcChannelAllowedForPetWindow(channel)).toBe(false)
   })
 
   it('rejects channels outside the desktop host contract', () => {
@@ -96,8 +106,8 @@ describe('Electron IPC capabilities', () => {
     expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.clipboardReadText, undefined)).toBe(true)
     expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.clipboardWriteText, 'paste me')).toBe(true)
     expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.clipboardWriteText, { text: 'paste me' })).toBe(false)
-    expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.traceOpenWindow, '4673a448-9e2c-475e-898d-9aa0ee2d1ab7')).toBe(true)
-    expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.traceOpenWindow, '../escape')).toBe(false)
+    expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.petsFocusSession, '4673a448-9e2c-475e-898d-9aa0ee2d1ab7')).toBe(true)
+    expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.petsFocusSession, '../escape')).toBe(false)
     expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.windowClose, undefined)).toBe(true)
     expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.windowClose, {})).toBe(false)
     expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.windowStartDragging, undefined)).toBe(true)

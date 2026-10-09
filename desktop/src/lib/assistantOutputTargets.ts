@@ -1,6 +1,12 @@
 import { resolveAssistantFileHref } from './assistantFileContext'
 import { trimTrailingPunctuation } from './urlBoundary'
-import { isLinkableFilePath, splitTextByFilePaths } from './filePathBoundary'
+import {
+  bareNameCandidates,
+  findUnicodeExtensionNames,
+  isLinkableFilePath,
+  parseFilePathRef,
+  splitTextByFilePaths,
+} from './filePathBoundary'
 import { isGeneratedArtifactFile, isOutputResourceFile, isShellProducedDeliverable } from './fileCapabilities'
 
 export type AssistantOutputTargetKind =
@@ -26,6 +32,30 @@ export type AssistantOutputTarget = {
   normalizedPath?: string
   confidence: 'high'
   source: AssistantOutputTargetSource
+  /**
+   * Other names a bare prose mention may really be (`报告v2.docx` for `v2.docx`),
+   * longest first, in the same directory. Text cannot choose between them; the
+   * changed files or the disk can — see {@link useDiskConfirmedTargets}.
+   */
+  nameCandidates?: string[]
+  /** Not to be shown until a changed file or the disk confirms one of its names. */
+  awaitsConfirmation?: boolean
+  /**
+   * Named, but no changed file shows the turn wrote it. Not to be shown as an
+   * output until the disk does — see {@link useTurnWrittenTargets}.
+   */
+  awaitsTurnWrite?: boolean
+}
+
+/** What a turn's checkpoint says about the files it could have produced. */
+export type TurnOutputEvidence = {
+  /**
+   * The turn ran a tool whose writes the changed files may not list (a writing
+   * shell command, an MCP tool). False means the changed files are the whole story.
+   */
+  unlistedWrites: boolean
+  /** When the turn's prompt was recorded, epoch ms on the server's clock. */
+  startedAt?: number
 }
 
 export type ExtractAssistantOutputTargetOptions = {
@@ -48,6 +78,22 @@ export type ExtractAssistantOutputTargetOptions = {
    * did not mention them. Reconciliation still runs when false. Defaults to true.
    */
   includeChangedFileFallback?: boolean
+  /**
+   * Also return names made only of CJK and an extension (`开题报告.docx`), marked
+   * {@link AssistantOutputTarget.awaitsConfirmation}. Their text reads the same
+   * as prose about formats (`后缀为.docx的文件`), so only a caller that confirms
+   * them against the disk before showing them should ask. Defaults to false.
+   */
+  includeUnconfirmedNames?: boolean
+  /**
+   * Return only what the turn produced, for a caller presenting results as its
+   * outputs. A mentioned file no changed file accounts for is dropped when the
+   * turn could not have written it unseen, and otherwise marked
+   * {@link AssistantOutputTarget.awaitsTurnWrite} for the disk to prove. A file
+   * the reply merely talks about (a name quoted from a commit message) is not an
+   * output. Omitted → every mention counts, as the inline galleries want.
+   */
+  outputEvidence?: Pick<TurnOutputEvidence, 'unlistedWrites'>
 }
 
 type FileTargetMatch = {
@@ -206,28 +252,17 @@ export function extractAssistantOutputTargets(
     }, createFileKey(fileTarget), treeMatch.position)
   }
 
-  let plainTextPosition = 0
-  for (const segment of splitTextByFilePaths(content)) {
-    const position = plainTextPosition
-    plainTextPosition += segment.value.length
-
-    if (segment.type !== 'path') {
-      continue
-    }
-
-    if (isInMarkdownLink(position, markdownLinks)) {
-      continue
-    }
-
-    if (isInCodeBlock(position, codeBlocks)) {
-      continue
-    }
-
-    const href = resolveAssistantFileHref(segment.ref.path, content)
+  const queuePlainPath = (
+    path: string,
+    position: number,
+    nameCandidates?: string[],
+    awaitsConfirmation = false,
+  ) => {
+    const href = resolveAssistantFileHref(path, content)
     const fileTarget = toWorkspaceFileTarget(href, workDir)
 
     if (!fileTarget) {
-      continue
+      return
     }
 
     queueTarget({
@@ -239,7 +274,69 @@ export function extractAssistantOutputTargets(
       normalizedPath: fileTarget.normalizedPath,
       confidence: 'high',
       source: 'plain-path',
+      ...(nameCandidates?.length ? { nameCandidates } : {}),
+      ...(awaitsConfirmation ? { awaitsConfirmation } : {}),
     }, createFileKey(fileTarget), position)
+  }
+
+  // A code span is bounded by its backticks, not by the sentence, so a name in
+  // one is read whole — CJK included, as the rendered chip does. The prose scan
+  // below leaves CJK out on purpose (`修改了lib/foo.ts` must not swallow the
+  // verb), and run over `开题报告2.docx` it kept only `2.docx`.
+  const codeSpans = extractInlineCodeSpans(content, codeBlocks)
+  for (const span of codeSpans) {
+    if (isInMarkdownLink(span.start, markdownLinks)) {
+      continue
+    }
+
+    queuePlainPath(span.ref.path, span.start)
+  }
+
+  let plainTextPosition = 0
+  let previousPathEnd = 0
+  const pathRanges: Array<{ start: number; end: number }> = []
+  for (const segment of splitTextByFilePaths(content)) {
+    const position = plainTextPosition
+    plainTextPosition += segment.value.length
+
+    if (segment.type !== 'path') {
+      continue
+    }
+    const floor = previousPathEnd
+    previousPathEnd = position + segment.value.length
+    pathRanges.push({ start: position, end: previousPathEnd })
+
+    if (isInMarkdownLink(position, markdownLinks)) {
+      continue
+    }
+
+    if (isInCodeBlock(position, codeBlocks)) {
+      continue
+    }
+
+    if (codeSpans.some((span) => position >= span.start && position < span.end)) {
+      continue
+    }
+
+    // Only a bare name is ambiguous at its edges; a path with a directory is not.
+    const nameCandidates = /[\\/]/.test(segment.ref.path)
+      ? undefined
+      : bareNameCandidates(content, position, position + segment.ref.path.length, floor)
+    queuePlainPath(segment.ref.path, position, nameCandidates)
+  }
+
+  if (options.includeUnconfirmedNames) {
+    const overlaps = (start: number, end: number) => [...pathRanges, ...codeSpans]
+      .some((range) => start < range.end && end > range.start)
+    for (const name of findUnicodeExtensionNames(content)) {
+      if (overlaps(name.start, name.end)) continue
+      if (isInMarkdownLink(name.start, markdownLinks) || isInCodeBlock(name.start, codeBlocks)) continue
+
+      const nameCandidates = /[\\/]/.test(name.ref.path)
+        ? undefined
+        : bareNameCandidates(content, name.start, name.start + name.ref.path.length, 0)
+      queuePlainPath(name.ref.path, name.start, nameCandidates, true)
+    }
   }
 
   candidates.sort((left, right) => {
@@ -269,7 +366,16 @@ export function extractAssistantOutputTargets(
       workDir,
       limit,
       options.includeChangedFileFallback !== false,
+      options.outputEvidence,
     )
+  }
+
+  // Without a checkpoint nothing vouches for any file; each one must be proven.
+  const evidence = options.outputEvidence
+  if (evidence) {
+    return results.flatMap((target) => target.kind === 'localhost-url'
+      ? [target]
+      : evidence.unlistedWrites ? [{ ...target, awaitsTurnWrite: true }] : [])
   }
 
   return results
@@ -332,6 +438,7 @@ function reconcileTargetsWithChangedFiles(
   workDir: string | null,
   limit: number,
   includeChangedFileFallback: boolean,
+  outputEvidence?: Pick<TurnOutputEvidence, 'unlistedWrites'>,
 ): AssistantOutputTarget[] {
   if (limit <= 0) return []
 
@@ -347,14 +454,27 @@ function reconcileTargetsWithChangedFiles(
 
     const mentioned = target.normalizedPath ?? target.href
     // An authored absolute path (including an explicit prose root) is identity,
-    // not a basename hint. A checkpoint cannot disprove a shell-created output.
+    // not a basename hint: it matches only the very same changed file. A
+    // checkpoint cannot disprove a shell-created output.
     const explicitPath = isAbsoluteFilePath(target.href)
-    const match = explicitPath ? null : matchChangedFile(mentioned, changedFiles)
+    // The longer reading of an ambiguous name wins when the turn really wrote it
+    // (`报告v2.docx`, not the `v2.docx` the prose scan settled on).
+    const match = explicitPath
+      ? findSameChangedFile(resolveFilePath(target.href), changedFiles)
+      : [...(target.nameCandidates ?? []), mentioned]
+        .sort((left, right) => getBasename(right).length - getBasename(left).length)
+        .map((name) => matchChangedFile(name, changedFiles))
+        .find(Boolean) ?? null
     // Checkpoints record editing tools, not arbitrary shell output. Explicit
     // identities and document/media deliverables survive absent evidence; bare
     // source-like mentions still need corroboration to avoid resource-strip noise.
     if (!match && !explicitPath && !isShellProducedDeliverable(mentioned)
       && target.kind !== 'video' && !/\.(?:mp3|wav|m4a|flac|aac|ogg|opus)$/i.test(mentioned)) {
+      continue
+    }
+    // That exemption exists for writes the checkpoint cannot see. A turn that ran
+    // nothing able to make one has no unseen output; the name is only quoted.
+    if (!match && outputEvidence && !outputEvidence.unlistedWrites) {
       continue
     }
 
@@ -370,12 +490,18 @@ function reconcileTargetsWithChangedFiles(
     }
     seen.add(key)
 
+    const { nameCandidates, awaitsConfirmation, ...rest } = target
     out.push({
-      ...target,
+      ...rest,
       id: createId(target.kind, corrected),
+      ...(target.source === 'plain-path' ? { title: getBasename(corrected) } : {}),
       href: corrected,
       normalizedPath: corrected,
       subtitle: corrected,
+      // A changed-file match is settled; only an unmatched guess stays open.
+      ...(!match && nameCandidates ? { nameCandidates } : {}),
+      ...(!match && awaitsConfirmation ? { awaitsConfirmation } : {}),
+      ...(!match && outputEvidence ? { awaitsTurnWrite: true } : {}),
     })
     if (out.length >= limit) break
   }
@@ -408,6 +534,11 @@ function reconcileTargetsWithChangedFiles(
   }
 
   return out
+}
+
+function findSameChangedFile(absolutePath: string, changedFiles: string[]): string | null {
+  const identity = absolutePath.toLowerCase()
+  return changedFiles.find((file) => resolveFilePath(file).toLowerCase() === identity) ?? null
 }
 
 /**
@@ -627,6 +758,31 @@ function normalizeMarkdownDestination(destination: string): string {
   }
 
   return trimTrailingPunctuation(normalized)
+}
+
+type InlineCodeSpan = {
+  start: number
+  end: number
+  ref: NonNullable<ReturnType<typeof parseFilePathRef>>
+}
+
+/** Single-line `code` spans outside fenced blocks whose whole content is one file reference. */
+function extractInlineCodeSpans(content: string, codeBlocks: FencedCodeBlock[]): InlineCodeSpan[] {
+  const spans: InlineCodeSpan[] = []
+
+  for (const match of content.matchAll(/(?<!`)`([^`\n]+)`(?!`)/g)) {
+    const start = match.index ?? 0
+    if (isInCodeBlock(start, codeBlocks)) {
+      continue
+    }
+
+    const ref = parseFilePathRef(match[1] ?? '')
+    if (ref) {
+      spans.push({ start, end: start + match[0].length, ref })
+    }
+  }
+
+  return spans
 }
 
 function isInMarkdownLink(position: number, markdownLinks: MarkdownLinkMatch[]): boolean {

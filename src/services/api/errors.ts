@@ -55,7 +55,14 @@ import {
   formatAPIError,
   hasAPIErrorType,
 } from './errorUtils.js'
+import {
+  formatStreamEndedEarlyMessage,
+  StreamEndedEarlyError,
+} from './streamFallback.js'
 import { StreamWatchdogTimeoutError } from './streamWatchdog.js'
+import { isUnsupportedImageInputErrorMessage } from './unsupportedImageInput.js'
+
+export { isUnsupportedImageInputErrorMessage }
 
 // Presentation only: classifiers, retries and diagnostic metadata keep the
 // original SDK error. Decode envelopes structurally so escaped quotes/newlines
@@ -662,47 +669,6 @@ export function extractUnknownErrorFormat(value: unknown): string | undefined {
   return undefined
 }
 
-export function isUnsupportedImageInputErrorMessage(message: string): boolean {
-  const raw = message.toLowerCase()
-  if (!raw.includes('image')) return false
-  if (isOpenAIImageUrlTextOnlySchemaError(raw)) {
-    return true
-  }
-  return (
-    raw.includes('not support') ||
-    raw.includes('not supported') ||
-    raw.includes('unsupported') ||
-    raw.includes('vision') ||
-    raw.includes('multimodal') ||
-    raw.includes('multi-modal') ||
-    raw.includes('modality')
-  )
-}
-
-function isOpenAIImageUrlTextOnlySchemaError(raw: string): boolean {
-  if (!raw.includes('image_url')) return false
-  if (
-    raw.includes('not allowed') ||
-    raw.includes('not permitted') ||
-    raw.includes('disallowed') ||
-    raw.includes('forbidden')
-  ) {
-    return true
-  }
-  if (!raw.includes('text')) return false
-  return (
-    raw.includes('expected') ||
-    raw.includes('input should be') ||
-    raw.includes('not one of') ||
-    raw.includes('permitted') ||
-    raw.includes('received') ||
-    raw.includes('unknown variant') ||
-    raw.includes('invalid value') ||
-    raw.includes('invalid type') ||
-    raw.includes('valid enumeration') ||
-    raw.includes('only text')
-  )
-}
 
 // Gate for the request-context fallback in buildAssistantMessageFromError.
 // That fallback exists because some providers reject non-text media with
@@ -781,6 +747,8 @@ function buildAssistantMessageFromError(
   options?: {
     messages?: Message[]
     messagesForAPI?: (UserMessage | AssistantMessage)[]
+    /** Mid-stream re-sends already spent on this failure. */
+    streamRetries?: number
   },
 ): AssistantMessage {
   // Check for SDK timeout errors
@@ -1346,6 +1314,21 @@ function buildAssistantMessageFromError(
       content: `${API_ERROR_MESSAGE_PREFIX}: ${error.message}`,
       error: 'server_error',
       errorDetails: JSON.stringify(error.toDiagnosticData()),
+    })
+  }
+
+  // The provider closed a 200 stream before finishing the reply. Name the
+  // upstream as the cause so it is not mistaken for a context-limit rejection.
+  if (error instanceof StreamEndedEarlyError) {
+    return createAssistantAPIErrorMessage({
+      content: `${API_ERROR_MESSAGE_PREFIX}: ${formatStreamEndedEarlyMessage(error, options?.streamRetries)}`,
+      error: 'unknown',
+      errorDetails: JSON.stringify({
+        reason: error.reason,
+        retries: options?.streamRetries ?? 0,
+        ...error.evidence,
+      }),
+      businessErrorCode: BUSINESS_ERROR_CODES.UPSTREAM_STREAM_INTERRUPTED,
     })
   }
 

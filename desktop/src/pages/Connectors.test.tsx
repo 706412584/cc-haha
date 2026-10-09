@@ -21,6 +21,13 @@ const perform = vi.fn(async () => {})
 beforeEach(() => { vi.clearAllMocks(); mocks.translations = null; useConnectorStore.setState({ items: [item], loading: false, error: null, pending: {}, refresh, act: perform }) })
 afterEach(() => { cleanup(); vi.useRealTimers() })
 describe('Connectors', () => {
+  it('opens the detail of the connector the composer menu pointed at', () => {
+    const handled = vi.fn()
+    render(<Connectors focusConnectorId="feishu" onFocusHandled={handled} />)
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'connectors.action.authenticate' })).toBeInTheDocument()
+    expect(handled).toHaveBeenCalledTimes(1)
+  })
   it('explains shared credentials and requires confirmation before account connection', () => {
     render(<Connectors />)
     fireEvent.click(screen.getByRole('button', { name: 'connectors.details' }))
@@ -402,4 +409,22 @@ it('distinguishes a management search miss from having no installed packages', (
   fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'missing-service' } })
   expect(screen.getByText('connectors.emptySearch')).toBeInTheDocument()
   expect(screen.queryByText('connectors.emptyAdded')).not.toBeInTheDocument()
+})
+
+it('colors each card status with the shared status vocabulary, never the brand', () => {
+  // Usable = success, needs the user = warning, broken = danger, working = info.
+  const cases: Array<[Partial<ConnectorDto>, string]> = [
+    [{ status: 'ready', connection: 'connected' }, 'success'],
+    [{ status: 'needs-auth' }, 'warning'],
+    [{ status: 'error' }, 'error'],
+    [{ status: 'authorizing', operation: { id: 'op', kind: 'authenticate', phase: 'waiting', startedAt: '' } }, 'info'],
+  ]
+  for (const [patch, tone] of cases) {
+    useConnectorStore.setState({ items: [{ ...item, ...patch } as ConnectorDto] })
+    const view = render(<Connectors />)
+    const status = screen.getByText(`connectors.status.${patch.status}`)
+    expect(status.className).toContain(`bg-[var(--color-${tone}-container)]`)
+    expect(status.className).not.toContain('brand')
+    view.unmount()
+  }
 })

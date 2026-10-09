@@ -871,6 +871,11 @@ export class SessionService {
     }>
   >()
   private readonly taskNotificationMutationEpochs = new Map<string, number>()
+
+  async drainForMigration(): Promise<void> {
+    const writes = [...this.pendingTaskNotificationWrites.values()].flatMap(entries => [...entries].map(entry => entry.promise))
+    await Promise.all(writes)
+  }
   private readonly clearingTaskNotificationSessions = new Set<string>()
 
   private readonly localIndexGateway: LocalIndexGateway
@@ -2801,18 +2806,43 @@ export class SessionService {
   }
 
   private async fileHasConversationTranscript(filePath: string): Promise<boolean> {
-    let hasTranscript = false
-    const scan = await withHistoryReadBudget(undefined, () => streamBoundedHistory(
-      filePath,
-      entry => {
-        if (!hasTranscript && this.hasConversationTranscript([entry as RawEntry])) hasTranscript = true
-      },
-      undefined,
-      { maxRecordBytes: HISTORY_SEMANTIC_RECORD_BYTES },
-    ), 'metadata')
-    // An oversized record may be the only conversation turn. Prefer that
-    // transcript over a newer metadata-only placeholder until it can be read.
-    return hasTranscript || scan.oversizedRecords > 0
+    // The first conversation record settles the answer. Scanning on would make
+    // every session lookup cost a full parse of the transcript.
+    const found = new AbortController()
+    try {
+      const scan = await withHistoryReadBudget(undefined, () => streamBoundedHistory(
+        filePath,
+        entry => {
+          if (this.hasConversationTranscript([entry as RawEntry])) found.abort()
+        },
+        found.signal,
+        { maxRecordBytes: HISTORY_SEMANTIC_RECORD_BYTES },
+      ), 'metadata')
+      // An oversized record may be the only conversation turn. Prefer that
+      // transcript over a newer metadata-only placeholder until it can be read.
+      // A final line without a newline is reported after the last abort check.
+      return found.signal.aborted || scan.oversizedRecords > 0
+    } catch (error) {
+      if (found.signal.aborted && error === found.signal.reason) return true
+      throw error
+    }
+  }
+
+  /** Content is only needed to choose between several files for one session. */
+  private async rankSessionFileMatches<T extends { filePath: string; mtimeMs: number }>(
+    matches: T[],
+    onReadError: (error: unknown) => 'drop' | 'fail',
+  ): Promise<T[] | null> {
+    if (matches.length < 2) return matches
+    const ranked: Array<T & { hasTranscript: boolean }> = []
+    for (const match of matches) {
+      try {
+        ranked.push({ ...match, hasTranscript: await this.fileHasConversationTranscript(match.filePath) })
+      } catch (error) {
+        if (onReadError(error) === 'fail') return null
+      }
+    }
+    return ranked.sort((a, b) => Number(b.hasTranscript) - Number(a.hasTranscript) || b.mtimeMs - a.mtimeMs || a.filePath.localeCompare(b.filePath))
   }
 
   // --------------------------------------------------------------------------
@@ -3044,6 +3074,36 @@ export class SessionService {
       ...(outputFile ? { outputFile } : {}),
       ...(timestamp ? { timestamp } : {}),
     }
+  }
+
+  // A notification the CLI drains while a turn is running is recorded as a
+  // queued_command attachment instead of a user turn, and one that was queued
+  // but never delivered (e.g. the session exited first) only as a
+  // queue-operation. For a session the desktop never ran, these are the only
+  // records that the task finished.
+  private parseQueuedTaskNotification(
+    entry: RawEntry,
+  ): SessionTaskNotification | null {
+    if (entry.type === 'queue-operation') {
+      return this.parseTaskNotificationContent(entry.content, entry.timestamp)
+    }
+    if (entry.type !== 'attachment') return null
+    const attachment = entry.attachment
+    if (
+      !attachment ||
+      typeof attachment !== 'object' ||
+      Array.isArray(attachment)
+    ) {
+      return null
+    }
+    const record = attachment as Record<string, unknown>
+    if (
+      record.type !== 'queued_command' ||
+      record.commandMode === 'prompt'
+    ) {
+      return null
+    }
+    return this.parseTaskNotificationContent(record.prompt, entry.timestamp)
   }
 
   private parsePersistedTaskNotification(
@@ -3673,6 +3733,8 @@ export class SessionService {
             : null
           const hydratedMatches: Array<SessionFileMatch & { mtimeMs: number }> = []
           let hydrationFailed = false
+          const failUnlessMissing = (error: unknown) =>
+            (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'drop' as const : 'fail' as const
           for (const match of indexedMatches) {
             try {
               const stat = await this.validateIndexedTranscriptPath(
@@ -3683,33 +3745,22 @@ export class SessionService {
               )
               hydratedMatches.push({ ...match, mtimeMs: stat.mtimeMs })
             } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+              if (failUnlessMissing(error) === 'fail') {
                 hydrationFailed = true
                 break
               }
             }
           }
+          const rankedMatches = hydrationFailed
+            ? null
+            : await this.rankSessionFileMatches(hydratedMatches, failUnlessMissing)
+          if (!rankedMatches) hydrationFailed = true
           if (
-            !hydrationFailed &&
-            hydratedMatches.length > 0 &&
+            rankedMatches &&
+            rankedMatches.length > 0 &&
             indexedMutationEpoch === getSharedSessionMutationState(this.localIndexGateway).epoch
           ) {
-            // Only pay for a transcript read when the candidates are ambiguous; a single
-            // match needs no tie-break and callers like the signature poll must not parse
-            // a transcript merely to locate it.
-            if (hydratedMatches.length === 1) {
-              return hydratedMatches.map(({ filePath, projectDir }) => ({ filePath, projectDir }))
-            }
-            // Tie-break via fileHasConversationTranscript rather than readJsonlFile: the
-            // latter degrades to a tail window on an oversized transcript, so it could
-            // miss the only conversation turn and rank a metadata-only placeholder first.
-            const withTranscript = await Promise.all(hydratedMatches.map(async (match) => ({
-              ...match,
-              hasTranscript: await this.fileHasConversationTranscript(match.filePath),
-            })))
-            return withTranscript
-              .sort((a, b) => Number(b.hasTranscript) - Number(a.hasTranscript) || b.mtimeMs - a.mtimeMs || a.filePath.localeCompare(b.filePath))
-              .map(({ filePath, projectDir }) => ({ filePath, projectDir }))
+            return rankedMatches.map(({ filePath, projectDir }) => ({ filePath, projectDir }))
           }
           if (hydrationFailed) this.markIndexReadFailure()
         }
@@ -3746,21 +3797,8 @@ export class SessionService {
       }
     }
 
-    // A single candidate needs no tie-break, and callers like the signature poll
-    // must not parse a transcript merely to locate it.
-    if (matches.length === 1) {
-      return matches.map(({ filePath, projectDir }) => ({ filePath, projectDir }))
-    }
-
-    // Prefer the candidate that actually holds a conversation: a worktree move leaves a
-    // placeholder behind, and a newer placeholder must not shadow the real transcript.
-    const withTranscript = await Promise.all(matches.map(async (match) => ({
-      ...match,
-      hasTranscript: await this.fileHasConversationTranscript(match.filePath),
-    })))
-    return withTranscript
-      .sort((a, b) => Number(b.hasTranscript) - Number(a.hasTranscript) || b.mtimeMs - a.mtimeMs || a.filePath.localeCompare(b.filePath))
-      .map(({ filePath, projectDir }) => ({ filePath, projectDir }))
+    const ranked = await this.rankSessionFileMatches(matches, () => 'drop')
+    return ranked!.map(({ filePath, projectDir }) => ({ filePath, projectDir }))
   }
 
   async findSessionFile(
@@ -6719,7 +6757,7 @@ export class SessionService {
 
     const entries = await this.readTargetedJsonlEntries(
       found,
-      ['user', PERSISTED_TASK_NOTIFICATION_ENTRY_TYPE],
+      ['user', 'attachment', 'queue-operation', PERSISTED_TASK_NOTIFICATION_ENTRY_TYPE],
     ) ?? await this.readJsonlFile(found.filePath)
     return this.taskNotificationsFromEntries(entries)
   }
@@ -6733,7 +6771,7 @@ export class SessionService {
         ? this.parsePersistedTaskNotification(entry.taskNotification, entry.timestamp)
         : entry.message?.role === 'user'
           ? this.parseTaskNotificationContent(entry.message.content, entry.timestamp)
-          : null
+          : this.parseQueuedTaskNotification(entry)
       if (notification) {
         notifications.set(sessionTaskNotificationIdentity(notification), notification)
       }

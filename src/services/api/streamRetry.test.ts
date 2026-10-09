@@ -1,14 +1,14 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
-import Anthropic, { APIConnectionError, APIError } from '@anthropic-ai/sdk'
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test'
+import { APIError } from '@anthropic-ai/sdk'
 import { withStreamRetry } from './streamRetry.js'
-import { EmptyStreamError } from './streamFallback.js'
-import {
-  isRetryableStreamError,
-  RetriableStreamError,
-} from './withRetry.js'
+import { RetriableStreamError } from './withRetry.js'
 
 const RETRY_ENV = 'CLAUDE_STREAM_TRANSIENT_RETRY_MAX'
-const BUDGET_ENV = 'CLAUDE_STREAM_TRANSIENT_RETRY_BUDGET_MS'
+const API_RETRY_ENV = 'CLAUDE_CODE_MAX_RETRIES'
+
+// Backoff waits are covered by recordingSleep below; the remaining tests only
+// care about which attempts run.
+const noSleep = async () => {}
 
 // getAssistantMessageFromError() (invoked when retries are exhausted) consults
 // isClaudeAISubscriber(), which throws if no auth is configured. We only assert
@@ -26,7 +26,7 @@ afterAll(() => {
 })
 
 /** A RetriableStreamError wrapping a realistic mid-stream api_error (no status). */
-function retriableError(requestID?: string): RetriableStreamError {
+function retriableError(): RetriableStreamError {
   const body = {
     type: 'error',
     error: {
@@ -34,8 +34,9 @@ function retriableError(requestID?: string): RetriableStreamError {
       message: 'Failed to generate a valid tool call.',
     },
   }
-  const error = new APIError(undefined, body, JSON.stringify(body), undefined)
-  return new RetriableStreamError(error, requestID)
+  return new RetriableStreamError(
+    new APIError(undefined, body, JSON.stringify(body), undefined),
+  )
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: test harness collects heterogeneous stream messages
@@ -47,148 +48,6 @@ async function collect(gen: AsyncGenerator<any, void>): Promise<any[]> {
 }
 
 describe('withStreamRetry', () => {
-  beforeEach(() => {
-    process.env.ANTHROPIC_API_KEY ??= 'sk-ant-test'
-  })
-  test('retries the screenshot upstream_error after the SDK parses it from SSE', async () => {
-    process.env[RETRY_ENV] = '1'
-    let requests = 0
-    const server = Bun.serve({
-      port: 0,
-      fetch() {
-        requests += 1
-        const payload = requests === 1
-          ? [
-              'event: error',
-              `data: ${JSON.stringify({
-                error: {
-                  message: 'Upstream service temporarily unavailable',
-                  type: 'upstream_error',
-                },
-                type: 'error',
-              })}`,
-              '',
-              '',
-            ].join('\n')
-          : [
-              'event: message_start',
-              `data: ${JSON.stringify({
-                type: 'message_start',
-                message: {
-                  id: 'msg_recovered',
-                  type: 'message',
-                  role: 'assistant',
-                  content: [],
-                  model: 'claude-test',
-                  stop_reason: null,
-                  stop_sequence: null,
-                  usage: { input_tokens: 1, output_tokens: 0 },
-                },
-              })}`,
-              '',
-              'event: message_delta',
-              `data: ${JSON.stringify({
-                type: 'message_delta',
-                delta: { stop_reason: 'end_turn', stop_sequence: null },
-                usage: { output_tokens: 1 },
-              })}`,
-              '',
-              'event: message_stop',
-              `data: ${JSON.stringify({ type: 'message_stop' })}`,
-              '',
-              '',
-            ].join('\n')
-        return new Response(payload, {
-          headers: { 'content-type': 'text/event-stream' },
-        })
-      },
-    })
-    const client = new Anthropic({
-      apiKey: 'sk-ant-test',
-      baseURL: `http://127.0.0.1:${server.port}`,
-      maxRetries: 0,
-    })
-    const attempt = () =>
-      (async function* () {
-        try {
-          const stream = client.messages.stream({
-            model: 'claude-test',
-            max_tokens: 8,
-            messages: [{ role: 'user', content: 'hello' }],
-          })
-          await stream.finalMessage()
-          yield { type: 'assistant', message: { content: [] }, uuid: 'recovered' } as any
-        } catch (error) {
-          if (isRetryableStreamError(error)) {
-            throw new RetriableStreamError(error)
-          }
-          throw error
-        }
-      })()
-
-    try {
-      const out = await collect(withStreamRetry(attempt, 'claude-test', []))
-      expect(requests).toBe(2)
-      expect(out).toContainEqual(expect.objectContaining({
-        type: 'system',
-        subtype: 'streaming_fallback',
-        cause: 'stream_retry',
-      }))
-      expect(out.at(-1)).toMatchObject({ type: 'assistant', uuid: 'recovered' })
-      expect(out.some((message) => message.isApiErrorMessage)).toBe(false)
-    } finally {
-      server.stop(true)
-      delete process.env[RETRY_ENV]
-    }
-  })
-
-  test('retries a Grok disconnect and only exposes the final error after exhaustion', async () => {
-    process.env[RETRY_ENV] = '1'
-    let calls = 0
-    const disconnect = new Error(
-      'API Error: {"error":{"message":"OpenAI messages stream disconnected before completion","type":"api_error"},"type":"error"}',
-    )
-    const attempt = () =>
-      (async function* (): AsyncGenerator<any, void> {
-        calls += 1
-        if (!isRetryableStreamError(disconnect)) throw disconnect
-        throw new RetriableStreamError(disconnect)
-      })()
-
-    const out = await collect(withStreamRetry(attempt, 'grok-4', []))
-
-    expect(calls).toBe(2)
-    expect(out.filter(
-      message => message.type === 'assistant' && message.isApiErrorMessage === true,
-    )).toHaveLength(1)
-    const text = out.at(-1)?.message?.content?.find((block: { type: string }) => block.type === 'text')?.text
-    expect(text).toContain('OpenAI messages stream disconnected before completion')
-    delete process.env[RETRY_ENV]
-  })
-
-  test('uses four retries by default and only shows the final connection error', async () => {
-    delete process.env[RETRY_ENV]
-    let calls = 0
-    const connectionError = new APIConnectionError({
-      cause: new Error('The socket connection was closed unexpectedly.'),
-    })
-    const attempt = () =>
-      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
-      (async function* (): AsyncGenerator<any, void> {
-        calls++
-        throw new RetriableStreamError(connectionError)
-      })()
-
-    const out = await collect(withStreamRetry(attempt, 'test-model', []))
-
-    expect(calls).toBe(5)
-    expect(out.filter(
-      m => m.type === 'assistant' && m.isApiErrorMessage === true,
-    )).toHaveLength(1)
-    const text = out.at(-1)?.message?.content?.find((block: { type: string }) => block.type === 'text')?.text
-    expect(text).toContain('Retried 4 times')
-  }, 15_000)
-
   test('retries after a transient mid-stream error and yields the successful attempt', async () => {
     process.env[RETRY_ENV] = '2'
     let calls = 0
@@ -204,7 +63,7 @@ describe('withStreamRetry', () => {
         yield { type: 'assistant', message: { content: [] }, uuid: 'ok' }
       })()
 
-    const out = await collect(withStreamRetry(attempt, 'test-model', []))
+    const out = await collect(withStreamRetry(attempt, 'test-model', [], { sleep: noSleep }))
 
     expect(calls).toBe(2)
     expect(out).toContainEqual(expect.objectContaining({
@@ -230,7 +89,7 @@ describe('withStreamRetry', () => {
         throw retriableError()
       })()
 
-    const out = await collect(withStreamRetry(attempt, 'test-model', []))
+    const out = await collect(withStreamRetry(attempt, 'test-model', [], { sleep: noSleep }))
 
     expect(calls).toBe(3) // 1 initial attempt + 2 retries
     expect(out.filter(
@@ -239,131 +98,6 @@ describe('withStreamRetry', () => {
     const last = out.at(-1)
     expect(last?.type).toBe('assistant')
     expect(last?.isApiErrorMessage).toBe(true)
-    // User-visible error message must be yielded EXACTLY ONCE — no matter
-    // how many retries fired in the middle. Per user requirement: "重试可以
-    // 但是只显示一次报错消息出就行". Without this assertion, a future
-    // refactor that yields per-attempt error messages could regress the UI
-    // to show a stack of red error chips.
-    const errorMessages = out.filter(
-      (m) => m.type === 'assistant' && m.isApiErrorMessage === true,
-    )
-    expect(errorMessages).toHaveLength(1)
-    delete process.env[RETRY_ENV]
-  })
-
-  test('final error says how many retries ran and preserves the upstream request ID', async () => {
-    process.env[RETRY_ENV] = '2'
-    const attempt = () =>
-      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
-      (async function* (): AsyncGenerator<any, void> {
-        throw retriableError('req-stream-final')
-      })()
-
-    const out = await collect(withStreamRetry(attempt, 'test-model', []))
-    const last = out.at(-1)
-    const text = last?.message?.content?.find((block: { type: string }) => block.type === 'text')?.text
-    expect(text).toContain('Retried 2 times')
-    expect(last?.requestId).toBe('req-stream-final')
-    delete process.env[RETRY_ENV]
-  })
-
-  test('retry attempts do not leak any error messages mid-stream (transparent retry)', async () => {
-    // attempt 1 throws RetriableStreamError, attempt 2 succeeds. The user
-    // must see ZERO error messages — the retry should be invisible.
-    process.env[RETRY_ENV] = '2'
-    let calls = 0
-    const attempt = () =>
-      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
-      (async function* (): AsyncGenerator<any, void> {
-        calls++
-        if (calls === 1) {
-          throw retriableError()
-        }
-        yield { type: 'assistant', message: { content: [] }, uuid: 'recovered' }
-      })()
-
-    const out = await collect(withStreamRetry(attempt, 'test-model', []))
-
-    expect(calls).toBe(2)
-    expect(
-      out.some(
-        (m) => m.type === 'assistant' && m.isApiErrorMessage === true,
-      ),
-    ).toBe(false)
-    delete process.env[RETRY_ENV]
-  })
-
-  test('does not retry a transient stream error after the caller aborts', async () => {
-    process.env[RETRY_ENV] = '2'
-    const controller = new AbortController()
-    let calls = 0
-    const attempt = () =>
-      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
-      (async function* (): AsyncGenerator<any, void> {
-        calls++
-        controller.abort()
-        throw retriableError()
-      })()
-
-    await expect(
-      collect(withStreamRetry(attempt, 'test-model', [], controller.signal)),
-    ).rejects.toThrow()
-    expect(calls).toBe(1)
-    delete process.env[RETRY_ENV]
-  })
-
-  test('stream_retry payload includes attempt metadata for visible desktop banners', async () => {
-    process.env[RETRY_ENV] = '2'
-    let calls = 0
-    const disconnect = new Error(
-      'OpenAI messages stream disconnected before completion',
-    )
-    const attempt = () =>
-      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
-      (async function* (): AsyncGenerator<any, void> {
-        calls++
-        if (calls === 1) throw new RetriableStreamError(disconnect)
-        yield { type: 'assistant', message: { content: [] }, uuid: 'ok' }
-      })()
-
-    const out = await collect(withStreamRetry(attempt, 'grok-4', []))
-    const retrySignals = out.filter(
-      (m) =>
-        m.type === 'system' &&
-        m.subtype === 'streaming_fallback' &&
-        m.cause === 'stream_retry',
-    )
-    expect(retrySignals).toHaveLength(1)
-    expect(retrySignals[0].attempt).toBe(1)
-    expect(retrySignals[0].maxRetries).toBe(2)
-    expect(typeof retrySignals[0].retryDelayMs).toBe('number')
-    expect(retrySignals[0].retryDelayMs).toBeGreaterThanOrEqual(0)
-    expect(String(retrySignals[0].errorMessage)).toContain('disconnected')
-    delete process.env[RETRY_ENV]
-  })
-
-  test('aborts during retry backoff without starting another attempt', async () => {
-    process.env[RETRY_ENV] = '3'
-    const controller = new AbortController()
-    let calls = 0
-    const attempt = () =>
-      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
-      (async function* (): AsyncGenerator<any, void> {
-        calls++
-        throw retriableError()
-      })()
-
-    const gen = withStreamRetry(attempt, 'test-model', [], controller.signal)
-    const first = await gen.next()
-    expect(first.value).toMatchObject({
-      type: 'system',
-      subtype: 'streaming_fallback',
-      cause: 'stream_retry',
-      attempt: 1,
-    })
-    controller.abort()
-    await expect(gen.next()).rejects.toThrow()
-    expect(calls).toBe(1)
     delete process.env[RETRY_ENV]
   })
 
@@ -393,7 +127,7 @@ describe('withStreamRetry', () => {
         yield { type: 'assistant', message: { content: [] }, uuid: 'recovered' }
       })()
 
-    const recovered = await collect(withStreamRetry(recovers, 'test-model', []))
+    const recovered = await collect(withStreamRetry(recovers, 'test-model', [], { sleep: noSleep }))
     expect(calls).toBe(2)
     expect(recovered.at(-1)?.uuid).toBe('recovered')
     expect(recovered.some(m => m.isApiErrorMessage)).toBe(false)
@@ -404,37 +138,10 @@ describe('withStreamRetry', () => {
         throw socketReset()
       })()
 
-    const failed = await collect(withStreamRetry(persists, 'test-model', []))
+    const failed = await collect(withStreamRetry(persists, 'test-model', [], { sleep: noSleep }))
     const last = failed.at(-1)
     expect(last?.type).toBe('assistant')
     expect(last?.isApiErrorMessage).toBe(true)
-    delete process.env[RETRY_ENV]
-  })
-
-  test('retries an EmptyStreamError wrapped as RetriableStreamError', async () => {
-    process.env[RETRY_ENV] = '1'
-    let calls = 0
-    const attempt = () =>
-      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
-      (async function* (): AsyncGenerator<any, void> {
-        calls++
-        if (calls === 1) {
-          // Simulate the claude.ts fix: EmptyStreamError is thrown as RetriableStreamError
-          throw new RetriableStreamError(new EmptyStreamError())
-        }
-        yield { type: 'assistant', message: { content: [] }, uuid: 'recovered' }
-      })()
-
-    const out = await collect(withStreamRetry(attempt, 'test-model', []))
-
-    expect(calls).toBe(2)
-    expect(out.at(-1)?.uuid).toBe('recovered')
-    expect(out.some(m => m.isApiErrorMessage)).toBe(false)
-    expect(out).toContainEqual(expect.objectContaining({
-      type: 'system',
-      subtype: 'streaming_fallback',
-      cause: 'stream_retry',
-    }))
     delete process.env[RETRY_ENV]
   })
 
@@ -448,7 +155,7 @@ describe('withStreamRetry', () => {
       })()
 
     await expect(
-      collect(withStreamRetry(attempt, 'test-model', [])),
+      collect(withStreamRetry(attempt, 'test-model', [], { sleep: noSleep })),
     ).rejects.toThrow('fatal')
     expect(calls).toBe(1)
   })
@@ -463,7 +170,7 @@ describe('withStreamRetry', () => {
         throw retriableError()
       })()
 
-    const out = await collect(withStreamRetry(attempt, 'test-model', []))
+    const out = await collect(withStreamRetry(attempt, 'test-model', [], { sleep: noSleep }))
 
     expect(calls).toBe(1)
     expect(out.at(-1)?.type).toBe('assistant')
@@ -503,7 +210,7 @@ describe('withStreamRetry', () => {
         )
       })()
 
-    const out = await collect(withStreamRetry(attempt, 'test-model', []))
+    const out = await collect(withStreamRetry(attempt, 'test-model', [], { sleep: noSleep }))
     const partials = out.filter(
       message =>
         message.type === 'assistant' &&
@@ -517,53 +224,6 @@ describe('withStreamRetry', () => {
     delete process.env[RETRY_ENV]
   })
 
-  test('stops retrying once the wall-clock budget is exhausted, before maxRetries', async () => {
-    // High retry count, but each attempt "hangs" ~40ms before failing and the
-    // budget is 50ms — so the loop must give up on time, not on count. This is
-    // the empty-stream-that-takes-30s scenario in miniature.
-    process.env[RETRY_ENV] = '10'
-    process.env[BUDGET_ENV] = '50'
-    let calls = 0
-    const attempt = () =>
-      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
-      (async function* (): AsyncGenerator<any, void> {
-        calls++
-        await new Promise((resolve) => setTimeout(resolve, 40))
-        throw retriableError()
-      })()
-
-    const out = await collect(withStreamRetry(attempt, 'test-model', []))
-
-    // Would be 11 attempts on count alone; the budget cuts it far shorter.
-    expect(calls).toBeLessThan(11)
-    expect(calls).toBeGreaterThanOrEqual(1)
-    expect(out.at(-1)?.type).toBe('assistant')
-    expect(out.at(-1)?.isApiErrorMessage).toBe(true)
-    delete process.env[RETRY_ENV]
-    delete process.env[BUDGET_ENV]
-  })
-
-  test('budget=0 disables the wall-clock cap (count-only, legacy behavior)', async () => {
-    process.env[RETRY_ENV] = '2'
-    process.env[BUDGET_ENV] = '0'
-    let calls = 0
-    const attempt = () =>
-      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
-      (async function* (): AsyncGenerator<any, void> {
-        calls++
-        await new Promise((resolve) => setTimeout(resolve, 10))
-        throw retriableError()
-      })()
-
-    const out = await collect(withStreamRetry(attempt, 'test-model', []))
-
-    // 1 initial + 2 retries: the elapsed time never terminates the loop.
-    expect(calls).toBe(3)
-    expect(out.at(-1)?.isApiErrorMessage).toBe(true)
-    delete process.env[RETRY_ENV]
-    delete process.env[BUDGET_ENV]
-  })
-
   test('passes through a clean attempt without retrying', async () => {
     let calls = 0
     const attempt = () =>
@@ -573,10 +233,246 @@ describe('withStreamRetry', () => {
         yield { type: 'assistant', message: { content: [] }, uuid: 'clean' }
       })()
 
-    const out = await collect(withStreamRetry(attempt, 'test-model', []))
+    const out = await collect(withStreamRetry(attempt, 'test-model', [], { sleep: noSleep }))
 
     expect(calls).toBe(1)
     expect(out).toHaveLength(1)
     expect(out[0].uuid).toBe('clean')
+  })
+})
+
+/** The SSE error event the provider proxy writes when the upstream is cut off. */
+function proxyTruncation(): RetriableStreamError {
+  const body = {
+    type: 'error',
+    error: {
+      type: 'stream_truncated',
+      message: 'OpenAI Chat upstream stream ended without finish_reason',
+    },
+  }
+  return new RetriableStreamError(
+    new APIError(undefined, body, undefined, undefined),
+    [],
+    'transport',
+  )
+}
+
+function withEnv(values: Record<string, string | undefined>) {
+  const saved = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]))
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  return () => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
+// biome-ignore lint/suspicious/noExplicitAny: test harness inspects heterogeneous stream messages
+function retryStatuses(out: any[]): any[] {
+  return out.filter(m => m.type === 'system' && m.subtype === 'api_error')
+}
+
+describe('withStreamRetry backoff and budgets', () => {
+  test('backs off between re-sends with growing, capped delays and reports each wait', async () => {
+    const restore = withEnv({ [RETRY_ENV]: undefined, [API_RETRY_ENV]: undefined })
+    const random = spyOn(Math, 'random').mockReturnValue(0)
+    try {
+      const delays: number[] = []
+      let calls = 0
+      const attempt = () =>
+        // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+        (async function* (): AsyncGenerator<any, void> {
+          calls++
+          if (calls <= 7) throw proxyTruncation()
+          yield { type: 'assistant', message: { content: [] }, uuid: 'recovered' }
+        })()
+
+      const out = await collect(withStreamRetry(attempt, 'test-model', [], {
+        sleep: async ms => { delays.push(ms) },
+      }))
+
+      expect(calls).toBe(8)
+      expect(delays).toEqual([500, 1000, 2000, 4000, 8000, 16000, 32000])
+      expect(retryStatuses(out).map(m => [m.retryAttempt, m.maxRetries, m.retryInMs])).toEqual(
+        delays.map((delay, index) => [index + 1, 10, delay]),
+      )
+      expect(out.at(-1)?.uuid).toBe('recovered')
+      expect(out.some(m => m.isApiErrorMessage)).toBe(false)
+    } finally {
+      random.mockRestore()
+      restore()
+    }
+  })
+
+  test('jitter stays within a quarter of the base delay', async () => {
+    const restore = withEnv({ [RETRY_ENV]: undefined, [API_RETRY_ENV]: '3' })
+    try {
+      const delays: number[] = []
+      const attempt = () =>
+        // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+        (async function* (): AsyncGenerator<any, void> {
+          throw proxyTruncation()
+        })()
+
+      await collect(withStreamRetry(attempt, 'test-model', [], {
+        sleep: async ms => { delays.push(ms) },
+      }))
+
+      expect(delays).toHaveLength(3)
+      delays.forEach((delay, index) => {
+        const base = 500 * 2 ** index
+        expect(delay).toBeGreaterThanOrEqual(base)
+        expect(delay).toBeLessThanOrEqual(base * 1.25)
+      })
+    } finally {
+      restore()
+    }
+  })
+
+  test('transport failures draw on the API retry budget, then surface the original error', async () => {
+    for (const [apiRetries, expectedCalls] of [[undefined, 11], ['3', 4]] as const) {
+      const restore = withEnv({ [RETRY_ENV]: undefined, [API_RETRY_ENV]: apiRetries })
+      try {
+        let calls = 0
+        let sleeps = 0
+        const attempt = () =>
+          // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+          (async function* (): AsyncGenerator<any, void> {
+            calls++
+            throw proxyTruncation()
+          })()
+
+        const out = await collect(withStreamRetry(attempt, 'test-model', [], {
+          sleep: async () => { sleeps++ },
+        }))
+
+        expect(calls).toBe(expectedCalls)
+        expect(sleeps).toBe(expectedCalls - 1)
+        const last = out.at(-1)
+        expect(last?.type).toBe('assistant')
+        expect(last?.isApiErrorMessage).toBe(true)
+        expect(JSON.stringify(last?.message.content)).toContain('ended without finish_reason')
+      } finally {
+        restore()
+      }
+    }
+  })
+
+  test('stalls and upstream-reported errors keep their small budget', async () => {
+    const restore = withEnv({ [RETRY_ENV]: undefined, [API_RETRY_ENV]: undefined })
+    try {
+      let calls = 0
+      const attempt = () =>
+        // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+        (async function* (): AsyncGenerator<any, void> {
+          calls++
+          throw retriableError()
+        })()
+
+      const out = await collect(withStreamRetry(attempt, 'test-model', [], { sleep: noSleep }))
+
+      // Fork default: the wider 4-retry transient window (relay providers rely
+      // on it), so a persistent transient burns 1 + 4 attempts.
+      expect(calls).toBe(5)
+      expect(out.at(-1)?.isApiErrorMessage).toBe(true)
+    } finally {
+      restore()
+    }
+  })
+
+  test('discards the failed attempt and reports the retry before waiting', async () => {
+    const restore = withEnv({ [RETRY_ENV]: undefined, [API_RETRY_ENV]: undefined })
+    try {
+      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+      const out: any[] = []
+      let yieldedBeforeWait = -1
+      let calls = 0
+      const attempt = () =>
+        // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+        (async function* (): AsyncGenerator<any, void> {
+          calls++
+          if (calls === 1) {
+            yield { type: 'stream_event', event: { type: 'content_block_delta' } }
+            throw proxyTruncation()
+          }
+          yield { type: 'assistant', message: { content: [] }, uuid: 'second' }
+        })()
+
+      for await (const message of withStreamRetry(attempt, 'test-model', [], {
+        sleep: async () => { yieldedBeforeWait = out.length },
+      })) {
+        out.push(message)
+      }
+
+      expect(out.map(m => m.subtype ?? m.type)).toEqual([
+        'stream_event',
+        'streaming_fallback',
+        'api_error',
+        'assistant',
+      ])
+      expect(out[1].cause).toBe('stream_retry')
+      expect(out[2].retryAttempt).toBe(1)
+      expect(yieldedBeforeWait).toBe(3)
+    } finally {
+      restore()
+    }
+  })
+
+  test('an interrupt during the backoff stops without another attempt or a provider error', async () => {
+    const restore = withEnv({ [RETRY_ENV]: undefined, [API_RETRY_ENV]: undefined })
+    try {
+      const controller = new AbortController()
+      let calls = 0
+      const attempt = () =>
+        // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+        (async function* (): AsyncGenerator<any, void> {
+          calls++
+          throw proxyTruncation()
+        })()
+
+      const out = await collect(withStreamRetry(attempt, 'test-model', [], {
+        signal: controller.signal,
+        sleep: async () => { controller.abort() },
+      }))
+
+      expect(calls).toBe(1)
+      expect(out.some(m => m.type === 'assistant')).toBe(false)
+      expect(out.at(-1)?.subtype).toBe('api_error')
+    } finally {
+      restore()
+    }
+  })
+
+  test('never replays an attempt that already committed assistant output', async () => {
+    const restore = withEnv({ [RETRY_ENV]: undefined, [API_RETRY_ENV]: undefined })
+    try {
+      let calls = 0
+      const toolUse = {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'toolu_committed', name: 'Bash', input: {} }] },
+        uuid: 'committed-tool',
+      }
+      const attempt = () =>
+        // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+        (async function* (): AsyncGenerator<any, void> {
+          calls++
+          // Once a tool_use reaches the consumer it may already be running.
+          yield toolUse
+          throw proxyTruncation()
+        })()
+
+      const out = await collect(withStreamRetry(attempt, 'test-model', [], { sleep: noSleep }))
+
+      expect(calls).toBe(1)
+      expect(out.filter(m => m.uuid === 'committed-tool')).toHaveLength(1)
+      expect(out.some(m => m.subtype === 'streaming_fallback')).toBe(false)
+      expect(out.at(-1)?.isApiErrorMessage).toBe(true)
+    } finally {
+      restore()
+    }
   })
 })

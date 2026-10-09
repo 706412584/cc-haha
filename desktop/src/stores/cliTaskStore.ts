@@ -29,6 +29,8 @@ type CLITaskStore = {
   refreshTasks: (sessionId?: string) => Promise<void>
   /** Update tasks from TodoWrite V1 tool input (in-memory, no disk read needed) */
   setTasksFromTodos: (todos: TodoItem[], sessionId?: string) => void
+  /** Put back what the bar showed, unless it has moved on to another session */
+  restoreTasks: (snapshot: CLITaskSnapshot) => void
   /** Mark that completed tasks were already dismissed (conversation continued) */
   markCompletedAndDismissed: (sessionId?: string) => void
   /** Clear a completed task list locally and remotely so the next cycle starts clean */
@@ -39,9 +41,22 @@ type CLITaskStore = {
   toggleExpanded: () => void
 }
 
+/** What the task bar showed for one session, to undo a live update that did not happen. */
+export type CLITaskSnapshot = Pick<CLITaskStore, 'tasks' | 'completedAndDismissed' | 'dismissedCompletionKey'> & {
+  sessionId: string
+}
+
 type InFlightTaskRequest = {
   generation: number
   promise: Promise<{ tasks: CLITask[] }>
+}
+
+let taskRequestGeneration = 0
+const latestAppliedTaskRequestBySession = new Map<string, number>()
+
+function invalidateTaskRequests(): void {
+  taskRequestGeneration += 1
+  latestAppliedTaskRequestBySession.clear()
 }
 
 const inFlightTaskRequests = new Map<string, InFlightTaskRequest>()
@@ -176,6 +191,17 @@ export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
       resetting: false,
       ...resolveDismissState(tasks, state.dismissedCompletionKey),
     }))
+  },
+
+  restoreTasks: (snapshot) => {
+    if (get().sessionId !== snapshot.sessionId) return
+    // Like a live TodoWrite, this is newer than any read still in flight.
+    invalidateTaskRequests()
+    set({
+      tasks: snapshot.tasks,
+      completedAndDismissed: snapshot.completedAndDismissed,
+      dismissedCompletionKey: snapshot.dismissedCompletionKey,
+    })
   },
 
   markCompletedAndDismissed: (targetSessionId) => {

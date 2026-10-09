@@ -13,6 +13,7 @@ import { useWorkspaceBrowserStore } from '../../stores/workspaceBrowserStore'
 import { useWorkspaceContentStore } from '../../stores/workspaceContentStore'
 import { openWorkspaceTarget, workspaceOpen } from '../../lib/workspace/openTarget'
 import { subscribeWorkspaceBrowserEvents } from '../../lib/workspace/browserHost'
+import { forgetLostWorkspaceBrowserGuest } from '../../lib/workspace/browserGuests'
 import type { WorkspaceCloseScope, WorkspaceDock, WorkspaceTabKind } from '../../lib/workspace/types'
 import { WorkspaceTabStrip } from './WorkspaceTabStrip'
 import { WorkspaceLauncher } from './WorkspaceLauncher'
@@ -30,6 +31,8 @@ export type WorkspaceSurfaceProps = {
   cwd: string
   /** Reason the review entry is unavailable here, e.g. "not a Git repository". */
   reviewUnavailableReason?: string | null
+  /** False until the session has a conversation for a side chat to fork. */
+  sideChatAvailable?: boolean
   /**
    * Whether this dock is on screen. The bottom dock stays mounted while hidden
    * so xterm keeps its geometry, so "mounted" and "visible" are not the same
@@ -50,6 +53,7 @@ export function WorkspaceSurface({
   dock,
   cwd,
   reviewUnavailableReason = null,
+  sideChatAvailable = true,
   visible = true,
 }: WorkspaceSurfaceProps) {
   const t = useTranslation()
@@ -236,6 +240,7 @@ export function WorkspaceSurface({
             onSelect={handleLauncherSelect}
             dock={dock}
             reviewUnavailableReason={reviewUnavailableReason}
+            sideChatAvailable={sideChatAvailable}
           />
         ) : activeTab === null ? null : activeTab.kind === 'side-chat' ? (
           <SideChatSurface parentSessionId={sessionId} sideChatId={activeTab.sideChatId} visible={visible} />
@@ -268,6 +273,7 @@ export function WorkspaceSurface({
           dock={dock}
           initialFocus={initialMenuFocus.current}
           reviewUnavailableReason={reviewUnavailableReason}
+          sideChatAvailable={sideChatAvailable}
           onSelect={selectFromMenu}
           onClose={closeMenu}
         />
@@ -335,6 +341,9 @@ export function useWorkspaceBrowserEventBridge(enabled: boolean) {
           })
           break
         case 'destroyed':
+          // A crashed guest still exists and reloads in place. A closed one is
+          // gone, so its retry has to build a new page.
+          if (event.reason === 'closed') forgetLostWorkspaceBrowserGuest(event.tabId)
           store.updateBrowserTab(owner.sessionId, event.tabId, {
             // A reason code is not a message. It reaches the error overlay, so
             // it has to be a translated sentence in all five languages.

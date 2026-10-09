@@ -144,9 +144,11 @@ describe('SessionActivityPanel', () => {
 
     // 30px matches AgentMascot, so SubAgent and background rows share a text column.
     expect(running?.className).toContain('h-[30px]')
-    expect(running?.className).toContain('bg-[var(--color-brand-soft)]')
+    // Running reads as info, never brand: terracotta is not a status colour.
+    expect(running?.className).toContain('bg-[var(--color-info-container)]')
+    expect(running?.className).not.toContain('brand')
     // Paired tokens, never a raw accent on its own container (AGENTS.md 3.2).
-    expect(running?.className).toContain('text-[var(--color-on-brand-soft)]')
+    expect(running?.className).toContain('text-[var(--color-on-info-container)]')
     expect(failed?.className).toContain('bg-[var(--color-error-container)]')
     expect(failed?.className).toContain('text-[var(--color-on-error-container)]')
   })
@@ -210,7 +212,7 @@ describe('SessionActivityPanel', () => {
     expect(screen.getByLabelText('Task completed')).toBeInTheDocument()
     expect(screen.getByLabelText('Task in progress')).toBeInTheDocument()
     expect(screen.getByLabelText('Task pending')).toBeInTheDocument()
-    // The in-progress marker is the design's terracotta ring — a bordered
+    // The in-progress marker is the design's info-blue ring — a bordered
     // circle, not an icon — so the animation classes sit on the marker itself.
     // It still stops rather than slows under reduced motion, which is why this
     // panel does not use `Spinner`.
@@ -858,6 +860,19 @@ describe('SessionActivityPanel', () => {
     fireEvent.pointerDown(screen.getByText('Activity trigger icon'))
 
     expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('opens as a bottom sheet on the phone, which a tap inside does not close', () => {
+    const onClose = vi.fn()
+    render(<SessionActivityPanel model={model()} open onClose={onClose} onOpenSubagent={vi.fn()} placement="sheet" />)
+
+    const sheet = screen.getByTestId('session-activity-sheet')
+    expect(screen.queryByTestId('session-activity-panel')).not.toBeInTheDocument()
+    fireEvent.pointerDown(sheet)
+    expect(onClose).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 
   it('renders as a rail without closing on outside pointerdown', () => {

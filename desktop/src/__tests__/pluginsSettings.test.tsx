@@ -259,12 +259,10 @@ describe('Settings > Plugins tab', () => {
     render(<Settings />)
     switchToPluginsTab()
 
-    expect(screen.getByText('Browse installed plugins')).toBeInTheDocument()
-    expect(screen.getByText('Plugin Manager')).toBeInTheDocument()
-    expect(screen.getByText('Language Servers')).toBeInTheDocument()
-    expect(screen.getByText('Install LSP plugins to add diagnostics, go-to-definition, references, and other code intelligence to the workspace editor.')).toBeInTheDocument()
-    expect(screen.getAllByText('pyright-lsp').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('1 LSP servers').length).toBeGreaterThan(0)
+    // The settings page head names the page; the list opens on its numbers
+    // instead of repeating a second title block under it.
+    expect(screen.queryByText('Browse installed plugins')).not.toBeInTheDocument()
+    expect(screen.getByText('Total plugins')).toBeInTheDocument()
     expect(screen.getAllByText('Needs attention').length).toBeGreaterThan(0)
     expect(screen.getByText('github')).toBeInTheDocument()
     expect(screen.getAllByText('Python language tooling').length).toBeGreaterThan(0)

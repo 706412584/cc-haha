@@ -9,6 +9,22 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const noPayload: Validator = value => value === undefined
 const optionalRecord: Validator = value => value === undefined || isRecord(value)
 const stringPayload: Validator = value => typeof value === 'string'
+
+const migrationPrepare: Validator = value =>
+  isRecord(value)
+  && hasOnlyKeys(value, ['targetDir'])
+  && typeof value.targetDir === 'string'
+  && value.targetDir.trim().length > 0
+  && value.targetDir.length <= 32_768
+  && !/[\u0000-\u001f\u007f]/.test(value.targetDir)
+
+const migrationIdentity: Validator = value =>
+  isRecord(value)
+  && hasOnlyKeys(value, ['id'])
+  && typeof value.id === 'string'
+  && value.id.length > 0
+  && value.id.length <= 200
+  && /^[A-Za-z0-9._:-]+$/.test(value.id)
 const booleanPayload: Validator = value => typeof value === 'boolean'
 const hasOnlyKeys = (value: Record<string, unknown>, allowedKeys: string[]) =>
   Object.keys(value).every(key => allowedKeys.includes(key))
@@ -412,6 +428,10 @@ export const ELECTRON_IPC_VALIDATORS = {
   [ELECTRON_IPC_CHANNELS.appModeSet]: optionalRecord,
   [ELECTRON_IPC_CHANNELS.appModePrepareRestart]: noPayload,
   [ELECTRON_IPC_CHANNELS.appModeRestart]: noPayload,
+  [ELECTRON_IPC_CHANNELS.migrationPrepare]: migrationPrepare,
+  [ELECTRON_IPC_CHANNELS.migrationStart]: migrationIdentity,
+  [ELECTRON_IPC_CHANNELS.migrationStatus]: noPayload,
+  [ELECTRON_IPC_CHANNELS.migrationCancel]: migrationIdentity,
   [ELECTRON_IPC_CHANNELS.adaptersRestartSidecar]: noPayload,
   [ELECTRON_IPC_CHANNELS.tunnelStart]: tunnelStartPayload,
   [ELECTRON_IPC_CHANNELS.tunnelStop]: noPayload,

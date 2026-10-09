@@ -16,9 +16,15 @@ import { normalizeAnthropicBaseUrl } from '../../services/api/anthropicBaseUrl.j
 import { createGunzip, createInflate } from 'node:zlib'
 
 import { ProviderService } from '../services/providerService.js'
+import { diagnosticsService } from '../services/diagnosticsService.js'
 import type { ProviderAuthStrategy } from '../types/provider.js'
 import { resolvePromptCacheKey } from './promptCacheKey.js'
-import { anthropicToOpenaiChat } from './transform/anthropicToOpenaiChat.js'
+import {
+  getOpenAIChatImageContentMode,
+  isOpenAIChatImageRejection,
+  rememberOpenAIChatTextOnlyModel,
+} from './openaiChatImageSupport.js'
+import { anthropicToOpenaiChat, type OpenAIChatImageContentMode } from './transform/anthropicToOpenaiChat.js'
 import { anthropicToOpenaiResponses } from './transform/anthropicToOpenaiResponses.js'
 import { RequestCompatibilityError, resolveRequestCompatibility, type RequestCompatibilityOptions } from './transform/requestCompatibility.js'
 import { ProtocolTraceObserver, observeProtocolStream, type ProtocolTraceTransport } from './protocolTrace.js'
@@ -28,7 +34,6 @@ import { openaiChatToAnthropic } from './transform/openaiChatToAnthropic.js'
 import { openaiResponsesToAnthropic } from './transform/openaiResponsesToAnthropic.js'
 import { openaiChatStreamToAnthropic } from './streaming/openaiChatStreamToAnthropic.js'
 import { openaiResponsesStreamToAnthropic } from './streaming/openaiResponsesStreamToAnthropic.js'
-import { isOverLengthToolName, ToolNameWireMap } from './transform/toolNameWire.js'
 import type { AnthropicRequest } from './transform/types.js'
 import { getProxyFetchOptions } from '../../utils/proxy.js'
 import {
@@ -45,6 +50,7 @@ import {
   type TraceBodySnapshot,
   type TraceProviderInfo,
 } from '../services/traceCaptureService.js'
+import { resolveModelReasoningProfile } from '../../shared/modelReasoning.js'
 import { resolveModelApiFormat } from '../../shared/modelApiFormats.js'
 import { applyUpstreamHeaders, resolveUpstreamHeaders } from './upstreamHeaders.js'
 
@@ -67,6 +73,91 @@ const TRACE_RECORDED_ERROR_MARKER = Symbol('cc-haha-trace-recorded-error')
 // `controller.error('...')`). The marker above still covers Error objects for
 // paths that only see object throws.
 const recordedTraceErrorContexts = new WeakSet<ProxyTraceContext>()
+
+
+const ATTEMPTED_URL = Symbol('cc-haha-attempted-url')
+
+function readErrno(error: unknown): number | undefined {
+  let current: unknown = error
+  for (let depth = 0; current instanceof Error && depth < 5; depth += 1) {
+    // A getter that throws here would turn the clean 502 this runs inside into
+    // an uncaught exception, so each read is guarded rather than assumed.
+    try {
+      if (Object.hasOwn(current, 'errno')) {
+        const errno = (current as { errno?: unknown }).errno
+        if (typeof errno === 'number' && Number.isFinite(errno) && errno !== 0) return errno
+      }
+    } catch {
+      return undefined
+    }
+    const cause = (current as { cause?: unknown }).cause
+    if (cause === current) break
+    current = cause
+  }
+  return undefined
+}
+
+function withAttemptedUrl(err: unknown, url: string): unknown {
+  if (err && typeof err === 'object') {
+    try {
+      Object.defineProperty(err, ATTEMPTED_URL, { value: url, enumerable: false })
+    } catch {
+      // Best effort only; diagnostics must not depend on mutating the error.
+    }
+  }
+  return err
+}
+
+function redactUrlsInMessage(message: string): string {
+  return message.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"']+/gi, candidate => {
+    try {
+      const { host } = new URL(candidate)
+      return host || '[redacted-url]'
+    } catch {
+      return '[redacted-url]'
+    }
+  })
+}
+
+const MAX_REPORTED_URL_PATH = 120
+const MAX_REPORTED_URL_HOST = 120
+
+function describeUpstreamUrl(url: string): string {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '[unparsable-url]'
+    if (!parsed.host) return '[unparsable-url]'
+    const host = parsed.host.length > MAX_REPORTED_URL_HOST
+      ? `${parsed.host.slice(0, MAX_REPORTED_URL_HOST)}…`
+      : parsed.host
+    const path = parsed.pathname.length > MAX_REPORTED_URL_PATH
+      ? `${parsed.pathname.slice(0, MAX_REPORTED_URL_PATH)}…`
+      : parsed.pathname
+    return `${parsed.protocol}//${host}${path}`
+  } catch {
+    // Unparseable input cannot be safely redacted, so it is not echoed.
+    return '[unparsable-url]'
+  }
+}
+
+function attemptedUrlOf(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object') return undefined
+  const url = (err as Record<symbol, unknown>)[ATTEMPTED_URL]
+  return typeof url === 'string' ? url : undefined
+}
+
+function describeUpstreamFailure(err: unknown, url: string): string {
+  const message = redactUrlsInMessage(err instanceof Error ? err.message : String(err))
+  const code = extractConnectionErrorDetails(err)?.code
+  const errno = readErrno(err)
+  const diagnostics = [
+    code ? `code=${code}` : null,
+    errno !== undefined ? `errno=${errno}` : null,
+    `url=${describeUpstreamUrl(url)}`,
+  ].filter((part): part is string => part !== null)
+
+  return `${message} (${diagnostics.join(', ')})`
+}
 
 function markTraceErrorRecorded(error: unknown): void {
   if (error && typeof error === 'object') {
@@ -98,167 +189,6 @@ function createTimeoutController(timeoutMs: number): {
     signal: controller.signal,
     clear: () => clearTimeout(timer),
   }
-}
-
-/**
- * Read a non-zero numeric `errno` from an error or its cause chain.
- *
- * Bun reports `errno: 0` for every transport failure (ECONNRESET, refused,
- * DNS), where 0 is a placeholder rather than a POSIX value — surfacing it
- * invites reading "errno 0" as success. Only a real, finite, non-zero value is
- * worth reporting. Reads own properties only and stops on a self-referential
- * `cause`, matching `extractConnectionErrorDetails`.
- */
-function readErrno(error: unknown): number | undefined {
-  let current: unknown = error
-  for (let depth = 0; current instanceof Error && depth < 5; depth += 1) {
-    // A getter that throws here would turn the clean 502 this runs inside into
-    // an uncaught exception, so each read is guarded rather than assumed.
-    try {
-      if (Object.hasOwn(current, 'errno')) {
-        const errno = (current as { errno?: unknown }).errno
-        if (typeof errno === 'number' && Number.isFinite(errno) && errno !== 0) return errno
-      }
-    } catch {
-      return undefined
-    }
-    const cause = (current as { cause?: unknown }).cause
-    if (cause === current) break
-    current = cause
-  }
-  return undefined
-}
-
-/** Longest pathname reported from an upstream URL. */
-const MAX_REPORTED_URL_PATH = 120
-/** A host is normally short; this only bounds a pathological baseUrl. */
-const MAX_REPORTED_URL_HOST = 120
-
-/**
- * Reduce an upstream URL to the part worth reporting: scheme, host, and a
- * bounded path.
- *
- * This string ends up in an error message written to the session transcript,
- * the diagnostics log, and the UI, so credentials must not survive it. A
- * provider `baseUrl` is user-supplied and reaches here unvalidated, which rules
- * out trusting the parse: `new URL('alice:s3cr3t@relay/v1')` succeeds with
- * scheme `alice:` and `s3cr3t@relay/v1` as the path, so a baseUrl missing its
- * scheme would print the password as if it were a scheme and host. Only http(s)
- * with a real authority is reported; anything else cannot be redacted reliably
- * and is not echoed at all.
- *
- * Only the endpoint helps diagnose a dropped connection, so userinfo and the
- * query are dropped. The path is kept because the failing route (`/v1/messages`
- * vs a relay's own prefix) is diagnostic, but it is truncated so a pathological
- * baseUrl cannot inflate the message.
- */
-function describeUpstreamUrl(url: string): string {
-  try {
-    const parsed = new URL(url)
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '[unparsable-url]'
-    if (!parsed.host) return '[unparsable-url]'
-    const host = parsed.host.length > MAX_REPORTED_URL_HOST
-      ? `${parsed.host.slice(0, MAX_REPORTED_URL_HOST)}…`
-      : parsed.host
-    const path = parsed.pathname.length > MAX_REPORTED_URL_PATH
-      ? `${parsed.pathname.slice(0, MAX_REPORTED_URL_PATH)}…`
-      : parsed.pathname
-    return `${parsed.protocol}//${host}${path}`
-  } catch {
-    // Unparseable input cannot be safely redacted, so it is not echoed.
-    return '[unparsable-url]'
-  }
-}
-
-/**
- * Strip URLs out of an upstream error message.
- *
- * Bun echoes the full request URL in some transport errors — notably
- * `UnsupportedProxyProtocol`, which fires whenever `HTTPS_PROXY` holds a
- * `socks5://` URL, a common local-proxy setup. That echoed URL carries the
- * userinfo and query that `describeUpstreamUrl` deliberately drops, so
- * appending a redacted URL after an unredacted message would leak exactly what
- * the redaction is for.
- *
- * Each URL collapses to its host, and to a placeholder when it has none
- * (`file://`, or any scheme without an authority), so a path that may embed a
- * credential cannot survive as the remainder of the match.
- *
- * The match deliberately stops at whitespace, which bounds the damage rather
- * than eliminating it: a URL containing a space (`file:///My Documents/token`)
- * leaves everything after the space in place. Transport errors from Bun
- * percent-encode the request URL, so the path this exists for is covered; the
- * residual case is a locally-constructed path with a space, where only the
- * trailing segment can leak. Widening the character class instead would swallow
- * the surrounding sentence for every ordinary message.
- */
-function redactUrlsInMessage(message: string): string {
-  return message.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"']+/gi, candidate => {
-    try {
-      const { host } = new URL(candidate)
-      return host || '[redacted-url]'
-    } catch {
-      return '[redacted-url]'
-    }
-  })
-}
-
-/**
- * Describe an upstream failure for the client, preserving the diagnostics the
- * original error already carries.
- *
- * A transport error (ECONNRESET, EPIPE, connection refused, DNS failure) carries
- * no HTTP response at all, so its own `code`/`errno` and the endpoint that
- * failed are the only diagnostics that exist. Flattening the error to
- * `err.message` alone left sessions reporting an undiagnosable "socket
- * connection was closed unexpectedly", with nothing to distinguish a provider
- * outage from a local network problem or from a request the gateway rejected.
- *
- * Non-connection failures (transform errors) pass through with only the URL
- * appended, which is accurate: the fields are omitted when the error does not
- * carry them. Callers keep their own type/status — notably `api_error`/502 for
- * dropped connections, which withRetry treats as retryable and is exactly the
- * transient case that retry exists for.
- */
-function describeUpstreamFailure(err: unknown, url: string): string {
-  const message = redactUrlsInMessage(err instanceof Error ? err.message : String(err))
-  const code = extractConnectionErrorDetails(err)?.code
-  const errno = readErrno(err)
-  const diagnostics = [
-    code ? `code=${code}` : null,
-    errno !== undefined ? `errno=${errno}` : null,
-    `url=${describeUpstreamUrl(url)}`,
-  ].filter((part): part is string => part !== null)
-
-  return `${message} (${diagnostics.join(', ')})`
-}
-
-/** The endpoint a rethrown failure was aimed at, when the thrower knew it. */
-const ATTEMPTED_URL = Symbol('cc-haha-attempted-url')
-
-/**
- * Tag an error with the URL that produced it.
- *
- * The OpenAI-shaped handlers rethrow into one shared catch, which otherwise only
- * has the provider's baseUrl — enough to name the provider, not the endpoint.
- * Marking is best-effort: a frozen or primitive throw keeps its original shape
- * and the caller falls back to the baseUrl.
- */
-function withAttemptedUrl(err: unknown, url: string): unknown {
-  if (err && typeof err === 'object') {
-    try {
-      Object.defineProperty(err, ATTEMPTED_URL, { value: url, enumerable: false })
-    } catch {
-      // Best effort only; diagnostics must not depend on mutating the error.
-    }
-  }
-  return err
-}
-
-function attemptedUrlOf(err: unknown): string | undefined {
-  if (!err || typeof err !== 'object') return undefined
-  const url = (err as Record<symbol, unknown>)[ATTEMPTED_URL]
-  return typeof url === 'string' ? url : undefined
 }
 
 async function fetchUpstreamWithTimeout(
@@ -862,26 +792,27 @@ async function handleOpenaiChat(
   traceContext: ProxyTraceContext | null,
   requestOptions: RequestCompatibilityOptions = {},
   upstreamHeaders: Record<string, string> = {},
+  imageContentModeOverride?: OpenAIChatImageContentMode,
 ): Promise<Response> {
-  // Over-length MCP tool names violate the `^[a-zA-Z0-9_-]{1,64}$` limit most
-  // OpenAI-compatible endpoints enforce. Only pay the mapping cost when the
-  // request actually carries one.
-  const toolNames = body.tools?.some((t) => isOverLengthToolName(t.name)) ? new ToolNameWireMap() : undefined
+  const knownDeepSeekHost = shouldUseDeepSeekReasoningCompat(baseUrl)
+  const reasoningProfile = resolveModelReasoningProfile(body.model, 'openai_chat')
+  const url = buildOpenaiEndpoint(baseUrl, 'chat/completions')
+  const imageContentMode = imageContentModeOverride ?? getOpenAIChatImageContentMode(url, body.model)
   const transformed = anthropicToOpenaiChat(body, {
     ...requestOptions,
-    // Third-party Anthropic-compatible endpoints may hide reasoning behind
-    // the OpenAI `thinking` toggle and `reasoning_content` — always pass them
-    // through so the upstream returns the thinking we already asked for.
+    // Fork invariant: reasoning round-trips unconditionally on OpenAI Chat
+    // hosts — third-party Anthropic-compatible endpoints hide reasoning behind
+    // the OpenAI `thinking` toggle and `reasoning_content`, so generic models
+    // keep it too (thinking passthrough). Upstream only enables it for
+    // DeepSeek-family hosts.
     roundTripReasoningContent: true,
-    passThinkingToggle: true,
-    imageContentMode: shouldUseTextOnlyOpenAIChatContent(baseUrl, body.model) ? 'text_only' : 'vision',
-    toolNames,
+    passThinkingToggle: knownDeepSeekHost,
+    imageContentMode,
   })
   if (traceContext) {
     traceContext.protocolTrace = new ProtocolTraceObserver('openai_chat', transformed,
       resolveRequestCompatibility(body, { ...requestOptions, protocol: 'openai_chat' }).outputBudget)
   }
-  const url = buildOpenaiEndpoint(baseUrl, 'chat/completions')
   // Preset-declared headers first: `Authorization` is applied last so a preset can
   // never shadow the credential, and the resolver already drops framing headers.
   const upstreamRequestHeaders: Record<string, string> = {}
@@ -933,6 +864,40 @@ async function handleOpenaiChat(
 
   if (!upstream.ok) {
     const errText = await upstream.text().catch(() => '')
+    if (imageContentMode === 'vision' && isOpenAIChatImageRejection(upstream.status, errText, transformed)) {
+      // The upstream refused the request before generating anything, so the
+      // client has seen no output and resending is safe. The model is only
+      // remembered once the same request succeeds without images, so an
+      // unrelated failure of the resend cannot disable images for good.
+      if (traceContext) {
+        recordProxyTraceInBackground({
+          context: traceContext,
+          callId: traceCallId,
+          model: body.model,
+          upstreamUrl: url,
+          upstreamRequest: transformed,
+          requestHeaders: upstreamRequestHeaders,
+          startedAt,
+          startedAtMs,
+          responseStatus: upstream.status,
+          upstreamResponseBody: errText,
+          responseHeaders: upstream.headers,
+        })
+      }
+      const resent = await handleOpenaiChat(
+        body, baseUrl, apiKey, isStream, networkSettings, traceContext, requestOptions, upstreamHeaders, 'text_only',
+      )
+      if (resent.ok) {
+        rememberOpenAIChatTextOnlyModel(url, body.model)
+        void diagnosticsService.recordEvent({
+          type: 'openai_chat_image_input_disabled',
+          severity: 'info',
+          summary: `Upstream rejected image input for ${body.model}; images are omitted for this model for 30 minutes`,
+          details: { model: body.model, upstreamUrl: url, httpStatus: upstream.status, upstreamError: errText.slice(0, 500) },
+        })
+      }
+      return resent
+    }
     let policyError = null
     try {
       policyError = getOpenAIPolicyError(JSON.parse(errText))
@@ -991,7 +956,7 @@ async function handleOpenaiChat(
     const upstreamBody = withStreamIdleTimeout(upstream.body, networkSettings.aiRequestTimeoutMs)
     const observedBody = traceContext?.protocolTrace
       ? observeProtocolStream(upstreamBody, traceContext.protocolTrace) : upstreamBody
-    const anthropicStream = openaiChatStreamToAnthropic(observedBody, body.model, toolNames)
+    const anthropicStream = openaiChatStreamToAnthropic(observedBody, body.model)
     const tracedStream = traceContext
       ? captureTraceStream(anthropicStream, async (bodySnapshot, error, protocolTraceEnd) => {
           await recordProxyTrace({
@@ -1026,7 +991,7 @@ async function handleOpenaiChat(
   const policyError = getOpenAIPolicyError(responseBody)
   const anthropicResponse = policyError
     ? { type: 'error', error: { type: 'permission_error', ...policyError } }
-    : openaiChatToAnthropic(responseBody, body.model, toolNames)
+    : openaiChatToAnthropic(responseBody, body.model)
   if (traceContext) {
     recordProxyTraceInBackground({
       callId: traceCallId,
@@ -1046,27 +1011,11 @@ async function handleOpenaiChat(
   return Response.json(anthropicResponse, { status: policyError ? 403 : 200 })
 }
 
-function shouldUseTextOnlyOpenAIChatContent(baseUrl: string, model: string): boolean {
-  // Keep classic DeepSeek text models compatible without dropping images for
-  // explicitly vision-capable models served by the same Chat endpoint.
-  if (/(^|[./-])deepseek([./-]|$)/i.test(baseUrl)) {
-    return !hasExplicitVisionModelMarker(model)
-  }
-
-  // OpenCode Go's Kimi K3 and Space Bunny Free accept image_url despite lacking
-  // "vision" in their model ids. Keep other unverified gateway models on the
-  // text-only path. Context-window suffixes have already been stripped.
-  if (/(^|[./-])opencode\.ai([:/]|$)/i.test(baseUrl)) {
-    return !hasExplicitVisionModelMarker(model) && !['kimi-k3', 'space-bunny-free'].includes(model.toLowerCase())
-  }
-
-  // Preserve the existing behavior for generic compatible providers whose
-  // capabilities are not controlled by either compatibility policy above.
-  return false
-}
-
-function hasExplicitVisionModelMarker(model: string): boolean {
-  return /(^|[/:._-])vision([/:._-]|$)/i.test(model)
+function shouldUseDeepSeekReasoningCompat(baseUrl: string): boolean {
+  return (
+    /(^|[./-])deepseek([./-]|$)/i.test(baseUrl) ||
+    /(^|[./-])opencode\.ai([:/]|$)/i.test(baseUrl)
+  )
 }
 
 async function handleOpenaiResponses(
@@ -1080,10 +1029,7 @@ async function handleOpenaiResponses(
   requestOptions: RequestCompatibilityOptions = {},
   upstreamHeaders: Record<string, string> = {},
 ): Promise<Response> {
-  // Same over-length tool-name guard as the Chat Completions path — the
-  // Responses API enforces the same 64-char function-name limit.
-  const toolNames = body.tools?.some((t) => isOverLengthToolName(t.name)) ? new ToolNameWireMap() : undefined
-  const transformed = anthropicToOpenaiResponses(body, { ...requestOptions, cacheKey: promptCacheKey, toolNames })
+  const transformed = anthropicToOpenaiResponses(body, { ...requestOptions, cacheKey: promptCacheKey })
   if (traceContext) {
     traceContext.protocolTrace = new ProtocolTraceObserver('openai_responses', transformed,
       resolveRequestCompatibility(body, { ...requestOptions, protocol: 'openai_responses' }).outputBudget)
@@ -1198,7 +1144,7 @@ async function handleOpenaiResponses(
     const upstreamBody = withStreamIdleTimeout(upstream.body, networkSettings.aiRequestTimeoutMs)
     const observedBody = traceContext?.protocolTrace
       ? observeProtocolStream(upstreamBody, traceContext.protocolTrace) : upstreamBody
-    const anthropicStream = openaiResponsesStreamToAnthropic(observedBody, body.model, { toolNames })
+    const anthropicStream = openaiResponsesStreamToAnthropic(observedBody, body.model)
     const tracedStream = traceContext
       ? captureTraceStream(anthropicStream, async (bodySnapshot, error, protocolTraceEnd) => {
           await recordProxyTrace({
@@ -1233,7 +1179,7 @@ async function handleOpenaiResponses(
   const policyError = getOpenAIPolicyError(responseBody)
   const anthropicResponse = policyError
     ? { type: 'error', error: { type: 'permission_error', ...policyError } }
-    : openaiResponsesToAnthropic(responseBody, body.model, { toolNames })
+    : openaiResponsesToAnthropic(responseBody, body.model)
   if (traceContext) {
     recordProxyTraceInBackground({
       callId: traceCallId,

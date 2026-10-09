@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { flushSync } from 'react-dom'
 import {
   ArrowLeft,
   ArrowRight,
+  Ellipsis,
   ExternalLink,
   Globe,
-  MessageSquarePlus,
-  MoreVertical,
-  RotateCw,
+  MousePointer2,
+  RefreshCw,
   Search,
   X,
 } from 'lucide-react'
+import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { Spinner } from '@/components/ui/Spinner'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -18,7 +18,6 @@ import { WorkspaceBrowserAddressBar } from '@/components/workbench/WorkspaceBrow
 import { WorkspaceBrowserSelectionBar } from '@/components/workbench/WorkspaceBrowserSelectionBar'
 import { useDismissable } from '@/hooks/useDismissable'
 import { useTranslation } from '../../i18n'
-import { computeWebviewBounds } from '../browser/computeWebviewBounds'
 import { getDesktopHost } from '../../lib/desktopHost'
 import { getServerBaseUrl } from '../../lib/desktopRuntime'
 import { formatBytes } from '../../lib/formatBytes'
@@ -28,7 +27,11 @@ import {
   isWorkspaceBrowserAvailable,
   workspaceBrowserHost,
 } from '../../lib/workspace/browserHost'
-import { useOverlayStore } from '../../stores/overlayStore'
+import {
+  ensureWorkspaceBrowserGuest,
+  isWorkspaceBrowserGuestRegistered,
+  placeWorkspaceBrowserGuest,
+} from '../../lib/workspace/browserGuests'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useWorkspaceBrowserStore } from '../../stores/workspaceBrowserStore'
@@ -43,7 +46,6 @@ import type { WorkspaceBrowserTab as WorkspaceBrowserTabModel } from '../../lib/
 const MIN_ZOOM = MIN_APP_ZOOM
 const MAX_ZOOM = MAX_APP_ZOOM
 const ZOOM_STEP = 0.1
-const PRESENTATION_SNAPSHOT_TIMEOUT_MS = 800
 
 type BrowserPanel = 'downloads' | 'history' | null
 
@@ -69,10 +71,11 @@ function resolveNavigationUrl(input: string, sessionId: string): string {
 /**
  * One page, addressed by its own `browserTabId`.
  *
- * React here only decides *where the page is drawn*. Creating it, navigating it
- * and destroying it are the controller's and the host's business — which is why
- * unmounting this component (hiding the panel, switching tab, switching task)
- * hides the view and nothing more.
+ * React here only decides *where the page is drawn*: the stage below is the
+ * placeholder the page's `<webview>` is positioned over. Creating it,
+ * navigating it and destroying it are the controller's and the host's business
+ * — which is why unmounting this component (hiding the panel, switching tab,
+ * switching task) parks the page and nothing more.
  */
 export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowserTabProps) {
   const t = useTranslation()
@@ -91,20 +94,19 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
   const panelRef = useRef<HTMLDivElement>(null)
   const appZoom = useSettingsStore((state) => state.uiZoom)
   const theme = useUIStore((state) => state.theme)
-  const overlayCount = useOverlayStore((state) => state.count)
-  const snapshotOverlayCount = useOverlayStore((state) => state.snapshotCount)
-  const nativePresentedRef = useRef(false)
-  const [presentationSnapshot, setPresentationSnapshot] = useState<string | null>(null)
   const available = useMemo(() => isWorkspaceBrowserAvailable(), [])
   const browserTabId = tab.browserTabId
-  const [registeredId, setRegisteredId] = useState<string | null>(null)
+  // Bumped when this page's registration settles; readiness itself is read
+  // from the guest registry, which also knows when a page was lost.
+  const [, setRegistrationSettled] = useState(0)
   const [createAttempt, setCreateAttempt] = useState(0)
   const lifetimeRef = useRef<{ id: string; ready: boolean; cancelled: boolean } | null>(null)
   const navigationRequestRef = useRef(0)
-  const appZoomRef = useRef(appZoom)
-  appZoomRef.current = appZoom
   const page = useWorkspaceBrowserStore((state) => state.pageByTabId[browserTabId])
-  const ready = page?.registered === true || registeredId === browserTabId
+  // Only a page the host adopted can take commands. A page registered by an
+  // earlier mount is ready at once, so re-activating a tab does not flash a
+  // disabled toolbar.
+  const ready = isWorkspaceBrowserGuestRegistered(browserTabId)
   const initialAddressFocusRef = useRef({ browserTabId, pending: !tab.url && !ready, activated: false })
   if (initialAddressFocusRef.current.browserTabId !== browserTabId) {
     initialAddressFocusRef.current = { browserTabId, pending: !tab.url && !ready, activated: false }
@@ -116,7 +118,7 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
   const visits = useMemo(() => Object.values(historyByTabId).flatMap((entries) => entries ?? []), [historyByTabId])
   const downloads = useWorkspaceBrowserStore((state) => state.downloads)
   const loading = page?.loading ?? false
-  menuAllowedRef.current = active && overlayCount === 0 && !pendingNavigation
+  menuAllowedRef.current = active && !pendingNavigation
 
   const currentAddress = page?.url || tab.url || ''
   const annotationActive = page?.annotationActive ?? false
@@ -151,13 +153,13 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
       menuRequestRef.current = null
       setMenuOpen(false)
     }
-  }, [active, overlayCount, pendingNavigation])
+  }, [active, pendingNavigation])
 
   const stillOwned = useCallback(() => useWorkspaceStore.getState().findBrowserTabOwner(browserTabId)?.sessionId === sessionId, [browserTabId, sessionId])
   const canCommand = useCallback(() => {
     const lifetime = lifetimeRef.current
     return lifetime?.id === browserTabId && !lifetime.cancelled && stillOwned() &&
-      (lifetime.ready || useWorkspaceBrowserStore.getState().pageByTabId[browserTabId]?.registered === true)
+      (lifetime.ready || isWorkspaceBrowserGuestRegistered(browserTabId))
   }, [browserTabId, stillOwned])
   const reportHostError = useCallback((error: unknown) => {
     const lifetime = lifetimeRef.current
@@ -180,18 +182,9 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
       reportHostError(error)
     })
   }
-  const reportBounds = useCallback(() => {
-    if (!canCommand()) return
-    const element = stageRef.current
-    if (!element) return
-    void workspaceBrowserHost.setBounds(
-      browserTabId,
-      computeWebviewBounds(element.getBoundingClientRect(), appZoomRef.current),
-    ).catch(reportHostError)
-  }, [browserTabId, canCommand, reportHostError])
-
   // Create once per page identity. `storageId` travels with it so a restored
-  // tab reopens the same page rather than a blank one.
+  // tab reopens the same page rather than a blank one. A page that already
+  // exists is only re-registered, never re-navigated.
   useEffect(() => {
     if (!available || !stillOwned()) return
     menuRequestRef.current = null
@@ -200,32 +193,25 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
     const lifetime = { id: browserTabId, ready: false, cancelled: false }
     lifetimeRef.current = lifetime
     const request = ++navigationRequestRef.current
-    const navigationId = useWorkspaceBrowserStore.getState().pageByTabId[browserTabId]?.navigationId ?? 0
-    const element = stageRef.current
-    void workspaceBrowserHost.create(browserTabId, {
-      storageId: tab.storageId,
-      // A delayed completion must never attach an abandoned tab over its replacement.
-      visible: false,
-      ...(tab.url ? { url: tab.url } : {}),
-      ...(element
-        ? { bounds: computeWebviewBounds(element.getBoundingClientRect(), appZoom) }
-        : {}),
-    }).then((result) => {
-      if (lifetime.cancelled || !stillOwned() || !result.ok) return
+    void ensureWorkspaceBrowserGuest(browserTabId, async (webContentsId) => {
+      const result = await workspaceBrowserHost.create(browserTabId, {
+        storageId: tab.storageId,
+        webContentsId,
+        ...(tab.url ? { url: tab.url } : {}),
+      })
+      if (!result.ok) throw new Error(t('workspace.browser.unavailableTitle'))
+    }).then(() => {
+      if (lifetime.cancelled || !stillOwned()) return
       lifetime.ready = true
-      setRegisteredId(browserTabId)
-      reportBounds()
+      setRegistrationSettled((count) => count + 1)
     }).catch((error: unknown) => {
       if (lifetime.cancelled || !stillOwned() || request !== navigationRequestRef.current) return
-      const current = useWorkspaceBrowserStore.getState().pageByTabId[browserTabId]
-      // The initial load may reject after the user has already navigated again.
-      if (current && (current.navigationId > navigationId + 1 || current.navigationOutcome === 'succeeded')) return
       reportHostError(error)
     })
     // Deliberately NOT closing on unmount: the page belongs to the tab, and the
     // tab outlives this component. `closeTab` is the only thing that ends it.
     return () => {
-      const registered = lifetime.ready || useWorkspaceBrowserStore.getState().pageByTabId[browserTabId]?.registered === true
+      const registered = lifetime.ready || isWorkspaceBrowserGuestRegistered(browserTabId)
       lifetime.cancelled = true
       if (registered && stillOwned()) {
         void workspaceBrowserHost.setVisible(browserTabId, false).catch((error: unknown) => {
@@ -235,98 +221,43 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
         })
       }
     }
-    // The URL/bounds are initial inputs, not a reason to recreate a live page.
+    // The URL is an initial input, not a reason to recreate a live page.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [browserTabId, createAttempt])
 
   /*
-    A `WebContentsView` always paints above the DOM, so "is this page on screen"
-    has to account for everything the app might want to draw over it — and the
-    teardown is load-bearing.
+    The page is a `<webview>` composited with the DOM, so menus, dialogs and
+    other pages draw over it on their own. What remains is deciding when this
+    surface shows it at all — and the teardown is load-bearing.
 
-    Without the cleanup, unmounting leaves the page attached at its last bounds:
-    switching to a file tab, opening the `+` picker, hiding the workspace or
-    switching tasks would each leave a live page floating over whatever replaced
-    it. The surface renders only the active tab, so unmount is the *normal* way
-    a browser tab goes off screen, not an edge case.
+    The surface renders only the active tab, so unmount is the *normal* way a
+    browser tab goes off screen: switching to a file tab, hiding the workspace
+    or switching tasks. Releasing the placement parks the page (it keeps its
+    state); without that it would stay drawn over whatever replaced it.
 
-    Full-page panels and the retry overlay still replace the guest. The toolbar
-    menu uses the host's native popup layer, so opening it must not detach or
-    hide the live page.
+    Full-page panels and the retry overlay replace the page, and a tab with no
+    address shows its empty state instead.
   */
-  const pageCanBePresented = active &&
+  const pageVisible = active &&
     panel === null &&
-    !pendingNavigation &&
     !tab.loadError &&
     Boolean(tab.url)
-  const pageVisible = pageCanBePresented && overlayCount === 0
-  const snapshotRequested = pageCanBePresented && overlayCount > 0 && overlayCount === snapshotOverlayCount
-  const navigationId = page?.navigationId ?? 0
 
+  useLayoutEffect(() => {
+    const stage = stageRef.current
+    if (!available || !stage) return
+    return placeWorkspaceBrowserGuest(browserTabId, stage, pageVisible && ready)
+  }, [available, browserTabId, pageVisible, ready])
+
+  // Only the shown page acts as browser chrome in the host (shortcuts, the zoom
+  // capsule), and a native menu of a page that goes away has to close with it.
   useLayoutEffect(() => {
     if (!canCommand()) return
-    let cancelled = false
-    let settled = false
-    let timeout: ReturnType<typeof setTimeout> | undefined
-    const present = (visible: boolean) => {
-      nativePresentedRef.current = visible
-      void workspaceBrowserHost.setVisible(browserTabId, visible).catch(reportHostError)
-    }
-    if (snapshotRequested && nativePresentedRef.current) {
-      // Capture while the native page is still attached. Its WebContentsView
-      // would otherwise cover a DOM menu, but detaching first can capture an
-      // empty frame. This image is presentation-only and never becomes a chat
-      // attachment. Ordinary modal overlays still hide immediately below.
-      const finish = (dataUrl: string | null) => {
-        if (cancelled || settled) return
-        settled = true
-        clearTimeout(timeout)
-        // Commit the already-decoded image before the IPC detaches the view.
-        flushSync(() => setPresentationSnapshot(dataUrl))
-        present(false)
-      }
-      timeout = setTimeout(() => finish(null), PRESENTATION_SNAPSHOT_TIMEOUT_MS)
-      void workspaceBrowserHost.snapshot(browserTabId).then(async (dataUrl) => {
-        if (cancelled || settled) return
-        if (!dataUrl?.startsWith('data:image/png;base64,')) { finish(null); return }
-        const image = new Image()
-        image.src = dataUrl
-        if (image.decode) await image.decode()
-        finish(dataUrl)
-      }).catch(() => finish(null))
-    } else {
-      setPresentationSnapshot(null)
-      present(pageVisible)
-    }
-    return () => {
-      cancelled = true
-      clearTimeout(timeout)
-    }
-    // Navigation invalidates an image even when the page identity is reused.
-  }, [browserTabId, canCommand, navigationId, pageVisible, ready, reportHostError, snapshotRequested])
+    void workspaceBrowserHost.setVisible(browserTabId, pageVisible).catch(reportHostError)
+  }, [browserTabId, canCommand, pageVisible, ready, reportHostError])
 
-  useEffect(() => {
-    if (!active || !ready) return
-    const element = stageRef.current
-    if (!element) return
-    let cancelled = false
-    const update = () => { if (!cancelled) reportBounds() }
-    const observer = new ResizeObserver(update)
-    observer.observe(element)
-    window.addEventListener('resize', update)
-    return () => {
-      cancelled = true
-      observer.disconnect()
-      window.removeEventListener('resize', update)
-    }
-  }, [active, ready, reportBounds])
-
-  useLayoutEffect(() => {
-    if (active) reportBounds()
-  }, [active, appZoom, ready, reportBounds])
-
-  // The capsule must be drawn inside the native page, not behind it in React.
-  // The host retains this configuration and replays it after each navigation.
+  // The capsule is drawn inside the page itself, so it scrolls and zooms with
+  // it. The host retains this configuration and replays it after each navigation.
   useEffect(() => {
     if (!ready || !available || !active || !canCommand()) return
     const styles = getComputedStyle(document.documentElement)
@@ -480,21 +411,25 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
         data-testid="workspace-browser-unavailable"
         className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-8 text-center"
       >
+        <span aria-hidden="true" className="mb-1 flex h-9 w-9 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-surface-container)] text-[var(--color-text-tertiary)]">
+          <Globe size={16} strokeWidth={1.75} />
+        </span>
         <p className="text-[13px] font-medium text-[var(--color-text-primary)]">
           {t('workspace.browser.unavailableTitle')}
         </p>
-        <p className="max-w-[360px] text-[12px] leading-relaxed text-[var(--color-text-secondary)]">
+        <p className="max-w-[360px] text-[12px] leading-[1.6] text-[var(--color-text-tertiary)]">
           {t('workspace.browser.unavailableBody')}
         </p>
         {tab.url ? (
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
+            className="mt-1"
+            icon={<ExternalLink size={14} strokeWidth={1.75} aria-hidden="true" />}
             onClick={() => { void getDesktopHost().shell.open(tab.url!) }}
-            className="mt-1 inline-flex items-center gap-1.5 rounded-[var(--radius-md)] border border-[var(--color-border)] px-3 py-1.5 text-[12px] text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
           >
-            <ExternalLink size={13} aria-hidden="true" />
             {t('workspace.browser.openExternal')}
-          </button>
+          </Button>
         ) : null}
       </div>
     )
@@ -504,28 +439,28 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
     <div ref={browserRootRef} className="relative flex min-h-0 flex-1 flex-col">
       <div
         data-testid="workspace-browser-toolbar"
-        className="flex h-[52px] shrink-0 items-center gap-1 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-2.5"
+        className="flex h-10 shrink-0 items-center gap-0.5 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-2"
       >
         <IconButton
-          icon={<ArrowLeft size={15} strokeWidth={1.9} />}
+          icon={<ArrowLeft size={16} strokeWidth={1.75} />}
           label={t('workspace.browser.back')}
-          size="md"
+          size="sm"
           tone="muted"
           disabled={!ready || !page?.canGoBack}
           onClick={() => requestNavigation(() => runNavigationCommand(() => workspaceBrowserHost.goBack(browserTabId)))}
         />
         <IconButton
-          icon={<ArrowRight size={15} strokeWidth={1.9} />}
+          icon={<ArrowRight size={16} strokeWidth={1.75} />}
           label={t('workspace.browser.forward')}
-          size="md"
+          size="sm"
           tone="muted"
           disabled={!ready || !page?.canGoForward}
           onClick={() => requestNavigation(() => runNavigationCommand(() => workspaceBrowserHost.goForward(browserTabId)))}
         />
         <IconButton
-          icon={loading ? <Spinner size={15} /> : <RotateCw size={15} strokeWidth={1.9} />}
+          icon={loading ? <Spinner size={14} /> : <RefreshCw size={14} strokeWidth={1.75} />}
           label={t(loading ? 'workspace.browser.stop' : 'workspace.browser.reload')}
-          size="md"
+          size="sm"
           tone="muted"
           aria-busy={loading}
           disabled={!ready}
@@ -549,7 +484,7 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
           onOpenExternal={(url) => { void getDesktopHost().shell.open(url) }}
         />
         <IconButton
-          icon={<MessageSquarePlus size={16} strokeWidth={1.75} />}
+          icon={<MousePointer2 size={16} strokeWidth={1.75} />}
           label={t(annotationActive ? 'workspace.browser.annotationActive' : 'workspace.browser.pickElement')}
           pressed={annotationActive}
           onKeyDown={(event) => {
@@ -559,7 +494,7 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
               runCommand(() => workspaceBrowserHost.message(browserTabId, { v: 1, type: 'exit-picker' }))
             }
           }}
-          size="md"
+          size="sm"
           tone="muted"
           disabled={!ready || !tab.url || !!tab.loadError}
           data-testid="workspace-browser-annotate"
@@ -567,9 +502,9 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
         />
         <IconButton
           ref={menuTriggerRef}
-          icon={<MoreVertical size={15} strokeWidth={1.9} />}
+          icon={<Ellipsis size={16} strokeWidth={1.75} />}
           label={t('workspace.browser.menu')}
-          size="md"
+          size="sm"
           tone="muted"
           pressed={menuOpen}
           aria-haspopup="menu"
@@ -588,9 +523,9 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
       {findOpen ? (
         <div
           data-testid="workspace-browser-find"
-          className="flex h-9 shrink-0 items-center gap-1.5 border-b border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2"
+          className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] pl-3 pr-2"
         >
-          <Search size={13} aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]" />
+          <Search size={14} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]" />
           <input
             autoFocus
             value={findText}
@@ -622,9 +557,9 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
               : ''}
           </span>
           <IconButton
-            icon={<X size={13} />}
+            icon={<X size={14} strokeWidth={1.75} />}
             label={t('workspace.browser.findClose')}
-            size="2xs"
+            size="xs"
             tone="muted"
             onClick={() => {
               setFindOpen(false)
@@ -635,24 +570,16 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
       ) : null}
 
       <div className="relative min-h-0 flex-1 overflow-hidden" data-testid="workspace-browser-stage">
-        <div ref={stageRef} className="absolute inset-0" />
-        {presentationSnapshot ? (
-          <img
-            data-testid="workspace-browser-backdrop"
-            src={presentationSnapshot}
-            alt=""
-            aria-hidden="true"
-            draggable={false}
-            className="pointer-events-none absolute inset-0 h-full w-full object-fill"
-          />
-        ) : null}
+        <div ref={stageRef} data-testid="workspace-browser-placeholder" className="absolute inset-0" />
         {!tab.url && !tab.loadError ? (
-          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 text-center">
-            <Globe size={32} strokeWidth={1.75} aria-hidden="true" className="mb-2 text-[var(--color-text-tertiary)]" />
-            <p className="text-[16px] font-medium text-[var(--color-text-primary)]">
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 px-8 text-center">
+            <span aria-hidden="true" className="mb-1 flex h-10 w-10 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-surface-container)] text-[var(--color-text-tertiary)]">
+              <Globe size={20} strokeWidth={1.75} />
+            </span>
+            <p className="text-[15px] font-medium text-[var(--color-text-primary)]">
               {t('workspace.browser.emptyTitle')}
             </p>
-            <p className="text-[14px] text-[var(--color-text-secondary)]">
+            <p className="max-w-[360px] text-[13px] text-[var(--color-text-tertiary)]">
               {t('workspace.browser.emptyBody')}
             </p>
           </div>
@@ -663,23 +590,28 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
             data-testid="workspace-browser-error"
             className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-[var(--color-surface)] px-8 text-center"
           >
+            <span aria-hidden="true" className="mb-1 flex h-9 w-9 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-error-container)] text-[var(--color-on-error-container)]">
+              <Globe size={16} strokeWidth={1.75} />
+            </span>
             <p className="text-[13px] font-medium text-[var(--color-text-primary)]">
               {t('workspace.browser.loadFailed', { url: tab.url ?? '' })}
             </p>
-            <p className="max-w-[420px] text-[12px] text-[var(--color-text-secondary)]">
+            <p className="max-w-[420px] break-words font-mono text-[12px] text-[var(--color-text-tertiary)]">
               {tab.loadError}
             </p>
-            <button
-              type="button"
+            <Button
+              variant="secondary"
+              size="sm"
+              className="mt-1"
+              icon={<RefreshCw size={14} strokeWidth={1.75} aria-hidden="true" />}
               onClick={() => {
                 useWorkspaceStore.getState().updateBrowserTab(sessionId, browserTabId, { loadError: null })
                 if (ready) runNavigationCommand(() => workspaceBrowserHost.reload(browserTabId, { ignoreCache: true }))
                 else setCreateAttempt((attempt) => attempt + 1)
               }}
-              className="mt-1 rounded-[var(--radius-md)] border border-[var(--color-border)] px-3 py-1.5 text-[12px] text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
             >
               {t('workspace.browser.retry')}
-            </button>
+            </Button>
           </div>
         ) : null}
       </div>
@@ -704,21 +636,21 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
         <div
           ref={panelRef}
           data-testid={`workspace-browser-panel-${panel}`}
-          className="absolute inset-x-0 bottom-0 top-[52px] z-[var(--z-raised)] flex flex-col border-t border-[var(--color-border)] bg-[var(--color-surface)]"
+          className="absolute inset-x-0 bottom-0 top-10 z-[var(--z-raised)] flex flex-col border-t border-[var(--color-border)] bg-[var(--color-surface)]"
         >
-          <div className="flex h-9 shrink-0 items-center justify-between border-b border-[var(--color-border)] px-3">
-            <span className="text-[12px] font-medium text-[var(--color-text-primary)]">
+          <div className="flex h-10 shrink-0 items-center justify-between border-b border-[var(--color-border)] pl-3 pr-2">
+            <span className="text-[13px] font-semibold text-[var(--color-text-primary)]">
               {t(panel === 'downloads' ? 'workspace.browser.downloads' : 'workspace.browser.history')}
             </span>
             <IconButton
-              icon={<X size={13} />}
+              icon={<X size={14} strokeWidth={1.75} />}
               label={t('workspace.browser.closeOverlay')}
-              size="2xs"
+              size="xs"
               tone="muted"
               onClick={() => setPanel(null)}
             />
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1.5">
+          <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
             {panel === 'downloads' ? (
               downloads.length === 0 ? (
                 <p className="px-2 py-3 text-[12px] text-[var(--color-text-tertiary)]">
@@ -729,9 +661,9 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
                   {downloads.map((item) => (
                     <li
                       key={item.id}
-                      className="flex items-center gap-2 rounded-[var(--radius-sm)] px-2 py-1.5"
+                      className="flex min-h-[30px] items-center gap-2 rounded-[var(--radius-sm)] px-2 py-1"
                     >
-                      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--color-text-primary)]">
+                      <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--color-text-primary)]">
                         {item.filename}
                       </span>
                       <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--color-text-tertiary)]">
@@ -741,9 +673,9 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
                       </span>
                       {item.state === 'completed' && item.savePath ? (
                         <IconButton
-                          icon={<ExternalLink size={13} />}
+                          icon={<ExternalLink size={14} strokeWidth={1.75} />}
                           label={t('workspace.browser.revealDownload')}
-                          size="2xs"
+                          size="xs"
                           tone="muted"
                           onClick={() => { void getDesktopHost().shell.openPath(item.savePath!) }}
                         />
@@ -768,7 +700,7 @@ export function WorkspaceBrowserTab({ sessionId, tab, active }: WorkspaceBrowser
                       }}
                       className="flex w-full flex-col items-start gap-0.5 rounded-[var(--radius-sm)] px-2 py-1.5 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
                     >
-                      <span className="w-full truncate text-[12px] text-[var(--color-text-primary)]">
+                      <span className="w-full truncate text-[13px] text-[var(--color-text-primary)]">
                         {visit.title || visit.url}
                       </span>
                       <span className="w-full truncate font-mono text-[11px] text-[var(--color-text-tertiary)]">

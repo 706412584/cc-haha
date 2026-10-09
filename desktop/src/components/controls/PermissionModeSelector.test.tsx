@@ -51,7 +51,8 @@ vi.mock('../../i18n', () => ({
   }[key] ?? key),
 }))
 
-import { PermissionModeSelector } from './PermissionModeSelector'
+import { createRef } from 'react'
+import { PermissionModeSelector, type PermissionModeSelectorHandle } from './PermissionModeSelector'
 import { useChatStore, type PerSessionState } from '../../stores/chatStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useSessionStore } from '../../stores/sessionStore'
@@ -176,6 +177,34 @@ describe('PermissionModeSelector', () => {
     expect(screen.getByRole('dialog', { name: 'Execution Permissions' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: /Auto accept edits/ })).toBeInTheDocument()
+  })
+
+  it('keeps the phone toolbar free of the trigger until some writes run unattended', () => {
+    viewportMocks.isMobile = true
+    useTabStore.setState({ activeTabId: 'tab', tabs: [] })
+    useChatStore.setState({ sessions: { tab: { ...makeChatSession('idle'), permissionMode: 'default' } } })
+
+    render(<PermissionModeSelector compact trigger="elevatedOnly" />)
+    expect(screen.queryByRole('button', { name: 'Ask permissions' })).not.toBeInTheDocument()
+
+    act(() => useChatStore.setState({ sessions: { tab: { ...makeChatSession('idle'), permissionMode: 'bypassPermissions' } } }))
+    expect(screen.getByRole('button', { name: 'Bypass permissions' })).toHaveClass('h-11', 'w-11')
+  })
+
+  it('opens from its handle with no trigger on screen, and not mid-turn', () => {
+    viewportMocks.isMobile = true
+    useTabStore.setState({ activeTabId: 'tab', tabs: [] })
+    useChatStore.setState({ sessions: { tab: makeChatSession('idle') } })
+    const handle = createRef<PermissionModeSelectorHandle>()
+
+    render(<PermissionModeSelector ref={handle} compact trigger="elevatedOnly" />)
+    act(() => handle.current?.open())
+    expect(screen.getByRole('dialog', { name: 'Execution Permissions' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    act(() => useChatStore.setState({ sessions: { tab: makeChatSession('streaming') } }))
+    act(() => handle.current?.open())
+    expect(screen.queryByRole('dialog', { name: 'Execution Permissions' })).not.toBeInTheDocument()
   })
 
   it('uses the active tab workspace when showing the bypass confirmation path', () => {
@@ -465,20 +494,20 @@ describe('PermissionModeSelector', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Ask permissions' }))
     const autoItem = screen.getByRole('menuitem', { name: /Auto mode/ })
-    expect(autoItem.querySelector('.material-symbols-outlined')).toHaveTextContent('autoplay')
-    expect(autoItem.querySelector('.material-symbols-outlined')).not.toHaveTextContent('auto_awesome')
+    expect(autoItem.querySelector('svg.lucide-circle-play')).toBeInTheDocument()
+    expect(autoItem.querySelector('svg.lucide-sparkles')).not.toBeInTheDocument()
 
     // The full trigger states the mode as a risk-coloured dot, not the glyph —
     // the glyph identifies the mode in the menu, the colour ranks it on the
     // toolbar. The compact trigger has no label, so it keeps the glyph.
     rerender(<PermissionModeSelector value="auto" onChange={vi.fn()} />)
     const trigger = screen.getByRole('button', { name: 'Auto mode' })
-    expect(trigger).not.toHaveTextContent('autoplay')
+    expect(trigger.querySelector('svg.lucide-circle-play')).not.toBeInTheDocument()
     expect(trigger.querySelector('[data-testid="permission-mode-dot"]')).toBeInTheDocument()
 
     rerender(<PermissionModeSelector value="auto" onChange={vi.fn()} compact />)
-    expect(screen.getByRole('button', { name: 'Auto mode' }))
-      .toHaveTextContent('autoplay')
+    expect(screen.getByRole('button', { name: 'Auto mode' }).querySelector('svg.lucide-circle-play'))
+      .toBeInTheDocument()
   })
 
   it('ranks permission modes by risk on the toolbar trigger', () => {
@@ -489,7 +518,8 @@ describe('PermissionModeSelector', () => {
         .querySelector('[data-testid="permission-mode-dot"]')
         ?.className ?? ''
 
-    expect(dotClass()).toContain('--color-text-tertiary')
+    // Every write still asks first: the safe (green) end of the scale.
+    expect(dotClass()).toContain('--color-success')
 
     rerender(<PermissionModeSelector value="acceptEdits" onChange={vi.fn()} />)
     expect(dotClass()).toContain('--color-warning')
@@ -499,38 +529,45 @@ describe('PermissionModeSelector', () => {
     expect(dotClass()).toContain('--color-error')
   })
 
-  it('renders the visually larger Auto glyph at a reduced size', () => {
+  it('draws every menu glyph and the compact trigger glyph on the same 16px/14px lucide grid', () => {
     const { rerender } = render(
       <PermissionModeSelector value="default" onChange={vi.fn()} />,
     )
 
     fireEvent.click(screen.getByRole('button', { name: 'Ask permissions' }))
-    const autoIcon = screen
-      .getByRole('menuitem', { name: /Auto mode/ })
-      .querySelector('.material-symbols-outlined')
-    expect(autoIcon).toHaveClass('text-[18px]')
+    for (const item of screen.getAllByRole('menuitem')) {
+      expect(item.querySelector('[data-mode-icon] svg')).toHaveAttribute('width', '16')
+    }
 
-    rerender(<PermissionModeSelector value="auto" onChange={vi.fn()} />)
-    const triggerIcon = screen
-      .getByRole('button', { name: 'Auto mode' })
-      .querySelector('.material-symbols-outlined')
-    expect(triggerIcon).toHaveClass('text-[12px]')
+    rerender(<PermissionModeSelector value="auto" onChange={vi.fn()} compact />)
+    expect(screen.getByRole('button', { name: 'Auto mode' }).querySelector('svg'))
+      .toHaveAttribute('width', '14')
   })
 
-  it('keeps every row on one text column despite the reduced Auto glyph', () => {
+  it('keeps every row on one text column whatever the glyph', () => {
     render(<PermissionModeSelector value="default" onChange={vi.fn()} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Ask permissions' }))
     const icons = screen
       .getAllByRole('menuitem')
-      .map((item) => item.querySelector('.material-symbols-outlined'))
+      .map((item) => item.querySelector('[data-mode-icon]'))
 
     expect(icons).toHaveLength(5)
-    // The box, not the glyph, sets where the title starts. Without it the
-    // 18px Auto glyph pulled its own title 2px left of the other four.
+    // The box, not the glyph, sets where the title starts.
     for (const icon of icons) {
-      expect(icon).toHaveClass('w-5', 'shrink-0', 'text-center')
+      expect(icon).toHaveClass('w-5', 'shrink-0', 'justify-center')
     }
+  })
+
+  it('marks the current mode with the terracotta check, not a filled row', () => {
+    render(<PermissionModeSelector value="default" onChange={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Ask permissions' }))
+    const current = screen.getByRole('menuitem', { name: /Ask permissions/ })
+    expect(current.querySelector('svg.lucide-check')).toHaveClass('text-[var(--color-brand)]')
+    expect(current).toHaveClass('bg-[var(--color-surface-hover)]')
+    expect(screen.getByRole('menuitem', { name: /Auto accept edits/ }).querySelector('svg.lucide-check'))
+      .not.toBeInTheDocument()
   })
 
   it('does not change mode when first-use Auto confirmation is cancelled', () => {

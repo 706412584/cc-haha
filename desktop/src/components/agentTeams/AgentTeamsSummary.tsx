@@ -14,11 +14,12 @@ import {
 /** Faces beyond this collapse into a `+N`, so the strip never wraps. */
 const MAX_STACKED_AVATARS = 5
 
+/**
+ * The app-wide status vocabulary: work under way is `info`, done is `success`.
+ * Forming, running and finishing are all a team still at work.
+ */
 function phaseTone(phase: WorkbenchPhase): Tone {
-  if (phase === 'forming') return 'warning'
-  if (phase === 'running') return 'brand'
-  if (phase === 'finishing') return 'info'
-  return 'success'
+  return phase === 'completed' ? 'success' : 'info'
 }
 
 function AvatarStack({
@@ -56,7 +57,7 @@ function AvatarStack({
       ))}
       {overflow > 0 ? (
         <span
-          className="inline-flex items-center justify-center rounded-full bg-[var(--color-surface-container)] font-mono text-[9px] font-extrabold text-[var(--color-text-secondary)] ring-1 ring-[var(--color-surface)]"
+          className="inline-flex items-center justify-center rounded-full bg-[var(--color-surface-container)] text-[11px] font-medium tabular-nums text-[var(--color-text-secondary)] ring-1 ring-[var(--color-surface)]"
           style={{ width: size, height: size, marginLeft: -Math.round(size * 0.32) }}
         >
           +{overflow}
@@ -79,7 +80,7 @@ export function AgentTeamsStrip({
 }: {
   snapshot: TeamWorkbenchSnapshot
   onOpen: () => void
-  /** Hides this team's strip for the session. Omitted renders no hide control. */
+  /** Fork: collapse the strip for this session + incarnation (a show chip replaces it). */
   onHide?: () => void
   compact: boolean
 }) {
@@ -89,56 +90,58 @@ export function AgentTeamsStrip({
   const members = snapshot.team.members
 
   return (
-    <div
+    <button
+      type="button"
+      data-testid="agent-teams-strip"
+      onClick={onOpen}
+      title={snapshot.team.name}
       className={[
-        'group/strip mt-2 flex w-full max-w-full items-center rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] transition-colors',
-        'hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-hover)]',
-        'focus-within:ring-2 focus-within:ring-[var(--color-border-focus)]',
+        'mt-2 flex w-full max-w-full items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2.5 py-1.5 text-left transition-colors',
+        'hover:border-[var(--color-outline)]',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]',
+        compact ? 'text-[11px]' : 'text-xs',
       ].join(' ')}
     >
-      <button
-        type="button"
-        data-testid="agent-teams-strip"
-        onClick={onOpen}
-        title={snapshot.team.name}
-        className={[
-          'flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-sm)] px-2.5 py-1.5 text-left',
-          'focus-visible:outline-none',
-          compact ? 'text-[11px]' : 'text-[12px]',
-        ].join(' ')}
-      >
-        <UsersRound size={compact ? 13 : 14} strokeWidth={2.25} aria-hidden="true" className="shrink-0 text-[var(--color-brand)]" />
-        <span className="shrink-0 font-semibold text-[var(--color-text-primary)]">
-          {t('agentTeams.strip.label')}
-        </span>
-        <AvatarStack members={members} leadAgentId={snapshot.team.leadAgentId} size={compact ? 18 : 20} />
-        <span className="flex shrink-0 items-center gap-1 text-[var(--color-text-tertiary)]">
-          <StatusDot tone={phaseTone(phase)} pulse={phase === 'running'} />
-          {t(`agentTeams.phase.${phase}` as TranslationKey)}
-        </span>
-        {progress.total > 0 ? (
-          <span className="shrink-0 tabular-nums text-[var(--color-text-secondary)]">
-            {t('agentTeams.inline.tasks', { completed: progress.completed, total: progress.total })}
-          </span>
-        ) : null}
-        <span className="ml-auto flex shrink-0 items-center gap-0.5 font-medium text-[var(--color-brand)]">
-          {t('agentTeams.inline.open')}
-          <ChevronRight size={12} strokeWidth={2.4} aria-hidden="true" />
-        </span>
-      </button>
+      <UsersRound size={compact ? 12 : 14} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]" />
+      <span className="shrink-0 font-medium text-[var(--color-text-primary)]">
+        {t('agentTeams.strip.label')}
+      </span>
+      <AvatarStack members={members} leadAgentId={snapshot.team.leadAgentId} size={compact ? 18 : 20} />
+      <span className="flex shrink-0 items-center gap-1 text-[var(--color-text-tertiary)]">
+        <StatusDot tone={phaseTone(phase)} pulse={phase === 'running'} />
+        {t(`agentTeams.phase.${phase}` as TranslationKey)}
+      </span>
       {onHide ? (
-        <button
-          type="button"
+        <span
+          role="button"
+          tabIndex={0}
           data-testid="agent-teams-strip-hide"
-          onClick={onHide}
-          title={t('agentTeams.strip.hide')}
           aria-label={t('agentTeams.strip.hide')}
-          className="mr-1 shrink-0 rounded-[var(--radius-sm)] p-1 text-[var(--color-text-tertiary)] opacity-0 transition-opacity hover:bg-[var(--color-surface-container)] hover:text-[var(--color-text-primary)] focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] group-hover/strip:opacity-100"
+          onClick={(event) => {
+            event.stopPropagation()
+            onHide()
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return
+            event.preventDefault()
+            event.stopPropagation()
+            onHide()
+          }}
+          className="ml-auto flex shrink-0 items-center justify-center rounded-full p-1 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
         >
-          <X size={compact ? 12 : 13} strokeWidth={2.4} aria-hidden="true" />
-        </button>
+          <X size={13} strokeWidth={1.75} aria-hidden="true" />
+        </span>
       ) : null}
-    </div>
+      {progress.total > 0 ? (
+        <span className="shrink-0 tabular-nums text-[var(--color-text-secondary)]">
+          {t('agentTeams.inline.tasks', { completed: progress.completed, total: progress.total })}
+        </span>
+      ) : null}
+      <span className="ml-auto flex shrink-0 items-center gap-0.5 text-[var(--color-text-secondary)]">
+        {t('agentTeams.inline.open')}
+        <ChevronRight size={12} strokeWidth={2} aria-hidden="true" />
+      </span>
+    </button>
   )
 }
 
@@ -175,26 +178,26 @@ export function AgentTeamsInlineCard({
         data-testid="agent-teams-inline-card"
         onClick={onOpen}
         disabled={!canOpen}
-        className="flex w-full items-center gap-3 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3.5 py-2.5 text-left shadow-[var(--shadow-card)] transition-colors hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+        className="flex w-full items-center gap-3 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3 py-2.5 text-left transition-colors enabled:hover:border-[var(--color-outline)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
       >
         {members.length > 0 ? (
           <AvatarStack members={members} leadAgentId={snapshot?.team.leadAgentId} size={30} />
         ) : (
-          <span className="inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full bg-[var(--color-surface-container)] text-[var(--color-brand)] ring-1 ring-[var(--color-border)]">
-            <UsersRound size={16} strokeWidth={2.2} aria-hidden="true" />
+          <span className="inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full bg-[var(--color-surface-container)] text-[var(--color-text-secondary)]">
+            <UsersRound size={16} strokeWidth={1.75} aria-hidden="true" />
           </span>
         )}
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 items-center gap-1.5">
-            <span className="min-w-0 truncate font-mono text-[12px] font-extrabold text-[var(--color-text-primary)]">
+            <span className="min-w-0 truncate text-[13px] font-medium text-[var(--color-text-primary)]">
               {teamName}
             </span>
-            <Badge tone={phaseTone(phase)} size="xs" bordered>
+            <Badge tone={phaseTone(phase)} size="xs">
               {t(`agentTeams.phase.${phase}` as TranslationKey)}
             </Badge>
           </span>
           {snapshot ? (
-            <span className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--color-text-tertiary)]">
+            <span className="mt-0.5 flex items-center gap-1.5 text-xs text-[var(--color-text-tertiary)]">
               <span>{t('agentTeams.inline.created', { count: members.length })}</span>
               {progress.total > 0 ? (
                 <>
@@ -208,9 +211,9 @@ export function AgentTeamsInlineCard({
           ) : null}
         </span>
         {canOpen ? (
-          <span className="flex shrink-0 items-center gap-0.5 text-[11.5px] font-medium text-[var(--color-brand)]">
+          <span className="flex shrink-0 items-center gap-0.5 text-xs text-[var(--color-text-secondary)]">
             {t('agentTeams.inline.open')}
-            <ChevronRight size={13} strokeWidth={2.4} aria-hidden="true" />
+            <ChevronRight size={14} strokeWidth={1.75} aria-hidden="true" />
           </span>
         ) : null}
       </button>

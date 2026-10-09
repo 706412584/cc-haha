@@ -68,7 +68,14 @@ vi.mock('@tauri-apps/plugin-shell', () => ({
 // Mock desktopRuntime.getServerBaseUrl
 vi.mock('../../lib/desktopRuntime', () => ({
   getServerBaseUrl: vi.fn(() => 'http://127.0.0.1:4321'),
+  isDesktopRuntime: () => false,
 }))
+
+const viewport = vi.hoisted(() => ({ mobile: false }))
+vi.mock('../../hooks/useMobileViewport', () => ({ useMobileViewport: () => viewport.mobile }))
+
+const turnDiff = vi.hoisted(() => ({ get: vi.fn() }))
+vi.mock('../../api/sessions', () => ({ sessionsApi: { getTurnCheckpointDiff: turnDiff.get } }))
 
 vi.mock('../../lib/systemFileOpen', () => ({
   openLocalFileWithSystem: openSystemFileSpy,
@@ -279,10 +286,13 @@ describe('CurrentTurnChangeCard – rich file row (icon / name / type)', () => {
 
     expect(screen.getByText('main.ts')).toBeInTheDocument()
     expect(screen.getByText('generated.ts')).toBeInTheDocument()
-    expect(screen.getByText('chat.turnChangesConversationOnlySubtitle')).toBeInTheDocument()
     // An unrestorable checkpoint must not cost the user the conversation
     // rollback too — the dialog is where the remaining action is chosen.
     const undoButton = screen.getByRole('button', { name: 'chat.turnChangesLatestUndoAria' })
+    // The limitation is the undo button's hint (its accessible description),
+    // not a line of grey text under the card.
+    expect(undoButton).toHaveAttribute('title', 'chat.turnChangesConversationOnlySubtitle')
+    expect(screen.queryByText('chat.turnChangesConversationOnlySubtitle')).toBeNull()
     expect(undoButton).toBeEnabled()
     fireEvent.click(undoButton)
     expect(onUndo).toHaveBeenCalledTimes(1)
@@ -332,8 +342,9 @@ describe('CurrentTurnChangeCard – rich file row (icon / name / type)', () => {
 
     expect(screen.queryByText('chat.turnChangesPartialCoverageSubtitle', { exact: false }))
       .toBeNull()
-    expect(screen.getByText('chat.turnChangesLatestSubtitle')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'chat.turnChangesLatestUndoAria' })).toBeEnabled()
+    const undoButton = screen.getByRole('button', { name: 'chat.turnChangesLatestUndoAria' })
+    expect(undoButton).toHaveAttribute('title', 'chat.turnChangesLatestSubtitle')
+    expect(undoButton).toBeEnabled()
   })
 
   it('prefers the conversation-only message over the coverage warning when restore is unavailable', () => {
@@ -341,10 +352,11 @@ describe('CurrentTurnChangeCard – rich file row (icon / name / type)', () => {
 
     // Both conditions hold, but "files cannot be restored at all" is the one
     // that changes what the user can do, so it wins the subtitle.
-    expect(screen.getByText('chat.turnChangesConversationOnlySubtitle')).toBeInTheDocument()
+    const undoButton = screen.getByRole('button', { name: 'chat.turnChangesLatestUndoAria' })
+    expect(undoButton).toHaveAttribute('title', 'chat.turnChangesConversationOnlySubtitle')
     expect(screen.queryByText('chat.turnChangesPartialCoverageSubtitle', { exact: false }))
       .toBeNull()
-    expect(screen.getByRole('button', { name: 'chat.turnChangesLatestUndoAria' })).toBeEnabled()
+    expect(undoButton).toBeEnabled()
   })
 })
 
@@ -513,9 +525,12 @@ describe('CurrentTurnChangeCard – open-with buttons', () => {
   })
 
   it('shows the same destination chevron on every changed-file row', () => {
-    const { container } = renderExpandedCard(['/w/proj/README.md', '/w/proj/src/main.ts'])
+    renderExpandedCard(['/w/proj/README.md', '/w/proj/src/main.ts'])
 
-    expect(container.querySelectorAll('.lucide-chevron-right')).toHaveLength(2)
+    // The card header carries its own disclosure chevron; count the rows'.
+    const rows = screen.getAllByRole('button', { name: /turnChangesOpen(InWorkspace|File)Aria/ })
+    expect(rows).toHaveLength(2)
+    expect(rows.map((row) => row.querySelectorAll('.lucide-chevron-right').length)).toEqual([1, 1])
   })
 
   it('clicking README.md open-with opens menu with workspace preview item', async () => {
@@ -646,7 +661,8 @@ describe('CurrentTurnChangeCard – conversation continuity', () => {
   it('truthfully labels a historical row as opening the current workspace diff', () => {
     renderExpandedCard(['/w/proj/src/main.ts'], false)
 
-    expect(screen.getByText('chat.turnChangesCurrentWorkspaceDiff')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'chat.turnChangesHistoricalUndoAria' }))
+      .toHaveAttribute('title', 'chat.turnChangesCurrentWorkspaceDiff')
   })
 
   it('records a stable opener id and semantic turn key before opening the diff', () => {
@@ -707,5 +723,44 @@ describe('CurrentTurnChangeCard – collapse long file lists', () => {
     fireEvent.click(showLess)
     expect(screen.getAllByRole('button', { name: /turnChangesOpenInWorkspaceAria/ })).toHaveLength(5)
     expect(screen.getByText('chat.turnChangesShowMore')).toBeInTheDocument()
+  })
+})
+
+describe('CurrentTurnChangeCard on a phone', () => {
+  beforeEach(() => {
+    viewport.mobile = true
+    turnDiff.get.mockReset()
+    reviewOpenSpy.mockClear()
+  })
+  afterEach(() => {
+    viewport.mobile = false
+    cleanup()
+  })
+
+  it('opens the turn\'s change to a file in a full-height sheet, since there is no workspace beside the chat', async () => {
+    turnDiff.get.mockImplementation(async (_session: string, _turn: string, path: string) => ({
+      state: 'ok',
+      path,
+      diff: `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old line in ${path}\n+new line in ${path}\n`,
+    }))
+    renderExpandedCard(['src/todo.ts', 'test/todo.test.ts'])
+
+    fireEvent.click(screen.getByTitle('src/todo.ts'))
+
+    expect(reviewOpenSpy).not.toHaveBeenCalled()
+    expect(turnDiff.get).toHaveBeenCalledWith('s1', 'msg-1', 'src/todo.ts', 0, true)
+    expect(await screen.findByText(/new line in src\/todo\.ts/)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'mobile.diff.next' }))
+    expect(await screen.findByText(/new line in test\/todo\.test\.ts/)).toBeInTheDocument()
+  })
+
+  it('says when a file has no line change to show', async () => {
+    turnDiff.get.mockResolvedValue({ state: 'ok', path: 'docs/spec.docx' })
+    renderExpandedCard(['docs/spec.docx'])
+
+    fireEvent.click(screen.getByTitle('docs/spec.docx'))
+
+    expect(await screen.findByText('mobile.diff.empty')).toBeInTheDocument()
   })
 })

@@ -80,6 +80,22 @@ Checkpoints capture the files Claude changed through its editing tools. **Files 
 
 When a turn's file checkpoint is itself incomplete (a damaged session log, an unsafe path), the code cannot be restored and the confirmation offers only **Roll back conversation only** — the conversation can always be rewound.
 
+### Editing a message and running it again
+
+To reword a prompt and run it again (a truncated reply, a request that missed a constraint), hover one of your own messages and click the pencil, **Edit and resend**. The message turns into an editor in place. Its attachments and references stay as chips you can remove. Enter sends (following your send-key setting) and Esc cancels. Cancelling leaves the session untouched.
+
+The messages you can edit are the same turns you can roll back: completed turns, including failed or interrupted ones. Editing is not offered while Claude is running, while background tasks run, in subagent or team-member sessions, or in a side chat.
+
+Sending rewinds the session to before that message and then sends the edited text, using exactly the rollback described above:
+
+- For the latest turn with no restorable file changes, the conversation is rolled back and the edit sent without asking.
+- For an older message, the confirmation says how many later turns will be deleted.
+- When files changed from that turn on and can be restored, choose **Roll back code and conversation and send** or **Roll back conversation only and send** (files on disk stay as they are). With an incomplete file checkpoint, only the second is offered.
+
+If the rollback fails, neither the conversation nor the files change, and the editor keeps your text. If the rollback succeeds but the message cannot be sent automatically, your edited text goes back into the composer instead of being lost.
+
+Editing a message from before a context compaction rewinds past the compaction, so the rerun works from the full original context.
+
 ## The Activity panel
 
 The first button on the right of the tab bar opens the Activity panel, which lists everything running in parallel for this session:
@@ -90,6 +106,24 @@ The first button on the right of the tab bar opens the Activity panel, which lis
 - **Team** — when an Agent Team is in play, one row per member, and you can message a member directly.
 
 Tool activity from background subagents bubbles up here too, so you don't have to wait for one to finish to see what it's doing.
+
+Team members retry on their own when the model service drops a stream, rate-limits, or returns a 5xx; the member row shows "Auto-retry 2/5" and neither you nor the lead has to step in. When the retries run out, or the error needs you (an expired API key, an empty balance, a used-up subscription limit), the row shows "Error" and the lead is told. Once the problem is fixed, tell the lead to continue: it gets the list of members that stopped on an error and wakes each one, which picks up from its saved conversation without redoing finished work. The Stop button halts the whole team, and the lead stops acting on its members' reports, without losing progress: your next message to the lead tells it which members stopped on which tasks, and it decides from your words whether they carry on. You can also message a member directly; it picks up from its saved conversation, and the same goes for a member marked "Stopped". Switching the model or permission mode doesn't interrupt the team, and after an app restart the team is still there — message a member to continue. Deleting the session or running `/clear` ends the team.
+
+## Trajectory: what actually happened, step by step
+
+Switch **Chat / Trajectory** next to the session title to **Trajectory** and the same session turns into a ledger, one line per event, with your composer and draft still in place. Lines run in order, with "Turn N" marked on the left:
+
+- **System** — the system prompt sent to the model. The first one is "Initial system prompt"; after that, "System prompt updated" or "Tools updated" appears whenever the prompt or the tool catalog changes.
+- **User** — your messages, including ones queued while a turn was running.
+- **Context** — what the harness injected: the skill list, a SKILL.md loaded when a skill was invoked, CLAUDE.md and the date, todo reminders, memories, hook output, plan-mode reminders, compaction summaries, and so on.
+- **Assistant** — one line per model response, with that call's input / output tokens and approximate duration on the right. A response that only called tools shows "(tool calls only)".
+- **Tool** — one line per tool call, as "name arguments → result". Failed calls are red.
+
+The minimap at the top lays the loaded trajectory out in three lanes — input, model, tools — and clicking anywhere jumps to that line. With **Size by duration** on, slow calls take up more width. The toolbar also folds every turn, hides tool calls, and searches.
+
+Click any line to open its details on the right: overview, preview, input / result, and the raw record. A system line shows the full system prompt, the tool catalog, and a diff against the previous version. An Agent tool line offers **View subagent trajectory**, which opens the subagent's own ledger. **Locate in chat** jumps back to the message in the conversation; in the other direction, hovering a tool card in the chat shows a button that jumps straight into the trajectory.
+
+With Agent Trace enabled in **Settings → General**, assistant lines also get a **Raw request** tab showing the request that call actually sent and the response it got back — useful when a provider returns an error.
 
 ## What the composer can do
 

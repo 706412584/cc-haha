@@ -1,17 +1,30 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
-/* ─── Dark variant binding ────────────────────────────────────────
-   Themes are switched via `<html data-theme>`. Following the OS is resolved
-   in JS (src/theme/systemAppearance.ts) and lands on that same attribute, so
-   `data-theme` stays the single source of truth here. Without this binding,
-   Tailwind's default `dark:` compiles to `prefers-color-scheme: dark` and
-   would fire on the wrong fixed palette.
+/* Material Symbols Outlined – variable weight, use block to avoid showing raw text.
+   The fork keeps this icon font: several fork-only surfaces (welcome task cards,
+   the fake tool-use notice, the member banner) still render named glyphs. */
+@font-face {
+  font-family: 'Material Symbols Outlined';
+  font-style: normal;
+  font-weight: 100 700;
+  font-display: block;
+  src: url('../../public/fonts/material-symbols-outlined.woff2') format('woff2');
+}
 
-   Three supported palettes sit on a dark ground, so all are listed explicitly.
-   Binding only `dark` is how a `dark:` utility would silently render its light
-   branch on any dark palette whose ID is not literally `dark`. */
-@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *, [data-theme="ink-blue"], [data-theme="ink-blue"] *, [data-theme="classic-dark"], [data-theme="classic-dark"] *));
+/* ─── Dark variant binding ────────────────────────────────────────
+   The app has six themes switched via `<html data-theme>`. Following the OS
+   is resolved in JS (src/theme/systemAppearance.ts) and lands on that same
+   attribute, so `data-theme` stays the single source of truth here. Without
+   this binding, Tailwind's default `dark:` compiles to
+   `prefers-color-scheme: dark` and would fire on the wrong theme — right by
+   accident for someone following the system, plainly wrong for anyone on a
+   fixed palette.
+
+   Two of the six sit on a dark ground — `dark` and `ink-blue` — so both are
+   listed. Binding only `dark` is how a `dark:` utility would silently render
+   its light branch on ink-blue. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *, [data-theme="ink-blue"], [data-theme="ink-blue"] *));
 
 /* ─── Self-hosted fonts (no Google CDN dependency) ────────────── */
 
@@ -92,41 +105,52 @@
   unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 
-/* Material Symbols Outlined – variable weight, use block to avoid showing raw text */
-@font-face {
-  font-family: 'Material Symbols Outlined';
-  font-style: normal;
-  font-weight: 100 700;
-  font-display: block;
-  src: url('../../public/fonts/material-symbols-outlined.woff2') format('woff2');
-}
-
-.workspace-syntax-comment { color: var(--color-code-comment); }
-.workspace-syntax-string { color: var(--color-code-string); }
-.workspace-syntax-keyword { color: var(--color-code-keyword); }
-.workspace-syntax-function { color: var(--color-code-function); }
-.workspace-syntax-number,
-.workspace-syntax-bool { color: var(--color-code-number); }
-.workspace-syntax-property { color: var(--color-code-property); }
-.workspace-syntax-type { color: var(--color-code-type); }
-.workspace-syntax-punctuation { color: var(--color-code-punctuation); }
-
 .code-viewer-area .line,
 .code-viewer-area .token-line {
   display: block;
 }
 
-.code-viewer-area .line {
-  padding: 0 12px;
-}
-
-.code-viewer-area .has-line-numbers .line {
-  padding-left: 12px;
+/* The gutter lives on the line, not the scroller, so the hover band runs edge
+   to edge. Prism (`token-line`) and Shiki (`line`) share it: they used to sit
+   12px and 24px in from the edge depending on which highlighter had loaded. */
+.code-viewer-area .line,
+.code-viewer-area .token-line {
+  padding: 0 14px;
 }
 
 .code-viewer-area .line:hover,
 .code-viewer-area .token-line:hover {
   background: var(--color-surface-hover);
+}
+
+/* react-shiki puts CodeViewer's wrapping style on its container div; the <pre>
+   it renders inside would otherwise reset it to the UA's `white-space: pre`, so
+   `wrapLongLines` never wrapped anything once Shiki took over from Prism. */
+.code-viewer-area [data-highlight-engine="shiki"] pre {
+  margin: 0;
+  white-space: inherit;
+  word-break: inherit;
+}
+
+/* Shiki joins its `.line` spans with "\n" text nodes. With the lines laid out
+   as blocks (for the padding and hover above), each of those newlines became an
+   empty line box of its own, double-spacing every highlighted block. A flex
+   container does not render whitespace-only text runs; an empty source line
+   keeps its height through a zero-width character. */
+.code-viewer-area [data-highlight-engine="shiki"] code {
+  display: flex;
+  flex-direction: column;
+  /* Inside Markdown prose this <code> also matches the inline-code chip
+     styles (fill, padding, radius). A block is not a chip. */
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-weight: 400;
+}
+
+.code-viewer-area [data-highlight-engine="shiki"] .line:empty::before {
+  content: '\200b';
 }
 
 .code-viewer-area .has-line-numbers,
@@ -208,55 +232,44 @@
   white-space: nowrap;
 }
 
-.settings-checkbox-input {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  cursor: pointer;
-  opacity: 0;
-}
-
-.settings-checkbox-input:disabled {
-  cursor: not-allowed;
-}
-
+/* The kbd chip of the 「素」 spec: mono 11px, 18px tall, xs radius, hairline
+   border on white, tertiary text. */
 .settings-zoom-kbd {
   min-width: 18px;
   height: 18px;
-  padding: 0 5px;
+  padding: 0 4px;
   border: 1px solid var(--color-border);
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   background: var(--color-surface-container-lowest);
-  color: var(--color-text-secondary);
-  font-family: var(--font-label);
-  font-size: 10px;
-  font-weight: 600;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 400;
   line-height: 16px;
   text-align: center;
-  box-shadow: inset 0 -1px 0 rgba(var(--cc-t1-rgb), 0.08);
 }
 
+/* The zoom slider: a 4px track filled with the brand up to the thumb, a 14px
+   white thumb, and a value bubble that floats above it only while dragging
+   (it overlaps the row above rather than reserving empty space). */
 .settings-zoom-control {
   --settings-zoom-range-progress: 33.333%;
   --settings-zoom-preview-scale: 0.88;
   --settings-zoom-preview-opacity: 0;
   --settings-zoom-track-empty: var(--color-surface-container-high);
   --settings-zoom-thumb-bg: var(--color-surface-container-lowest);
-  --settings-zoom-thumb-border: var(--color-border);
-  --settings-zoom-thumb-shadow: 0 2px 8px rgba(var(--cc-t1-rgb), 0.16);
-  padding-top: 22px;
+  --settings-zoom-thumb-border: var(--color-outline);
+  --settings-zoom-thumb-shadow: var(--shadow-raised);
 }
 
+/* On the two ink grounds a light thumb on a light track disappears; the brand
+   rim keeps it legible. */
 [data-theme="dark"] .settings-zoom-control,
-[data-theme="ink-blue"] .settings-zoom-control,
-[data-theme="classic-dark"] .settings-zoom-control {
+[data-theme="ink-blue"] .settings-zoom-control {
   --settings-zoom-track-empty: var(--color-surface-container-highest);
   --settings-zoom-thumb-bg: var(--color-surface-bright);
   --settings-zoom-thumb-border: var(--color-brand);
-  --settings-zoom-thumb-shadow: 0 0 0 3px rgba(var(--cc-ac-rgb), 0.2), 0 10px 24px rgba(0, 0, 0, 0.5);
+  --settings-zoom-thumb-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
 }
 
 .settings-zoom-control.is-dragging {
@@ -270,25 +283,25 @@
 
 .settings-zoom-preview {
   position: absolute;
-  left: clamp(24px, var(--settings-zoom-range-progress), calc(100% - 24px));
+  left: clamp(22px, var(--settings-zoom-range-progress), calc(100% - 22px));
   top: -30px;
   z-index: 1;
-  min-width: 52px;
+  min-width: 44px;
   transform: translateX(-50%) scale(var(--settings-zoom-preview-scale));
   transform-origin: 50% 100%;
-  border: 1px solid var(--color-surface-glass-border);
+  border: 1px solid var(--color-border);
   border-radius: 999px;
-  background: var(--color-surface-glass);
-  padding: 4px 9px;
+  background: var(--color-surface-container-lowest);
+  padding: 2px 8px;
   color: var(--color-text-primary);
-  font-size: 12px;
-  font-weight: 700;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
   line-height: 16px;
   text-align: center;
   opacity: var(--settings-zoom-preview-opacity);
   box-shadow: var(--shadow-dropdown);
-  backdrop-filter: blur(14px) saturate(1.15);
-  -webkit-backdrop-filter: blur(14px) saturate(1.15);
   pointer-events: none;
   transition:
     left 260ms cubic-bezier(0.22, 1, 0.36, 1),
@@ -296,23 +309,10 @@
     transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.settings-zoom-preview::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  bottom: -4px;
-  width: 8px;
-  height: 8px;
-  transform: translateX(-50%) rotate(45deg);
-  border-right: 1px solid var(--color-surface-glass-border);
-  border-bottom: 1px solid var(--color-surface-glass-border);
-  background: var(--color-surface-glass);
-}
-
 .settings-zoom-range {
   appearance: none;
   display: block;
-  height: 20px;
+  height: 18px;
   cursor: pointer;
   background: transparent;
   accent-color: var(--color-brand);
@@ -328,9 +328,8 @@
 }
 
 .settings-zoom-range::-webkit-slider-runnable-track {
-  height: 6px;
+  height: 4px;
   border-radius: 999px;
-  border: 1px solid var(--color-border);
   background:
     linear-gradient(
       90deg,
@@ -339,14 +338,14 @@
       var(--settings-zoom-track-empty) var(--settings-zoom-range-progress),
       var(--settings-zoom-track-empty) 100%
     );
-  transition: background 220ms ease, border-color 180ms ease;
+  transition: background 220ms ease;
 }
 
 .settings-zoom-range::-webkit-slider-thumb {
   appearance: none;
-  width: 18px;
-  height: 18px;
-  margin-top: -7px;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
   border-radius: 999px;
   border: 1px solid var(--settings-zoom-thumb-border);
   background: var(--settings-zoom-thumb-bg);
@@ -355,37 +354,35 @@
 }
 
 .settings-zoom-range:hover::-webkit-slider-thumb {
-  border-color: var(--color-border-focus);
+  border-color: var(--color-border-strong);
 }
 
 .settings-zoom-control.is-dragging .settings-zoom-range::-webkit-slider-thumb {
-  transform: scale(1.18);
+  transform: scale(1.15);
   border-color: var(--color-brand);
-  box-shadow: var(--shadow-dropdown);
 }
 
 .settings-zoom-range:focus-visible::-webkit-slider-thumb {
   border-color: var(--color-brand);
-  box-shadow: var(--shadow-focus-ring), 0 2px 8px rgba(var(--cc-t1-rgb), 0.16);
+  box-shadow: var(--shadow-focus-ring);
 }
 
 .settings-zoom-range::-moz-range-track {
-  height: 6px;
+  height: 4px;
   border-radius: 999px;
-  border: 1px solid var(--color-border);
   background: var(--settings-zoom-track-empty);
-  transition: background 220ms ease, border-color 180ms ease;
+  transition: background 220ms ease;
 }
 
 .settings-zoom-range::-moz-range-progress {
-  height: 6px;
+  height: 4px;
   border-radius: 999px;
   background: var(--color-brand);
 }
 
 .settings-zoom-range::-moz-range-thumb {
-  width: 18px;
-  height: 18px;
+  width: 14px;
+  height: 14px;
   border-radius: 999px;
   border: 1px solid var(--settings-zoom-thumb-border);
   background: var(--settings-zoom-thumb-bg);
@@ -394,23 +391,24 @@
 }
 
 .settings-zoom-control.is-dragging .settings-zoom-range::-moz-range-thumb {
-  transform: scale(1.18);
+  transform: scale(1.15);
   border-color: var(--color-brand);
-  box-shadow: var(--shadow-dropdown);
 }
 
 .settings-zoom-range:focus-visible::-moz-range-thumb {
   border-color: var(--color-brand);
-  box-shadow: var(--shadow-focus-ring), 0 2px 8px rgba(var(--cc-t1-rgb), 0.16);
+  box-shadow: var(--shadow-focus-ring);
 }
 
+/* Same selectors as the rules above and later in the sheet, so these win on
+   order alone. */
 @media (prefers-reduced-motion: reduce) {
   .settings-zoom-preview,
   .settings-zoom-range::-webkit-slider-runnable-track,
   .settings-zoom-range::-webkit-slider-thumb,
   .settings-zoom-range::-moz-range-track,
   .settings-zoom-range::-moz-range-thumb {
-    transition-duration: 0.01ms !important;
+    transition: none;
   }
 }
 
@@ -630,28 +628,6 @@
   --color-terminal-ansi-bright-white: #FFFFFF;
 }
 
-/* classic-dark is a fork theme. It paints a dark workspace, so it has to
-   share the dark ANSI ramp — without this it falls back to the light ramp
-   and red/green/blue lose most of their contrast against #0E0E0E. */
-[data-theme="classic-dark"] {
-  --color-terminal-ansi-black: #1F1F1F;
-  --color-terminal-ansi-red: #FF6D67;
-  --color-terminal-ansi-green: #7EF18A;
-  --color-terminal-ansi-yellow: #F8C55F;
-  --color-terminal-ansi-blue: #77A8FF;
-  --color-terminal-ansi-magenta: #D699FF;
-  --color-terminal-ansi-cyan: #61D6D6;
-  --color-terminal-ansi-white: #D7D2D0;
-  --color-terminal-ansi-bright-black: #8F8683;
-  --color-terminal-ansi-bright-red: #FF8A85;
-  --color-terminal-ansi-bright-green: #9FF7A7;
-  --color-terminal-ansi-bright-yellow: #FFDD7A;
-  --color-terminal-ansi-bright-blue: #A6C5FF;
-  --color-terminal-ansi-bright-magenta: #E3B8FF;
-  --color-terminal-ansi-bright-cyan: #8CEEEE;
-  --color-terminal-ansi-bright-white: #FFFFFF;
-}
-
 /* ─── Layering scale ──────────────────────────────────────────────
    One ordered stack for every overlay. Theme-independent, so it lives
    outside the theme blocks.
@@ -690,78 +666,82 @@
    the `:root` semantic layer below re-points every one of them at a
    `--cc-*` source variable, which is what actually varies per theme. */
 @theme {
-  --color-primary: #96442B;
-  --color-primary-container: #7C3620;
-  --color-primary-fixed: #F6ECE5;
-  --color-primary-fixed-dim: #E6CDBF;
+  --color-primary: #A24A2E;
+  --color-primary-container: #8C3F26;
+  --color-primary-fixed: #F6ECE7;
+  --color-primary-fixed-dim: #E8CFC3;
 
-  --color-on-primary: #FBF6EC;
-  --color-on-primary-container: #FBF6EC;
-  --color-on-surface: #1F1C17;
-  --color-on-surface-variant: #5D5850;
+  --color-on-primary: #FFFFFF;
+  --color-on-primary-container: #FFFFFF;
+  --color-on-surface: #1F1E1C;
+  --color-on-surface-variant: #55524D;
 
   --color-surface: #FFFFFF;
   --color-surface-bright: #FFFFFF;
-  --color-surface-dim: #F0EFE9;
-  --color-surface-container: #FAFAF8;
-  --color-surface-container-low: #F6F6F3;
-  --color-surface-container-high: #F0EFE9;
-  --color-surface-container-highest: #EBE9E2;
+  --color-surface-dim: #F1F0EE;
+  --color-surface-container: #F5F5F3;
+  --color-surface-container-low: #F7F7F6;
+  --color-surface-container-high: #F1F0EE;
+  --color-surface-container-highest: #E9E8E5;
   --color-surface-container-lowest: #FFFFFF;
-  --color-surface-variant: #F6F6F3;
+  --color-surface-variant: #F7F7F6;
 
   --color-background: #FFFFFF;
 
-  --color-outline: #D8D5CC;
-  --color-outline-variant: #EBE9E2;
+  --color-outline: #D9D7D3;
+  --color-outline-variant: #E9E8E5;
 
-  --color-secondary: #96442B;
-  --color-secondary-container: #F5ECEA;
+  --color-secondary: #2C66C9;
+  --color-secondary-container: #E9F0FB;
   --color-tertiary: #3B7068;
   --color-tertiary-container: #F1F5F4;
 
-  --color-error: #C74436;
-  --color-on-error: #FBF6EC;
-  --color-error-container: #FAECE8;
-  --color-on-error-container: #BD4133;
+  --color-error: #C42B3C;
+  --color-on-error: #FFFFFF;
+  --color-error-container: #FBE9EC;
+  --color-on-error-container: #B12636;
 
-  --color-inverse-surface: #1F1C17;
+  --color-inverse-surface: #1F1E1C;
   --color-inverse-on-surface: #FFFFFF;
-  --color-inverse-primary: #E6CDBF;
+  --color-inverse-primary: #E8CFC3;
 
-  --color-success: #3E8153;
-  --color-success-container: #E8F2E9;
-  --color-on-success-container: #3A784D;
-  --color-info: #96442B;
-  --color-info-container: #F5ECEA;
-  --color-on-info-container: #96442B;
-  --color-warning: #A8751F;
-  --color-warning-container: #F8F0DC;
-  --color-on-warning-container: #90641B;
+  --color-success: #2E7D4F;
+  --color-success-container: #E7F3EB;
+  --color-on-success-container: #2A7148;
+  --color-info: #2C66C9;
+  --color-info-container: #E9F0FB;
+  --color-on-info-container: #2459B3;
+  --color-warning: #A5650F;
+  --color-warning-container: #FBF0DC;
+  --color-on-warning-container: #8A540C;
 
   /* Software chrome shares one sans-serif family. Keep the editorial serif
      explicit for content that requests it, instead of inheriting it in tools. */
-  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  /* Latin runs in the self-hosted Inter (400–600); CJK falls through to the
+     platform face. Weights above 600 are not shipped, so the UI tops out at
+     semibold instead of letting the browser synthesize a smeared bold. */
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   --font-headline: var(--font-body);
   --font-serif: 'Noto Serif SC', 'Songti SC', Georgia, serif;
   --font-label: var(--font-body);
-  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --font-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
 
-  /* Corner scale, from the handoff: 6–7 badges / 9–11 controls /
-     12–14 inner cards / 16–18 cards / 20 composer / 24 modals / 99 pills. */
+  /* Corner scale (「素」): 4 chips / 6 rows and small controls / 8 controls and
+     inner blocks / 12 cards / 16 composer and large panels / 20 dialogs. */
+  --radius-xs: 4px;
   --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 13px;
-  --radius-xl: 17px;
-  --radius-2xl: 20px;
-  --radius-3xl: 24px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 16px;
+  --radius-3xl: 20px;
   --radius-full: 9999px;
 }
 
 /* ─── Theme sources ───────────────────────────────────────────────
-   The six 「纸 · 墨 · 印」 palettes plus four restored classic palettes. Each
-   block carries only raw color values; the semantic layer below turns them
-   into the `--color-*` tokens the components consume. Generated values
+   Six palettes from the 「纸 · 墨 · 印」 handoff. Each block carries only
+   raw color values; the semantic layer below turns them into the
+   `--color-*` tokens the components consume. Generated values
    (`*-ink`, the heat ramp, the `*-rgb` triplets) are derived from these
    sources — see the header comment on the semantic layer. */
 
@@ -770,57 +750,63 @@
 [data-theme="white"] {
   color-scheme: light;
 
+  /* 「素 Porcelain」(2026-10 visual direction). One warm-neutral ramp that
+     climbs in a single direction — page → sidebar (s0) → card lining (s2) →
+     hover/selected (s1) — and every shadow below uses the same warm hue, so
+     the surfaces no longer mix cool greys with brown shadows. Terracotta is
+     kept for the brand, the send key and selection only; info is a separate
+     blue and error a crimson, so status never reads as brand. */
   --cc-bg: #FFFFFF;
-  --cc-s0: #F7F7F7;
-  --cc-s1: #F0F0F0;
-  --cc-s2: #FAFAFA;
-  --cc-bd: #EBEBEB;
-  --cc-bd2: #D6D6D6;
+  --cc-s0: #F7F7F6;
+  --cc-s1: #F1F0EE;
+  --cc-s2: #F5F5F3;
+  --cc-bd: #E9E8E5;
+  --cc-bd2: #D9D7D3;
   /* Control boundary — clears WCAG 1.4.11's 3:1 on the card lining. */
-  --cc-bd-strong: #8C8C8C;
+  --cc-bd-strong: #8C8984;
   /* Tab strip. Trough stays --cc-s0, so these two carry the shape. */
-  --cc-tab-edge: #DADADA;
-  --cc-tab-sep: #E3E3E3;
-  --cc-t1: #242424;
-  --cc-t2: #575757;
-  --cc-t3: #6E6E6E;
+  --cc-tab-edge: #D7D5D1;
+  --cc-tab-sep: #E6E4E1;
+  --cc-t1: #1F1E1C;
+  --cc-t2: #55524D;
+  --cc-t3: #6F6B65;
 
-  --cc-ac: #96442B;
-  --cc-ac2: #7C3620;
-  --cc-ac-soft: #F6ECE5;
-  --cc-ac-soft-hover: #EFDED4;
-  --cc-ac-border: #E6CDBF;
-  --cc-ac-ink: #96442B;
-  --cc-on-ac: #FBF6EC;
+  --cc-ac: #A24A2E;
+  --cc-ac2: #8C3F26;
+  --cc-ac-soft: #F6ECE7;
+  --cc-ac-soft-hover: #F0DFD6;
+  --cc-ac-border: #E8CFC3;
+  --cc-ac-ink: #93432A;
+  --cc-on-ac: #FFFFFF;
 
-  --cc-ok: #3E8153;
-  --cc-ok-soft: #E8F2E9;
-  --cc-ok-ink: #3A784D;
-  --cc-wn: #A8751F;
-  --cc-wn-soft: #F8F0DC;
-  --cc-wn-ink: #90641B;
-  --cc-er: #C74436;
-  --cc-er-soft: #FAECE8;
-  --cc-er-soft-hover: #F5DBD6;
-  --cc-er-ink: #BD4133;
-  --cc-info: #96442B;
-  --cc-info-soft: #F5ECEA;
-  --cc-info-ink: #96442B;
+  --cc-ok: #2E7D4F;
+  --cc-ok-soft: #E7F3EB;
+  --cc-ok-ink: #2A7148;
+  --cc-wn: #A5650F;
+  --cc-wn-soft: #FBF0DC;
+  --cc-wn-ink: #8A540C;
+  --cc-er: #C42B3C;
+  --cc-er-soft: #FBE9EC;
+  --cc-er-soft-hover: #F6D6DB;
+  --cc-er-ink: #B12636;
+  --cc-info: #2C66C9;
+  --cc-info-soft: #E9F0FB;
+  --cc-info-ink: #2459B3;
 
   --cc-teal: #3B7068;
   --cc-teal-soft: #F1F5F4;
   --cc-teal-border: #C0D1CF;
   --cc-teal-icon: #EBF1F0;
 
-  --cc-diff-add: #E8F3E9;
-  --cc-diff-add-gutter: #D9EBDC;
-  --cc-diff-add-word: #DEEDE0;
-  --cc-diff-del: #FAEEED;
-  --cc-diff-del-gutter: #F6E1DF;
-  --cc-diff-del-word: #F0CECB;
-  --cc-diff-mark: #F4EDE2;
-  --cc-diff-mark-gutter: #ECE1CE;
-  --cc-code: #F8F8F8;
+  --cc-diff-add: #EAF5ED;
+  --cc-diff-add-gutter: #DCEEE2;
+  --cc-diff-add-word: #CFE8D6;
+  --cc-diff-del: #FCEFEE;
+  --cc-diff-del-gutter: #F8E1DE;
+  --cc-diff-del-word: #F2CDC8;
+  --cc-diff-mark: #F7F0E4;
+  --cc-diff-mark-gutter: #EFE3CF;
+  --cc-code: #F7F6F4;
 
   --cc-heat-0: #F0EFE9;
   --cc-heat-1: #E8D6D0;
@@ -828,18 +814,18 @@
   --cc-heat-3: #B8806F;
   --cc-heat-4: #9C4F38;
 
-  --cc-shadow-card: 0 1px 3px rgba(30, 28, 22, 0.04), 0 6px 24px rgba(30, 28, 22, 0.06);
-  --cc-shadow-composer: 0 1px 2px rgba(24, 24, 24, 0.04), 0 4px 16px rgba(24, 24, 24, 0.04);
-  --cc-shadow-overlay: 0 8px 24px rgba(30, 28, 22, 0.10), 0 24px 64px rgba(30, 28, 22, 0.15);
+  --cc-shadow-card: 0 1px 2px rgba(28, 25, 23, 0.05), 0 6px 20px rgba(28, 25, 23, 0.06);
+  --cc-shadow-composer: 0 1px 2px rgba(28, 25, 23, 0.04), 0 8px 28px rgba(28, 25, 23, 0.07);
+  --cc-shadow-overlay: 0 2px 6px rgba(28, 25, 23, 0.05), 0 16px 40px rgba(28, 25, 23, 0.12);
 
   --cc-bg-rgb: 255, 255, 255;
-  --cc-s1-rgb: 240, 240, 240;
-  --cc-t1-rgb: 36, 36, 36;
-  --cc-t2-rgb: 87, 87, 87;
-  --cc-bd2-rgb: 214, 214, 214;
-  --cc-ac-rgb: 150, 68, 43;
-  --cc-er-rgb: 199, 68, 54;
-  --cc-scrim-rgb: 19, 17, 14;
+  --cc-s1-rgb: 241, 240, 238;
+  --cc-t1-rgb: 31, 30, 28;
+  --cc-t2-rgb: 85, 82, 77;
+  --cc-bd2-rgb: 217, 215, 211;
+  --cc-ac-rgb: 162, 74, 46;
+  --cc-er-rgb: 196, 43, 60;
+  --cc-scrim-rgb: 24, 22, 20;
 }
 
 /* 纸墨 paper */
@@ -1226,302 +1212,6 @@
   --cc-scrim-rgb: 6, 6, 6;
 }
 
-/* 旧版纯白 classic-white */
-[data-theme="classic-white"] {
-  color-scheme: light;
-
-  --cc-bg: #FFFFFF;
-  --cc-s0: #F9FAFB;
-  --cc-s1: #EEF2F6;
-  --cc-s2: #F6F8FA;
-  --cc-bd: #DDE3EA;
-  --cc-bd2: #8B98A7;
-  --cc-bd-strong: #66717E;
-  --cc-tab-edge: #D8DEE6;
-  --cc-tab-sep: #E3E7EC;
-  --cc-t1: #111827;
-  --cc-t2: #4B5563;
-  --cc-t3: #66717E;
-
-  --cc-ac: #8F482F;
-  --cc-ac2: #AD5F45;
-  --cc-ac-soft: #FFF0EA;
-  --cc-ac-soft-hover: #FBE1D7;
-  --cc-ac-border: #D8A997;
-  --cc-ac-ink: #8F482F;
-  --cc-on-ac: #FFFFFF;
-
-  --cc-ok: #087E4F;
-  --cc-ok-soft: #DCFAE6;
-  --cc-ok-ink: #087E4F;
-  --cc-wn: #B54708;
-  --cc-wn-soft: #FEF0C7;
-  --cc-wn-ink: #845307;
-  --cc-er: #B42318;
-  --cc-er-soft: #FEE4E2;
-  --cc-er-soft-hover: #FECDCA;
-  --cc-er-ink: #B42318;
-  --cc-info: #0F5C8F;
-  --cc-info-soft: #D9ECFF;
-  --cc-info-ink: #0F5C8F;
-
-  --cc-teal: #0F766E;
-  --cc-teal-soft: #F3F8F7;
-  --cc-teal-border: #AECBC9;
-  --cc-teal-icon: #EDF7F6;
-
-  --cc-diff-add: #ECFDF3;
-  --cc-diff-add-gutter: #D1FADF;
-  --cc-diff-add-word: #ABEFC6;
-  --cc-diff-del: #FEF3F2;
-  --cc-diff-del-gutter: #FEE4E2;
-  --cc-diff-del-word: #FECDCA;
-  --cc-diff-mark: #FFFAEB;
-  --cc-diff-mark-gutter: #FEF0C7;
-  --cc-code: #FAFBFC;
-
-  --cc-heat-0: #EEF2F6;
-  --cc-heat-1: #FFF0EA;
-  --cc-heat-2: #FFDBD0;
-  --cc-heat-3: #FFB59D;
-  --cc-heat-4: #8F482F;
-
-  --cc-shadow-card: 0 1px 3px rgba(15, 23, 42, 0.04), 0 6px 24px rgba(15, 23, 42, 0.05);
-  --cc-shadow-composer: 0 1px 2px rgba(15, 23, 42, 0.05), 0 14px 44px rgba(15, 23, 42, 0.08);
-  --cc-shadow-overlay: 0 8px 24px rgba(15, 23, 42, 0.08), 0 24px 60px rgba(15, 23, 42, 0.12);
-
-  --cc-bg-rgb: 255, 255, 255;
-  --cc-s1-rgb: 238, 242, 246;
-  --cc-t1-rgb: 17, 24, 39;
-  --cc-t2-rgb: 75, 85, 99;
-  --cc-bd2-rgb: 139, 152, 167;
-  --cc-ac-rgb: 143, 72, 47;
-  --cc-er-rgb: 180, 35, 24;
-  --cc-scrim-rgb: 15, 23, 42;
-}
-
-/* 旧版浅色 classic-light */
-[data-theme="classic-light"] {
-  color-scheme: light;
-
-  --cc-bg: #FAF9F5;
-  --cc-s0: #F4F4F0;
-  --cc-s1: #E9E8E4;
-  --cc-s2: #EFEEEA;
-  --cc-bd: #DAC1BA;
-  --cc-bd2: #87736D;
-  --cc-bd-strong: #6B5C57;
-  --cc-tab-edge: #DDD0CB;
-  --cc-tab-sep: #E6DDD9;
-  --cc-t1: #1B1C1A;
-  --cc-t2: #54433E;
-  --cc-t3: #6B5C57;
-
-  --cc-ac: #8F482F;
-  --cc-ac2: #AD5F45;
-  --cc-ac-soft: #FFDBD0;
-  --cc-ac-soft-hover: #F5CABB;
-  --cc-ac-border: #FFB59D;
-  --cc-ac-ink: #8F3217;
-  --cc-on-ac: #FFFFFF;
-
-  --cc-ok: #16A34A;
-  --cc-ok-soft: #E8F5E2;
-  --cc-ok-ink: #256D37;
-  --cc-wn: #CA8A04;
-  --cc-wn-soft: #FFF3D6;
-  --cc-wn-ink: #7A5300;
-  --cc-er: #BA1A1A;
-  --cc-er-soft: #FFDAD6;
-  --cc-er-soft-hover: #F5B8B4;
-  --cc-er-ink: #BA1A1A;
-  --cc-info: #2D628F;
-  --cc-info-soft: #E4F1FF;
-  --cc-info-ink: #2D628F;
-
-  --cc-teal: #3B7068;
-  --cc-teal-soft: #F6FAF8;
-  --cc-teal-border: #BCCDC8;
-  --cc-teal-icon: #F3F8F7;
-
-  --cc-diff-add: #E8F5E2;
-  --cc-diff-add-gutter: #D4EDCA;
-  --cc-diff-add-word: #B8E4A8;
-  --cc-diff-del: #FDECEA;
-  --cc-diff-del-gutter: #F9D4D0;
-  --cc-diff-del-word: #F5B8B4;
-  --cc-diff-mark: #FFF5D6;
-  --cc-diff-mark-gutter: #FFECB3;
-  --cc-code: #FDFCF9;
-
-  --cc-heat-0: #EFEEEA;
-  --cc-heat-1: #FBE9E2;
-  --cc-heat-2: #FFDBD0;
-  --cc-heat-3: #FFB59D;
-  --cc-heat-4: #8F482F;
-
-  --cc-shadow-card: 0 1px 3px rgba(65, 54, 48, 0.04), 0 6px 24px rgba(65, 54, 48, 0.06);
-  --cc-shadow-composer: 0 1px 2px rgba(65, 54, 48, 0.05), 0 14px 44px rgba(65, 54, 48, 0.08);
-  --cc-shadow-overlay: 0 4px 20px rgba(27, 28, 26, 0.04), 0 12px 40px rgba(27, 28, 26, 0.08);
-
-  --cc-bg-rgb: 250, 249, 245;
-  --cc-s1-rgb: 233, 232, 228;
-  --cc-t1-rgb: 27, 28, 26;
-  --cc-t2-rgb: 84, 67, 62;
-  --cc-bd2-rgb: 135, 115, 109;
-  --cc-ac-rgb: 143, 72, 47;
-  --cc-er-rgb: 186, 26, 26;
-  --cc-scrim-rgb: 27, 28, 26;
-}
-
-/* 旧版护眼 eye-care */
-[data-theme="eye-care"] {
-  color-scheme: light;
-
-  --cc-bg: #EAF6EF;
-  --cc-s0: #F0F9F4;
-  --cc-s1: #DDEFE6;
-  --cc-s2: #F3FBF6;
-  --cc-bd: #C8DDD2;
-  --cc-bd2: #7C8B83;
-  --cc-bd-strong: #5C6B63;
-  --cc-tab-edge: #C8DDD2;
-  --cc-tab-sep: #D1E3DA;
-  --cc-t1: #17211C;
-  --cc-t2: #53625A;
-  --cc-t3: #5C6B63;
-
-  --cc-ac: #3F6F5A;
-  --cc-ac2: #4F7C65;
-  --cc-ac-soft: #DDF0E5;
-  --cc-ac-soft-hover: #CDE6D8;
-  --cc-ac-border: #B8DCC8;
-  --cc-ac-ink: #315D4A;
-  --cc-on-ac: #FFFFFF;
-
-  --cc-ok: #087E4F;
-  --cc-ok-soft: #DDF5E8;
-  --cc-ok-ink: #2F684F;
-  --cc-wn: #A66107;
-  --cc-wn-soft: #FEF0C7;
-  --cc-wn-ink: #845307;
-  --cc-er: #B42318;
-  --cc-er-soft: #FEE4E2;
-  --cc-er-soft-hover: #FECDCA;
-  --cc-er-ink: #B42318;
-  --cc-info: #2D6472;
-  --cc-info-soft: #DDF1F5;
-  --cc-info-ink: #2D6472;
-
-  --cc-teal: #2F7661;
-  --cc-teal-soft: #EAF6F0;
-  --cc-teal-border: #B2D2C4;
-  --cc-teal-icon: #DDF0E7;
-
-  --cc-diff-add: #ECFDF3;
-  --cc-diff-add-gutter: #D1FADF;
-  --cc-diff-add-word: #ABEFC6;
-  --cc-diff-del: #FEF3F2;
-  --cc-diff-del-gutter: #FEE4E2;
-  --cc-diff-del-word: #FECDCA;
-  --cc-diff-mark: #FFFAEB;
-  --cc-diff-mark-gutter: #FEF0C7;
-  --cc-code: #EEF8F2;
-
-  --cc-heat-0: #EAF3EE;
-  --cc-heat-1: #DDF0E5;
-  --cc-heat-2: #B8DCC8;
-  --cc-heat-3: #7EB392;
-  --cc-heat-4: #3F6F5A;
-
-  --cc-shadow-card: 0 1px 3px rgba(39, 70, 55, 0.04), 0 6px 24px rgba(39, 70, 55, 0.05);
-  --cc-shadow-composer: 0 1px 2px rgba(39, 70, 55, 0.05), 0 14px 44px rgba(39, 70, 55, 0.08);
-  --cc-shadow-overlay: 0 8px 24px rgba(39, 70, 55, 0.06), 0 24px 60px rgba(39, 70, 55, 0.10);
-
-  --cc-bg-rgb: 234, 246, 239;
-  --cc-s1-rgb: 221, 239, 230;
-  --cc-t1-rgb: 23, 33, 28;
-  --cc-t2-rgb: 83, 98, 90;
-  --cc-bd2-rgb: 124, 139, 131;
-  --cc-ac-rgb: 63, 111, 90;
-  --cc-er-rgb: 180, 35, 24;
-  --cc-scrim-rgb: 15, 35, 25;
-}
-
-/* 旧版深色 classic-dark */
-[data-theme="classic-dark"] {
-  color-scheme: dark;
-
-  --cc-bg: #0E0E0E;
-  --cc-s0: #1C1B1B;
-  --cc-s1: #2A2929;
-  --cc-s2: #201F1F;
-  --cc-bd: #40312C;
-  --cc-bd2: #8D7F7A;
-  --cc-bd-strong: #9B8E89;
-  --cc-tab-edge: #40312C;
-  --cc-tab-sep: #342724;
-  --cc-t1: #E5E2E1;
-  --cc-t2: #B7AAA5;
-  --cc-t3: #A0948F;
-
-  --cc-ac: #FFB59F;
-  --cc-ac2: #FF6E40;
-  --cc-ac-soft: #3A2823;
-  --cc-ac-soft-hover: #4A3028;
-  --cc-ac-border: #674032;
-  --cc-ac-ink: #FFD9CF;
-  --cc-on-ac: #2C120B;
-
-  --cc-ok: #7EDB8B;
-  --cc-ok-soft: #243126;
-  --cc-ok-ink: #64B970;
-  --cc-wn: #F7C46C;
-  --cc-wn-soft: #352B1B;
-  --cc-wn-ink: #E6B457;
-  --cc-er: #FFB4AB;
-  --cc-er-soft: #42211F;
-  --cc-er-soft-hover: #5A2926;
-  --cc-er-ink: #FFB4AB;
-  --cc-info: #74E0F7;
-  --cc-info-soft: #173237;
-  --cc-info-ink: #74E0F7;
-
-  --cc-teal: #7DD3C7;
-  --cc-teal-soft: #1D2423;
-  --cc-teal-border: #334743;
-  --cc-teal-icon: #22302E;
-
-  --cc-diff-add: #243126;
-  --cc-diff-add-gutter: #2A3B2D;
-  --cc-diff-add-word: #314A35;
-  --cc-diff-del: #3A211E;
-  --cc-diff-del-gutter: #462724;
-  --cc-diff-del-word: #5A302B;
-  --cc-diff-mark: #332D3D;
-  --cc-diff-mark-gutter: #3D354B;
-  --cc-code: #0E0E0E;
-
-  --cc-heat-0: #242322;
-  --cc-heat-1: #3A2823;
-  --cc-heat-2: #674032;
-  --cc-heat-3: #A76549;
-  --cc-heat-4: #FFB59F;
-
-  --cc-shadow-card: 0 1px 3px rgba(0, 0, 0, 0.35), 0 6px 24px rgba(0, 0, 0, 0.35);
-  --cc-shadow-composer: 0 1px 2px rgba(0, 0, 0, 0.45), 0 14px 44px rgba(0, 0, 0, 0.50);
-  --cc-shadow-overlay: 0 16px 40px rgba(0, 0, 0, 0.42), 0 28px 80px rgba(0, 0, 0, 0.58);
-
-  --cc-bg-rgb: 14, 14, 14;
-  --cc-s1-rgb: 42, 41, 41;
-  --cc-t1-rgb: 229, 226, 225;
-  --cc-t2-rgb: 183, 170, 165;
-  --cc-bd2-rgb: 141, 127, 122;
-  --cc-ac-rgb: 255, 181, 159;
-  --cc-er-rgb: 255, 180, 171;
-  --cc-scrim-rgb: 6, 6, 6;
-}
-
 /* ─── Semantic layer ──────────────────────────────────────────────
    Every `--color-*` the app consumes is defined exactly once, here, in terms
    of the `--cc-*` source variables above. Adding a theme therefore means
@@ -1565,7 +1255,9 @@
      delineate an interactive control. */
   --color-border-strong: var(--cc-bd-strong);
   --color-border-separator: var(--cc-bd);
-  --color-border-focus: var(--cc-ac);
+  /* Neutral on purpose: a terracotta ring sat one hue step from the error red
+     and read as "this field is invalid". */
+  --color-border-focus: var(--cc-t3);
   /* Tab strip outlines. The strip's trough deliberately stays the sidebar's
      own ground, so the selected tab's fill is only 1.05–1.10:1 against it in
      all six themes — far too little for a rounded corner to be *visible*, and
@@ -1583,10 +1275,12 @@
   --color-on-surface: var(--cc-t1);
   --color-on-surface-variant: var(--cc-t2);
   --color-text-primary: var(--cc-t1);
-  --color-text-secondary: var(--cc-t2);
-  --color-text-tertiary: var(--cc-t3);
+  /* Fork aliases kept for fork-only workspace components. */
   --color-text: var(--cc-t1);
+  --color-text-secondary: var(--cc-t2);
+  /* Fork alias kept for fork-only components (SkillDetail, ConflictBanner). */
   --color-text-muted: var(--cc-t2);
+  --color-text-tertiary: var(--cc-t3);
   --color-text-accent: var(--cc-info);
 
   /* Terracotta seal — the brand accent */
@@ -1626,6 +1320,17 @@
   --color-on-success-container: var(--cc-ok-ink);
   --color-warning: var(--cc-wn);
   --color-warning-container: var(--cc-wn-soft);
+  /* Fork aliases kept for fork-only components (ConflictBanner). */
+  --color-warning-text: var(--color-on-warning-container);
+  --color-success-text: var(--color-on-success-container);
+  --color-error-text: var(--color-on-error-container);
+  --color-error-surface: var(--color-error-container);
+  --color-error-border: var(--color-error);
+  --color-scrim: var(--color-modal-scrim);
+  --shadow-modal: var(--cc-shadow-overlay);
+  --color-warning-surface: var(--color-warning-container);
+  --color-warning-border: var(--color-warning);
+  --color-warning-hover: var(--cc-wn-soft);
   --color-on-warning-container: var(--cc-wn-ink);
   --color-error: var(--cc-er);
   --color-on-error: var(--cc-on-ac);
@@ -1636,16 +1341,6 @@
   --color-info: var(--cc-info);
   --color-info-container: var(--cc-info-soft);
   --color-on-info-container: var(--cc-info-ink);
-
-  /* Workspace compatibility aliases for the previous semantic vocabulary. */
-  --color-success-text: var(--color-on-success-container);
-  --color-warning-text: var(--color-on-warning-container);
-  --color-warning-surface: var(--color-warning-container);
-  --color-warning-border: var(--color-warning);
-  --color-warning-hover: var(--cc-wn-soft);
-  --color-error-text: var(--color-on-error-container);
-  --color-error-surface: var(--color-error-container);
-  --color-error-border: var(--color-error);
 
   /* Language identity is independent of the app's status/brand palette. */
   --color-file-typescript-container: #DDEDFC;
@@ -1672,11 +1367,18 @@
   --color-switch-thumb: var(--cc-bg);
   --color-btn-primary-bg: var(--cc-t1);
   --color-btn-primary-fg: var(--cc-bg);
+  /* Primary stays ink on hover (a lighter ink), it no longer flips to brand. */
+  --color-btn-primary-hover: rgba(var(--cc-t1-rgb), 0.86);
+  /* A neutral disc one step up from the dialog surface it sits on (`IconButton
+     soft`). The ink themes raise that surface to `--cc-s1`, so they raise this
+     too — the same value would vanish into the composer. */
+  --color-btn-soft-bg: var(--cc-s1);
+  --color-btn-soft-hover: var(--cc-bd);
   /* Flat ink, not a gradient: the handoff's primary action is a solid ink
      block that turns terracotta on hover. Kept as gradient-shaped tokens so
      existing call sites keep resolving. */
   --gradient-btn-primary: linear-gradient(var(--cc-t1), var(--cc-t1));
-  --gradient-btn-primary-hover: linear-gradient(var(--cc-ac), var(--cc-ac));
+  --gradient-btn-primary-hover: linear-gradient(var(--color-btn-primary-hover), var(--color-btn-primary-hover));
 
   /* Sidebar chrome */
   --color-sidebar-filter-bg: var(--cc-bg);
@@ -1730,7 +1432,6 @@
      drawer); `--color-modal-scrim` is the heavier one true modals sit on. */
   --color-overlay-scrim: rgba(var(--cc-scrim-rgb), 0.42);
   --color-modal-scrim: rgba(var(--cc-scrim-rgb), 0.5);
-  --color-scrim: var(--color-modal-scrim);
   /* Dialogs are opaque: see `.dialog-panel`. Light themes put the paper at the
      top of the ramp, so the lifted surface is the background value itself. */
   --color-surface-dialog: var(--cc-bg);
@@ -1741,13 +1442,16 @@
   --shadow-card: var(--cc-shadow-card);
   --shadow-composer: var(--cc-shadow-composer);
   --shadow-overlay: var(--cc-shadow-overlay);
-  --shadow-modal: var(--cc-shadow-overlay);
   --shadow-dropdown: var(--cc-shadow-overlay);
   --shadow-inspector: var(--cc-shadow-overlay);
   --shadow-sidebar-filter: none;
-  --shadow-focus-ring: 0 0 0 1px rgba(var(--cc-ac-rgb), 0.24);
+  --shadow-focus-ring: 0 0 0 3px rgba(var(--cc-t1-rgb), 0.10);
   --shadow-error-ring: 0 0 0 1px rgba(var(--cc-er-rgb), 0.26);
-  --shadow-button-primary: 0 2px 10px rgba(var(--cc-t1-rgb), 0.22);
+  --shadow-button-primary: 0 1px 2px rgba(var(--cc-t1-rgb), 0.16);
+  /* A row or chip lifted one hair off its ground (the selected sidebar row). */
+  --shadow-raised: 0 1px 2px rgba(var(--cc-t1-rgb), 0.06);
+  /* The selected segment of a segmented control: lifted one hair off its track. */
+  --shadow-segment: 0 1px 2px rgba(var(--cc-t1-rgb), 0.10), 0 0 0 0.5px rgba(var(--cc-t1-rgb), 0.06);
 
   /* Code + diff */
   --color-code-bg: var(--cc-code);
@@ -1766,31 +1470,31 @@
   --color-diff-title-color: var(--cc-t3);
   --color-diff-title-border: var(--cc-bd);
 
-  /* Syntax highlighting. One ramp for the light themes; the ink themes
-     override it below. */
-  --color-code-comment: #8A8478;
-  --color-code-string: #437220;
-  --color-code-keyword: #B8533B;
-  --color-code-function: #1D5A8C;
-  --color-code-number: #1B7A6A;
+  /* Syntax highlighting. One ramp for the four paper themes; the two ink
+     themes override it below. */
+  --color-code-comment: #8F8A82;
+  --color-code-string: #3F7A2A;
+  --color-code-keyword: #A2442B;
+  --color-code-function: #2A5EA8;
+  --color-code-number: #A2602A;
   --color-code-property: #7A3E20;
-  --color-code-type: #7E5520;
+  --color-code-type: #7A4FB0;
   --color-code-parameter: #5C3D2E;
   --color-code-punctuation: #5C504A;
   --color-code-inserted: var(--cc-ok-ink);
   --color-code-deleted: var(--cc-er-ink);
 
   --color-diff-syntax-foreground: var(--cc-t1);
-  --color-diff-syntax-comment: #8A8478;
-  --color-diff-syntax-string: #437220;
-  --color-diff-syntax-number: #1B7A6A;
-  --color-diff-syntax-regexp: #1D5A8C;
-  --color-diff-syntax-keyword: #B8533B;
+  --color-diff-syntax-comment: #8F8A82;
+  --color-diff-syntax-string: #3F7A2A;
+  --color-diff-syntax-number: #A2602A;
+  --color-diff-syntax-regexp: #2A5EA8;
+  --color-diff-syntax-keyword: #A2442B;
   --color-diff-syntax-variable: #7A3E20;
   --color-diff-syntax-parameter: #5C504A;
   --color-diff-syntax-property: #7A3E20;
-  --color-diff-syntax-function: #1D5A8C;
-  --color-diff-syntax-type: #7E5520;
+  --color-diff-syntax-function: #2A5EA8;
+  --color-diff-syntax-type: #7A4FB0;
   --color-diff-syntax-punctuation: #5C504A;
 
   /* The terminal belongs to the current workspace theme. */
@@ -1853,19 +1557,19 @@
   --color-outline-a92: rgba(var(--cc-bd2-rgb), 0.92);
 
   /* Radii — mirrored from `@theme` so `var(--radius-*)` resolves at runtime */
+  --radius-xs: 4px;
   --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 13px;
-  --radius-xl: 17px;
-  --radius-2xl: 20px;
-  --radius-3xl: 24px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 16px;
+  --radius-3xl: 20px;
   --radius-full: 9999px;
 }
 
 /* Ink themes: lift the syntax ramp off the paper values. */
 [data-theme="dark"],
-[data-theme="ink-blue"],
-[data-theme="classic-dark"] {
+[data-theme="ink-blue"] {
   --color-file-typescript-container: #203B55;
   --color-on-file-typescript-container: #92CAF7;
   --color-file-javascript-container: #BFA453;
@@ -1897,38 +1601,15 @@
   /* Ink themes run the background at the bottom of the ramp, so a lifted
      surface has to climb it — `--cc-s1`, not the light themes' `--cc-bg`. */
   --color-surface-dialog: var(--cc-s1);
+  --color-btn-soft-bg: var(--cc-bd);
+  --color-btn-soft-hover: var(--cc-bd2);
   --color-surface-glass: rgba(var(--cc-bg-rgb), 0.93);
   --color-modal-scrim: rgba(var(--cc-scrim-rgb), 0.66);
   --color-overlay-scrim: rgba(var(--cc-scrim-rgb), 0.56);
   --shadow-button-primary: 0 2px 10px rgba(0, 0, 0, 0.4);
+  --shadow-segment: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-raised: 0 1px 2px rgba(0, 0, 0, 0.35);
   --color-activity-tooltip-border: rgba(var(--cc-bg-rgb), 0.28);
-}
-
-/* ─── Material Symbols ─────────────────────────────────────────────
-   Inside @layer base ON PURPOSE. Unlayered CSS beats every @layer, and
-   Tailwind v4 puts its utilities in `@layer utilities` — so an unlayered
-   `font-size: 24px` here silently overrode every `text-[14px]` on every
-   hand-written icon span in the app, regardless of source order. In base,
-   the 24px default still applies when no size utility is present, and the
-   utilities win when one is. */
-@layer base {
-  .material-symbols-outlined {
-    font-family: 'Material Symbols Outlined';
-    font-weight: normal;
-    font-style: normal;
-    font-size: 24px;
-    line-height: 1;
-    letter-spacing: normal;
-    text-transform: none;
-    display: inline-block;
-    white-space: nowrap;
-    word-wrap: normal;
-    direction: ltr;
-    -webkit-font-feature-settings: 'liga';
-    -webkit-font-smoothing: antialiased;
-    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
-    vertical-align: middle;
-  }
 }
 
 /* ─── Base styles ──────────────────────────────────────────────── */
@@ -1945,6 +1626,12 @@ html, body, #root {
   background-color: var(--color-background);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Code reads as code: JetBrains Mono's ligatures turned `===` into a single
+   glyph inside diffs and inline code. */
+code, kbd, pre, samp, .font-mono {
+  font-variant-ligatures: none;
 }
 
 ::selection {
@@ -1984,41 +1671,16 @@ button, input, textarea, select, a, [role="button"] {
   -webkit-app-region: no-drag;
 }
 
-/* Chrome's hairline between two neighbouring idle tabs — the thing that keeps
-   a row of untitled sessions from reading as one continuous smear.
-   It belongs to the *gap*, not to either tab, so it has to vanish the moment
-   either side of that gap gets a fill: a line running alongside a rounded
-   corner reads as a crack in it. Only sibling combinators can express "the
-   tab after the hovered one", which is why this is here and not in a Tailwind
-   class list. `::after` on purpose — `::before` is taken by the drag-over
-   drop indicator. */
-.tab-strip-item::after {
-  content: '';
-  position: absolute;
-  left: -1px;
-  top: 50%;
-  width: 1px;
-  height: 16px;
-  transform: translateY(-50%);
-  background: var(--color-tab-separator);
-  pointer-events: none;
-}
-.tab-strip-item:first-child::after,
-.tab-strip-item:hover::after,
-.tab-strip-item[data-active='true']::after,
-.tab-strip-item[data-dragging='true']::after,
-.tab-strip-item:hover + .tab-strip-item::after,
-.tab-strip-item[data-active='true'] + .tab-strip-item::after,
-.tab-strip-item[data-dragging='true'] + .tab-strip-item::after {
-  content: none;
-}
-
+/* 「素」 popover shell: a near-opaque white sheet, the same hairline every card
+   uses, and the dropdown step of the shadow scale. The old translucent border
+   (`--color-surface-glass-border`) vanished against white pages, so menus read
+   as floating shadows with no edge. */
 .glass-panel {
   background: var(--color-surface-glass);
-  border: 1px solid var(--color-surface-glass-border);
+  border: 1px solid var(--color-border);
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
-  box-shadow: var(--shadow-overlay);
+  box-shadow: var(--shadow-dropdown);
 }
 
 /* The fill above is translucent on the assumption that the blur will scramble
@@ -2032,8 +1694,10 @@ button, input, textarea, select, a, [role="button"] {
   }
 }
 
+/* Focus inside a popover is shown on the focused control itself; ringing the
+   whole sheet as well doubled the indicator. The edge darkens one step instead. */
 .glass-panel:focus-within {
-  box-shadow: var(--shadow-focus-ring), var(--shadow-dropdown);
+  border-color: var(--color-outline);
 }
 
 /* Modals are read-and-fill surfaces, not glances: an 860px provider form that
@@ -2048,17 +1712,43 @@ button, input, textarea, select, a, [role="button"] {
   box-shadow: var(--shadow-overlay);
 }
 
-/* The composer sits closer to the page than a floating overlay does, so it
-   takes the middle step of the shadow scale. Declared as a class rather than a
-   `shadow-[…]` utility because `.glass-panel` also sets `box-shadow`, and which
-   of the two wins would come down to stylesheet order. */
-.glass-panel--composer,
+/* The composer is a floating card (「素」): an opaque lifted sheet — white on
+   the light themes, one step up the ramp on the ink ones — with the card
+   hairline and the composer step of the shadow scale. No blur: it sits over
+   the transcript's fade, not over content that has to stay legible behind it.
+   Declared as a class rather than utilities because `.glass-panel` also sets
+   the fill, border and shadow, and which of two would win would come down to
+   stylesheet order. */
+.glass-panel--composer {
+  background: var(--color-surface-dialog);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: var(--shadow-composer);
+  transition: border-color 150ms ease-out, box-shadow 150ms ease-out;
+}
+
+/* Focus is a darker edge, not a ring: the editor holds focus for the whole
+   time anyone types, and a permanent halo stops meaning anything. */
 .glass-panel--composer:focus-within {
+  border-color: var(--color-outline);
   box-shadow: var(--shadow-composer);
 }
 
-.glass-panel--composer:focus-within {
-  box-shadow: var(--shadow-focus-ring), var(--shadow-composer);
+/* The 28px fade above the docked composer, so the transcript dissolves into
+   the composer's ground instead of being cut by a hard edge. */
+.composer-fade {
+  position: relative;
+}
+
+.composer-fade::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  height: 28px;
+  background: linear-gradient(to bottom, transparent, var(--color-surface));
+  pointer-events: none;
 }
 
 /* Radial wash behind the empty-state seal. */
@@ -2066,9 +1756,10 @@ button, input, textarea, select, a, [role="button"] {
   background: radial-gradient(460px 300px at 50% 44%, var(--color-brand-soft) 0%, transparent 72%);
 }
 
-.composer-drop-target-active {
+.composer-drop-target-active,
+.composer-drop-target-active:focus-within {
   border-color: var(--color-border-focus);
-  box-shadow: var(--shadow-focus-ring), var(--shadow-dropdown);
+  box-shadow: var(--shadow-focus-ring), var(--shadow-composer);
 }
 
 /* ProseMirror composer (MentionComposer). Paragraphs carry the line breaks,
@@ -2089,11 +1780,32 @@ button, input, textarea, select, a, [role="button"] {
 .composer-workflow-keyword {
   color: var(--color-on-brand-soft);
   background: var(--color-brand-soft);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-xs);
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
   padding: 0 2px;
-  font-weight: 600;
+  font-weight: 500;
+}
+
+/* Dictated text that was just written into the draft. Held, then faded, so the
+   eye can find where it landed; the same tint as a navigation target, because
+   it answers the same question. `MentionComposer` drops the decoration after
+   `INSERTION_FLASH_MS`, which this duration matches. */
+@keyframes composer-insertion-flash {
+  0%, 55% { background-color: var(--color-chat-navigation-target); }
+  100% { background-color: transparent; }
+}
+.composer-insertion-flash {
+  border-radius: var(--radius-xs);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  animation: composer-insertion-flash 1.6s ease-out forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-insertion-flash {
+    animation: none;
+    background-color: var(--color-chat-navigation-target);
+  }
 }
 
 /* Floated zero-height placeholder: the empty paragraph keeps its own caret,
@@ -2107,19 +1819,25 @@ button, input, textarea, select, a, [role="button"] {
 }
 
 /* Inline @-mention pill (an atom node in the document). */
+/* A chip, not a link: the sunken chip ground and the chip corner, so a mention
+   reads as an inserted token without borrowing the brand color reserved for
+   the send key and selection. */
 .composer-mention {
-  color: var(--color-on-brand-soft);
-  background: var(--color-brand-soft);
-  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  background: var(--color-surface-container);
+  border-radius: var(--radius-xs);
   padding: 0 4px;
   margin: 0 1px;
   overflow-wrap: anywhere;
 }
 
 .composer-mention-icon {
-  font-size: 15px;
-  vertical-align: -3px;
-  margin-right: 1px;
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  vertical-align: -2px;
+  margin-right: 2px;
+  color: var(--color-text-tertiary);
 }
 
 .composer-mention--skill,
@@ -2183,10 +1901,6 @@ button, input, textarea, select, a, [role="button"] {
   position: relative;
   width: 100%;
   overflow-x: hidden;
-}
-
-.app-shell-backdrop {
-  background: var(--color-overlay-scrim);
 }
 
 .sidebar-shell {
@@ -2256,28 +1970,6 @@ body.sidebar-resizing * {
   cursor: col-resize !important;
 }
 
-.app-shell--mobile .sidebar-shell {
-  position: fixed;
-  inset: 0 auto 0 0;
-  z-index: 50;
-  width: min(88vw, var(--sidebar-width));
-  max-width: var(--sidebar-width);
-  overflow: visible;
-  transform: translateX(-100%);
-  transition:
-    transform var(--motion-sidebar-duration) var(--motion-sidebar-easing),
-    width var(--motion-sidebar-duration) var(--motion-sidebar-easing);
-}
-
-.app-shell--mobile .sidebar-shell[data-state="closed"] {
-  pointer-events: none;
-}
-
-.app-shell--mobile .sidebar-shell[data-state="open"] {
-  transform: translateX(0);
-  pointer-events: auto;
-}
-
 .sidebar-panel {
   width: var(--sidebar-width);
   min-width: var(--sidebar-width);
@@ -2291,127 +1983,6 @@ body.sidebar-resizing * {
 .sidebar-panel[data-state="closed"] {
   width: var(--sidebar-rail-width);
   min-width: var(--sidebar-rail-width);
-}
-
-.app-shell--mobile .sidebar-panel,
-.app-shell--mobile .sidebar-panel[data-state="closed"] {
-  width: min(88vw, var(--sidebar-width));
-  min-width: min(88vw, var(--sidebar-width));
-  box-shadow: var(--shadow-dropdown);
-}
-
-.app-shell--mobile .mobile-app-header {
-  padding-top: max(0.5rem, env(safe-area-inset-top, 0px));
-  box-shadow: 0 1px 0 var(--color-border-subtle);
-}
-
-html[data-touch-h5] .app-shell--mobile .mobile-app-header__button {
-  min-height: 44px;
-  min-width: 44px;
-}
-
-.settings-page--mobile .settings-page__layout {
-  flex-direction: column;
-}
-
-.settings-page--mobile .settings-page__tabs {
-  width: 100%;
-  border-right: 0;
-  border-bottom: 1px solid var(--color-border);
-  padding: 0.5rem 0.75rem;
-  overflow-x: auto;
-  flex-direction: row;
-  gap: 0.5rem;
-  scrollbar-width: none;
-}
-
-.settings-page--mobile .settings-page__tabs::-webkit-scrollbar {
-  display: none;
-}
-
-.settings-page--mobile .settings-page__tabs-primary,
-.settings-page--mobile .settings-page__tabs-secondary {
-  display: flex;
-  flex: none;
-  gap: 0.5rem;
-}
-
-.settings-page--mobile .settings-page__tabs-secondary {
-  border-top: 0;
-  border-left: 1px solid var(--color-border);
-  padding-top: 0;
-  padding-left: 0.5rem;
-}
-
-.settings-page--mobile .settings-page__content {
-  min-height: 0;
-  padding: 1rem;
-}
-
-.settings-page--mobile .settings-tab-button {
-  width: auto;
-  min-width: max-content;
-  border-radius: 999px;
-  padding: 0.625rem 0.875rem;
-}
-
-html[data-touch-h5] .settings-page--mobile .settings-tab-button {
-  min-height: 44px;
-}
-
-html[data-touch-h5] .mobile-composer-shell {
-  position: relative;
-  z-index: 20;
-  border-top: 1px solid var(--color-border-subtle);
-  background: var(--color-surface);
-  backdrop-filter: blur(18px);
-}
-
-html[data-touch-h5] .mobile-composer-panel {
-  border-color: var(--color-border-subtle);
-}
-
-html[data-touch-h5] .mobile-composer-textarea {
-  font-size: 16px;
-  line-height: 1.5;
-  max-height: min(34dvh, 180px);
-}
-
-html[data-touch-h5] .mobile-composer-toolbar {
-  align-items: center;
-  gap: 0.5rem;
-}
-
-html[data-touch-h5] .mobile-composer-toolbar__tools,
-html[data-touch-h5] .mobile-composer-toolbar__actions {
-  min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-/* The anchored capability menu pops above this toolbar; an overflow clip on
-   the scrolling toolbar cuts it to a sliver (the "gray box" report). While a
-   menu is open, release the clip — the toolbar content fits by definition,
-   because the menu is what pushed the release. */
-html[data-touch-h5] [data-capability-menu-open] .mobile-composer-toolbar__tools {
-  overflow: visible;
-}
-
-html[data-touch-h5] .mobile-composer-toolbar__tools::-webkit-scrollbar,
-html[data-touch-h5] .mobile-composer-toolbar__actions::-webkit-scrollbar {
-  display: none;
-}
-
-html[data-touch-h5] .mobile-composer-toolbar__actions {
-  justify-content: flex-end;
-}
-
-.app-shell--mobile .sidebar-scroll-area {
-  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 1rem);
-}
-
-html[data-touch-h5] .app-shell--mobile .sidebar-panel {
-  border-right: 0;
 }
 
 .sidebar-toggle-button {
@@ -2546,38 +2117,68 @@ html[data-touch-h5] .app-shell--mobile .sidebar-panel {
    document typography without resizing tool controls or non-chat Markdown. */
 :root {
   --chat-font-family: var(--font-body);
-  --chat-font-size: 14px;
-  --chat-content-max-width: 900px;
+  --chat-font-size: 15px;
+  --chat-content-max-width: 800px;
 }
 
 .chat-reading-text,
 .markdown-prose.chat-reading-markdown {
   font-family: var(--chat-font-family);
   font-size: var(--chat-font-size);
-  line-height: 1.625;
+  line-height: 1.7;
 }
 
+/* Code — inline chips and blocks alike — runs two steps under the prose
+   (13px at the default 15px), so a monospace run never out-shouts the
+   sentence it sits in. */
 .markdown-prose.chat-reading-markdown {
-  --code-viewer-font-size: calc(var(--chat-font-size) * 0.928571);
+  --code-viewer-font-size: calc(var(--chat-font-size) - 2px);
 }
 
-.markdown-prose.chat-reading-markdown :is(p, li, table, blockquote) {
+/* Reasoning is secondary reading: the same family, two steps down. */
+.markdown-prose.chat-reading-markdown.thinking-markdown {
+  font-size: calc(var(--chat-font-size) - 2px);
+  --code-viewer-font-size: calc(var(--chat-font-size) - 3px);
+}
+
+.markdown-prose.chat-reading-markdown :is(p, li, blockquote) {
   font-size: 1em;
-  line-height: 1.625;
+  line-height: 1.7;
+}
+
+/* Tables are reference material, not running text: a denser 13px grid. */
+.markdown-prose.chat-reading-markdown table {
+  font-size: calc(var(--chat-font-size) - 2px);
+  line-height: 1.55;
 }
 
 .markdown-prose.chat-reading-markdown :is(h1, h2, h3, h4, h5, h6) {
   font-family: var(--chat-font-family);
-  line-height: 1.35;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.4;
 }
 
-.markdown-prose.chat-reading-markdown h1 { font-size: 1.75em; }
-.markdown-prose.chat-reading-markdown h2 { font-size: 1.5em; }
-.markdown-prose.chat-reading-markdown h3 { font-size: 1.25em; }
+/* On the type scale at the default size: 22 / 18 / 18 / 15. */
+.markdown-prose.chat-reading-markdown h1 { font-size: calc(var(--chat-font-size) + 7px); }
+.markdown-prose.chat-reading-markdown :is(h2, h3) { font-size: calc(var(--chat-font-size) + 3px); }
 .markdown-prose.chat-reading-markdown :is(h4, h5, h6) { font-size: 1em; }
+.markdown-prose.chat-reading-markdown :is(h2, h3) {
+  margin-bottom: 8px;
+  /* The document variant underlines h2; in a reply the size step is enough. */
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.markdown-prose.chat-reading-markdown :is(h2, h3):not(:first-child) {
+  margin-top: 22px;
+}
 .markdown-prose.chat-reading-markdown code {
   font-family: var(--font-mono);
   font-size: var(--code-viewer-font-size);
+  font-weight: 400;
+}
+.markdown-prose.chat-reading-markdown table code {
+  font-size: 12px;
 }
 
 .markdown-prose {
@@ -2604,71 +2205,30 @@ html[data-touch-h5] .app-shell--mobile .sidebar-panel {
   border-bottom: 0;
 }
 
+/* A path or identifier in a table cell is one token. Breaking it per letter
+   in a narrow column ("src/lib/v / alidators.ts") made it unreadable; keep it
+   whole and let the wrapper's horizontal scroll absorb the width. */
+.markdown-prose .md-table-wrap :is(td, th) code {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
 .markdown-prose a code {
   color: inherit;
-}
-
-/* Fade-in animation for expand/appear transitions */
-@keyframes fade-in {
-  from { opacity: 0; transform: translateY(-4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-.fade-in {
-  animation: fade-in 200ms ease-out;
-}
-
-/* Thinking brain icon pulse animation */
-@keyframes thinking-brain-pulse {
-  0%, 100% { transform: scale(1); opacity: 0.85; }
-  50% { transform: scale(1.08); opacity: 1; }
-}
-.thinking-brain-icon {
-  animation: thinking-brain-pulse 1.8s ease-in-out infinite;
-}
-
-/* Thinking block animations */
-@keyframes thinking-cursor-blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
-}
-@keyframes thinking-dots {
-  0%, 20% { content: ''; }
-  40% { content: '.'; }
-  60% { content: '..'; }
-  80%, 100% { content: '...'; }
-}
-.thinking-cursor {
-  display: inline-block;
-  width: 2px;
-  height: 1em;
-  background: var(--color-text-tertiary);
-  vertical-align: middle;
-  margin-left: 1px;
-  animation: thinking-cursor-blink 1s step-end infinite;
-}
-.thinking-dots::after {
-  content: '';
-  animation: thinking-dots 1.4s steps(1, end) infinite;
-}
-.thinking-markdown > :first-child,
-.thinking-markdown > :first-child > :first-child {
-  margin-top: 0;
-}
-.thinking-markdown > :last-child,
-.thinking-markdown > :last-child > :last-child {
-  margin-bottom: 0;
 }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--color-outline); border-radius: 9999px; opacity: 0.3; }
-::-webkit-scrollbar-thumb:hover { opacity: 0.6; }
-.dark ::-webkit-scrollbar-thumb { background: var(--color-on-surface); opacity: 0.15; }
-.dark ::-webkit-scrollbar-thumb:hover { opacity: 0.35; }
+/* `opacity` is ignored on scrollbar parts, so the hover step is a darker ink. */
+::-webkit-scrollbar-thumb { background: var(--color-outline); border-radius: 9999px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-border-strong); }
 
+/* Clears the settings dock (8px inset + 30px row + 8px + hairline) with a
+   row's breathing room, so the last session never sits under it. */
 .sidebar-scroll-area {
-  padding-bottom: 72px;
+  padding-bottom: 60px;
   scrollbar-width: thin;
   scrollbar-color: var(--color-outline-a72) transparent;
 }
@@ -2715,24 +2275,31 @@ html[data-touch-h5] .app-shell--mobile .sidebar-panel {
   word-break: keep-all;
 }
 
+/* Five tiles on a 700px page: the headline total takes two columns so the rows
+   read 2+1 / 1+1+1 instead of leaving a hole at the end of the second row. */
 @container (min-width: 360px) {
   .activity-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-}
-
-@container (min-width: 560px) {
-  .activity-summary-grid {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-  }
 
   .activity-summary-metric-primary {
-    grid-column: auto;
+    grid-column: span 2;
   }
+}
+
+@container (min-width: 520px) {
+  .activity-summary-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.activity-heat-swatch {
+  border-radius: calc(var(--radius-xs) / 2);
 }
 
 .activity-heat-cell {
   position: relative;
+  border-radius: calc(var(--radius-xs) / 2);
   transform: translateZ(0);
   transform-origin: center;
   transition:
@@ -2745,7 +2312,7 @@ html[data-touch-h5] .app-shell--mobile .sidebar-panel {
 .activity-heat-cell:hover,
 .activity-heat-cell:focus-visible,
 .activity-heat-cell.is-active {
-  z-index: 1;
+  z-index: var(--z-raised);
   transform: translateZ(0) scale(1.16);
   box-shadow: var(--shadow-activity-cell-hover);
   filter: saturate(1.08);
@@ -2753,7 +2320,7 @@ html[data-touch-h5] .app-shell--mobile .sidebar-panel {
 
 @media (prefers-reduced-motion: reduce) {
   .activity-heat-cell {
-    transition-duration: 0.01ms !important;
+    transition: none;
   }
 
   .activity-heat-cell:hover,
@@ -2832,8 +2399,15 @@ html[data-touch-h5] .app-shell--mobile .sidebar-panel {
 .animate-overlay-in-top { animation: overlay-in-from-top 150ms ease-out; }
 .animate-overlay-in-bottom { animation: overlay-in-from-bottom 150ms ease-out; }
 .animate-overlay-in-right { animation: overlay-in-from-right 200ms cubic-bezier(0.22, 1, 0.36, 1); }
+/* A full-height sheet rising from the bottom edge (the phone's new task). */
+@keyframes sheet-rise {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+.animate-sheet-rise { animation: sheet-rise 280ms cubic-bezier(0.22, 1, 0.36, 1); }
 
 @media (prefers-reduced-motion: reduce) {
+  .animate-sheet-rise,
   .animate-overlay-in,
   .animate-overlay-in-top,
   .animate-overlay-in-bottom,
@@ -2918,12 +2492,20 @@ html[data-touch-h5] .app-shell--mobile .sidebar-panel {
    see, so its offsets would run short by one gap per turn. */
 .chat-turn-rail--none {
   padding-top: 24px;
+  /* The prompt's hover actions hang below the bubble (absolutely positioned,
+     24px tall) and must land inside this box: `--cv` rows paint-contain, so
+     anything past the padding edge is clipped. The bar does not add height;
+     it borrows the gap that separates the prompt from its reply. */
+  padding-bottom: 24px;
 }
 
+/* Held, not flashed: a jump usually lands on borderless content (a run's summary
+   line, a reply), and a tint that peaks for a few frames is over before the eye
+   has found where the scroll stopped. The spread ring lets the tint breathe past
+   text that sits flush with the item's edges without moving any layout. */
 @keyframes chat-navigation-target-pulse {
-  0% { background: transparent; }
-  22% { background: var(--color-chat-navigation-target); }
-  100% { background: transparent; }
+  0%, 100% { background: transparent; box-shadow: 0 0 0 4px transparent; }
+  12%, 70% { background: var(--color-chat-navigation-target); box-shadow: 0 0 0 4px var(--color-chat-navigation-target); }
 }
 
 .chat-render-item--navigation-target {
@@ -2931,10 +2513,51 @@ html[data-touch-h5] .app-shell--mobile .sidebar-panel {
   animation: chat-navigation-target-pulse 1.4s ease-out;
 }
 
+/* The jump targets one tool call. Its row or card carries the mark instead of
+   the whole item, which for an activity group can be thousands of rows. When
+   the call has no row of its own on screen the item keeps the mark. */
+.chat-render-item--navigation-target:has(.chat-tool-navigation-target) {
+  animation: none;
+}
+
+/* Rows are borderless lines: tint them like an item. Cards have their own
+   opaque surface, so they take a focus-coloured ring outside the border. */
+@keyframes chat-tool-row-navigation-target-pulse {
+  0%, 100% { background: transparent; box-shadow: 0 0 0 4px transparent; }
+  12%, 70% { background: var(--color-chat-navigation-target); box-shadow: 0 0 0 4px var(--color-chat-navigation-target); }
+}
+
+@keyframes chat-tool-card-navigation-target-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  12%, 70% { box-shadow: 0 0 0 2px var(--color-border-focus), 0 0 0 6px var(--color-chat-navigation-target); }
+}
+
+.chat-tool-navigation-target[data-tool-call-chrome="row"] {
+  animation: chat-tool-row-navigation-target-pulse 1.4s ease-out;
+}
+
+.chat-tool-navigation-target[data-tool-call-chrome="card"] {
+  animation: chat-tool-card-navigation-target-pulse 1.4s ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chat-render-item--navigation-target {
     animation: none;
     background: var(--color-chat-navigation-target);
+  }
+
+  .chat-render-item--navigation-target:has(.chat-tool-navigation-target) {
+    background: none;
+  }
+
+  .chat-tool-navigation-target[data-tool-call-chrome="row"] {
+    animation: none;
+    background: var(--color-chat-navigation-target);
+  }
+
+  .chat-tool-navigation-target[data-tool-call-chrome="card"] {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--color-border-focus);
   }
 }
 
@@ -3009,29 +2632,6 @@ html[data-touch-h5] .app-shell-viewport {
 }
 html[data-touch-h5][data-touch-h5-keyboard] .app-shell-viewport {
   padding-bottom: 0px;
-}
-
-/* Message action bars (copy / branch) are hover-revealed on desktop. Keep
-   them visible whenever the browser is in the narrow H5 shell, even if an
-   embedded browser reports no coarse pointer, and retain the touch marker as
-   coverage for wider tablets. */
-.app-shell--mobile [data-message-actions],
-html[data-touch-h5] [data-message-actions] {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.app-shell--mobile [data-message-actions] {
-  height: 2.75rem;
-}
-
-.app-shell--mobile [data-message-actions] > div,
-.app-shell--mobile [data-message-actions] button {
-  min-height: 2.75rem;
-}
-
-.app-shell--mobile [data-message-actions] button {
-  width: 2.75rem;
 }
 
 /* Agent list rows reveal their edit / delete / override buttons on hover, which
@@ -3156,9 +2756,9 @@ html[data-window-kind='pet'] #root {
   padding: 0 6px;
   background: var(--color-brand);
   box-shadow: 0 5px 14px rgba(13, 31, 48, 0.26);
-  color: white;
+  color: var(--color-on-primary);
   cursor: pointer;
-  font: 650 12px/1 var(--font-body);
+  font: 600 12px/1 var(--font-body);
   pointer-events: auto;
   -webkit-app-region: no-drag;
 }
@@ -3271,7 +2871,7 @@ html[data-window-kind='pet'] #root {
   /* Keep the card, collapse control, and visible mascot as one compact stack. */
   margin-bottom: 12px;
   border: 1px solid rgba(255, 255, 255, 0.76);
-  border-radius: 24px;
+  border-radius: var(--radius-3xl);
   padding: 6px 7px;
   background: rgba(255, 255, 255, 0.8);
   box-shadow:
@@ -3284,7 +2884,7 @@ html[data-window-kind='pet'] #root {
 }
 
 .pet-activity-card[data-expanded='true'] {
-  border-radius: 22px;
+  border-radius: var(--radius-3xl);
   padding-right: 7px;
 }
 
@@ -3348,10 +2948,10 @@ html[data-theme='ink-blue'] .pet-session-list > [role='listitem'] + [role='listi
   align-items: center;
   gap: 12px;
   border: 0;
-  border-radius: 17px;
+  border-radius: var(--radius-xl);
   padding: 7px 10px;
   background: transparent;
-  color: #25222b;
+  color: var(--color-text-primary);
   cursor: pointer;
   text-align: left;
   transition: background 140ms ease, transform 140ms ease;
@@ -3371,22 +2971,22 @@ html[data-theme='ink-blue'] .pet-session-list > [role='listitem'] + [role='listi
 }
 
 .pet-session-indicator.is-waiting {
-  background: #f1ad3b;
+  background: var(--color-warning);
 }
 
 .pet-session-indicator.is-failed {
-  background: #ee5a73;
+  background: var(--color-error);
 }
 
 .pet-session-indicator.is-review {
-  background: #46bf8c;
+  background: var(--color-success);
 }
 
 .pet-session-indicator.is-running {
   width: 12px;
   height: 12px;
-  border: 2px solid var(--color-primary-fixed-dim);
-  border-top-color: var(--color-brand);
+  border: 2px solid var(--color-info-container);
+  border-top-color: var(--color-info);
   background: transparent;
   animation: pet-status-spin 1s linear infinite;
 }
@@ -3399,11 +2999,6 @@ html[data-theme='ink-blue'] .pet-session-list > [role='listitem'] + [role='listi
 .pet-panel-toggle:focus-visible {
   outline: 2px solid var(--color-border-focus);
   outline-offset: -2px;
-}
-
-html[data-theme='dark'] .pet-session-row,
-html[data-theme='ink-blue'] .pet-session-row {
-  color: rgba(255, 255, 255, 0.94);
 }
 
 html[data-theme='dark'] .pet-session-row:hover,
@@ -3427,17 +3022,12 @@ html[data-theme='ink-blue'] .pet-session-row:hover {
 }
 
 .pet-session-title {
-  font: 650 13px/1.25 var(--font-body);
+  font: 500 13px/1.25 var(--font-body);
 }
 
 .pet-session-status {
-  color: rgba(75, 70, 85, 0.66);
-  font: 500 11px/1.25 var(--font-body);
-}
-
-html[data-theme='dark'] .pet-session-status,
-html[data-theme='ink-blue'] .pet-session-status {
-  color: rgba(236, 232, 243, 0.62);
+  color: var(--color-text-tertiary);
+  font: 400 12px/1.25 var(--font-body);
 }
 
 .pet-panel-toggle {
@@ -3473,7 +3063,7 @@ html[data-theme='ink-blue'] .pet-session-status {
 
 .pet-panel-toggle:hover {
   background: rgba(43, 47, 54, 0.88);
-  color: white;
+  color: rgba(255, 255, 255, 1);
 }
 
 .pet-panel-toggle:active {
@@ -3494,15 +3084,14 @@ html[data-theme='ink-blue'] .pet-panel-toggle {
 html[data-theme='dark'] .pet-panel-toggle:hover,
 html[data-theme='ink-blue'] .pet-panel-toggle:hover {
   background: rgba(255, 255, 255, 0.09);
-  color: white;
+  color: rgba(255, 255, 255, 1);
 }
 
 .pet-error-card {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
-  color: rgba(70, 65, 79, 0.68);
+  gap: 8px;
   font-size: 12px;
 }
 
@@ -3511,11 +3100,11 @@ html[data-theme='ink-blue'] .pet-panel-toggle:hover {
   left: 22px;
   bottom: 14px;
   width: 340px;
-  border: 1px solid rgba(234, 82, 104, 0.24);
-  border-radius: 18px;
-  padding: 18px;
-  background: rgba(255, 244, 246, 0.9);
-  color: #a83f54;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  padding: 16px;
+  background: var(--color-error-container);
+  color: var(--color-on-error-container);
   pointer-events: auto;
 }
 

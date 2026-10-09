@@ -136,6 +136,10 @@ export type McpSessionSync = {
 export type McpToggleResult = {
   server: McpServerRecord
   sessionSync?: McpSessionSync
+  /** Fork reconnect flow: a toggle/reconnect response may carry the live status it settled on. */
+  status?: McpServerRecord['status']
+  statusLabel?: string
+  statusDetail?: string
 }
 
 // Create/reconnect responses carry a sessionSync receipt (create fans the

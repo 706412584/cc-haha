@@ -1,13 +1,23 @@
 /**
- * The few things every Settings panel needs.
+ * The few things more than one Settings panel needs.
  *
- * Extracted while splitting `Settings.tsx` into one module per panel. These three are
- * the only declarations more than one panel reaches for, so they get their own module
- * rather than staying behind — leaving them in Settings.tsx would make every panel
- * import from the file that imports it, and the resulting cycle is exactly the kind of
- * fragility a split is supposed to remove.
+ * Extracted while splitting `Settings.tsx` into one module per panel, so a
+ * panel never imports from the file that imports it. The hand-rolled checkbox
+ * mark that used to live here is gone: settings toggles are `Switch` rows of
+ * the shared skeleton (`components/settings/SettingsSection`), and dialog
+ * checkboxes use `ui/Checkbox`.
  */
 
+export function isValidHttpProxyUrl(value: string) {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+/* Fork: hand-rolled checkbox rows still used by GeneralSettings's fork-only toggles. */
 export const SETTINGS_CHECKBOX_INPUT_CLASS = 'settings-checkbox-input peer'
 
 export function SettingsCheckboxMark({ checked, disabled = false }: { checked: boolean; disabled?: boolean }) {
@@ -25,13 +35,4 @@ export function SettingsCheckboxMark({ checked, disabled = false }: { checked: b
       </span>
     </span>
   )
-}
-
-export function isValidHttpProxyUrl(value: string) {
-  try {
-    const url = new URL(value)
-    return url.protocol === 'http:' || url.protocol === 'https:'
-  } catch {
-    return false
-  }
 }

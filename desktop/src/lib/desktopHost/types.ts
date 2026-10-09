@@ -194,8 +194,6 @@ export type PreviewHostMessage = PreviewCaptureMessage | PreviewPickerMessage | 
  * Multi-page browser host. Every method names its page, so a second page never
  * navigates the first and unmounting a React surface never destroys a page.
  */
-export type WorkspaceBrowserBounds = PreviewBounds
-
 export type WorkspaceBrowserCaptureKind = 'full' | 'viewport'
 
 export type WorkspaceBrowserMenuAction =
@@ -422,6 +420,28 @@ export type DesktopTunnelStartOptions = {
   provider?: DesktopTunnelProvider
 }
 
+export type MigrationPreview = {
+  id: string
+  sourceDir: string
+  targetDir: string
+  files: number
+  bytes: number
+  activeTasks: number
+}
+
+export type MigrationStatus = {
+  id: string
+  sourceDir: string
+  targetDir: string
+  stage: 'preparing' | 'quiescing' | 'copying' | 'verifying' | 'committing' | 'restarting' | 'completed' | 'cancelled' | 'failed'
+  files: number
+  totalFiles: number
+  bytes: number
+  totalBytes: number
+  error?: string
+  cancellable: boolean
+}
+
 export type DesktopPublicAccessStatus = {
   state: 'unconfigured' | 'disabled' | 'connecting' | 'online' | 'reconnecting' | 'failed'
   hasCredential: boolean
@@ -564,23 +584,21 @@ export type DesktopHost = {
   }
   browser: {
     showMenu(tabId: string, options: WorkspaceBrowserMenuOptions): Promise<WorkspaceBrowserMenuAction | null>
+    /** Registers the page's `<webview>` guest with the host and starts `url`. */
     create(
       tabId: string,
-      options: { storageId: string; url?: string; bounds?: WorkspaceBrowserBounds; visible?: boolean },
+      options: { storageId: string; url?: string; webContentsId: number },
     ): Promise<void>
     navigate(tabId: string, url: string): Promise<void>
     goBack(tabId: string): Promise<void>
     goForward(tabId: string): Promise<void>
     reload(tabId: string, options?: { ignoreCache?: boolean }): Promise<void>
     stop(tabId: string): Promise<void>
-    setBounds(tabId: string, bounds: WorkspaceBrowserBounds): Promise<void>
     setVisible(tabId: string, visible: boolean): Promise<void>
     setZoom(tabId: string, factor: number): Promise<void>
     find(tabId: string, text: string, options?: WorkspaceBrowserFindOptions): Promise<void>
     stopFind(tabId: string): Promise<void>
     capture(tabId: string, kind: WorkspaceBrowserCaptureKind): Promise<void>
-    /** Read-only presentation backdrop, with no screenshot or composer event. */
-    snapshot(tabId: string): Promise<string | null>
     message(tabId: string, payload: PreviewHostMessage): Promise<void>
     printToPdf(tabId: string): Promise<void>
     close(tabId: string): Promise<void>
@@ -591,6 +609,13 @@ export type DesktopHost = {
     set(config: AppModeSetInput): Promise<void>
     prepareRestart(): Promise<void>
     restart(): Promise<void>
+    migration: {
+      prepare(targetDir: string): Promise<MigrationPreview>
+      start(id: string): Promise<void>
+      status(): Promise<MigrationStatus | null>
+      cancel(id: string): Promise<void>
+      onProgress(handler: (status: MigrationStatus) => void): Promise<DesktopHostUnlisten>
+    }
   }
   adapters: {
     restartSidecar(): Promise<void>

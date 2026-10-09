@@ -47,11 +47,9 @@ describe('IconButton', () => {
     expect(container.firstElementChild?.className).toContain('focus-visible:ring-2')
   })
 
-  it('renders a string icon as a material symbol hidden from assistive tech', () => {
-    const { container } = render(<IconButton icon="settings" label="Settings" />)
-    const glyph = container.querySelector('.material-symbols-outlined')
-    expect(glyph).toHaveTextContent('settings')
-    expect(glyph).toHaveAttribute('aria-hidden', 'true')
+  it('renders the icon element it is given and names the button from label', () => {
+    render(<IconButton icon={<svg data-testid="glyph" aria-hidden="true" />} label="Settings" />)
+    expect(screen.getByRole('button', { name: 'Settings' })).toContainElement(screen.getByTestId('glyph'))
   })
 
   it('shows a spinner and disables itself while loading', () => {
@@ -106,6 +104,15 @@ describe('IconButton', () => {
   it('omits aria-pressed entirely when it is not a toggle', () => {
     render(<IconButton icon={<span />} label="Refresh" />)
     expect(screen.getByRole('button', { name: 'Refresh' })).not.toHaveAttribute('aria-pressed')
+  })
+
+  it('marks a pressed sidebar toggle with the theme accent, not the hover fill', () => {
+    const { container } = render(<IconButton icon={<span />} label="Tasks" tone="muted" surface="sidebar" pressed />)
+    const className = container.firstElementChild!.className
+    expect(className).toContain('bg-[var(--color-brand-soft)]')
+    expect(className).toContain('text-[var(--color-brand)]')
+    expect(className).not.toContain('bg-[var(--color-sidebar-item-hover)]')
+    expect(className).not.toContain('text-[var(--color-text-tertiary)]')
   })
 
   it('drops the tone hover while pressed so two fills cannot compete', () => {
@@ -205,6 +212,16 @@ describe('IconButton', () => {
   it('solid suppresses the tone hover so two fills cannot compete', () => {
     const { container } = render(<IconButton icon={<span />} label="Remove" tone="danger" solid />)
     expect(container.firstElementChild?.className).not.toContain('hover:bg-[var(--color-error-soft)]')
+  })
+
+  it('soft rests on a neutral disc with no border, and owns the only hover fill', () => {
+    // `filled` is a bordered card face; the recording bar's cancel and stop sit
+    // beside a waveform and need a ground without becoming separate objects.
+    const { container } = render(<IconButton icon={<span />} label="Cancel" tone="default" soft filled />)
+    const classes = container.firstElementChild!.className.split(/\s+/)
+    expect(classes).toContain('bg-[var(--color-btn-soft-bg)]')
+    expect(classes.filter((c) => c.startsWith('hover:bg-'))).toEqual(['hover:bg-[var(--color-btn-soft-hover)]'])
+    expect(classes.some((c) => c === 'border' || c.startsWith('border-'))).toBe(false)
   })
 
   it('emits exactly one disabled opacity', () => {

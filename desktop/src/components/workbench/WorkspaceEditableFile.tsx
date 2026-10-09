@@ -1,5 +1,5 @@
 import { useCallback, useDeferredValue, useMemo, useState } from 'react'
-import { Columns2, FilePen, FileText } from 'lucide-react'
+import { Columns2, FilePen, FileText, SquareCode } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { useTabStore } from '../../stores/tabStore'
@@ -259,7 +259,7 @@ export function WorkspaceEditableFile({
       ) : editing && !unsupported ? (
         editor
       ) : unsupported ? (
-        <PanelMessage icon="code_off" message={t('workspace.editUnsupported')} />
+        <PanelMessage icon={SquareCode} message={t('workspace.editUnsupported')} />
       ) : (
         preview
       )}

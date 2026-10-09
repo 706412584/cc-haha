@@ -5,7 +5,6 @@ import type {
   DesktopHostUnlisten,
   NotificationPermissionState,
 } from './types'
-import { buildTraceWindowUrl } from '../traceLaunch'
 import { readBrowserLanguages } from '../../i18n/locale'
 
 const browserCapabilities: DesktopHostCapabilities = {
@@ -128,15 +127,6 @@ export const browserHost: DesktopHost = {
     },
     async openPath() {
       unsupported('Opening system file paths')
-    },
-  },
-  trace: {
-    async openWindow(sessionId) {
-      if (typeof window !== 'undefined') {
-        window.open(buildTraceWindowUrl(sessionId), '_blank', 'noopener,noreferrer')
-        return
-      }
-      unsupported('Opening trace windows')
     },
   },
   pets: {
@@ -335,13 +325,11 @@ export const browserHost: DesktopHost = {
     async goForward() {},
     async reload() {},
     async stop() {},
-    async setBounds() {},
     async setVisible() {},
     async setZoom() {},
     async find() {},
     async stopFind() {},
     async capture() {},
-    async snapshot() { return null },
     async message() {},
     async printToPdf() {},
     async showMenu() { return null },
@@ -362,6 +350,13 @@ export const browserHost: DesktopHost = {
     },
     async restart() {
       unsupported('Desktop app restart')
+    },
+    migration: {
+      async prepare() { return unsupported('Data migration') },
+      async start() { unsupported('Data migration') },
+      async status() { return null },
+      async cancel() { unsupported('Data migration') },
+      async onProgress() { return noopUnlisten },
     },
   },
   adapters: {

@@ -216,7 +216,14 @@ export function snapshotWithHistoricalMembers(
         }
       }
       const [currentMember] = remaining.splice(currentIndex, 1)
-      const merged = { ...historicalMember, ...currentMember! }
+      const merged = {
+        ...historicalMember,
+        ...currentMember!,
+        // A frame records its failure state by omission once it clears, so an
+        // earlier frame's failure must not outlive the recovery.
+        lastError: currentMember!.lastError,
+        autoRetry: currentMember!.autoRetry,
+      }
       // A later frame can land with `model: undefined`, which would clobber a
       // model already learned from an earlier snapshot. Restore the historical
       // model when the incoming member has no model of its own.
@@ -269,7 +276,7 @@ export function resolveTeamMemberIdentity(
   return { member, isLead }
 }
 
-export type MemberWorkState = 'working' | 'idle' | 'stopped' | 'exited' | 'error'
+export type MemberWorkState = 'working' | 'idle' | 'retrying' | 'stopped' | 'exited' | 'error'
 
 /**
  * What the member itself is doing, which is never what its tasks say. A task
@@ -280,19 +287,52 @@ export type MemberWorkState = 'working' | 'idle' | 'stopped' | 'exited' | 'error
  *
  * The lead has no runner writing turn markers for it, so its caller supplies
  * whether its session is streaming.
+ *
+ * Only `exited` is final. A stopped, retrying or failed member is still on the
+ * team, and a message is what brings it back.
  */
 export function getMemberWorkState(
   member: TeamMember,
   options: { isLead?: boolean; leadIsStreaming?: boolean } = {},
 ): MemberWorkState {
   if (member.status === 'completed' || member.activity === 'exited') return 'exited'
-  if (member.status === 'error') return 'error'
-  if (options.isLead) return options.leadIsStreaming ? 'working' : 'idle'
+  if (options.isLead) {
+    if (member.status === 'error') return 'error'
+    return options.leadIsStreaming ? 'working' : 'idle'
+  }
+  // A live turn outranks the failure record: the runtime keeps the reason the
+  // previous turn failed until the turn a message started succeeds.
   if (member.activity === 'active') return 'working'
+  // With its process gone, a scheduled retry will never fire and the failure
+  // only explains why it stopped; a message is what restarts it.
+  if (member.activity === 'stopped') return 'stopped'
+  if (member.autoRetry) return 'retrying'
+  if (member.status === 'error') return 'error'
   if (member.activity === 'idle') return 'idle'
   // `unknown` means the backend records no turn markers and left no transcript
   // to date, so fall back to the coarser roster status.
   return member.status === 'running' ? 'working' : 'idle'
+}
+
+export type StalledTaskOwnerState = Extract<MemberWorkState, 'stopped' | 'error' | 'retrying'>
+
+/**
+ * Why a task still marked in progress is not moving: its owner was stopped,
+ * failed, or waits for an automatic retry. Only the member updates its own
+ * task, so the list keeps saying `in_progress`, and the board would animate
+ * work nobody is doing.
+ */
+export function stalledTaskOwnerState(
+  task: TeamWorkbenchTask,
+  snapshot: TeamWorkbenchSnapshot,
+): StalledTaskOwnerState | undefined {
+  if (task.status !== 'in_progress' || snapshot.deletedAt) return undefined
+  const owner = inferTaskOwner(task, snapshot)
+  if (!owner) return undefined
+  const { member, isLead } = resolveTeamMemberIdentity(snapshot.team, owner.identity)
+  if (isLead || !snapshot.team.members.includes(member)) return undefined
+  const state = getMemberWorkState(member)
+  return state === 'stopped' || state === 'error' || state === 'retrying' ? state : undefined
 }
 
 export type TaskOwnerAttribution = {

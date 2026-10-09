@@ -6,14 +6,20 @@ import { ScheduledTasks } from '../../pages/ScheduledTasks'
 import { ExtensionMarket } from '@/pages/ExtensionMarket'
 import { Settings } from '../../pages/Settings'
 import { TerminalSettings } from '../../pages/TerminalSettings'
-import { TraceList } from '../../pages/TraceList'
-import { TraceSession } from '../../pages/TraceSession'
 import { SubagentRunPage, TeamMemberRunPage } from '../../pages/SubagentRunPage'
 import { AgentOfficePage } from '../../pages/AgentOffice'
 import { AgentTeamsWorkbenchTab } from '../agentTeams/AgentTeamsWorkbenchTab'
-import { returnToTraceList } from '../../lib/traceNavigation'
+import { WorkspaceBrowserGuestLayer } from '../workbench/WorkspaceBrowserGuestLayer'
 
-export function ContentRouter() {
+type ContentRouterProps = {
+  /**
+   * What shows when no tab is active. The desktop shows the new-session page;
+   * the phone shows its session list with the new-task composer under it.
+   */
+  homePage?: ReactNode
+}
+
+export function ContentRouter({ homePage }: ContentRouterProps = {}) {
   const activeTabId = useTabStore((s) => s.activeTabId)
   const tabs = useTabStore((s) => s.tabs)
   const activeTabType = tabs.find((t) => t.sessionId === activeTabId)?.type
@@ -44,21 +50,13 @@ export function ContentRouter() {
 
   let page: ReactNode = null
   if (!activeTabId || !activeTabType) {
-    page = <EmptySession />
+    page = homePage ?? <EmptySession />
   } else if (activeTabType === 'settings') {
     page = <Settings />
   } else if (activeTabType === 'scheduled') {
     page = <ScheduledTasks />
   } else if (activeTabType === 'connectors' || activeTabType === 'market') {
     page = <ExtensionMarket />
-  } else if (activeTabType === 'trace') {
-    const traceTabId = activeTabId
-    const traceSessionId = tabs.find((t) => t.sessionId === traceTabId)?.traceSessionId
-    page = traceSessionId
-      ? <TraceSession sessionId={traceSessionId} onBack={() => returnToTraceList(traceTabId)} />
-      : <EmptySession />
-  } else if (activeTabType === 'traces') {
-    page = <TraceList />
   } else if (activeTabType === 'subagent') {
     const subagentTab = tabs.find((t) => t.sessionId === activeTabId)
     page = subagentTab?.sourceSessionId && subagentTab.subagentToolUseId
@@ -103,18 +101,24 @@ export function ContentRouter() {
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden">
-      {retainedSessionId && (
-        <div
-          aria-hidden={!activeSessionId}
-          {...(activeSessionId ? {} : { inert: '' })}
-          data-testid="session-tab-panel"
-          className={`absolute inset-0 flex min-h-0 flex-col overflow-hidden ${
-            activeSessionId ? 'z-10 opacity-100' : 'pointer-events-none z-0 opacity-0'
-          }`}
-        >
+      {/*
+        Always rendered, even with no task to retain: the browser page layer
+        inside it must outlive every task switch, because a page whose element
+        is removed is destroyed and one that is moved reloads.
+      */}
+      <div
+        aria-hidden={!activeSessionId}
+        {...(activeSessionId ? {} : { inert: '' })}
+        data-testid="session-tab-panel"
+        className={`absolute inset-0 flex min-h-0 flex-col overflow-hidden ${
+          activeSessionId ? 'z-10 opacity-100' : 'pointer-events-none z-0 opacity-0'
+        }`}
+      >
+        {retainedSessionId ? (
           <ActiveSession sessionId={retainedSessionId} active={Boolean(activeSessionId)} />
-        </div>
-      )}
+        ) : null}
+        <WorkspaceBrowserGuestLayer />
+      </div>
       {page && (
         <div className="absolute inset-0 z-10 flex min-h-0 flex-col overflow-hidden">
           {page}
