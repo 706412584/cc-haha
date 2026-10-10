@@ -48,7 +48,10 @@ async function imageSourceToDataUrl(src: string): Promise<string> {
   let blobUrl: string
   try {
     blobUrl = await fetchServerImageBlobUrl(src)
-  } catch {
+  } catch (error) {
+    // Only a non-local origin falls back to the bare fetch; a local-server
+    // failure (404, auth) must surface its own error instead of being masked.
+    if (!(error instanceof Error) || error.message !== 'Not a local-server image URL') throw error
     const response = await fetch(src)
     if (!response.ok) throw new Error(`Failed to load image: HTTP ${response.status}`)
     return readBlobAsDataUrl(await response.blob())

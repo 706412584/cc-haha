@@ -225,13 +225,15 @@ export function TabBar() {
       hasVisibleActivity: hasVisibleSessionActivity(model),
     }
   }))
-  // A team member's transcript never shows the activity button (fork guard the
-  // merge dropped; the unified-panel setting deliberately no longer gates it —
-  // a persisted workflow-only run must keep the button).
+  // Fork guards the merge dropped: the unified-panel setting gates the button
+  // (with the legacy panel on, activity lives in SessionTaskBar instead), and
+  // a team member's transcript never shows it.
+  const unifiedActivityPanelEnabled = useSettingsStore((state) => state.unifiedActivityPanelEnabled)
   const isActiveMemberSession = useTeamStore((state) =>
     activeTabId ? Boolean(state.getMemberBySessionId(activeTabId)) : false,
   )
-  const showActivityButton = activeTabId &&
+  const showActivityButton = unifiedActivityPanelEnabled &&
+    activeTabId &&
     !isActiveMemberSession &&
     activityState.hasVisibleActivity &&
     !isWorkbenchOpen
@@ -408,9 +410,8 @@ export function TabBar() {
     const el = scrollRef.current
     if (!el) return
     const step = el.clientWidth * SCROLL_STEP_RATIO
-    // The chevrons are the only way to drive the strip by hand — it is
-    // `overflow-x-hidden`, so wheel and trackpad do not reach it — which makes
-    // this the one place that has to hand the position over to the user.
+    // A chevron press hands the position over to the user (see
+    // `realignActiveTab`), same as the wheel handler below.
     userScrolledRef.current = true
     el.scrollBy({ left: direction === 'left' ? -step : step, behavior: 'smooth' })
   }
