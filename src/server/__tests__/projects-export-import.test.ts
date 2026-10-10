@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach } from 'bun:test'
+import { afterAll, describe, it, expect, mock, beforeEach } from 'bun:test'
 import * as path from 'path'
 
 const MOCK_CLAUDE_HOME = path.join('/mock', 'home', '.claude')
@@ -34,6 +34,16 @@ mock.module('fs/promises', () => ({
     dirCreated.add(path.resolve(dirPath))
   },
 }))
+
+// Bun's mock.module leaks across files in a same-process full run and has no
+// unregister API, so every later test file importing node:fs/promises would
+// get this partial mock (handle.writeFile undefined etc.). Restore the real
+// module once this file's tests are done.
+afterAll(async () => {
+  const realFs = await import('node:fs/promises')
+  mock.module('fs/promises', () => realFs)
+  mock.module('node:fs/promises', () => realFs)
+})
 
 import { handleProjectsApi } from '../api/projects'
 
