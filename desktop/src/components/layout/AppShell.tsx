@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Sidebar } from './Sidebar'
 import { ContentRouter } from './ContentRouter'
+import { AgentOfficeModal } from '../../pages/AgentOffice'
 import { ToastContainer } from '@/components/layout/Toast'
 import { UpdateChecker } from '@/components/layout/UpdateChecker'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -55,6 +56,19 @@ export function AppShell() {
   }, [])
   const t = useTranslation()
   const desktopRuntime = isDesktopRuntime()
+  // Fork: Agent Office surface. 'modal' renders here; 'tab' routes through
+  // ContentRouter's office tab (TabBar's Building2 button picks per setting).
+  const activeModal = useUIStore((s) => s.activeModal)
+  const officeModalSessionId = activeModal?.startsWith('agentOffice:')
+    ? activeModal.slice('agentOffice:'.length)
+    : null
+  const expandOfficeModal = () => {
+    if (!officeModalSessionId) return
+    useUIStore.getState().closeModal()
+    queueMicrotask(() => {
+      useTabStore.getState().openOfficeTab(officeModalSessionId, t('agentOffice.title'))
+    })
+  }
   const shellLayout = useMobileShellLayout(desktopRuntime)
   const tabs = useTabStore((s) => s.tabs)
   const activeTabId = useTabStore((s) => s.activeTabId)
@@ -258,6 +272,13 @@ export function AppShell() {
           <ContentRouter />
         </WorkspaceHeaderProvider>
       </main>
+      {desktopRuntime && officeModalSessionId ? (
+        <AgentOfficeModal
+          sessionId={officeModalSessionId}
+          onClose={() => useUIStore.getState().closeModal()}
+          onExpand={expandOfficeModal}
+        />
+      ) : null}
       <ToastContainer />
       <UpdateChecker />
     </div>

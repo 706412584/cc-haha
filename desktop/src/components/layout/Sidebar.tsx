@@ -42,6 +42,7 @@ import {
   type SidebarProjectPreferences,
 } from '../../api/desktopUiPreferences'
 import { getDesktopHost } from '../../lib/desktopHost'
+import { projectsApi } from '../../api/projects'
 import { hasRunningBackgroundTasks } from '../../lib/backgroundTasks'
 import { collectAttentionIds } from '../../lib/sessionAttention'
 import { getSessionWorkspaceState, getSessionSeedWorkDir } from '../../lib/sessionWorkspace'
@@ -828,6 +829,132 @@ export function Sidebar({
     setPendingBatchDeleteSessionIds(null)
   }, [exitBatchMode])
 
+  const handleCopySessionPath = useCallback(async (sessionId: string) => {
+    setContextMenu(null)
+    const session = sessions.find((candidate) => candidate.id === sessionId)
+    if (!session?.filePath) {
+      addToast({ type: 'error', message: t('sidebar.copySessionPathUnavailable') })
+      return
+    }
+    try {
+      await desktopHost.clipboard.writeText(session.filePath)
+      addToast({ type: 'success', message: t('sidebar.copySessionPathSuccess') })
+    } catch {
+      addToast({ type: 'error', message: t('common.copyFailed') })
+    }
+  }, [addToast, sessions, t])
+
+  const handleRevealSession = useCallback(async (sessionId: string) => {
+    setContextMenu(null)
+    const session = sessions.find((candidate) => candidate.id === sessionId)
+    if (!session?.filePath) {
+      addToast({ type: 'error', message: t('sidebar.copySessionPathUnavailable') })
+      return
+    }
+    const reveal = desktopHost.shell.showItemInFolder
+    if (!reveal) {
+      addToast({ type: 'error', message: t('sidebar.revealSessionUnsupported') })
+      return
+    }
+    try {
+      await reveal(session.filePath)
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: t('sidebar.revealSessionFailure', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      })
+    }
+  }, [addToast, sessions, t])
+
+  const handleExportSession = useCallback(async (sessionId: string) => {
+    setContextMenu(null)
+    const session = sessions.find((candidate) => candidate.id === sessionId)
+    const workDir = session?.workDir || session?.projectRoot || session?.projectPath
+    if (!workDir) {
+      addToast({ type: 'error', message: t('sidebar.exportSessionNoWorkDir') })
+      return
+    }
+    try {
+      const result = await projectsApi.exportSession(workDir, sessionId)
+      addToast({
+        type: 'success',
+        message: t('sidebar.exportSessionSuccess', { filename: result.filename }),
+      })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: t('sidebar.exportSessionFailure', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      })
+    }
+  }, [addToast, sessions, t])
+
+  const [isBatchExporting, setIsBatchExporting] = useState(false)
+
+  const handleBatchExport = useCallback(async () => {
+    const ids = [...selectedSessionIds]
+    if (ids.length === 0) return
+    if (ids.length === 1) {
+      await handleExportSession(ids[0]!)
+      handleExitBatchMode()
+      return
+    }
+
+    setIsBatchExporting(true)
+    addToast({ type: 'info', message: t('sidebar.batchExporting', { count: ids.length }) })
+    try {
+      const { zipSync } = await import('fflate')
+      const entries: Record<string, Uint8Array> = {}
+      for (const sessionId of ids) {
+        const session = sessions.find((candidate) => candidate.id === sessionId)
+        const workDir = session?.workDir || session?.projectRoot || session?.projectPath
+        if (!workDir) continue
+        try {
+          const { filename, blob } = await projectsApi.exportSessionBlob(workDir, sessionId)
+          entries[filename] = new Uint8Array(await blob.arrayBuffer())
+        } catch {
+          // Export the sessions that are still available; report failure only if none remain.
+        }
+      }
+      const exportedCount = Object.keys(entries).length
+      if (exportedCount === 0) {
+        addToast({
+          type: 'error',
+          message: t('sidebar.exportSessionFailure', { error: 'No sessions exported' }),
+        })
+        return
+      }
+      const zipData = zipSync(entries)
+      const zipBlob = new Blob([zipData], { type: 'application/zip' })
+      const filename = `sessions-export-${new Date().toISOString().slice(0, 10)}.zip`
+      const objectUrl = URL.createObjectURL(zipBlob)
+      const anchor = document.createElement('a')
+      anchor.href = objectUrl
+      anchor.download = filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+      addToast({
+        type: 'success',
+        message: t('sidebar.exportSessionSuccess', { filename: `${filename} (${exportedCount} sessions)` }),
+      })
+      handleExitBatchMode()
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: t('sidebar.exportSessionFailure', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      })
+    } finally {
+      setIsBatchExporting(false)
+    }
+  }, [addToast, handleExitBatchMode, handleExportSession, selectedSessionIds, sessions, t])
+
   const requestBatchDelete = useCallback((ids: string[]) => {
     if (ids.length === 0) return
     setPendingBatchDeleteSessionIds([...new Set(ids)])
@@ -1122,6 +1249,17 @@ export function Sidebar({
                     {filteredSessionIds.length > 0 && filteredSessionIds.every((id) => selectedSessionIds.has(id))
                       ? t('sidebar.batchDeselectAll')
                       : t('sidebar.batchSelectAll')}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="base"
+                    onClick={() => void handleBatchExport()}
+                    disabled={selectedCount === 0 || isBatchExporting}
+                    loading={isBatchExporting}
+                  >
+                    {isBatchExporting
+                      ? t('sidebar.batchExporting', { count: selectedCount })
+                      : t('sidebar.batchExportSelected', { count: selectedCount })}
                   </Button>
                   <Button
                     variant="danger"
@@ -1483,6 +1621,26 @@ export function Sidebar({
           >
             {t('common.rename')}
           </button>
+          <button
+            onClick={() => void handleExportSession(contextMenu.id)}
+            className="flex h-8 w-full items-center rounded-[var(--radius-sm)] px-2.5 text-left text-[13px] text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+          >
+            {t('sidebar.exportSession')}
+          </button>
+          <button
+            onClick={() => void handleCopySessionPath(contextMenu.id)}
+            className="flex h-8 w-full items-center rounded-[var(--radius-sm)] px-2.5 text-left text-[13px] text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+          >
+            {t('sidebar.copySessionPath')}
+          </button>
+          {desktopHost.shell.showItemInFolder && (
+            <button
+              onClick={() => void handleRevealSession(contextMenu.id)}
+              className="flex h-8 w-full items-center rounded-[var(--radius-sm)] px-2.5 text-left text-[13px] text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+            >
+              {t('sidebar.revealSession')}
+            </button>
+          )}
           <button
             onClick={() => handleDelete(contextMenu.id)}
             className="flex h-8 w-full items-center rounded-[var(--radius-sm)] px-2.5 text-left text-[13px] text-[var(--color-error)] transition-colors hover:bg-[var(--color-error-container)]"

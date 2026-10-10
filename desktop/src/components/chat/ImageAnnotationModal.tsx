@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Modal } from '@/components/ui/Modal'
 import { useOverlayStore } from '../../stores/overlayStore'
+import { fetchServerImageBlobUrl } from '../../lib/authedImage'
 
 type Tool = 'rect' | 'arrow' | 'text'
 
@@ -31,9 +32,24 @@ type TextDrag = {
 
 async function imageSourceToDataUrl(src: string): Promise<string> {
   if (src.startsWith('data:')) return src
-  const response = await fetch(src)
-  if (!response.ok) throw new Error(`Failed to load image: HTTP ${response.status}`)
-  const blob = await response.blob()
+  // A bare `fetch(src)` carries no credential: the packaged renderer's page
+  // origin is `file://`, and with H5 access enabled the server refuses that
+  // credential-less cross-site fetch. The thumbnail's `<img>` gets the header
+  // injected by the Electron session; this path has to fetch through the
+  // authenticated client instead (same route as AuthedImage).
+  let blob: Blob
+  if (src.startsWith('blob:')) {
+    const response = await fetch(src)
+    if (!response.ok) throw new Error(`Failed to load image: HTTP ${response.status}`)
+    blob = await response.blob()
+  } else {
+    const blobUrl = await fetchServerImageBlobUrl(src)
+    try {
+      blob = await (await fetch(blobUrl)).blob()
+    } finally {
+      URL.revokeObjectURL(blobUrl)
+    }
+  }
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => resolve(reader.result as string)

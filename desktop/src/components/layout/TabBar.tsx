@@ -5,6 +5,7 @@ import {
   SETTINGS_TAB_ID,
   MARKET_TAB_ID,
   CONNECTORS_TAB_ID,
+  OFFICE_TAB_PREFIX,
   SUBAGENT_TAB_PREFIX,
   TEAM_MEMBER_TAB_PREFIX,
   TEAM_TAB_PREFIX,
@@ -15,6 +16,8 @@ import {
   type TabType,
 } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useSettingsStore } from '../../stores/settingsStore'
+import { useUIStore } from '../../stores/uiStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { isPlaceholderSessionTitle } from '../../lib/sessionTitle'
 import { useWorkspaceStore } from '../../stores/workspaceStore'
@@ -33,7 +36,7 @@ import { SessionAttentionMark } from './SessionAttentionMark'
 import { TabAttentionJump } from './TabAttentionJump'
 import { WindowControls, showWindowControls } from './WindowControls'
 import { OpenProjectMenu } from './OpenProjectMenu'
-import { AppWindow, Bot, CalendarClock, ChevronLeft, ChevronRight, Link, Network, PanelRight, Settings, SquareTerminal, Store, X, type LucideIcon } from 'lucide-react'
+import { AppWindow, Bot, Building2, CalendarClock, ChevronLeft, ChevronRight, Link, Network, PanelRight, Settings, SquareTerminal, Store, X, type LucideIcon } from 'lucide-react'
 import { WorkspaceLayoutControls } from './WorkspaceLayoutControls'
 import { useWorkspaceHeaderHost } from './WorkspaceHeaderContext'
 import { ActionDialog } from '@/components/ui/ActionDialog'
@@ -125,6 +128,7 @@ function isSessionTabId(tabId: string | null) {
     !tabId.startsWith(TERMINAL_TAB_PREFIX) &&
     !tabId.startsWith(WORKBENCH_TAB_PREFIX) &&
     !tabId.startsWith(SUBAGENT_TAB_PREFIX) &&
+    !tabId.startsWith(OFFICE_TAB_PREFIX) &&
     !tabId.startsWith(TEAM_TAB_PREFIX) &&
     !tabId.startsWith(TEAM_MEMBER_TAB_PREFIX)
 }
@@ -221,7 +225,14 @@ export function TabBar() {
       hasVisibleActivity: hasVisibleSessionActivity(model),
     }
   }))
+  // A team member's transcript never shows the activity button (fork guard the
+  // merge dropped; the unified-panel setting deliberately no longer gates it —
+  // a persisted workflow-only run must keep the button).
+  const isActiveMemberSession = useTeamStore((state) =>
+    activeTabId ? Boolean(state.getMemberBySessionId(activeTabId)) : false,
+  )
   const showActivityButton = activeTabId &&
+    !isActiveMemberSession &&
     activityState.hasVisibleActivity &&
     !isWorkbenchOpen
 
@@ -402,6 +413,17 @@ export function TabBar() {
     // this the one place that has to hand the position over to the user.
     userScrolledRef.current = true
     el.scrollBy({ left: direction === 'left' ? -step : step, behavior: 'smooth' })
+  }
+
+  // The strip is `overflow-x-auto` with a hidden scrollbar, so a vertical
+  // wheel over it has to be translated into horizontal scroll by hand.
+  const handleTabWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    const el = scrollRef.current
+    if (!el || el.scrollWidth <= el.clientWidth) return
+    userScrolledRef.current = true
+    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
+    event.preventDefault()
+    el.scrollLeft += event.deltaY
   }
 
   const closeTabWithCleanup = useCallback((tab: Tab) => {
@@ -636,8 +658,8 @@ export function TabBar() {
     </>
   ) : null
 
-  const rightScrollControl = canScrollRight && (
-        <button type="button" onClick={() => scroll('right')} aria-label={t('tabs.scrollRight')} aria-describedby={attentionOffscreen.right ? `${attentionHintId}-right` : undefined} title={attentionOffscreen.right ? t('sidebar.sessionNeedsAttention') : undefined} className="relative flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]">
+  const rightScrollControl = (canScrollLeft || canScrollRight) && (
+        <button type="button" onClick={() => scroll('right')} aria-label={t('tabs.scrollRight')} disabled={!canScrollRight} aria-describedby={attentionOffscreen.right ? `${attentionHintId}-right` : undefined} title={attentionOffscreen.right ? t('sidebar.sessionNeedsAttention') : undefined} className={`relative flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)] ${canScrollRight ? '' : 'invisible'}`}>
           <ChevronRight size={16} strokeWidth={1.75} aria-hidden="true" />
           {attentionHint('right')}
         </button>
@@ -667,8 +689,11 @@ export function TabBar() {
     >
 
       <div data-testid="workspace-session-header" className={hasWorkspaceHeader ? 'flex min-w-0 flex-1 overflow-hidden' : 'contents'}>
-      {canScrollLeft && (
-        <button type="button" onClick={() => scroll('left')} aria-label={t('tabs.scrollLeft')} aria-describedby={attentionOffscreen.left ? `${attentionHintId}-left` : undefined} title={attentionOffscreen.left ? t('sidebar.sessionNeedsAttention') : undefined} className="relative flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]">
+      {/* Both chevrons stay mounted: unmounting the other changes the strip
+          width and restarts alignment, so an end-reached chevron only goes
+          invisible (fork behavior, preserved through the merge). */}
+      {(canScrollLeft || canScrollRight) && (
+        <button type="button" onClick={() => scroll('left')} aria-label={t('tabs.scrollLeft')} disabled={!canScrollLeft} aria-describedby={attentionOffscreen.left ? `${attentionHintId}-left` : undefined} title={attentionOffscreen.left ? t('sidebar.sessionNeedsAttention') : undefined} className={`relative flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)] ${canScrollLeft ? '' : 'invisible'}`}>
           <ChevronLeft size={16} strokeWidth={1.75} aria-hidden="true" />
           {attentionHint('left')}
         </button>
@@ -684,8 +709,9 @@ export function TabBar() {
           resource tabs do. The space around them stays inside the scroll
           region, which carries the window drag region; the chips do not.
         */
-        className="tab-strip-scroll flex flex-1 items-center gap-0.5 overflow-x-hidden px-1"
+        className="tab-strip-scroll min-w-0 flex-1 flex items-center gap-[2px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         onDragOver={(e) => e.preventDefault()}
+        onWheel={handleTabWheel}
       >
         {tabs.map((tab, index) => {
           const displayTitle = tab.type === 'settings'
@@ -778,6 +804,23 @@ export function TabBar() {
         )}
         {showActivityButton && activeTabId && (
           <SessionActivityButton sessionId={activeTabId} />
+        )}
+        {/* Fork: Agent Office entry. The surface setting decides tab vs modal;
+            both renderers live in ContentRouter / AppShell. */}
+        {isDesktopRuntime && isActiveSessionTab && activeTabId && (
+          <IconButton
+            icon={<Building2 size={17} strokeWidth={1.9} />}
+            label={t('agentOffice.title')}
+            onClick={() => {
+              if (useSettingsStore.getState().agentOfficeSurface === 'tab') {
+                useTabStore.getState().openOfficeTab(activeTabId, t('agentOffice.title'))
+                return
+              }
+              useUIStore.getState().openModal(`agentOffice:${activeTabId}`)
+            }}
+            size="md"
+            tone="muted"
+          />
         )}
         {isDesktopRuntime && isActiveSessionTab && !isWorkbenchOpen && (
           <OpenProjectMenu path={openProjectPath} />

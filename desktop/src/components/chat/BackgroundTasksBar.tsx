@@ -79,8 +79,8 @@ export function BackgroundTasksBar({
   return (
     <>
       {runningCount > 0 || visibleFinishedCount > 0 ? (
-        <div className={['shrink-0', compact ? 'px-4' : 'px-8'].join(' ')}>
-          <div className={compact ? 'w-full py-2' : 'mx-auto w-full max-w-[900px] py-2'}>
+        <div className={['shrink-0', compact ? 'px-4' : 'px-6'].join(' ')}>
+          <div className={compact ? 'w-full py-2' : 'mx-auto w-full max-w-[var(--chat-content-max-width)] py-2'}>
             <Button
               variant="tonal"
               size="base"

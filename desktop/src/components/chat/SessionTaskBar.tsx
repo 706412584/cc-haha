@@ -44,8 +44,8 @@ export function SessionTaskBar() {
   const progressPercent = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0
 
   return (
-    <div className="shrink-0 px-8">
-      <div className="mx-auto max-w-[900px] rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] overflow-hidden mb-2">
+    <div className="shrink-0 px-6">
+      <div className="mx-auto max-w-[var(--chat-content-max-width)] rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] overflow-hidden mb-2">
         {/* Header — always visible, clickable to toggle */}
         <div className="flex items-center gap-2 bg-[var(--color-surface-container)] px-2 py-1.5">
           <button

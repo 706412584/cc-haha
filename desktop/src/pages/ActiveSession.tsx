@@ -1055,7 +1055,7 @@ export function ActiveSession({ sessionId, active = true }: { sessionId?: string
     >
       {isMemberSession && (
         <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-surface-container)]">
-          <div className="mx-auto flex max-w-[900px] items-center justify-between gap-4 px-8 py-2">
+          <div className="mx-auto flex max-w-[var(--chat-content-max-width)] items-center justify-between gap-4 px-6 py-2">
             <div className="min-w-0">
               <div className="flex items-center gap-3">
                 {memberInfo?.status === 'running' && (
@@ -1441,7 +1441,7 @@ export function ActiveSession({ sessionId, active = true }: { sessionId?: string
             </>
           ) : null}
 
-          {active && activeTabId && <div className="mx-auto w-full max-w-[900px] shrink-0 px-4">
+          {active && activeTabId && <div className="mx-auto w-full max-w-[var(--chat-content-max-width)] shrink-0 px-4">
             <AgentTeamsPlanCard key={activeTabId} sessionId={activeTabId} />
           </div>}
 
