@@ -5,6 +5,7 @@ import {
   Box,
   ChevronRight,
   Network,
+  Settings,
   SquareTerminal,
   Webhook,
   Zap,
@@ -12,6 +13,7 @@ import {
 } from 'lucide-react'
 import { usePluginStore } from '../../stores/pluginStore'
 import { useSessionStore } from '../../stores/sessionStore'
+import { PluginConfigModal } from './PluginConfigModal'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { Badge } from '@/components/ui/Badge'
@@ -53,6 +55,7 @@ export function PluginDetail() {
   const t = useTranslation()
   const [actionKey, setActionKey] = useState<string | null>(null)
   const [showUninstallDialog, setShowUninstallDialog] = useState(false)
+  const [showConfigModal, setShowConfigModal] = useState(false)
 
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const currentWorkDir = activeSession?.workDir || undefined
@@ -297,6 +300,17 @@ export function PluginDetail() {
             {t('settings.plugins.apply')}
           </Button>
 
+          {selectedPlugin.userConfig && Object.keys(selectedPlugin.userConfig).length > 0 && (
+            <Button
+              variant="secondary"
+              size="base"
+              onClick={() => setShowConfigModal(true)}
+              icon={<Settings size={16} strokeWidth={1.75} aria-hidden="true" />}
+            >
+              {t('settings.plugins.configure')}
+            </Button>
+          )}
+
           {canMutate && (
             <Button
               variant="danger-ghost"
@@ -514,6 +528,17 @@ export function PluginDetail() {
         confirmVariant="danger"
         loading={isApplying && actionKey === 'uninstall'}
       />
+
+      {selectedPlugin.userConfig && Object.keys(selectedPlugin.userConfig).length > 0 && (
+        <PluginConfigModal
+          open={showConfigModal}
+          pluginId={selectedPlugin.id}
+          pluginName={selectedPlugin.name}
+          schema={selectedPlugin.userConfig}
+          onClose={() => setShowConfigModal(false)}
+          onSaved={() => void handleReload()}
+        />
+      )}
     </div>
   )
 }
