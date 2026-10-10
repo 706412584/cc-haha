@@ -29,6 +29,7 @@ import { getTraceIndexDatabasePath } from '../services/localIndex/traceDatabase.
 let tmpDir: string
 let originalConfigDir: string | undefined
 let originalLocalIndexMode: string | undefined
+let originalTraceEnv: string | undefined
 
 async function waitForTrace(
   sessionId: string,
@@ -48,6 +49,10 @@ beforeEach(async () => {
   originalLocalIndexMode = process.env.CC_HAHA_LOCAL_INDEX
   process.env.CLAUDE_CONFIG_DIR = tmpDir
   process.env.CC_HAHA_LOCAL_INDEX = 'on'
+  // A desktop-launched shell carries CC_HAHA_TRACE_API_CALLS=1, which would
+  // override the managed settings these tests exercise. Isolate it.
+  originalTraceEnv = process.env.CC_HAHA_TRACE_API_CALLS
+  delete process.env.CC_HAHA_TRACE_API_CALLS
   await clearTraceCaptureStateForTests()
 })
 
@@ -68,6 +73,11 @@ afterEach(async () => {
     delete process.env.CC_HAHA_LOCAL_INDEX
   } else {
     process.env.CC_HAHA_LOCAL_INDEX = originalLocalIndexMode
+  }
+  if (originalTraceEnv === undefined) {
+    delete process.env.CC_HAHA_TRACE_API_CALLS
+  } else {
+    process.env.CC_HAHA_TRACE_API_CALLS = originalTraceEnv
   }
   await fs.rm(tmpDir, { recursive: true, force: true })
 })

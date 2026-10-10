@@ -285,3 +285,12 @@ desktop 侧整套带插桩并发，负载显著高于 `desktop-checks` / `server
   **判定**：负载型偶发。2026-09-29 v0.6.7 合并的 coverage 任务同一用例 306 ms 通过；本地单跑 5/5 通过；
   `server-checks` 全量也通过。**处置**：重跑该 job，不改生产代码（5 s 是刻意的桌面端 UX 行为，
   为 CI 放宽会回退用户可见的快速回退语义）。
+
+## 2026-10-10 合并上游 v0.7.0 后的 Windows 本地实测补充
+
+`bun test src/server` 在 Windows 本地全量跑仍有约 1700 失败，均为平台/环境类，CI(Linux) 不受影响：
+
+- **symlink EPERM**：`sessions.test.ts` 的 rewind/symlink 用例、`workflows` 同类 —— Windows 非管理员无法建符号链接（清单既有条目，合并后数量略增，同根因）。
+- **分支长度实测类**（`branch name past the length cap` 等）：依赖文件系统/命令实际行为，Windows 与 Linux 不同（清单既有条目）。
+- **大套件资源抖动**：`MessageList.test.tsx`、`diagnosticsSettings.test.tsx` 在全套件并发跑时超时/崩溃（tinypool ERR_IPC_CHANNEL_CLOSED），**单独跑全绿**。CI 分片跑不受影响。
+- **本地 shell 携带 `CC_HAHA_TRACE_API_CALLS=1`**（桌面端启动的终端会继承）：会覆盖 managed settings，使 `trace-capture.test.ts > respects managed...` 失败。已在测试 beforeEach 隔离该 env（合并提交内）。其它从桌面 shell 跑测试的人若遇同类覆盖，同样处理。

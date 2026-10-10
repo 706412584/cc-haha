@@ -1,4 +1,5 @@
 import { lstat, readdir, stat } from 'node:fs/promises'
+import { migrationMaintenance } from '../../migrationMaintenance.js'
 import { basename, join, relative, resolve, sep } from 'node:path'
 import { getClaudeConfigHomeDir, parseMegabyteEnvToBytes } from '../../../utils/envUtils.js'
 import {
@@ -1502,6 +1503,7 @@ export function createLocalIndexCoordinator(
 
   const coordinator: LocalIndexCoordinator = {
     async start(): Promise<void> {
+      if (migrationMaintenance.isActive) return
       if (started) {
         if (synchronizeRuntimeConfiguration()) return
         await runtimeReconfigurePromise

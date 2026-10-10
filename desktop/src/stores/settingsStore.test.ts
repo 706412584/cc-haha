@@ -281,6 +281,15 @@ describe('settingsStore Agent Office surface preference', () => {
       useSettingsStore.getState().setAgentOfficeSurface('tab'),
     ).rejects.toThrow('settings unavailable')
     expect(useSettingsStore.getState().agentOfficeSurface).toBe('modal')
+})
+
+describe('settingsStore effort default', () => {
+  it('starts at low before the server value loads', async () => {
+    vi.resetModules()
+    const { useSettingsStore } = await import('./settingsStore')
+
+    expect(useSettingsStore.getState().effortLevel).toBe('low')
+})
   })
 })
 

@@ -104,6 +104,29 @@ export async function dataTransferToComposerAttachments(dataTransfer: DataTransf
   return filesToComposerAttachments(getDataTransferFiles(dataTransfer))
 }
 
+export async function selectNativeFileAttachments(): Promise<ComposerAttachment[] | null> {
+  const host = getDesktopHost()
+  if (!host.isDesktop || !host.capabilities.dialogs) return null
+
+  try {
+    const selected = await host.dialogs.open({
+      multiple: true,
+      directory: false,
+    })
+    const paths = normalizeDialogSelection(selected)
+    return pathsToComposerAttachments(paths)
+  } catch (error) {
+    console.warn('[attachments] Native file picker failed; falling back to browser file input', error)
+    return null
+  }
+}
+
+function normalizeDialogSelection(selected: string | string[] | null): string[] {
+  if (!selected) return []
+  const paths = Array.isArray(selected) ? selected : [selected]
+  return paths.filter((filePath) => typeof filePath === 'string' && filePath.length > 0)
+}
+
 export async function filesToComposerAttachments(files: FileList | File[]): Promise<ComposerAttachment[]> {
   const entries = Array.from(files)
   const attachments = await Promise.all(entries.map(fileToComposerAttachment))

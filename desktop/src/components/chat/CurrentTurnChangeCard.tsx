@@ -1,9 +1,10 @@
 import { useCallback, useId, useMemo, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
-import { ChevronDown, ChevronRight, ChevronUp } from 'lucide-react'
+import { ChevronDown, ChevronRight, ChevronUp, Ellipsis, FileDiff, TriangleAlert, Undo2 } from 'lucide-react'
 import type { SessionTurnCheckpoint } from '../../api/sessions'
 import { useTranslation, type TranslationKey } from '../../i18n'
 import { Button } from '@/components/ui/Button'
+import { IconButton } from '@/components/ui/IconButton'
 import { OpenWithMenu } from '@/components/composite/OpenWithMenu'
 import { FileTypeIcon } from '@/components/ui/FileTypeIcon'
 import { describeFileType, isPreviewableChangedFile, type OpenWithItem } from '../../lib/openWithItems'
@@ -16,6 +17,9 @@ import { useOpenTargetStore } from '../../stores/openTargetStore'
 import { workspaceOpen } from '../../lib/workspace/openTarget'
 import { isWorkspaceDocumentFile, isWorkspacePreviewableFile } from '../../lib/fileCapabilities'
 import { openLocalFileWithSystem, reportOpenFailure } from '../../lib/systemFileOpen'
+import { useMobileViewport } from '../../hooks/useMobileViewport'
+import { isDesktopRuntime } from '../../lib/desktopRuntime'
+import { MobileTurnDiffSheet } from './MobileTurnDiffSheet'
 
 type CurrentTurnChangeCardProps = {
   sessionId: string
@@ -51,6 +55,10 @@ export function CurrentTurnChangeCard({
   const filesId = useId()
   const [openWith, setOpenWith] = useState<{ items: OpenWithItem[]; anchor: DOMRect; triggerEl: HTMLElement } | null>(null)
   const [showAllFiles, setShowAllFiles] = useState(false)
+  // A phone has no workspace beside the chat to open a file in; the turn's
+  // change to it opens full height in a sheet instead.
+  const isMobile = useMobileViewport() && !isDesktopRuntime()
+  const [diffPath, setDiffPath] = useState<string | null>(null)
 
   const files = useMemo<ChangedFileEntry[]>(
     () => checkpoint.code.filesChanged
@@ -74,6 +82,10 @@ export function CurrentTurnChangeCard({
   const hasUnverifiedChanges = restoreAvailable && unverifiedChangeSources.length > 0
 
   const openChangedFile = useCallback((event: ReactMouseEvent<HTMLButtonElement>, fileEntry: ChangedFileEntry) => {
+    if (isMobile) {
+      setDiffPath(fileEntry.displayPath)
+      return
+    }
     const renderItem = event.currentTarget.closest<HTMLElement>('[data-chat-render-item-key]')
     const origin = {
       sourceTurnKey: renderItem?.dataset.chatRenderItemKey ?? checkpoint.target.targetUserMessageId,
@@ -110,7 +122,7 @@ export function CurrentTurnChangeCard({
       path: fileEntry.displayPath,
       origin,
     })
-  }, [checkpoint.target.targetUserMessageId, checkpoint.target.userMessageIndex, sessionId, files])
+  }, [checkpoint.target.targetUserMessageId, checkpoint.target.userMessageIndex, sessionId, files, isMobile])
 
   const handleOpenWith = useCallback((event: ReactMouseEvent<HTMLButtonElement>, fileEntry: ChangedFileEntry) => {
     event.stopPropagation()
@@ -167,10 +179,13 @@ export function CurrentTurnChangeCard({
       // Follows the message it belongs to inside the same rail box, so it takes a
       // top margin and no width of its own — `max-w-[900px]` here would have
       // overflowed the column once the rail indented it.
-      className="mt-2 w-full overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-card)]"
+      className="mt-2.5 w-full overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]"
       aria-label={cardLabel}
     >
-      <div className="flex flex-wrap items-center justify-between gap-2 bg-[var(--color-surface-container-low)] px-3 py-2">
+      {/* One 40px line. The disclosure's hit area is stretched over the whole
+          row (its ::after), so the trailing chevron toggles too; the undo
+          button is lifted above that layer to keep its own click. */}
+      <div className="relative flex h-10 items-center gap-2 pl-3 pr-2">
         <button
           type="button"
           data-chat-disclosure="true"
@@ -182,45 +197,58 @@ export function CurrentTurnChangeCard({
             setOpenWith(null)
             onExpandedChange(!expanded)
           }}
-          className="flex min-h-8 min-w-0 flex-1 basis-40 flex-wrap items-center gap-2 rounded-[var(--radius-md)] text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left text-[13px] focus-visible:outline-none after:absolute after:inset-0 after:rounded-[var(--radius-lg)] focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-[var(--color-border-focus)]"
         >
-          {expanded ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
-          <span className="font-semibold text-[var(--color-text-primary)]">
+          <FileDiff size={15} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]" />
+          <span className="truncate font-medium text-[var(--color-text-primary)]">
             {t('chat.turnChangesTitle', { count: files.length })}
           </span>
-          <span className="font-mono text-xs font-semibold text-[var(--color-diff-added-text)]">+{checkpoint.code.insertions}</span>
-          <span className="font-mono text-xs font-semibold text-[var(--color-diff-removed-text)]">-{checkpoint.code.deletions}</span>
+          <span className="shrink-0 font-mono text-xs tabular-nums text-[var(--color-diff-added-text)]">+{checkpoint.code.insertions}</span>
+          <span className="shrink-0 font-mono text-xs tabular-nums text-[var(--color-diff-removed-text)]">-{checkpoint.code.deletions}</span>
         </button>
 
         {/* Never disabled: rolling the conversation back is always possible, even
-            when the files are not restorable. The dialog picks what to touch. */}
+            when the files are not restorable. The dialog picks what to touch.
+            What the checkpoint covers is the button's hint rather than a line
+            of grey text under every card; the confirm dialog repeats it. */}
         <Button
-          variant="secondary"
-          size="base"
+          variant="ghost"
+          size="sm"
           loading={isUndoing}
           onClick={onUndo}
           aria-label={undoAria}
-          className="shrink-0"
-          icon={<span className="material-symbols-outlined text-[15px]" aria-hidden="true">undo</span>}
+          title={subtitle}
+          className="relative shrink-0"
+          icon={<Undo2 size={13} strokeWidth={1.75} aria-hidden="true" />}
         >
           {isUndoing ? t('chat.turnChangesUndoing') : undoLabel}
         </Button>
+        <ChevronRight
+          size={14}
+          strokeWidth={1.75}
+          aria-hidden="true"
+          className={`pointer-events-none shrink-0 text-[var(--color-text-tertiary)] transition-transform duration-150 motion-reduce:transition-none ${expanded ? 'rotate-90' : ''}`}
+        />
       </div>
 
-      {(expanded || !restoreAvailable || hasUnverifiedChanges) && (
-        <div className={`border-t border-[var(--color-border)] px-3 py-2 text-xs ${hasUnverifiedChanges ? 'text-[var(--color-warning)]' : 'text-[var(--color-text-tertiary)]'}`}>
-          {subtitle}
+      {/* A partial checkpoint changes what undo will do, so that one stays in
+          view; the routine "what this card compares" notes live in the hint. */}
+      {hasUnverifiedChanges && (
+        <div className="flex items-start gap-2 border-t border-[var(--color-border)] px-3 py-2 text-xs text-[var(--color-text-secondary)]">
+          <TriangleAlert size={13} strokeWidth={1.75} aria-hidden="true" className="mt-0.5 shrink-0 text-[var(--color-warning)]" />
+          <span className="min-w-0">{subtitle}</span>
         </div>
       )}
 
       <div id={filesId} hidden={!expanded}>
-        {expanded && <div className="divide-y divide-[var(--color-border)]">
+        {expanded && <div className="border-t border-[var(--color-border)] py-1">
           {visibleFiles.map((fileEntry) => {
             const fileName = fileEntry.displayPath.split('/').pop() || fileEntry.displayPath
+            const directory = fileEntry.displayPath.slice(0, fileEntry.displayPath.length - fileName.length)
             const typeInfo = describeFileType(fileEntry.displayPath)
             const workspacePreviewable = isWorkspacePreviewableFile(fileEntry.displayPath)
             return (
-              <div key={fileEntry.apiPath} className="flex items-center gap-2">
+              <div key={fileEntry.apiPath} className={`flex ${isMobile ? 'h-11' : 'h-8'} items-center gap-0.5 px-1.5`}>
                 <button
                   type="button"
                   id={`turn-change-opener-${checkpoint.target.targetUserMessageId}-${encodeURIComponent(fileEntry.apiPath)}`}
@@ -233,26 +261,25 @@ export function CurrentTurnChangeCard({
                     { path: fileEntry.displayPath },
                   )}
                   title={fileEntry.displayPath}
-                  className="flex min-h-[52px] min-w-0 flex-1 items-center gap-3 rounded-[var(--radius-md)] px-4 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]"
+                  className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-sm)] px-1.5 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]"
                 >
-                  <FileTypeIcon path={fileEntry.displayPath} size={24} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium text-[var(--color-text-primary)]">{fileName}</span>
-                    <span className="block truncate text-xs text-[var(--color-text-tertiary)]">{`${t(typeInfo.categoryKey as Parameters<typeof t>[0])} · ${typeInfo.ext}`}</span>
+                  <FileTypeIcon path={fileEntry.displayPath} size={14} />
+                  <span className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--color-text-tertiary)]">
+                    {directory}
+                    <span className="font-medium text-[var(--color-text-primary)]">{fileName}</span>
                   </span>
-                  <ChevronRight size={17} strokeWidth={1.9} aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]" />
+                  <span className="shrink-0 text-[11px] text-[var(--color-text-tertiary)]">
+                    {typeInfo.ext || t(typeInfo.categoryKey as Parameters<typeof t>[0])}
+                  </span>
+                  <ChevronRight size={14} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]" />
                 </button>
-                <Button
-                  variant="secondary"
-                  size="base"
-                  aria-label={t('openWith.title')}
+                <IconButton
+                  icon={<Ellipsis size={14} strokeWidth={1.75} aria-hidden="true" />}
+                  label={t('openWith.title')}
+                  size="xs"
+                  tone="muted"
                   onClick={(event) => handleOpenWith(event, fileEntry)}
-                  className="mr-2 shrink-0"
-                  icon={<ChevronDown size={14} strokeWidth={1.9} aria-hidden="true" />}
-                  iconPosition="end"
-                >
-                  {t('openWith.title')}
-                </Button>
+                />
               </div>
             )
           })}
@@ -264,17 +291,17 @@ export function CurrentTurnChangeCard({
             data-chat-disclosure="true"
             aria-expanded={showAllFiles}
             onClick={() => setShowAllFiles((current) => !current)}
-            className="flex w-full items-center justify-center gap-1 border-t border-[var(--color-border)] px-4 py-2 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]"
+            className="flex h-8 w-full items-center justify-center gap-1 border-t border-[var(--color-border)] px-4 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]"
           >
             {showAllFiles ? (
               <>
                 {t('chat.turnChangesShowLess')}
-                <ChevronUp size={14} strokeWidth={1.9} />
+                <ChevronUp size={14} strokeWidth={1.75} />
               </>
             ) : (
               <>
                 {t('chat.turnChangesShowMore', { count: String(files.length - COLLAPSED_COUNT) })}
-                <ChevronDown size={14} strokeWidth={1.9} />
+                <ChevronDown size={14} strokeWidth={1.75} />
               </>
             )}
           </button>
@@ -283,12 +310,22 @@ export function CurrentTurnChangeCard({
       </div>
 
       {error && (
-        <div role="alert" className="border-t border-[var(--color-error)] bg-[var(--color-error-container)] px-4 py-3 text-xs text-[var(--color-on-error-container)]">
+        <div role="alert" className="border-t border-[var(--color-border)] bg-[var(--color-error-container)] px-3 py-2 text-xs text-[var(--color-on-error-container)]">
           {error}
         </div>
       )}
 
       {openWith && <OpenWithMenu items={openWith.items} anchor={openWith.anchor} triggerEl={openWith.triggerEl} onClose={() => setOpenWith(null)} />}
+      {isMobile && checkpoint.target.targetUserMessageId ? (
+        <MobileTurnDiffSheet
+          sessionId={sessionId}
+          targetUserMessageId={checkpoint.target.targetUserMessageId}
+          userMessageIndex={checkpoint.target.userMessageIndex}
+          paths={files.map((entry) => entry.displayPath)}
+          openPath={diffPath}
+          onOpenPathChange={setDiffPath}
+        />
+      ) : null}
     </section>
   )
 }

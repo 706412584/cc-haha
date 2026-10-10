@@ -11,38 +11,52 @@ import type { UIMessage } from '../../types/chat'
 
 describe('chat blocks', () => {
   beforeEach(() => {
-    // jsdom implements neither; the shared tool-result gallery builds a blob URL
-    // per thumbnail, and an unstubbed call drops the picture.
-    Object.defineProperty(URL, 'createObjectURL', { configurable: true, writable: true, value: () => 'blob:test' })
-    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, writable: true, value: () => {} })
     useSettingsStore.setState({ locale: 'en' })
     useTabStore.setState({ activeTabId: 'active-tab', tabs: [{ sessionId: 'active-tab', title: 'Test', type: 'session' as const, status: 'idle' }] })
     useChatStore.setState({ sessions: {} })
   })
 
-  it('shows thinking expanded by default', () => {
+  it.each(['card', 'row'] as const)('marks a located %s by its tool id, on the chrome the highlight style keys off', (chrome) => {
+    const { container, rerender } = render(
+      <ToolCallBlock chrome={chrome} toolName="Bash" input={{ command: 'ls' }} result={{ content: 'a', isError: false }} toolUseId="toolu_mark" navigationHighlighted />,
+    )
+    const root = container.querySelector('[data-tool-use-id="toolu_mark"]')!
+    expect(root.getAttribute('data-tool-call-chrome')).toBe(chrome)
+    expect(root.className).toContain('chat-tool-navigation-target')
+
+    rerender(<ToolCallBlock chrome={chrome} toolName="Bash" input={{ command: 'ls' }} result={{ content: 'a', isError: false }} toolUseId="toolu_mark" />)
+    expect(container.querySelector('[data-tool-use-id="toolu_mark"]')!.className).not.toContain('chat-tool-navigation-target')
+  })
+
+  it.each(['card', 'row'] as const)('names the %s output copy action in the interface language', (chrome) => {
+    // Regression: tool output copy buttons fell back to CopyButton's English "Copy".
+    useSettingsStore.setState({ locale: 'zh' })
+    const { container } = render(
+      <ToolCallBlock chrome={chrome} toolName="Bash" input={{ command: 'ls' }} result={{ content: 'a.txt', isError: false }} />,
+    )
+    fireEvent.click(container.querySelector('[data-chat-disclosure="true"]')!)
+    expect(screen.getAllByRole('button', { name: '复制' }).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull()
+  })
+
+  it('keeps thinking collapsed by default', () => {
     const { container } = render(<ThinkingBlock content="this is a long internal reasoning trace" isActive />)
 
     expect(screen.getByText(/Thinking/)).toBeTruthy()
-    expect(container.textContent).toContain('this is a long internal reasoning trace')
-    expect(container.querySelector('.thinking-cursor')).not.toBeNull()
+    // The row previews the reasoning; what stays shut is the full block. A
+    // label with nothing beside it was the old standalone form, and it made the
+    // opening thought of a turn — usually the substantial one — the least
+    // informative thing on screen.
+    expect(container.querySelector('[data-thinking-content="expanded"]')).toBeNull()
+    expect(container.querySelector('.thinking-cursor')).toBeNull()
   })
 
   it('does not animate inactive historical thinking blocks', () => {
     const { container } = render(<ThinkingBlock content="old reasoning" isActive={false} />)
 
-    // collapsed: content not in expanded panel
-    expect(container.querySelector('[data-thinking-content="expanded"]')).toBeNull()
-    expect(container.querySelector('.thinking-cursor')).toBeNull()
-
-    // click to expand
     fireEvent.click(screen.getByRole('button', { name: /Thought/ }))
-    expect(container.querySelector('[data-thinking-content="expanded"]')).not.toBeNull()
-    expect(container.querySelector('.thinking-cursor')).toBeNull()
 
-    // click to collapse again
-    fireEvent.click(screen.getByRole('button', { name: /Thought/ }))
-    expect(container.querySelector('[data-thinking-content="expanded"]')).toBeNull()
+    expect(container.textContent).toContain('old reasoning')
     expect(container.querySelector('.thinking-cursor')).toBeNull()
   })
 
@@ -325,19 +339,14 @@ describe('chat blocks', () => {
     expect(container.querySelector('strong')).toBeNull()
     expect(container.querySelector('li')).toBeNull()
     expect(container.textContent).not.toContain('item one')
+
     fireEvent.click(screen.getByRole('button', { name: /Thought/ }))
 
     expect(container.querySelector('strong')?.textContent).toBe('important')
     expect(container.querySelector('li')?.textContent).toBe('item one')
-
-    fireEvent.click(screen.getByRole('button', { name: /Thought/ }))
-
-    expect(container.querySelector('[data-thinking-content="expanded"]')).toBeNull()
-    expect(container.querySelector('strong')).toBeNull()
-    expect(container.querySelector('li')).toBeNull()
   })
 
-  it('shows full thinking content after expanding and hides it after collapsing', () => {
+  it('hides full thinking content until expanded', () => {
     const content = Array.from({ length: 12 }, (_, index) => `line-${index + 1}`).join('\n')
     const { container } = render(<ThinkingBlock content={content} />)
 
@@ -345,82 +354,12 @@ describe('chat blocks', () => {
     expect(container.textContent).toContain('line-1')
     expect(container.textContent).not.toContain('line-11')
     expect(container.querySelector('[data-thinking-content="expanded"]')).toBeNull()
+
     fireEvent.click(screen.getByRole('button', { name: /Thought/ }))
 
     expect(container.textContent).toContain('line-1')
     expect(container.textContent).toContain('line-11')
     expect(container.textContent).toContain('line-12')
-
-    fireEvent.click(screen.getByRole('button', { name: /Thought/ }))
-
-    expect(container.querySelector('[data-thinking-content="expanded"]')).toBeNull()
-    expect(container.querySelector('[data-thinking-content="expanded"]')).toBeNull()
-  })
-
-  it('shows a media agent image through the real Agent group path', () => {
-    const toolCall: Extract<UIMessage, { type: 'tool_use' }> = {
-      id: 'agent-call',
-      type: 'tool_use',
-      toolName: 'Agent',
-      toolUseId: 'agent-1',
-      input: { subagent_type: 'media-gen:media-gen-agent', description: 'Generate image' },
-      timestamp: 1,
-    }
-    const result: Extract<UIMessage, { type: 'tool_result' }> = {
-      id: 'agent-result',
-      type: 'tool_result',
-      toolUseId: 'agent-1',
-      content: [{
-        type: 'text',
-        text: '生成成功。\n![generated](https://cdn.example.com/generated/image-123.png "preview")\nURL: https://cdn.example.com/generated/image-123.png',
-      }],
-      isError: false,
-      timestamp: 2,
-    }
-
-    render(
-      <ToolCallGroup
-        toolCalls={[toolCall]}
-        resultMap={new Map([['agent-1', result]])}
-        childToolCallsByParent={new Map()}
-        agentTaskNotifications={{}}
-      />,
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/ }))
-    const image = screen.getByRole('img', { name: 'Generated image 1' })
-    expect(image).toHaveAttribute('src', 'https://cdn.example.com/generated/image-123.png')
-  })
-
-  it('does not treat URLs from unrelated agents as generated images', () => {
-    const toolCall: Extract<UIMessage, { type: 'tool_use' }> = {
-      id: 'agent-call',
-      type: 'tool_use',
-      toolName: 'Agent',
-      toolUseId: 'agent-1',
-      input: { subagent_type: 'general-purpose', description: 'Research docs' },
-      timestamp: 1,
-    }
-    const result: Extract<UIMessage, { type: 'tool_result' }> = {
-      id: 'agent-result',
-      type: 'tool_result',
-      toolUseId: 'agent-1',
-      content: [{ type: 'text', text: 'URL: https://example.com/reference.png' }],
-      isError: false,
-      timestamp: 2,
-    }
-
-    render(
-      <ToolCallGroup
-        toolCalls={[toolCall]}
-        resultMap={new Map([['agent-1', result]])}
-        childToolCallsByParent={new Map()}
-        agentTaskNotifications={{}}
-      />,
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/ }))
-    expect(screen.queryByRole('img')).not.toBeInTheDocument()
   })
 
   it('shows tool previews only after expanding the tool block', () => {
@@ -481,7 +420,10 @@ describe('chat blocks', () => {
       />,
     )
 
-    expect(container.textContent).toContain('Bash')
+    // A described command is named by its description; the raw tool name and
+    // the command stay in the tooltip.
+    expect(container.textContent).toContain('List files')
+    expect(screen.getByRole('button').getAttribute('title')).toBe('Bash · ls -la')
     expect(container.textContent).not.toContain('file-a')
 
     fireEvent.click(screen.getByRole('button'))
@@ -615,30 +557,6 @@ describe('chat blocks', () => {
     // Nothing to print is not the same as the command printing nothing.
     expect(container.textContent).toContain('python plot.py')
     expect(container.textContent).not.toContain('No output')
-  })
-
-  it('renders an image-only MCP result (source-nested base64) inline with no empty text box', async () => {
-    // jsdom has no URL.createObjectURL; the shared gallery builds a blob URL for
-    // every thumbnail, and without the stub it drops the picture.
-    render(
-      <ToolCallBlock
-        toolName="mcp__layout-editor-mcp__layout_get_preview_image"
-        input={{ documentId: 'doc_1' }}
-        result={{
-          content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }],
-          isError: false,
-        }}
-        defaultExpanded
-      />,
-    )
-
-    // The shared gallery hands each image to a blob URL through an effect, so
-    // the thumbnail appears asynchronously.
-    const images = await screen.findAllByRole('img')
-    expect(images).toHaveLength(1)
-    expect(images[0]?.getAttribute('src')).toBe('blob:test')
-    // Image-only result: no empty "Tool Output" text box should render.
-    expect(screen.queryByText('Tool Output')).toBeNull()
   })
 
   it('keeps rendering the error body for a shell call whose input lacks a command', () => {
@@ -799,9 +717,26 @@ describe('chat blocks', () => {
       />,
     )
 
-    expect(container.textContent).toContain('Write')
+    expect(container.textContent).toContain('Create')
+    expect(screen.getByRole('button').getAttribute('title')).toContain('Write')
     expect(container.textContent).toContain('ai-code-novel.md')
     expect(container.textContent).toContain('Generating content')
+  })
+
+  it('shows pending Write line and character progress in the collapsed header', () => {
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Write"
+        input={{ file_path: '/private/tmp/ai-code-novel.md' }}
+        isPending
+        partialInput={'{"file_path":"/private/tmp/ai-code-novel.md","content":"alpha\\nbeta'}
+      />,
+    )
+
+    expect(container.textContent).toContain('Generating content')
+    expect(container.textContent).toContain('2 lines')
+    expect(container.textContent).toContain('10 chars')
+    expect(container.textContent).not.toContain('latest')
   })
 
   it('expands pending Write tool calls into a live writer preview instead of raw JSON', () => {
@@ -820,6 +755,65 @@ describe('chat blocks', () => {
     expect(container.textContent).toContain('# 第一章')
     expect(container.textContent).toContain('正文正在生成')
     expect(container.textContent).not.toContain('"content"')
+  })
+
+  it('formats and wraps pending Bash partial JSON input when expanded', () => {
+    const partialInput = [
+      '{"command":"cat << \'HTMLEOF\' > /tmp/index.html\\n<!DOCTYPE html>\\n<html lang=\\"zh-CN\\">",',
+      '"description":"Create HTML shell command"}',
+    ].join('')
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Bash"
+        input={{ command: 'cat << \'HTMLEOF\' > /tmp/index.html', description: 'Create HTML shell command' }}
+        isPending
+        partialInput={partialInput}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button'))
+
+    expect(container.textContent).toContain('Partial input')
+    expect(container.textContent).toContain('json')
+    expect(container.textContent).toContain('4 lines')
+    expect(container.textContent).not.toContain('1 line')
+
+    const contentWrapper = container.querySelector('[data-code-viewer-content]') as HTMLElement | null
+    expect(contentWrapper?.style.whiteSpace).toBe('pre-wrap')
+    expect(contentWrapper?.style.wordBreak).toBe('break-word')
+  })
+
+  it('shows non-windowed Writer preview stats before the 120-line limit', () => {
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Write"
+        input={{ file_path: '/private/tmp/generated.ts' }}
+        isPending
+        partialInput={'{"file_path":"/private/tmp/generated.ts","content":"alpha\\nbeta\\ngamma'}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button'))
+
+    expect(container.textContent).toContain('Writer')
+    expect(container.textContent).toContain('3 lines')
+    expect(container.textContent).toContain('16 chars')
+    expect(container.textContent).not.toContain('latest')
+  })
+
+  it('shows pending Edit replacement character progress in the collapsed header', () => {
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Edit"
+        input={{ file_path: '/tmp/example.ts' }}
+        isPending
+        partialInput={'{"file_path":"/tmp/example.ts","old_string":"const ready = false","new_string":"const ready = true'}
+      />,
+    )
+
+    expect(container.textContent).toContain('Preparing edit')
+    expect(container.textContent).toContain('1 line')
+    expect(container.textContent).toContain('18 chars')
   })
 
   it('windows long pending Write previews to the latest content', () => {
@@ -850,8 +844,9 @@ describe('chat blocks', () => {
       />,
     )
 
-    expect(container.textContent).toContain('Bash')
+    expect(container.textContent).toContain('Show full diff of latest commit')
     expect(container.textContent).toContain('fatal: unrecognized argument: --no-stat')
+    expect(container.querySelector('[data-tool-status]')?.getAttribute('data-tool-status')).toBe('error')
   })
 
   it('shows full bash error output when the tool block is expanded', () => {
@@ -874,7 +869,9 @@ describe('chat blocks', () => {
 
     fireEvent.click(screen.getByRole('button'))
 
-    expect(container.textContent).toContain('Error Output')
+    // A failed command reads as failed in the terminal head — no exit code is
+    // recoverable from this payload, so the pill says so instead of guessing 1.
+    expect(container.querySelector('[data-shell-exit]')?.textContent).toBe('Failed')
     expect(container.textContent).toContain('detail line 8')
     expect(container.textContent).toContain('final remediation hint')
   })

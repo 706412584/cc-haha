@@ -2,32 +2,12 @@ import '@testing-library/jest-dom'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { ApiError } from '../../api/client'
 import { browserHost } from '../../lib/desktopHost/browserHost'
 
-const { queueComposerPrefill } = vi.hoisted(() => ({
-  queueComposerPrefill: vi.fn(),
-}))
-
-vi.mock('../../stores/chatStore', () => ({
-  useChatStore: {
-    getState: () => ({ queueComposerPrefill }),
-  },
-}))
-
-vi.mock('./ImageAnnotationModal', () => ({
-  ImageAnnotationModal: ({ open, image, onSave }: {
-    open: boolean
-    image: { name: string } | null
-    onSave: (dataUrl: string) => void
-  }) => open ? (
-    <button type="button" onClick={() => onSave('data:image/png;base64,ANNOTATED')}>
-      Save {image?.name}
-    </button>
-  ) : null,
-}))
-
 // getBaseUrl backs the absolute-path src (/api/filesystem/file).
-vi.mock('../../api/client', () => ({
+vi.mock('../../api/client', async (original) => ({
+  ...(await original<Record<string, unknown>>()),
   getBaseUrl: () => 'http://127.0.0.1:3456',
 }))
 
@@ -36,15 +16,25 @@ vi.mock('../../lib/desktopRuntime', () => ({
   getServerBaseUrl: () => 'http://127.0.0.1:4321',
 }))
 
-// The authenticated fallback an <img> error falls back to. It rejects by default,
-// which is what a missing or denied file does, so the failure notice shows.
+// The authenticated fallback an <img> error falls back to. It rejects by default
+// the way a server fault does, so the failure notice shows; a file the server will
+// not serve is answered with its 4xx status instead.
 const fetchServerImageBlobUrl = vi.hoisted(() => vi.fn())
 vi.mock('../../lib/authedImage', () => ({ fetchServerImageBlobUrl }))
 
+// Bare names glued to prose are settled against a workspace listing.
+const getWorkspaceTree = vi.hoisted(() => vi.fn())
+vi.mock('../../api/sessions', () => ({ sessionsApi: { getWorkspaceTree } }))
+
 import { InlineImageGallery } from './InlineImageGallery'
+import { resetDiskListingCacheForTests } from '../../hooks/useDiskConfirmedTargets'
+import { useSettingsStore } from '../../stores/settingsStore'
 
 beforeEach(() => {
-  fetchServerImageBlobUrl.mockReset().mockRejectedValue(new Error('403'))
+  useSettingsStore.setState({ locale: 'en' })
+  resetDiskListingCacheForTests()
+  getWorkspaceTree.mockReset().mockResolvedValue({ state: 'missing', path: '', entries: [] })
+  fetchServerImageBlobUrl.mockReset().mockRejectedValue(new ApiError(500, { error: 'Internal error' }))
   // jsdom ships no object-URL support.
   Object.defineProperty(URL, 'revokeObjectURL', { value: vi.fn(), configurable: true, writable: true })
 })
@@ -54,68 +44,110 @@ function imgSrcs(): string[] {
 }
 
 describe('InlineImageGallery', () => {
-  beforeEach(() => {
-    queueComposerPrefill.mockReset()
-  })
-
-  it('annotates an inline image and appends the result to the session composer', () => {
-    render(
-      <InlineImageGallery
-        text={'render saved to outputs/a/frame.png'}
-        sessionId="s1"
-        workDir="/w"
-      />,
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: /frame\.png/i }))
-    fireEvent.click(screen.getByRole('button', { name: /标注并提问/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Save frame.png' }))
-
-    expect(queueComposerPrefill).toHaveBeenCalledWith('s1', {
-      text: '',
-      mode: 'append',
-      attachments: [{
-        type: 'image',
-        name: 'frame-annotated.png',
-        data: 'data:image/png;base64,ANNOTATED',
-        previewUrl: 'data:image/png;base64,ANNOTATED',
-        mimeType: 'image/png',
-      }],
-    })
-    expect(screen.queryByRole('button', { name: /标注并提问/ })).not.toBeInTheDocument()
-  })
-
-  it('shows a failed image notice and filename instead of hiding the gallery entry', async () => {
-    render(<InlineImageGallery text="See E:/test/denied.png" />)
+  it('shows a retryable notice when an image the server would serve fails to load', async () => {
+    render(<InlineImageGallery text="See E:/test/chart.png" />)
 
     fireEvent.error(screen.getByRole('img'))
 
     const notice = await screen.findByRole('alert')
     expect(notice).toBeVisible()
     expect(notice).toHaveTextContent('Unable to load image')
-    expect(notice).toHaveTextContent('denied.png')
-    expect(notice).toHaveTextContent('The file may be missing or access may be denied.')
+    expect(notice).toHaveTextContent('chart.png')
+    expect(notice).toHaveTextContent('The file may be damaged, or the local server did not respond.')
     expect(screen.getByRole('button', { name: 'Retry' })).toBeVisible()
   })
 
+  it.each([
+    ['en', 'See /tmp/chart.png', '1 image'],
+    ['en', 'See /tmp/a.png and /tmp/b.png', '2 images'],
+    ['zh', 'See /tmp/a.png and /tmp/b.png', '2 张图片'],
+    ['jp', 'See /tmp/a.png and /tmp/b.png', '画像 2 枚'],
+  ] as const)('counts the pictures in the reader\'s language (%s: %s)', (locale, text, header) => {
+    // The header was typed in English and read "1 IMAGE" in every locale.
+    useSettingsStore.setState({ locale })
+    render(<InlineImageGallery text={text} />)
+
+    expect(screen.getByText(header)).toBeInTheDocument()
+  })
+
   it('keeps other images usable and tracks failures by source when the list changes', async () => {
-    const { rerender } = render(<InlineImageGallery text="See /tmp/denied.png and /tmp/allowed.png" />)
-    fireEvent.error(screen.getByRole('img', { name: 'denied.png' }))
+    const { rerender } = render(<InlineImageGallery text="See /tmp/broken.png and /tmp/chart.png" />)
+    fireEvent.error(screen.getByRole('img', { name: 'broken.png' }))
     await screen.findByRole('alert')
 
-    expect(screen.getByRole('img', { name: 'allowed.png' })).toBeVisible()
-    fireEvent.click(screen.getByRole('button', { name: /allowed.png/ }))
+    expect(screen.getByRole('img', { name: 'chart.png' })).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: /chart.png/ }))
     expect(screen.getByRole('dialog')).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'Close' }))
 
-    rerender(<InlineImageGallery text="See /tmp/new.png and /tmp/denied.png" />)
+    rerender(<InlineImageGallery text="See /tmp/new.png and /tmp/broken.png" />)
     expect(screen.getByRole('img', { name: 'new.png' })).toBeVisible()
-    expect(screen.getByRole('alert')).toHaveTextContent('denied.png')
-    expect(screen.queryByRole('img', { name: 'denied.png' })).not.toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('broken.png')
+    expect(screen.queryByRole('img', { name: 'broken.png' })).not.toBeInTheDocument()
   })
 
-  it('retries the same protected URL and keeps feedback if the retry fails', async () => {
-    render(<InlineImageGallery text="See /tmp/denied.png" />)
+  describe('an image the server will not serve', () => {
+    // Most paths a reply names that do not load are not there at all: a file
+    // cleaned out of /tmp since, a web route, a name quoted from a log. That is
+    // no fault and no retry fixes it, yet every such reply in the history carried
+    // a red "unable to load" notice.
+    it.each([
+      [404, 'it is missing'],
+      [403, 'it is outside the readable roots'],
+      [400, 'it is not an image file'],
+    ])('leaves no trace when the server answers %i: %s', async (status) => {
+      fetchServerImageBlobUrl.mockRejectedValue(new ApiError(status, { error: 'refused' }))
+      render(<InlineImageGallery text="截图已保存到 /tmp/cleaned/chart.png" />)
+
+      fireEvent.error(screen.getByRole('img'))
+
+      await waitFor(() => expect(screen.queryByRole('img')).not.toBeInTheDocument())
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+      expect(screen.queryByText('1 image')).not.toBeInTheDocument()
+    })
+
+    it('keeps the images that load beside one that is gone', async () => {
+      fetchServerImageBlobUrl.mockRejectedValue(new ApiError(404, { error: 'File not found' }))
+      render(<InlineImageGallery text="See /tmp/gone.png and /tmp/chart.png" />)
+
+      fireEvent.error(screen.getByRole('img', { name: 'gone.png' }))
+
+      await waitFor(() => expect(screen.queryByRole('img', { name: 'gone.png' })).not.toBeInTheDocument())
+      expect(screen.getByRole('img', { name: 'chart.png' })).toBeVisible()
+      expect(screen.getByText('1 image')).toBeInTheDocument()
+    })
+
+    it('leaves no trace for a missing workspace image the prose spelled out with its directory', async () => {
+      fetchServerImageBlobUrl.mockRejectedValue(new ApiError(404, 'not found'))
+      render(
+        <InlineImageGallery
+          text={'渲染结果已保存到 outputs/a/frame.png'}
+          sessionId="s1"
+          workDir="/w"
+          changedFiles={[]}
+        />,
+      )
+
+      fireEvent.error(screen.getByRole('img'))
+
+      await waitFor(() => expect(screen.queryByRole('img')).not.toBeInTheDocument())
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
+
+    it('tries again in another workspace, where the same path can exist', async () => {
+      fetchServerImageBlobUrl.mockRejectedValue(new ApiError(404, { error: 'File not found' }))
+      const { rerender } = render(<InlineImageGallery text="See /tmp/chart.png" sessionId="old" workDir="/tmp/old" />)
+      fireEvent.error(screen.getByRole('img'))
+      await waitFor(() => expect(screen.queryByRole('img')).not.toBeInTheDocument())
+
+      rerender(<InlineImageGallery text="See /tmp/chart.png" sessionId="new" workDir="/tmp/old" />)
+
+      expect(screen.getByRole('img', { name: 'chart.png' })).toBeVisible()
+    })
+  })
+
+  it('retries the same URL and keeps feedback if the retry fails', async () => {
+    render(<InlineImageGallery text="See /tmp/broken.png" />)
     const source = screen.getByRole('img').getAttribute('src')
     fireEvent.error(screen.getByRole('img'))
     fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
@@ -186,10 +218,10 @@ describe('InlineImageGallery', () => {
     { sessionId: 'new-session', workDir: '/tmp/old' },
     { sessionId: 'old-session', workDir: '/tmp/new' },
   ])('clears a failed absolute source when context changes to %j', (context) => {
-    const { rerender } = render(<InlineImageGallery text="See /tmp/denied.png" sessionId="old-session" workDir="/tmp/old" />)
+    const { rerender } = render(<InlineImageGallery text="See /tmp/broken.png" sessionId="old-session" workDir="/tmp/old" />)
     const source = screen.getByRole('img').getAttribute('src')
     fireEvent.error(screen.getByRole('img'))
-    rerender(<InlineImageGallery text="See /tmp/denied.png" {...context} />)
+    rerender(<InlineImageGallery text="See /tmp/broken.png" {...context} />)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.getByRole('img')).toHaveAttribute('src', source)
   })
@@ -232,6 +264,126 @@ describe('InlineImageGallery', () => {
     const srcs = imgSrcs()
     expect(srcs).toHaveLength(1)
     expect(srcs[0]).toBe('http://127.0.0.1:4321/preview-fs/s1/outputs/a/frame.png')
+  })
+
+  describe('an image the prose only names, without a path', () => {
+    // A read-only turn ("which commit swapped nodemaven_banner_sep.png?") names a
+    // file it never wrote. Resolved at the workdir root it is not there, and a file
+    // that is not there leaves no trace.
+    it('does not raise the error block when a guessed bare name is not there', async () => {
+      fetchServerImageBlobUrl.mockRejectedValue(new ApiError(404, 'not found'))
+      render(
+        <InlineImageGallery
+          text={'素材也换成 `nodemaven_banner_sep.png`,说明是按月续的'}
+          sessionId="s1"
+          workDir="/w"
+          changedFiles={[]}
+        />,
+      )
+
+      fireEvent.error(screen.getByRole('img'))
+
+      await waitFor(() => expect(screen.queryByRole('img')).not.toBeInTheDocument())
+      expect(fetchServerImageBlobUrl).toHaveBeenCalled()
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+      expect(screen.queryByText('1 image')).not.toBeInTheDocument()
+    })
+
+    it('shows the image the workspace really holds when a verb is glued to its name', async () => {
+      getWorkspaceTree.mockResolvedValue({
+        state: 'ok',
+        path: '',
+        entries: [{ name: '1.png', path: '1.png', isDirectory: false }],
+      })
+      render(<InlineImageGallery text={'截图保存为1.png'} sessionId="s1" workDir="/w" changedFiles={[]} />)
+
+      await waitFor(() => expect(imgSrcs()).toEqual(['http://127.0.0.1:4321/preview-fs/s1/1.png']))
+    })
+
+    it('shows a CJK-named image only once the workspace confirms it', async () => {
+      getWorkspaceTree.mockResolvedValue({
+        state: 'ok',
+        path: '',
+        entries: [{ name: '流程图.png', path: '流程图.png', isDirectory: false }],
+      })
+      render(<InlineImageGallery text={'已导出 流程图.png，格式选.png即可'} sessionId="s1" workDir="/w" changedFiles={[]} />)
+
+      expect(screen.queryAllByRole('img')).toHaveLength(0)
+      await waitFor(() => expect(imgSrcs()).toEqual([
+        `http://127.0.0.1:4321/preview-fs/s1/${encodeURIComponent('流程图.png')}`,
+      ]))
+    })
+
+    it('shows the notice for a guessed name too when its load fails for another reason', async () => {
+      // How the reply named a file does not decide the notice; why the load failed does.
+      render(
+        <InlineImageGallery
+          text={'素材也换成 `nodemaven_banner_sep.png`,说明是按月续的'}
+          sessionId="s1"
+          workDir="/w"
+          changedFiles={[]}
+        />,
+      )
+
+      fireEvent.error(screen.getByRole('img'))
+
+      expect(await screen.findByRole('alert')).toHaveTextContent('nodemaven_banner_sep.png')
+    })
+  })
+
+  describe('a pattern the text quotes, not a file', () => {
+    // The reply pointed at the screenshots it had taken as a glob. No URL loads
+    // `0*.png`, so the gallery showed a red "unable to load" tile with a retry.
+    it('shows nothing for a glob quoted in the reply', () => {
+      render(
+        <InlineImageGallery
+          text={'并截了 8 张关键界面（`/tmp/cc-haha-ui-review/0*.png`，含权限卡片、工具完成态）。'}
+          sessionId="s1"
+          workDir="/w"
+          changedFiles={['/tmp/cc-haha-ui-review/design/index.html']}
+        />,
+      )
+
+      expect(screen.queryAllByRole('img')).toHaveLength(0)
+      expect(screen.queryByText('1 image')).not.toBeInTheDocument()
+    })
+
+    it.each([
+      ['a wildcard directory listing', 'zsh: no matches found: /tmp/pres-verify/steps/*.png'],
+      ['a wildcard name', '截图在 /private/tmp/todo_*.png'],
+      ['a single-character wildcard', '帧序列 /tmp/frames/shot-??.png'],
+      ['a format-string placeholder', 'plt.savefig(f"/tmp/plots/{name}.png")'],
+      ['a template variable', 'logo 路径是 /connectors/${brand.id}.svg'],
+      ['a brace expansion', '两张图 /tmp/{before,after}.png'],
+      ['a shell variable', 'cp shot.png /tmp/$NAME.png'],
+      ['a printf frame pattern', 'ffmpeg -i in.mp4 /tmp/frames/f%03d.png'],
+    ])('shows nothing for %s', (_shape, text) => {
+      render(<InlineImageGallery text={text} />)
+
+      expect(screen.queryAllByRole('img')).toHaveLength(0)
+    })
+
+    it('still shows the concrete file named beside the pattern', () => {
+      render(
+        <InlineImageGallery
+          text={'截图 `/tmp/cc-haha-ui-review/0*.png`，首屏见 `/tmp/cc-haha-ui-review/01-initial.png`'}
+          sessionId="s1"
+          workDir="/w"
+        />,
+      )
+
+      expect(imgSrcs()).toEqual([
+        'http://127.0.0.1:3456/api/filesystem/file?path=' + encodeURIComponent('/tmp/cc-haha-ui-review/01-initial.png'),
+      ])
+    })
+
+    it('keeps a real directory whose name has brackets', () => {
+      render(<InlineImageGallery text={'已生成 /w/app/blog/[slug]/opengraph-image.png'} />)
+
+      expect(imgSrcs()).toEqual([
+        'http://127.0.0.1:3456/api/filesystem/file?path=' + encodeURIComponent('/w/app/blog/[slug]/opengraph-image.png'),
+      ])
+    })
   })
 
   it('uses the absolute-file route for a changed image outside the workspace', () => {
@@ -294,83 +446,8 @@ describe('InlineImageGallery', () => {
     expect(imgSrcs()).toEqual(['http://127.0.0.1:4321/preview-fs/s1/outputs/a/frame.png'])
   })
 
-  it('renders a remote https image URL directly', () => {
+  it('renders both absolute and relative images together', () => {
     render(
-      <InlineImageGallery
-        text={'preview at https://cdn.example.com/img/result.png ok'}
-        allowRemoteImages
-      />,
-    )
-
-    const srcs = imgSrcs()
-    expect(srcs).toHaveLength(1)
-    expect(srcs[0]).toBe('https://cdn.example.com/img/result.png')
-  })
-
-  it('ignores remote image URLs unless allowRemoteImages is set (untrusted prose)', () => {
-    render(
-      <InlineImageGallery
-        text={'preview at https://cdn.example.com/img/result.png ok'}
-      />,
-    )
-    expect(screen.queryAllByRole('img')).toHaveLength(0)
-  })
-
-  it('renders a remote image URL that carries a query string, using a clean name', () => {
-    render(
-      <InlineImageGallery
-        text={'{"previewUrl":"https://cdn.example.com/a/b.png?token=abc&x=1"}'}
-        allowRemoteImages
-      />,
-    )
-
-    expect(imgSrcs()).toEqual(['https://cdn.example.com/a/b.png?token=abc&x=1'])
-    expect(screen.getByRole('button', { name: /b\.png/i })).toBeInTheDocument()
-  })
-
-  it('drops the local sibling of a remote previewUrl (MCP result shape)', () => {
-    // Regression: an MCP image tool returns ONE logical image as both a remote
-    // previewUrl and a local absolutePath (the on-disk copy) that usually 403s
-    // through the filesystem sandbox. Only the remote URL should render — the
-    // sibling would otherwise show as a second, broken duplicate tile.
-    render(
-      <InlineImageGallery
-        text={'{"previewUrl":"https://tap.example.com/x.png","absolutePath":"/Users/me/out/x.png"}'}
-        allowRemoteImages
-      />,
-    )
-
-    expect(imgSrcs()).toEqual(['https://tap.example.com/x.png'])
-  })
-
-  it('drops a Windows-style local sibling path of a remote previewUrl', () => {
-    render(
-      <InlineImageGallery
-        text={'{"previewUrl":"https://tap.example.com/x.png","absolutePath":"D:\\\\MarkerAnim\\\\assets\\\\image\\\\facility_library.png"}'}
-        allowRemoteImages
-      />,
-    )
-
-    expect(imgSrcs()).toEqual(['https://tap.example.com/x.png'])
-  })
-
-  it('keeps an unrelated local image alongside a remote previewUrl', () => {
-    // Only the previewUrl's own sibling (absolutePath/localPath) is dropped; an
-    // independently-mentioned local image must still render.
-    render(
-      <InlineImageGallery
-        text={'{"previewUrl":"https://tap.example.com/x.png","absolutePath":"/Users/me/out/x.png"} also /Users/me/other/y.png'}
-        allowRemoteImages
-      />,
-    )
-
-    expect(imgSrcs()).toEqual([
-      'https://tap.example.com/x.png',
-      'http://127.0.0.1:3456/api/filesystem/file?path=' + encodeURIComponent('/Users/me/other/y.png'),
-    ])
-  })
-
-  it('renders both absolute and relative images together', () => {    render(
       <InlineImageGallery
         text={'abs /Users/me/pics/photo.png and rel outputs/b/chart.png'}
         sessionId="s1"

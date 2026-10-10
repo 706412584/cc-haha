@@ -1,6 +1,5 @@
 import { useEffect } from 'react'
-import { ExternalLink, X } from 'lucide-react'
-import { Button } from '@/components/ui/Button'
+import { ChevronLeft, ChevronRight, ExternalLink, X } from 'lucide-react'
 import { IconButton } from '@/components/ui/IconButton'
 import { Modal } from '@/components/ui/Modal'
 import { ZoomableImage, type ZoomableImageProps } from '@/components/ui/ZoomableImage'
@@ -9,7 +8,6 @@ import { AuthedImage } from './AuthedImage'
 import { getDesktopHost } from '@/lib/desktopHost'
 import { isRootedLocalPath } from '@/lib/handlePreviewLink'
 import { openLocalFileWithSystem, reportOpenFailure } from '@/lib/systemFileOpen'
-import { useOverlayStore } from '../../stores/overlayStore'
 import { useTranslation } from '../../i18n'
 
 type GalleryImage = {
@@ -28,7 +26,6 @@ type Props = {
   activeIndex: number
   onClose: () => void
   onSelect: (index: number) => void
-  onAnnotate?: (image: GalleryImage) => void
 }
 
 /** The lightbox picture, which also loads where a bare request is refused (web UI, H5). */
@@ -37,19 +34,9 @@ function AuthedZoomableImage({ src, onError, ...props }: ZoomableImageProps) {
   return <ZoomableImage {...props} src={image.src ?? src} onError={image.onError} />
 }
 
-export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect, onAnnotate }: Props) {
+export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect }: Props) {
   const t = useTranslation()
   const activeImage = images[activeIndex]
-
-  // Native child webviews (e.g. the in-app browser preview) always render
-  // ABOVE the DOM, so this fullscreen overlay would be partially covered.
-  // Bump the overlay count while open so BrowserSurface can hide the webview.
-  useEffect(() => {
-    if (!open) return
-    const { push, pop } = useOverlayStore.getState()
-    push()
-    return () => pop()
-  }, [open])
 
   useEffect(() => {
     if (!open || images.length <= 1) return
@@ -83,27 +70,15 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
           <span className="font-mono text-xs tabular-nums text-[var(--color-media-muted)]">
             {activeIndex + 1} / {images.length}
           </span>
-          <div className="flex items-center gap-2">
-            {onAnnotate && (
-              <Button
-                variant="secondary"
-                size="md"
-                icon={<span className="material-symbols-outlined text-[18px]">edit</span>}
-                onClick={() => onAnnotate(activeImage)}
-              >
-                标注并提问
-              </Button>
-            )}
-            <IconButton
-              icon={<X />}
-              label={t('workbench.close')}
-              size="lg"
-              tone="secondary"
-              shape="circle"
-              surface="media"
-              onClick={onClose}
-            />
-          </div>
+          <IconButton
+            icon={<X />}
+            label={t('workbench.close')}
+            size="lg"
+            tone="secondary"
+            shape="circle"
+            surface="media"
+            onClick={onClose}
+          />
         </div>
 
         <div className="relative flex min-h-0 flex-1 flex-col px-4 pb-4">
@@ -137,7 +112,7 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
             <>
               <div className="absolute left-3 top-1/2 -translate-y-1/2">
                 <IconButton
-                  icon="chevron_left"
+                  icon={<ChevronLeft size={20} strokeWidth={1.75} aria-hidden="true" />}
                   label={t('attachments.previousImage')}
                   size="xl"
                   tone="secondary"
@@ -149,7 +124,7 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
               </div>
               <div className="absolute right-3 top-1/2 -translate-y-1/2">
                 <IconButton
-                  icon="chevron_right"
+                  icon={<ChevronRight size={20} strokeWidth={1.75} aria-hidden="true" />}
                   label={t('attachments.nextImage')}
                   size="xl"
                   tone="secondary"

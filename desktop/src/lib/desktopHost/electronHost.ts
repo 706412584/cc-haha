@@ -128,9 +128,6 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
       openPath: path => invoke(ELECTRON_IPC_CHANNELS.shellOpenPath, path),
       showItemInFolder: target => invoke(ELECTRON_IPC_CHANNELS.shellShowItemInFolder, target),
     },
-    trace: {
-      openWindow: sessionId => invoke(ELECTRON_IPC_CHANNELS.traceOpenWindow, sessionId),
-    },
     pets: {
       list: () => invoke(ELECTRON_IPC_CHANNELS.petsList),
       createFromImage: input => invoke(ELECTRON_IPC_CHANNELS.petsCreateFromImage, input),
@@ -211,9 +208,8 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
       create: (tabId, options) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserCreate, {
         tabId,
         storageId: options.storageId,
+        webContentsId: options.webContentsId,
         ...(options.url === undefined ? {} : { url: options.url }),
-        ...(options.bounds === undefined ? {} : { bounds: options.bounds }),
-        ...(options.visible === undefined ? {} : { visible: options.visible }),
       }),
       navigate: (tabId, url) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserNavigate, { tabId, url }),
       goBack: tabId => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserGoBack, { tabId }),
@@ -223,7 +219,6 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
         ...(options?.ignoreCache === undefined ? {} : { ignoreCache: options.ignoreCache }),
       }),
       stop: tabId => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserStop, { tabId }),
-      setBounds: (tabId, bounds) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserSetBounds, { tabId, bounds }),
       setVisible: (tabId, visible) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserSetVisible, { tabId, visible }),
       setZoom: (tabId, factor) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserSetZoom, { tabId, factor }),
       find: (tabId, text, options) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserFind, {
@@ -233,7 +228,6 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
       }),
       stopFind: tabId => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserStopFind, { tabId }),
       capture: (tabId, kind) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserCapture, { tabId, kind }),
-      snapshot: (tabId) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserSnapshot, { tabId }),
       message: (tabId, payload) => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserMessage, { tabId, payload }),
       printToPdf: tabId => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserPrintToPdf, { tabId }),
       close: tabId => invoke(ELECTRON_IPC_CHANNELS.workspaceBrowserClose, { tabId }),
@@ -244,6 +238,13 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
       set: config => invoke(ELECTRON_IPC_CHANNELS.appModeSet, config),
       prepareRestart: () => invoke(ELECTRON_IPC_CHANNELS.appModePrepareRestart),
       restart: () => invoke(ELECTRON_IPC_CHANNELS.appModeRestart),
+      migration: {
+        prepare: targetDir => invoke(ELECTRON_IPC_CHANNELS.migrationPrepare, { targetDir }),
+        start: id => invoke(ELECTRON_IPC_CHANNELS.migrationStart, { id }),
+        status: () => invoke(ELECTRON_IPC_CHANNELS.migrationStatus),
+        cancel: id => invoke(ELECTRON_IPC_CHANNELS.migrationCancel, { id }),
+        onProgress: handler => subscribe(ELECTRON_EVENT_CHANNELS.migrationProgress, handler),
+      },
     },
     adapters: {
       restartSidecar: () => invoke(ELECTRON_IPC_CHANNELS.adaptersRestartSidecar),

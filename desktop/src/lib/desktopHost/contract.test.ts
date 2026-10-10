@@ -23,6 +23,11 @@ describe('desktop host contract', () => {
   })
 
   it('rejects desktop-only browser calls with actionable errors', async () => {
+    await expect(browserHost.appMode.migration.prepare('/fixture/new')).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.appMode.migration.start('migration-1')).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.appMode.migration.cancel('migration-1')).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.appMode.migration.status()).resolves.toBeNull()
+    await expect(browserHost.appMode.migration.onProgress(vi.fn())).resolves.toEqual(expect.any(Function))
     await expect(browserHost.runtime.getServerUrl()).rejects.toThrow('desktop app runtime')
     await expect(browserHost.runtime.getLocalAccessToken()).rejects.toThrow('desktop app runtime')
     await expect(browserHost.dialogs.open({ directory: true })).rejects.toThrow('desktop app runtime')
@@ -67,19 +72,17 @@ describe('desktop host contract', () => {
     // externally" fallback, so a rejection here would only ever surface as an
     // unhandled error behind that fallback.
     expect(browserHost.capabilities.workspaceBrowser).toBe(false)
-    await expect(browserHost.browser.create('wb-1', { storageId: 'wsb-1' })).resolves.toBeUndefined()
+    await expect(browserHost.browser.create('wb-1', { storageId: 'wsb-1', webContentsId: 7 })).resolves.toBeUndefined()
     await expect(browserHost.browser.navigate('wb-1', 'https://example.com')).resolves.toBeUndefined()
     await expect(browserHost.browser.goBack('wb-1')).resolves.toBeUndefined()
     await expect(browserHost.browser.goForward('wb-1')).resolves.toBeUndefined()
     await expect(browserHost.browser.reload('wb-1', { ignoreCache: true })).resolves.toBeUndefined()
     await expect(browserHost.browser.stop('wb-1')).resolves.toBeUndefined()
-    await expect(browserHost.browser.setBounds('wb-1', { x: 0, y: 0, width: 10, height: 10 })).resolves.toBeUndefined()
     await expect(browserHost.browser.setVisible('wb-1', false)).resolves.toBeUndefined()
     await expect(browserHost.browser.setZoom('wb-1', 1.25)).resolves.toBeUndefined()
     await expect(browserHost.browser.find('wb-1', 'invoice')).resolves.toBeUndefined()
     await expect(browserHost.browser.stopFind('wb-1')).resolves.toBeUndefined()
     await expect(browserHost.browser.capture('wb-1', 'viewport')).resolves.toBeUndefined()
-    await expect(browserHost.browser.snapshot('wb-1')).resolves.toBeNull()
     await expect(browserHost.browser.message('wb-1', { v: 1, type: 'exit-picker' })).resolves.toBeUndefined()
     await expect(browserHost.browser.printToPdf('wb-1')).resolves.toBeUndefined()
     await expect(browserHost.browser.showMenu('wb-1', {

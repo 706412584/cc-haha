@@ -187,43 +187,6 @@ vi.mock('../components/controls/ModelSelector', async () => {
   }
 })
 
-vi.mock('../components/chat/ImageAnnotationModal', () => ({
-  ImageAnnotationModal: ({ open, image, onSave }: {
-    open: boolean
-    image: { src: string; name: string } | null
-    onSave: (dataUrl: string) => void
-  }) => open && image ? (
-    <button
-      type="button"
-      data-image-src={image.src}
-      onClick={() => onSave('data:image/png;base64,ANNOTATED')}
-    >
-      Save annotation for {image.name}
-    </button>
-  ) : null,
-}))
-
-vi.mock('../lib/composerAttachments', async () => {
-  const actual = await vi.importActual<typeof import('../lib/composerAttachments')>('../lib/composerAttachments')
-  return {
-    ...actual,
-    filesToComposerAttachments: async (files: FileList | File[]) => {
-      const entries = Array.from(files)
-      if (entries.length === 1 && entries[0]?.name === 'screenshot.jpg') {
-        return [{
-          id: 'selected-screenshot',
-          type: 'image' as const,
-          name: 'screenshot.jpg',
-          path: 'C:\\Users\\Nanmi\\Desktop\\screenshot.jpg',
-          mimeType: 'image/jpeg',
-          previewUrl: 'data:image/jpeg;base64,SELECTED',
-        }]
-      }
-      return actual.filesToComposerAttachments(files)
-    },
-  }
-})
-
 import { EmptySession } from './EmptySession'
 import { ApiError } from '../api/client'
 import { useChatStore } from '../stores/chatStore'
@@ -393,6 +356,75 @@ describe('EmptySession', () => {
     useWorkflowStore.setState(initialWorkflowState, true)
   })
 
+  it('drops a starter into the draft and keeps what was already typed', async () => {
+    render(<EmptySession />)
+
+    const starters = screen.getByRole('group', { name: 'Suggestions' })
+    fireEvent.click(within(starters).getByRole('button', { name: 'Fix the failing tests' }))
+    await waitFor(() => expect(getComposerText()).toBe('Fix the failing tests'))
+
+    // A second pick appends on a new line rather than replacing the draft.
+    fireEvent.click(within(starters).getByRole('button', { name: 'Build a new feature' }))
+    await waitFor(() => expect(getComposerText()).toBe('Fix the failing tests\nBuild a new feature'))
+  })
+
+  it('keeps the starter row off the phone layout, where the composer docks to the bottom', () => {
+    mocks.isMobile = true
+
+    render(<EmptySession />)
+
+    expect(screen.queryByTestId('new-session-starter')).not.toBeInTheDocument()
+    expect(screen.getByTestId('empty-session-composer-shell')).toHaveClass('absolute', 'bottom-0')
+  })
+
+  it('puts the project above the hero on a phone, where the keyboard cannot cover it', async () => {
+    mocks.isMobile = true
+
+    render(<EmptySession />)
+
+    const launch = screen.getByTestId('empty-session-mobile-launch')
+    const pill = await within(launch).findByRole('button', { name: /^Location:/ })
+    expect(pill).toHaveClass('h-10')
+    // Read before the hero and outside the docked composer.
+    expect(launch.compareDocumentPosition(screen.getByRole('heading', { level: 1 })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByTestId('empty-session-composer-shell')).not.toContainElement(pill)
+    expect(screen.getAllByRole('button', { name: /^Location:/ })).toHaveLength(1)
+  })
+
+  it('starts in the folder it is given, holding Run until that repository is read', async () => {
+    mocks.isMobile = true
+    // Its own id: the session store keeps per-id bookkeeping across tests.
+    mocks.createSession.mockResolvedValue({ sessionId: 'phone-session' })
+    let resolveContext: (context: RepositoryContextResult) => void = () => {}
+    mocks.getRepositoryContext.mockReturnValue(new Promise<RepositoryContextResult>((resolve) => {
+      resolveContext = resolve
+    }))
+
+    render(<EmptySession initialWorkDir="/workspace/project" />)
+    setComposerText('draft question', 14)
+
+    const runButton = screen.getByRole('button', { name: /Run/i })
+    expect(mocks.getRepositoryContext).toHaveBeenCalledWith('/workspace/project')
+    expect(runButton).toBeDisabled()
+
+    await act(async () => { resolveContext(okRepositoryContext()) })
+    expect(await screen.findByRole('button', { name: 'Location: project / main' })).toBeInTheDocument()
+    await waitFor(() => expect(runButton).not.toBeDisabled())
+
+    fireEvent.click(runButton)
+
+    await waitFor(() => {
+      expect(mocks.createSession).toHaveBeenCalledWith({
+        workDir: '/workspace/project',
+        repository: { branch: 'main', worktree: false },
+        permissionMode: 'default',
+      })
+    })
+    await waitFor(() => {
+      expect(mocks.wsSend).toHaveBeenCalledWith('phone-session', expect.objectContaining({ content: 'draft question' }))
+    })
+  })
+
   it('uses compact composer controls on phone-sized H5 browsers', async () => {
     mocks.isMobile = true
 
@@ -404,7 +436,7 @@ describe('EmptySession', () => {
     expect(screen.getByTestId('model-selector')).toHaveAttribute('data-compact', 'true')
     expect(screen.getByRole('button', { name: 'Run' })).toHaveClass('h-11', 'w-11')
     expect(screen.getByTestId('empty-session-composer-shell')).toHaveClass('px-3')
-    expect(screen.getByTestId('empty-session-composer-panel')).toHaveClass('rounded-[var(--radius-2xl)]')
+    expect(screen.getByTestId('empty-session-composer-panel')).toHaveClass('rounded-[var(--radius-xl)]')
   })
 
   it.each(['@', '/', '/empty', '+'] as const)('hides withdrawn bundled capabilities in %s while keeping personal skills and other plugins', async (entry) => {
@@ -427,7 +459,7 @@ describe('EmptySession', () => {
     render(<EmptySession />)
     if (entry === '+') {
       fireEvent.click(screen.getByLabelText('Open composer tools'))
-      fireEvent.change(screen.getByRole('combobox', { name: 'Search skills, plugins, files…' }), { target: { value: 'design' } })
+      fireEvent.change(screen.getByRole('combobox', { name: 'Search skills, connectors, files…' }), { target: { value: 'design' } })
     } else if (entry === '/empty') setComposerText('/', 1)
     else setComposerText(`${entry}design`, 7)
     expect(await screen.findByRole('option', { name: 'Personal frontend design' })).toBeInTheDocument()
@@ -462,6 +494,7 @@ describe('EmptySession', () => {
     fireEvent.click(screen.getByLabelText('Open composer tools'))
     await waitFor(() => expect(mocks.listReferences.mock.calls.length).toBeGreaterThan(initialCalls))
     fireEvent.click(await screen.findByRole('option', { name: /^Skills/ }))
+    fireEvent.click(await screen.findByRole('option', { name: /^All skills/ }))
     expect(screen.queryByRole('option', { name: 'Old skill' })).not.toBeInTheDocument()
 
     await act(async () => resolveRefresh({ plugins: [], skills: result === 'replacement' ? [newSkill] : [] }))
@@ -479,7 +512,7 @@ describe('EmptySession', () => {
     await pickProject()
     setComposerText('Please review ', 14)
     fireEvent.click(screen.getByLabelText('Open composer tools'))
-    fireEvent.change(screen.getByRole('combobox', { name: 'Search skills, plugins, files…' }), { target: { value: 'README' } })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Search skills, connectors, files…' }), { target: { value: 'README' } })
     fireEvent.click(await screen.findByRole('option', { name: 'README.md' }))
 
     await waitFor(() => {
@@ -488,7 +521,7 @@ describe('EmptySession', () => {
     expect(document.querySelector('.composer-mention')).toHaveTextContent('@README.md')
     expect(getComposerText()).toContain('Please review @README.md')
     expect(mocks.search).toHaveBeenCalledWith('README', '/workspace/project', { signal: expect.any(AbortSignal) })
-    expect(screen.queryByRole('combobox', { name: 'Search skills, plugins, files…' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'Search skills, connectors, files…' })).not.toBeInTheDocument()
     expect(mocks.wsSend).not.toHaveBeenCalled()
     expect(mocks.createSession).not.toHaveBeenCalled()
   })
@@ -790,17 +823,17 @@ describe('EmptySession', () => {
     render(<EmptySession />)
 
     const panel = screen.getByTestId('empty-session-composer-panel')
-    // 20px corner and the middle shadow step — the composer's own place on the
-    // handoff's scale. The repository controls live inside this panel, so it
+    // 16px corner and the composer shadow step — the same floating card as
+    // ChatInput's. The repository controls live inside this panel, so it
     // must stay a single rounded block rather than a split top/bottom pair.
-    expect(panel).toHaveClass('rounded-[var(--radius-2xl)]', 'p-0', 'glass-panel--composer')
+    expect(panel).toHaveClass('rounded-[var(--radius-xl)]', 'p-2', 'glass-panel--composer')
     expect(panel).not.toHaveClass('rounded-b-none')
 
     await pickProject()
 
     const pill = await screen.findByRole('button', { name: 'Location: project / main' })
     expect(panel).toContainElement(pill)
-    expect(pill).toHaveClass('h-9')
+    expect(pill).toHaveClass('h-7')
 
     // Same toolbar row as Run — that row is the whole point of the change.
     const toolbarRow = pill.closest('.justify-between')
@@ -882,7 +915,6 @@ describe('EmptySession', () => {
         'draft-session',
         {
           type: 'set_runtime_config',
-          requestId: expect.any(String),
           providerId: 'provider-explicit',
           modelId: 'model-explicit',
         },
@@ -900,6 +932,30 @@ describe('EmptySession', () => {
 
     await waitFor(() => {
       expect(mocks.createSession).toHaveBeenCalledWith({ permissionMode: 'auto' })
+    })
+  })
+
+  it('carries the global effort into the first draft selection for ChatGPT Official', async () => {
+    useSettingsStore.setState({ effortLevel: 'low' })
+    useProviderStore.setState({
+      providers: [],
+      activeId: 'openai-official',
+      providerOrder: ['claude-official', 'openai-official', 'grok-official'],
+      hasLoadedProviders: true,
+    })
+
+    render(<EmptySession />)
+
+    setComposerText('draft question', 14)
+    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
+
+    await waitFor(() => {
+      expect(mocks.createSession).toHaveBeenCalledWith({ permissionMode: 'default' })
+    })
+
+    expect(useSessionRuntimeStore.getState().selections['draft-session']).toMatchObject({
+      providerId: 'openai-official',
+      effortLevel: 'low',
     })
   })
 
@@ -940,79 +996,27 @@ describe('EmptySession', () => {
     expect(useSessionRuntimeStore.getState().selections['draft-session']).toEqual({
       providerId: 'provider-minimax',
       modelId: enabled ? 'MiniMax-M3[1m]' : 'MiniMax-M3',
-      effortLevel: 'max',
+      effortLevel: 'low',
     })
-    // The fork replays the runtime mode alignment ahead of every user turn,
-    // so set_coordinator_mode sits between prewarm and the user message.
-    const runtimeCallTypes = mocks.wsSend.mock.calls.map((call) => {
-      const payload = call[1] as Record<string, unknown>
-      return payload.type
-    })
-    expect(runtimeCallTypes[0]).toBe('set_runtime_config')
-    expect(runtimeCallTypes).toContain('prewarm_session')
-    expect(runtimeCallTypes[runtimeCallTypes.length - 1]).toBe('user_message')
-    expect(mocks.wsSend.mock.calls[0]).toEqual([
-      'draft-session',
-      {
-        type: 'set_runtime_config',
-        requestId: expect.any(String),
-        providerId: 'provider-minimax',
-        modelId: enabled ? 'MiniMax-M3[1m]' : 'MiniMax-M3',
-        effortLevel: 'max',
-      },
-    ])
-    expect(mocks.wsSend.mock.calls[mocks.wsSend.mock.calls.length - 1]).toEqual([
-      'draft-session',
-      {
-        type: 'user_message',
-        content: 'draft question',
-        attachments: [],
-      },
-    ])
-  })
-
-  it('does not materialize a default effort for models that explicitly disable it', async () => {
-    const model = {
-      id: 'grok-4.5',
-      name: 'Grok 4.5',
-      description: 'Grok frontier text model',
-      context: '500000',
-      supportedReasoningEfforts: [],
-    }
-    useSettingsStore.setState({
-      availableModels: [model],
-      currentModel: model,
-      effortLevel: 'max',
-      activeProviderName: 'Grok Official',
-    })
-    useProviderStore.setState({
-      providers: [],
-      activeId: 'grok-official',
-      providerOrder: ['claude-official', 'openai-official', 'grok-official'],
-      hasLoadedProviders: true,
-    })
-
-    render(<EmptySession />)
-
-    setComposerText('draft question', 14)
-    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
-
-    await waitFor(() => {
-      expect(mocks.createSession).toHaveBeenCalledWith({ permissionMode: 'default' })
-    })
-
-    expect(useSessionRuntimeStore.getState().selections['draft-session']).toEqual({
-      providerId: 'grok-official',
-      modelId: 'grok-4.5',
-    })
-    expect(mocks.wsSend.mock.calls[0]).toEqual([
-      'draft-session',
-      {
-        type: 'set_runtime_config',
-        requestId: expect.any(String),
-        providerId: 'grok-official',
-        modelId: 'grok-4.5',
-      },
+    expect(mocks.wsSend.mock.calls.slice(0, 3)).toEqual([
+      [
+        'draft-session',
+        {
+          type: 'set_runtime_config',
+          providerId: 'provider-minimax',
+          modelId: enabled ? 'MiniMax-M3[1m]' : 'MiniMax-M3',
+          effortLevel: 'low',
+        },
+      ],
+      ['draft-session', { type: 'prewarm_session' }],
+      [
+        'draft-session',
+        {
+          type: 'user_message',
+          content: 'draft question',
+          attachments: [],
+        },
+      ],
     ])
   })
 
@@ -1052,40 +1056,26 @@ describe('EmptySession', () => {
       modelId: 'claude-sonnet-5',
       effortLevel: 'high',
     })
-    // set_runtime_config now carries a requestId so stale acks can be
-    // dropped (see setSessionRuntime in chatStore); assert the shape instead
-    // of the generated uuid.
-    const [runtimeConfigCall] = mocks.wsSend.mock.calls
-    expect(runtimeConfigCall?.[0]).toBe('draft-session')
-    expect(runtimeConfigCall?.[1]).toMatchObject({
-      type: 'set_runtime_config',
-      providerId: null,
-      modelId: 'claude-sonnet-5',
-      effortLevel: 'high',
-    })
-    expect(typeof runtimeConfigCall?.[1]?.requestId).toBe('string')
-    // The fork replays the runtime mode alignment ahead of every user turn:
-    // connectToSession fires set_coordinator_mode(false) (+ set_pipeline_mode)
-    // before the user message, and prewarm stays the second call overall.
-    const remainingCalls = mocks.wsSend.mock.calls.slice(1).map((call) => {
-      const payload = call[1] as Record<string, unknown>
-      return { sessionId: call[0], type: payload.type, enabled: payload.enabled, flavor: payload.flavor }
-    })
-    expect(remainingCalls).toEqual(expect.arrayContaining([
-      { sessionId: 'draft-session', type: 'prewarm_session', enabled: undefined, flavor: undefined },
-    ]))
-    const messageTypes = remainingCalls.map((call) => call.type)
-    expect(messageTypes[0]).toBe('prewarm_session')
-    expect(messageTypes).toContain('set_coordinator_mode')
-    expect(remainingCalls.find((call) => call.type === 'set_coordinator_mode')?.enabled).toBe(false)
-    expect(messageTypes[messageTypes.length - 1]).toBe('user_message')
-    const userMessage = mocks.wsSend.mock.calls[mocks.wsSend.mock.calls.length - 1]
-    expect(userMessage?.[0]).toBe('draft-session')
-    expect(userMessage?.[1]).toEqual({
-      type: 'user_message',
-      content: 'Claude OAuth question',
-      attachments: [],
-    })
+    expect(mocks.wsSend.mock.calls.slice(0, 3)).toEqual([
+      [
+        'draft-session',
+        {
+          type: 'set_runtime_config',
+          providerId: null,
+          modelId: 'claude-sonnet-5',
+          effortLevel: 'high',
+        },
+      ],
+      ['draft-session', { type: 'prewarm_session' }],
+      [
+        'draft-session',
+        {
+          type: 'user_message',
+          content: 'Claude OAuth question',
+          attachments: [],
+        },
+      ],
+    ])
   })
 
   it('opens provider settings instead of creating a session when no model authentication exists', async () => {
@@ -1107,38 +1097,36 @@ describe('EmptySession', () => {
 
   it('uses native desktop file paths for draft attachments', async () => {
     mocks.isTauriRuntime = true
-    const firstFile = new File(['log'], 'huge-a.log', { type: 'text/plain' })
-    const secondFile = new File(['zip'], 'huge-b.zip', { type: 'application/zip' })
-    Object.defineProperty(firstFile, 'path', {
-      configurable: true,
-      value: 'C:\\Users\\Nanmi\\Desktop\\huge-a.log',
-    })
-    Object.defineProperty(secondFile, 'path', {
-      configurable: true,
-      value: '/Users/nanmi/tmp/huge-b.zip',
-    })
     window.desktopHost = {
-      ...browserHost,
       kind: 'electron',
       isDesktop: true,
       capabilities: {
-        ...browserHost.capabilities,
+        appMode: false,
         dialogs: true,
+        notifications: false,
+        previewWebview: false,
+        shell: false,
+        terminal: false,
+        updates: false,
+        windowControls: false,
+        zoom: false,
       },
-      files: {
-        getPathForFile: (file) => (file as File & { path?: string }).path ?? '',
+      dialogs: {
+        open: mocks.dialogOpen,
       },
       webview: {
         onDragDropEvent: vi.fn().mockResolvedValue(mocks.webviewUnlisten),
       },
-    }
+    } as any
+    mocks.dialogOpen.mockResolvedValueOnce([
+      'C:\\Users\\Nanmi\\Desktop\\huge-a.log',
+      '/Users/nanmi/tmp/huge-b.zip',
+    ])
 
     render(<EmptySession />)
 
     fireEvent.click(screen.getByLabelText('Open composer tools'))
     fireEvent.click(screen.getByText('Add files or photos'))
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
-    fireEvent.change(fileInput, { target: { files: [firstFile, secondFile] } })
 
     expect(await screen.findByText('huge-a.log')).toBeInTheDocument()
     expect(await screen.findByText('huge-b.zip')).toBeInTheDocument()
@@ -1167,128 +1155,6 @@ describe('EmptySession', () => {
         }),
       ],
     })
-  })
-
-  it('replaces a selected desktop image with the saved annotation', async () => {
-    mocks.isTauriRuntime = true
-    const image = new File(['image'], 'screenshot.jpg', { type: 'image/jpeg' })
-    Object.defineProperty(image, 'path', {
-      configurable: true,
-      value: 'C:\\Users\\Nanmi\\Desktop\\screenshot.jpg',
-    })
-    window.desktopHost = {
-      ...browserHost,
-      kind: 'electron',
-      isDesktop: true,
-      capabilities: {
-        ...browserHost.capabilities,
-        dialogs: true,
-      },
-      files: {
-        getPathForFile: (file) => (file as File & { path?: string }).path ?? '',
-      },
-      webview: {
-        onDragDropEvent: vi.fn().mockResolvedValue(mocks.webviewUnlisten),
-      },
-    }
-
-    render(<EmptySession />)
-
-    fireEvent.click(screen.getByLabelText('Open composer tools'))
-    fireEvent.click(screen.getByText('Add files or photos'))
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
-    fireEvent.change(fileInput, { target: { files: [image] } })
-
-    expect(await screen.findByLabelText('Annotate screenshot.jpg')).toBeInTheDocument()
-    fireEvent.click(screen.getByLabelText('Annotate screenshot.jpg'))
-    fireEvent.click(await screen.findByRole('button', { name: 'Save annotation for screenshot.jpg' }))
-
-    expect(await screen.findByLabelText('Annotate screenshot-annotated.png')).toBeInTheDocument()
-    setComposerText('use the annotation', 'use the annotation'.length)
-    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
-
-    await waitFor(() => {
-      expect(mocks.createSession).toHaveBeenCalledWith({ permissionMode: 'default' })
-    })
-    expect(mocks.wsSend).toHaveBeenCalledWith('draft-session', {
-      type: 'user_message',
-      content: 'use the annotation',
-      attachments: [expect.objectContaining({
-        type: 'image',
-        name: 'screenshot-annotated.png',
-        path: undefined,
-        data: 'data:image/png;base64,ANNOTATED',
-        mimeType: 'image/png',
-      })],
-    })
-  })
-
-  it('resolves a path-only dropped image before opening annotation', async () => {
-    window.desktopHost = {
-      ...browserHost,
-      kind: 'electron',
-      isDesktop: true,
-      webview: {
-        ...browserHost.webview,
-        onDragDropEvent: async (handler) => {
-          mocks.webviewDragHandlers.push(handler as (event: { payload: unknown }) => void)
-          return mocks.webviewUnlisten
-        },
-      },
-    }
-    render(<EmptySession />)
-
-    const panel = screen.getByTestId('empty-session-composer-panel')
-    Object.defineProperty(panel, 'getBoundingClientRect', {
-      configurable: true,
-      value: () => ({
-        left: 0,
-        top: 0,
-        right: 640,
-        bottom: 180,
-        width: 640,
-        height: 180,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      }),
-    })
-    await waitFor(() => expect(mocks.webviewDragHandlers).toHaveLength(1))
-
-    const imagePath = 'C:\\Users\\Nanmi\\Desktop\\path-only.png'
-    act(() => {
-      mocks.webviewDragHandlers[0]?.({
-        payload: {
-          type: 'drop',
-          position: { x: 24, y: 24 },
-          paths: [imagePath],
-        },
-      })
-    })
-    fireEvent.click(await screen.findByLabelText('Annotate path-only.png'))
-
-    expect(screen.getByRole('button', { name: 'Save annotation for path-only.png' })).toHaveAttribute(
-      'data-image-src',
-      expect.stringContaining(`/api/filesystem/file?path=${encodeURIComponent(imagePath)}`),
-    )
-  })
-
-  it('closes image annotation when the target attachment is removed', async () => {
-    const image = new File(['image'], 'screenshot.jpg', { type: 'image/jpeg' })
-
-    render(<EmptySession />)
-
-    fireEvent.click(screen.getByLabelText('Open composer tools'))
-    fireEvent.click(screen.getByText('Add files or photos'))
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
-    fireEvent.change(fileInput, { target: { files: [image] } })
-
-    fireEvent.click(await screen.findByLabelText('Annotate screenshot.jpg'))
-    expect(screen.getByRole('button', { name: 'Save annotation for screenshot.jpg' })).toBeInTheDocument()
-    fireEvent.click(screen.getByLabelText('Remove screenshot.jpg'))
-
-    expect(screen.queryByRole('button', { name: 'Save annotation for screenshot.jpg' })).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('Annotate screenshot.jpg')).not.toBeInTheDocument()
   })
 
   it('shows a drop affordance and sends dropped desktop files as path attachments', async () => {
@@ -1594,9 +1460,6 @@ describe('EmptySession', () => {
 
     expect(screen.queryByText('worktree-desktop-feature-a-12345678')).not.toBeInTheDocument()
 
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Run/i })).not.toBeDisabled()
-    })
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
     await waitFor(() => {
@@ -1740,6 +1603,10 @@ describe('EmptySession', () => {
       mocks.voiceTranscribe.mockImplementation(() => new Promise((resolve) => {
         finishTranscription = (text) => resolve({ text, audioSeconds: 2, inferenceSeconds: 0.1 })
       }))
+      // Voice input exists only in the desktop app (the outer beforeEach resets this).
+      mocks.isTauriRuntime = true
+      // jsdom has no canvas; the recording bar's trace draws nothing without one.
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null)
     })
 
     async function dictate() {
@@ -1768,6 +1635,12 @@ describe('EmptySession', () => {
       expect(screen.queryByTestId('voice-input')).toBeNull()
     })
 
+    it('does not render the microphone in the browser (H5)', () => {
+      mocks.isTauriRuntime = false
+      render(<EmptySession />)
+      expect(screen.queryByTestId('voice-input')).toBeNull()
+    })
+
     it('writes dictated text at the caret without starting a session', async () => {
       render(<EmptySession />)
       setComposerText('ab', 1)
@@ -1781,6 +1654,32 @@ describe('EmptySession', () => {
 
       expect(getComposerText()).toBe('a你好b')
       expect(mocks.createSession).not.toHaveBeenCalled()
+    })
+
+    it('starts the session with the dictated text when sent from the recording bar', async () => {
+      render(<EmptySession />)
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Dictate' }))
+      })
+      // The bar takes the toolbar's row: its controls, Run included, are hidden.
+      expect(screen.getByTestId('voice-recording-bar')).toBeVisible()
+      expect(screen.queryByRole('button', { name: 'Run' })).toBeNull()
+
+      await act(async () => {
+        fireEvent.click(await screen.findByRole('button', { name: 'Transcribe and send' }))
+      })
+      expect(mocks.createSession).not.toHaveBeenCalled()
+      await act(async () => {
+        finishTranscription('你好')
+      })
+
+      await waitFor(() => {
+        expect(mocks.wsSend).toHaveBeenCalledWith('draft-session', {
+          type: 'user_message',
+          content: '你好',
+          attachments: [],
+        })
+      })
     })
 
     it('keeps the text aside when the draft was edited while it was being recognised', async () => {
@@ -1823,134 +1722,4 @@ describe('EmptySession', () => {
     })
   })
 
-})
-
-describe('EmptySession welcome-screen task cards', () => {
-  const initialSessionState = useSessionStore.getInitialState()
-  const initialChatState = useChatStore.getInitialState()
-  const initialTabState = useTabStore.getInitialState()
-  const initialRuntimeState = useSessionRuntimeStore.getInitialState()
-  const initialUiState = useUIStore.getInitialState()
-  const initialPluginState = usePluginStore.getInitialState()
-
-  beforeEach(() => {
-    vi.clearAllMocks()
-    mocks.webviewDragHandlers.length = 0
-    mocks.isMobile = false
-    mocks.isTauriRuntime = false
-    useSettingsStore.setState({ locale: 'en', activeProviderName: null, permissionMode: 'default' })
-    useSessionStore.setState(initialSessionState, true)
-    useChatStore.setState(initialChatState, true)
-    useTabStore.setState(initialTabState, true)
-    useSessionRuntimeStore.setState(initialRuntimeState, true)
-    useUIStore.setState(initialUiState, true)
-    usePluginStore.setState(initialPluginState, true)
-
-    mocks.createSession.mockResolvedValue({ sessionId: 'draft-session' })
-    mocks.getRepositoryContext.mockResolvedValue(okRepositoryContext())
-    mocks.listSessions.mockResolvedValue({
-      sessions: [{
-        id: 'draft-session',
-        title: 'New Session',
-        createdAt: '2026-05-01T00:00:00.000Z',
-        modifiedAt: '2026-05-01T00:00:00.000Z',
-        messageCount: 0,
-        projectPath: '/workspace/project',
-        workDir: '/workspace/project',
-        workDirExists: true,
-      }],
-      total: 1,
-    })
-    mocks.getMessages.mockResolvedValue({ messages: [] })
-    mocks.getSlashCommands.mockResolvedValue({ commands: [] })
-    mocks.listSkills.mockResolvedValue({ skills: [] })
-    mocks.listAgents.mockResolvedValue({ activeAgents: [], allAgents: [] })
-    mocks.search.mockResolvedValue({
-      currentPath: '/workspace/project',
-      parentPath: null,
-      query: '',
-      entries: [],
-    })
-    mocks.getTasksForList.mockResolvedValue({ tasks: [] })
-    mocks.resetTaskList.mockResolvedValue(undefined)
-  })
-
-  afterEach(() => {
-    cleanup()
-    Reflect.deleteProperty(window, 'desktopHost')
-    useSessionStore.setState(initialSessionState, true)
-    useChatStore.setState(initialChatState, true)
-    useTabStore.setState(initialTabState, true)
-    useSessionRuntimeStore.setState(initialRuntimeState, true)
-    useUIStore.setState(initialUiState, true)
-    usePluginStore.setState(initialPluginState, true)
-  })
-
-  it('renders all four task cards on desktop', async () => {
-    render(<EmptySession />)
-
-    expect(await screen.findByTestId('welcome-task-cards')).toBeInTheDocument()
-    expect(screen.getByTestId('welcome-task-card-preMergeReview')).toBeInTheDocument()
-    expect(screen.getByTestId('welcome-task-card-investigateTest')).toBeInTheDocument()
-    expect(screen.getByTestId('welcome-task-card-writeTests')).toBeInTheDocument()
-    expect(screen.getByTestId('welcome-task-card-understandProject')).toBeInTheDocument()
-  })
-
-  it('hides the task cards on phone-sized H5 browsers (composer is dense enough already)', async () => {
-    mocks.isMobile = true
-    render(<EmptySession />)
-
-    await waitFor(() => {
-      expect(screen.queryByRole('textbox')).toBeInTheDocument()
-    })
-    expect(screen.queryByTestId('welcome-task-cards')).not.toBeInTheDocument()
-  })
-
-  it('clicking a card pre-fills the composer with the starter prompt', async () => {
-    render(<EmptySession />)
-
-    fireEvent.click(await screen.findByTestId('welcome-task-card-preMergeReview'))
-
-    const text = getComposerText()
-    expect(text).toContain('main')
-    expect(text.toLowerCase()).toContain('pr description')
-  })
-
-  it('orchestration cards persist coordinator mode for the new session before connect', async () => {
-    render(<EmptySession />)
-
-    fireEvent.click(await screen.findByTestId('welcome-task-card-preMergeReview'))
-    await pickProject()
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Location: project / main' })).toBeInTheDocument()
-    })
-
-    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
-
-    await waitFor(() => {
-      expect(mocks.createSession).toHaveBeenCalled()
-    })
-    await waitFor(() => {
-      expect(useSessionRuntimeStore.getState().coordinatorModes['draft-session']).toBe(true)
-    })
-  })
-
-  it('non-orchestration cards do NOT enable coordinator mode', async () => {
-    render(<EmptySession />)
-
-    fireEvent.click(await screen.findByTestId('welcome-task-card-writeTests'))
-    await pickProject()
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Location: project / main' })).toBeInTheDocument()
-    })
-
-    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
-
-    await waitFor(() => {
-      expect(mocks.createSession).toHaveBeenCalled()
-    })
-    // We never called setSessionCoordinatorMode for this card, so the key is
-    // absent in the runtime store.
-    expect(useSessionRuntimeStore.getState().coordinatorModes['draft-session']).toBeUndefined()
-  })
 })

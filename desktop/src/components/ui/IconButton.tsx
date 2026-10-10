@@ -1,4 +1,4 @@
-import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from 'react'
+import { forwardRef, type ButtonHTMLAttributes, type ReactElement } from 'react'
 
 import { cx } from '@/lib/cx'
 import { Spinner } from './Spinner'
@@ -11,8 +11,12 @@ export type IconButtonSurface = 'default' | 'sidebar' | 'terminal' | 'media'
 
 export type IconButtonProps =
   Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'children' | 'aria-label' | 'title'> & {
-    /** A lucide component, a material-symbols name, or any node. */
-    icon: ReactNode | string
+    /**
+     * A lucide icon element. Strings are rejected at the type level: this prop
+     * used to accept a Material Symbols ligature name, and a string slipping
+     * through now would render as raw text ("chevron_left") instead of a glyph.
+     */
+    icon: ReactElement
     /**
      * Required. An icon-only control has no visible text, so without this it is
      * unreachable by screen readers and unlabeled in the accessibility tree.
@@ -40,6 +44,13 @@ export type IconButtonProps =
      * washes out against a photo.
      */
     solid?: boolean
+    /**
+     * A neutral resting disc with no border, for controls that share a strip
+     * with something busy and need their own ground: the composer's recording
+     * bar sets cancel and stop beside a live waveform. `filled` is a bordered
+     * card face, which reads as a separate object instead.
+     */
+    soft?: boolean
     /** Hairline border on a transparent background. */
     bordered?: boolean
     /**
@@ -208,9 +219,15 @@ const SOLID_CLASSES: Record<IconButtonTone, string> = {
   danger: 'bg-[var(--color-error)] text-[var(--color-on-error)]',
 }
 
+/** `soft`: its own resting fill and the hover that steps past it. */
+const SOFT_CLASSES = 'bg-[var(--color-btn-soft-bg)] hover:bg-[var(--color-btn-soft-hover)]'
+
 const PRESSED_CLASSES: Record<IconButtonSurface, string> = {
   default: 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]',
-  sidebar: 'bg-[var(--color-sidebar-item-hover)] text-[var(--color-text-primary)]',
+  // The sidebar's hover fill is the faintest step on its ground; a toggle that
+  // is on must not look like one the pointer is merely over, so it takes the
+  // theme accent.
+  sidebar: 'bg-[var(--color-brand-soft)] text-[var(--color-brand)]',
   terminal: 'bg-[var(--color-terminal-selection)] text-[var(--color-terminal-fg)]',
   media: 'bg-[var(--color-media-selection)] text-[var(--color-media-fg)]',
 }
@@ -247,6 +264,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
   shape = 'square',
   filled = false,
   solid = false,
+  soft = false,
   bordered = false,
   hoverTone,
   pressed,
@@ -273,13 +291,14 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
         BASE_CLASSES,
         DISABLED_OPACITY[disabledStyle],
         SIZE_CLASSES[size],
-        // `solid` supplies both fill and foreground, so the tone's resting text
-        // color and hover fill are skipped rather than left to compete.
-        solid ? SOLID_CLASSES[tone] : (SURFACE_REST_TEXT[surface] ?? REST_TEXT)[tone],
+        // `solid` and `pressed` supply both fill and foreground, so the tone's
+        // resting text color is skipped rather than left to compete: two
+        // `text-[…]` values resolve by alphabetical order, not by intent.
+        solid ? SOLID_CLASSES[tone] : !pressed && (SURFACE_REST_TEXT[surface] ?? REST_TEXT)[tone],
         solid && 'hover:brightness-110',
-        // A pressed button carries its own fill and hover; skipping the tone's
-        // hover here keeps two `hover:bg-[…]` values from competing.
-        !solid && (pressed ? PRESSED_CLASSES[surface] : HOVER_BG[surface][tone]),
+        // A pressed or soft button carries its own fill and hover; skipping the
+        // tone's hover here keeps two `hover:bg-[…]` values from competing.
+        !solid && (pressed ? PRESSED_CLASSES[surface] : soft ? SOFT_CLASSES : HOVER_BG[surface][tone]),
         // Exactly one hover text color — `hoverTone` replaces the tone's own
         // rather than stacking on top of it, which Tailwind would silently
         // resolve the wrong way.
@@ -288,22 +307,14 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
             ? 'hover:text-[var(--color-error)]'
             : (SURFACE_HOVER_TEXT[surface] ?? HOVER_TEXT)[tone]
         ),
-        filled && !pressed && !solid && FILLED_CLASSES[tone],
+        filled && !pressed && !solid && !soft && FILLED_CLASSES[tone],
         bordered && !filled && 'border border-[var(--color-border)]',
         shape === 'circle' && 'rounded-full',
         className,
       )}
       {...props}
     >
-      {loading
-        ? <Spinner size={iconSize} />
-        : typeof icon === 'string'
-          ? (
-            <span className="material-symbols-outlined" style={{ fontSize: iconSize }} aria-hidden="true">
-              {icon}
-            </span>
-          )
-          : icon}
+      {loading ? <Spinner size={iconSize} /> : icon}
     </button>
   )
 })

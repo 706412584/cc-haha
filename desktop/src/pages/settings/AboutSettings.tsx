@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { SegmentedControl } from '@/components/ui/SegmentedControl'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useTranslation } from '../../i18n'
 import { Input } from '@/components/ui/Input'
@@ -105,6 +106,7 @@ export function AboutSettings() {
       description: t('update.proxyModeManualDescription'),
     },
   ]
+  const selectedUpdateProxyMode = updateProxyModes.find((mode) => mode.value === updateProxyDraft.mode)
   const manualProxyUrl = updateProxyDraft.url.trim()
   const manualProxyError =
     updateProxyDraft.mode === 'manual' && !manualProxyUrl
@@ -249,29 +251,20 @@ export function AboutSettings() {
 
             {showUpdateProxyAdvanced && (
               <div className="mt-3 space-y-3">
-                <div className="grid grid-cols-2 gap-2">
-                  {updateProxyModes.map((mode) => (
-                    <button
-                      key={mode.value}
-                      type="button"
-                      onClick={() => {
-                        setUpdateProxyDraft((current) => ({ ...current, mode: mode.value }))
-                        setUpdateProxySaveError(null)
-                      }}
-                      aria-pressed={updateProxyDraft.mode === mode.value}
-                      className={`rounded-[var(--radius-lg)] border px-3 py-2 text-left transition-colors ${
-                        updateProxyDraft.mode === mode.value
-                          ? 'border-[var(--color-brand)] bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
-                          : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
-                      }`}
-                    >
-                      <div className="text-xs font-semibold">{mode.label}</div>
-                      <div className="mt-1 text-[11px] leading-4 text-[var(--color-text-tertiary)]">
-                        {mode.description}
-                      </div>
-                    </button>
-                  ))}
-                </div>
+                <SegmentedControl<UpdateProxyMode>
+                  label={t('update.proxyAdvanced')}
+                  layout="fill"
+                  size="sm"
+                  value={updateProxyDraft.mode}
+                  onChange={(mode) => {
+                    setUpdateProxyDraft((current) => ({ ...current, mode }))
+                    setUpdateProxySaveError(null)
+                  }}
+                  items={updateProxyModes.map(({ value, label }) => ({ value, label }))}
+                />
+                {selectedUpdateProxyMode && (
+                  <p className="text-xs leading-[1.5] text-[var(--color-text-tertiary)]">{selectedUpdateProxyMode.description}</p>
+                )}
 
                 {updateProxyDraft.mode === 'manual' && (
                   <div>

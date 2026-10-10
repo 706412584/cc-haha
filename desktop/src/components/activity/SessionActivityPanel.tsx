@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, ChevronRight, Circle, FileText, LoaderCircle, Square, Terminal, Users, X, Zap } from 'lucide-react'
 import { Badge, StatusDot, type Tone } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
+import { MobileBottomSheet } from '@/components/ui/MobileBottomSheet'
 import { IconButton } from '@/components/ui/IconButton'
 import { Progress } from '@/components/ui/Progress'
 import { useDismissable } from '@/hooks/useDismissable'
@@ -22,7 +23,11 @@ export type OpenSubagentPayload = {
   teamStartedAt?: number
 }
 
-type SessionActivityPanelPlacement = 'overlay' | 'rail'
+/**
+ * `overlay` floats over the session's top right, `rail` docks beside it, and
+ * `sheet` is the phone's bottom sheet, opened from the top bar's activity pill.
+ */
+type SessionActivityPanelPlacement = 'overlay' | 'rail' | 'sheet'
 
 type TranslationFn = ReturnType<typeof useTranslation>
 
@@ -179,9 +184,9 @@ function TaskStatusMarker({ status, t }: { status: ActivityRow['status']; t: Tra
     return (
       <span
         aria-label={t('session.activity.task.completed')}
-        className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-success)] text-[var(--color-surface)]"
+        className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-success-container)] text-[var(--color-on-success-container)]"
       >
-        <Check size={13} strokeWidth={3} aria-hidden="true" />
+        <Check size={12} strokeWidth={2} aria-hidden="true" />
       </span>
     )
   }
@@ -192,7 +197,7 @@ function TaskStatusMarker({ status, t }: { status: ActivityRow['status']; t: Tra
         aria-label={t('session.activity.status.stopped')}
         className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-[var(--color-outline)] text-[var(--color-text-tertiary)]"
       >
-        <X size={12} strokeWidth={2.4} aria-hidden="true" />
+        <X size={12} strokeWidth={2} aria-hidden="true" />
       </span>
     )
   }
@@ -205,7 +210,7 @@ function TaskStatusMarker({ status, t }: { status: ActivityRow['status']; t: Tra
     return (
       <span
         aria-label={t('session.activity.task.inProgress')}
-        className="inline-flex h-5 w-5 shrink-0 rounded-full border-[2.5px] border-[var(--color-primary-fixed-dim)] border-t-[var(--color-brand)] motion-safe:animate-spin motion-reduce:animate-none"
+        className="inline-flex h-5 w-5 shrink-0 rounded-full border-2 border-[var(--color-info-container)] border-t-[var(--color-info)] motion-safe:animate-spin motion-reduce:animate-none"
       />
     )
   }
@@ -213,7 +218,7 @@ function TaskStatusMarker({ status, t }: { status: ActivityRow['status']; t: Tra
   return (
     <span
       aria-label={t('session.activity.task.pending')}
-      className="inline-flex h-5 w-5 shrink-0 rounded-full border-[1.8px] border-[var(--color-outline)]"
+      className="inline-flex h-5 w-5 shrink-0 rounded-full border-[1.5px] border-[var(--color-border-strong)]"
     />
   )
 }
@@ -238,7 +243,7 @@ function getRowIcon(row: ActivityRow) {
 }
 
 function getStatusTone(status: ActivityRow['status']): Tone {
-  if (status === 'running' || status === 'in_progress') return 'brand'
+  if (status === 'running' || status === 'in_progress') return 'info'
   if (status === 'completed' || status === 'idle') return 'success'
   if (status === 'failed' || status === 'error' || status === 'stopped') return 'danger'
   return 'neutral'
@@ -266,7 +271,7 @@ function getTaskProgress(rows: ActivityRow[]): { completed: number; total: numbe
  */
 function getRowIconToneClass(status: ActivityRow['status']): string {
   if (status === 'running' || status === 'in_progress') {
-    return 'bg-[var(--color-brand-soft)] text-[var(--color-on-brand-soft)]'
+    return 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)]'
   }
   if (status === 'completed' || status === 'idle') {
     return 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
@@ -302,7 +307,7 @@ function ActivityRowIcon({
       data-tone-status={status}
       className={`inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[var(--radius-md)] ${getRowIconToneClass(status)}`}
     >
-      <Icon size={15} strokeWidth={2} aria-hidden="true" />
+      <Icon size={16} strokeWidth={1.75} aria-hidden="true" />
     </span>
   )
 }
@@ -357,9 +362,9 @@ function BackgroundTaskStopButton({
   return (
     <IconButton
       icon={stopping ? (
-        <LoaderCircle size={14} strokeWidth={2.2} className="motion-safe:animate-spin motion-reduce:animate-none" aria-hidden="true" />
+        <LoaderCircle size={14} strokeWidth={1.75} className="motion-safe:animate-spin motion-reduce:animate-none" aria-hidden="true" />
       ) : (
-        <Square size={12} strokeWidth={2.4} aria-hidden="true" />
+        <Square size={12} strokeWidth={2} aria-hidden="true" />
       )}
       label={label}
       size="md"
@@ -394,7 +399,7 @@ function WorkflowPhaseHeader({
       data-status={status}
       className="flex items-center gap-2 px-2 pb-1 pt-2.5 first:pt-1"
     >
-      <span className="truncate text-[11px] font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">
+      <span className="truncate text-[12px] font-semibold text-[var(--color-text-tertiary)]">
         {label}
       </span>
       <span className="h-px flex-1 bg-[var(--color-border)]" aria-hidden="true" />
@@ -492,7 +497,7 @@ function ActivityRowView({
         </span>
         {detail ? (
           <span
-            className="mt-px block truncate text-[11.5px] leading-4 text-[var(--color-text-tertiary)]"
+            className="mt-px block truncate text-[12px] leading-4 text-[var(--color-text-tertiary)]"
             title={detail}
           >
             {detail}
@@ -519,12 +524,12 @@ function ActivityRowView({
         />
       ) : null}
       {!isTask && row.openable ? (
-        <ChevronRight size={13} strokeWidth={2.2} className="shrink-0 text-[var(--color-text-tertiary)]" aria-hidden="true" />
+        <ChevronRight size={14} strokeWidth={1.75} className="shrink-0 text-[var(--color-text-tertiary)]" aria-hidden="true" />
       ) : null}
     </>
   )
   const interactiveRowClassName =
-    'flex min-w-0 items-center gap-2.5 rounded-[var(--radius-md)] px-2 py-1.5 text-left transition-[background-color,transform] duration-150 ease-out hover:bg-[var(--color-surface-hover)] active:translate-y-px motion-reduce:active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]'
+    'flex min-w-0 items-center gap-2.5 rounded-[var(--radius-sm)] px-2 py-1.5 text-left transition-[background-color,transform] duration-150 ease-out hover:bg-[var(--color-surface-hover)] active:translate-y-px motion-reduce:active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]'
   const stopButton = row.section === 'backgroundTasks' && onStopBackgroundTask ? (
     <BackgroundTaskStopButton
       row={row}
@@ -634,7 +639,7 @@ function ActivityRowView({
         aria-label={t('session.activity.openBackgroundTask', { name: row.label })}
         aria-expanded={selected}
         onClick={() => onOpenBackgroundTask(row)}
-        className={`${interactiveRowClassName} ${stopButton ? 'flex-1' : 'w-full'} ${selected ? 'bg-[var(--color-surface-container)]' : ''}`}
+        className={`${interactiveRowClassName} ${stopButton ? 'flex-1' : 'w-full'} ${selected ? 'bg-[var(--color-surface-selected)]' : ''}`}
       >
         {content}
       </button>
@@ -651,7 +656,7 @@ function ActivityRowView({
   if (stopButton) {
     return (
       <div className="flex w-full items-center gap-1">
-        <div className="flex min-w-0 flex-1 items-center gap-2.5 rounded-[var(--radius-md)] px-2 py-1.5">
+        <div className="flex min-w-0 flex-1 items-center gap-2.5 rounded-[var(--radius-sm)] px-2 py-1.5">
           {content}
         </div>
         {stopButton}
@@ -660,7 +665,7 @@ function ActivityRowView({
   }
 
   return (
-    <div className="flex items-center gap-2.5 rounded-[var(--radius-md)] px-2 py-1.5">
+    <div className="flex items-center gap-2.5 rounded-[var(--radius-sm)] px-2 py-1.5">
       {content}
     </div>
   )
@@ -696,14 +701,14 @@ function BackgroundTaskDetail({ row }: { row: ActivityRow }) {
   if (details.length === 0) return null
 
   return (
-    <div className="mx-2 mb-1.5 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] p-3">
-      <div className="mb-2 text-[11px] font-semibold text-[var(--color-text-tertiary)]">
+    <div className="mx-2 mb-1.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container)] p-3">
+      <div className="mb-2 text-[12px] font-semibold text-[var(--color-text-tertiary)]">
         {t('session.activity.details.title')}
       </div>
       <dl className="space-y-2">
         {details.map((detail) => (
           <div key={detail.label} className="min-w-0">
-            <dt className="text-[11px] font-semibold text-[var(--color-text-tertiary)]">
+            <dt className="text-[11px] font-medium text-[var(--color-text-tertiary)]">
               {detail.label}
             </dt>
             <dd className="max-h-28 overflow-auto whitespace-pre-wrap break-words text-[12px] leading-relaxed text-[var(--color-text-secondary)]">
@@ -751,7 +756,8 @@ export function SessionActivityPanel({
   )
 
   useDismissable({
-    open,
+    // A sheet closes itself (scrim, close button, Escape).
+    open: open && placement !== 'sheet',
     refs: [panelRef],
     onDismiss: onClose,
     isExempt: isDismissExempt,
@@ -770,6 +776,98 @@ export function SessionActivityPanel({
       setSelectedBackgroundTaskId(null)
     }
   }, [model.sections.backgroundTasks.rows, open, selectedBackgroundTaskId])
+
+  const sections = visibleSections.map((section, index) => {
+    const sectionTitle = getSectionTitle(section.id, t)
+    const taskProgress = section.id === 'tasks' ? getTaskProgress(section.rows) : null
+
+    return (
+      <section
+        key={section.id}
+        aria-label={sectionTitle}
+        className={index > 0 ? 'border-t border-[var(--color-border)] pt-3' : undefined}
+      >
+        <div className="mb-1.5 flex items-center justify-between gap-2 px-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <h3 className="text-[12px] font-semibold text-[var(--color-text-tertiary)]">
+              {sectionTitle}
+            </h3>
+            {section.rows.length > 0 ? (
+              <Badge tone="neutral" size="sm" pill={false}>{section.rows.length}</Badge>
+            ) : null}
+          </div>
+          {taskProgress ? (
+            <span className="flex shrink-0 items-center gap-2 text-[12px] tabular-nums text-[var(--color-text-tertiary)]">
+              {/* `Progress` is `w-full`; the wrapper is what makes it the
+                  52px rail the design calls for, since the two width
+                  utilities would otherwise resolve by stylesheet order. */}
+              <span className="inline-flex w-[52px] shrink-0">
+                {/* Named for what it measures, not the section: reusing the
+                    section title made screen readers announce "任务, 50%". */}
+                <Progress
+                  size="xs"
+                  tone="success"
+                  value={taskProgress.percent}
+                  label={t('session.activity.tasksProgress', {
+                    completed: taskProgress.completed,
+                    total: taskProgress.total,
+                  })}
+                />
+              </span>
+              {taskProgress.completed}/{taskProgress.total}
+            </span>
+          ) : null}
+          {section.id === 'backgroundTasks' && finishedBackgroundTaskKeys.length > 0 && onClearFinishedBackgroundTasks ? (
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={() => onClearFinishedBackgroundTasks(finishedBackgroundTaskKeys)}
+            >
+              {t('session.activity.clearFinished')}
+            </Button>
+          ) : null}
+        </div>
+        <div className={getSectionRowsClassName(section.id, section.rows.length)}>
+          {section.rows.map((row) => (
+            <div key={row.id}>
+              <ActivityRowView
+                row={row}
+                sessionId={model.sessionId}
+                onOpenSubagent={onOpenSubagent}
+                onOpenMember={onOpenMember}
+                onStopBackgroundTask={onStopBackgroundTask}
+                stoppingBackgroundTask={Boolean(row.taskId && stoppingBackgroundTaskIds?.[row.taskId])}
+                onOpenBackgroundTask={(backgroundRow) => {
+                  setSelectedBackgroundTaskId((current) => (
+                    current === backgroundRow.id ? null : backgroundRow.id
+                  ))
+                }}
+                selected={section.id === 'backgroundTasks' && selectedBackgroundTaskId === row.id}
+              />
+              {section.id === 'backgroundTasks' && selectedBackgroundTaskId === row.id ? (
+                <BackgroundTaskDetail row={row} />
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </section>
+    )
+  })
+
+  if (placement === 'sheet') {
+    return (
+      <MobileBottomSheet
+        open={open}
+        onClose={onClose}
+        title={t('session.activity.title')}
+        closeLabel={t('session.activity.close')}
+        testId="session-activity-sheet"
+        contentClassName="space-y-3 px-3 pb-4 pt-3"
+      >
+        {sections}
+      </MobileBottomSheet>
+    )
+  }
 
   if (!open) return null
   // Both placements are out-of-flow overlays pinned to the top right of the
@@ -808,12 +906,12 @@ export function SessionActivityPanel({
       data-placement={placement}
       className={className}
     >
-      <div className="flex items-center gap-2 px-4 pb-2 pt-3.5">
-        <h2 className="min-w-0 flex-1 truncate text-[15px] font-semibold text-[var(--color-text-primary)]">
+      <div className="flex h-12 shrink-0 items-center gap-2 pl-4 pr-3">
+        <h2 className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[var(--color-text-primary)]">
           {t('session.activity.title')}
         </h2>
         <IconButton
-          icon={<X size={14} strokeWidth={2.2} aria-hidden="true" />}
+          icon={<X size={14} strokeWidth={1.75} aria-hidden="true" />}
           label={t('session.activity.close')}
           size="sm"
           tone="muted"
@@ -825,82 +923,7 @@ export function SessionActivityPanel({
         data-testid="session-activity-scroll"
         className={`min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-4 pb-4 pt-0.5 ${ACTIVITY_SCROLLBAR_CLASS}`}
       >
-        {visibleSections.map((section, index) => {
-          const sectionTitle = getSectionTitle(section.id, t)
-          const taskProgress = section.id === 'tasks' ? getTaskProgress(section.rows) : null
-
-          return (
-            <section
-              key={section.id}
-              aria-label={sectionTitle}
-              className={index > 0 ? 'border-t border-[var(--color-border)] pt-3' : undefined}
-            >
-              <div className="mb-1.5 flex items-center justify-between gap-2 px-2">
-                <div className="flex min-w-0 items-center gap-2">
-                  <h3 className="text-[12px] font-semibold text-[var(--color-text-secondary)]">
-                    {sectionTitle}
-                  </h3>
-                  {section.rows.length > 0 ? (
-                    <Badge tone="neutral" size="sm" pill={false}>{section.rows.length}</Badge>
-                  ) : null}
-                </div>
-                {taskProgress ? (
-                  <span className="flex shrink-0 items-center gap-2 text-[12px] tabular-nums text-[var(--color-text-tertiary)]">
-                    {/* `Progress` is `w-full`; the wrapper is what makes it the
-                        52px rail the design calls for, since the two width
-                        utilities would otherwise resolve by stylesheet order. */}
-                    <span className="inline-flex w-[52px] shrink-0">
-                      {/* Named for what it measures, not the section: reusing the
-                          section title made screen readers announce "任务, 50%". */}
-                      <Progress
-                        size="xs"
-                        tone="success"
-                        value={taskProgress.percent}
-                        label={t('session.activity.tasksProgress', {
-                          completed: taskProgress.completed,
-                          total: taskProgress.total,
-                        })}
-                      />
-                    </span>
-                    {taskProgress.completed}/{taskProgress.total}
-                  </span>
-                ) : null}
-                {section.id === 'backgroundTasks' && finishedBackgroundTaskKeys.length > 0 && onClearFinishedBackgroundTasks ? (
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    onClick={() => onClearFinishedBackgroundTasks(finishedBackgroundTaskKeys)}
-                  >
-                    {t('session.activity.clearFinished')}
-                  </Button>
-                ) : null}
-              </div>
-              <div className={getSectionRowsClassName(section.id, section.rows.length)}>
-                {section.rows.map((row) => (
-                  <div key={row.id}>
-                    <ActivityRowView
-                      row={row}
-                      sessionId={model.sessionId}
-                      onOpenSubagent={onOpenSubagent}
-                      onOpenMember={onOpenMember}
-                      onStopBackgroundTask={onStopBackgroundTask}
-                      stoppingBackgroundTask={Boolean(row.taskId && stoppingBackgroundTaskIds?.[row.taskId])}
-                      onOpenBackgroundTask={(backgroundRow) => {
-                        setSelectedBackgroundTaskId((current) => (
-                          current === backgroundRow.id ? null : backgroundRow.id
-                        ))
-                      }}
-                      selected={section.id === 'backgroundTasks' && selectedBackgroundTaskId === row.id}
-                    />
-                    {section.id === 'backgroundTasks' && selectedBackgroundTaskId === row.id ? (
-                      <BackgroundTaskDetail row={row} />
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            </section>
-          )
-        })}
+        {sections}
       </div>
     </div>
   )

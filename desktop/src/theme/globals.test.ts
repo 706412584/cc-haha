@@ -189,15 +189,25 @@ describe('desktop theme tokens', () => {
     expect(getThemeBlock(':root')).toContain('--color-switch-checked-bg: var(--color-brand);')
   })
 
-  it('uses container queries for the compact activity summary strip', () => {
+  it('keeps a path in a chat table cell whole instead of breaking it per letter', () => {
+    // In the split workspace the chat column is ~400px; table cells used to wrap
+    // `src/lib/validators.ts` one letter at a time.
+    expect(css).toMatch(/\.md-table-wrap :is\(td, th\) code \{[^}]*white-space: nowrap;[^}]*word-break: normal;/)
+  })
+
+  it('lays the activity summary tiles out by container width, not viewport width', () => {
     const activitySummaryCss = getCssBetween('.activity-summary-panel {', '.activity-heat-cell {')
 
     expect(activitySummaryCss).toContain('container-type: inline-size;')
+    // One column when cramped; on the 700px settings page the five tiles read
+    // 2+1 / 1+1+1 — the headline total spans two of three columns, so the second
+    // row is full instead of ending in a hole.
+    expect(activitySummaryCss).toContain('grid-template-columns: minmax(0, 1fr);')
     expect(activitySummaryCss).toContain('@container (min-width: 360px)')
-    expect(activitySummaryCss).toContain('@container (min-width: 560px)')
-    expect(activitySummaryCss).toContain('grid-template-columns: repeat(5, minmax(0, 1fr));')
-    expect(activitySummaryCss).toContain('grid-column: auto;')
-    expect(activitySummaryCss).not.toContain('grid-column: span 2;')
+    expect(activitySummaryCss).toContain('@container (min-width: 520px)')
+    expect(activitySummaryCss).toContain('grid-template-columns: repeat(3, minmax(0, 1fr));')
+    expect(activitySummaryCss).toContain('grid-column: span 2;')
+    expect(activitySummaryCss).not.toContain('repeat(5, minmax(0, 1fr))')
   })
 
   it('avoids color-mix in the startup-critical UI zoom shell chrome for Safari 15 WebView support', () => {
@@ -232,6 +242,24 @@ describe('desktop theme tokens', () => {
   it('keeps code viewer line hover and line numbers on theme tokens', () => {
     expect(css).toContain('background: var(--color-surface-hover);')
     expect(css).toContain('--line-numbers-foreground: var(--color-text-tertiary);')
+  })
+
+  // Shiki only runs in a real browser (CodeViewer keeps tests on Prism), so its
+  // markup is pinned here. Block `.line`s joined by "\n" text nodes rendered an
+  // empty line box between every two lines, and its inner <pre> reset
+  // `wrapLongLines` back to `white-space: pre`.
+  it('keeps Shiki code single-spaced and lets wrapLongLines reach its inner pre', () => {
+    expect(getThemeBlock('.code-viewer-area [data-highlight-engine="shiki"] code')).toMatch(/display:\s*flex;[\s\S]*flex-direction:\s*column;/)
+    expect(getThemeBlock('.code-viewer-area [data-highlight-engine="shiki"] .line:empty::before')).toContain("content: '\\200b';")
+    const pre = getThemeBlock('.code-viewer-area [data-highlight-engine="shiki"] pre')
+    expect(pre).toContain('white-space: inherit;')
+    expect(pre).toContain('word-break: inherit;')
+  })
+
+  it('marks a located tool call on its own row or card, and lets it take over from its item', () => {
+    expect(getThemeBlock('.chat-tool-navigation-target[data-tool-call-chrome="row"]')).toContain('animation: chat-tool-row-navigation-target-pulse')
+    expect(getThemeBlock('.chat-tool-navigation-target[data-tool-call-chrome="card"]')).toContain('animation: chat-tool-card-navigation-target-pulse')
+    expect(getThemeBlock('.chat-render-item--navigation-target:has(.chat-tool-navigation-target)')).toContain('animation: none;')
   })
 
   it('keeps xterm helper and accessibility layers from rendering duplicate terminal text', () => {

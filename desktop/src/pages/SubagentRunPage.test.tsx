@@ -524,6 +524,8 @@ describe('SubagentRunPage', () => {
     expect(screen.getByTestId('session-header')).toHaveClass('px-4', 'py-2.5')
     expect(screen.getByTestId('agent-run-conversation-column')).toHaveClass('flex-1')
     expect(screen.queryByTestId('conversation-navigator')).not.toBeInTheDocument()
+    // The phone shell's top bar owns Back; the page does not draw a second one.
+    expect(screen.queryByRole('button', { name: 'Back to parent session' })).not.toBeInTheDocument()
   })
 
   it('does not replace authoritative activity with a partial transcript tail', async () => {
@@ -1670,6 +1672,49 @@ describe('SubagentRunPage', () => {
     expect(getMemberTranscriptMock).toHaveBeenCalledTimes(1)
   })
 
+  it.each([
+    ['stopped', { status: 'idle' as const, activity: 'stopped' as const }],
+    ['retrying', {
+      status: 'idle' as const,
+      activity: 'idle' as const,
+      lastError: 'API Error: 529 overloaded',
+      autoRetry: { attempt: 1, max: 5, nextAt: Date.parse('2026-08-09T00:00:15.000Z') },
+    }],
+    ['failed', {
+      status: 'error' as const,
+      activity: 'idle' as const,
+      lastError: 'Credit balance is too low',
+    }],
+  ])('keeps the composer for a %s member, since a message is what brings it back', async (_state, recovery) => {
+    getMemberTranscriptMock.mockResolvedValue({ messages: [] })
+    const member = {
+      agentId: 'builder@review-team',
+      name: 'builder',
+      role: 'builder',
+      ...recovery,
+    }
+    const team = {
+      name: 'review-team',
+      leadSessionId: 'lead-session',
+      members: [member],
+    }
+    useTeamStore.setState({ activeTeam: team })
+    useTeamStore.getState().openMemberSession(member, team)
+
+    render(
+      <TeamMemberRunPage
+        tabId="team-member:builder@review-team"
+        leadSessionId="lead-session"
+        agentId={member.agentId}
+        title="builder"
+      />,
+    )
+
+    expect(await screen.findByTestId('team-member-conversation')).toBeInTheDocument()
+    expect(screen.queryByTestId('team-member-readonly-note')).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox')).toBeInTheDocument()
+  })
+
   it('settles a completed member task without losing direct-message activity', async () => {
     const member = {
       agentId: 'ui-designer@review-team',
@@ -2179,7 +2224,7 @@ describe('SubagentRunPage', () => {
     // A running run plays open, so its rows are already there — no need to
     // unfold the summary first, and clicking it here would fold them away.
     expect(await screen.findByTestId('activity-group')).toHaveAttribute('data-expanded', 'true')
-    fireEvent.click(screen.getByRole('button', { name: /Bash.*pwd/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Run.*pwd/i }))
     expect(document.querySelector('[data-shell-output]')).toHaveTextContent('/workspace')
 
     await waitFor(() => expect(subagentsApi.getRunByTool).toHaveBeenCalledTimes(2), { timeout: 2500 })

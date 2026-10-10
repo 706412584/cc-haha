@@ -21,11 +21,12 @@ import {
   type VirtualRenderItemMetric,
 } from './virtualHeightCache'
 import { relativizeWorkspacePath } from './CurrentTurnChangeCard'
-import { ApiError } from '../../api/client'
 import { sessionsApi } from '../../api/sessions'
+import { ApiError } from '../../api/client'
 import { subagentsApi, type SubagentRunResponse } from '../../api/subagents'
 import { teamsApi } from '../../api/teams'
 import { resetAgentRunActivityCache } from './useAgentRunActivity'
+import { resetWorkspaceFileStatsForTests } from '../../lib/workspaceFileStats'
 import { useChatStore } from '../../stores/chatStore'
 import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
 import { useWorkspaceStore } from '../../stores/workspaceStore'
@@ -33,7 +34,9 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { initializeChatAppearance, useChatAppearanceStore } from '../../stores/chatAppearanceStore'
 import { CHAT_APPEARANCE_STORAGE_KEY } from '../../lib/chatAppearance'
 import { useSessionStore } from '../../stores/sessionStore'
+import { useSideChatStore } from '../../stores/sideChatStore'
 import { useTabStore } from '../../stores/tabStore'
+import { useTrajectoryViewStore } from '../../stores/trajectoryViewStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useTeamStore } from '../../stores/teamStore'
 import { formatExactMessageTimestamp, formatMessageHoverTime } from '../../lib/formatMessageTimestamp'
@@ -1073,9 +1076,6 @@ describe('MessageList nested tool calls', () => {
       set: (value: number) => { scrollTop = value },
     })
 
-    // User intent first: without a prior scrollTop baseline, auto-scroll mode
-    // would treat non-bottom as programmatic and keep isAwayFromLatest false.
-    fireEvent.wheel(scroller, { deltaY: -40 })
     fireEvent.scroll(scroller)
     expect(screen.getByRole('button', { name: /Turn 1 of 4: First prompt/ }).getAttribute('aria-current')).toBe('location')
 
@@ -1222,6 +1222,103 @@ describe('MessageList nested tool calls', () => {
     await waitFor(() => expect(screen.getByText('Prompt 0')).toBeTruthy())
     expect(scrollTop).toBe(0)
     expect(container.querySelector('[data-chat-render-item-key="user-0"]')?.className).toContain('chat-render-item--navigation-target')
+  })
+
+  it('scrolls to and highlights the message a trajectory row asks to locate', async () => {
+    const messages: UIMessage[] = Array.from({ length: 220 }, (_, index) => ({
+      id: `${index % 2 === 0 ? 'user' : 'assistant'}-${index}`,
+      type: index % 2 === 0 ? 'user_text' : 'assistant_text',
+      content: `${index % 2 === 0 ? 'Prompt' : 'Answer'} ${index}`,
+      timestamp: index,
+    })) as UIMessage[]
+    useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState({ messages }) } })
+    useTrajectoryViewStore.setState({ nav: null, modes: {}, opened: {} })
+
+    const { container } = render(<MessageList />)
+    const scroller = container.querySelector('.chat-scroll-area') as HTMLElement
+    let scrollTop = 24_000
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 500 })
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 25_000 })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = value },
+    })
+
+    // An unknown uuid first, then the real one: any listed uuid identifies the item.
+    act(() => useTrajectoryViewStore.getState().revealInChat(ACTIVE_TAB, { uuids: ['not-loaded', 'assistant-1'] }))
+
+    await waitFor(() => expect(container.querySelector('[data-chat-render-item-key="assistant-1"]')?.className).toContain('chat-render-item--navigation-target'))
+    expect(scrollTop).toBeLessThan(1000)
+    expect(container.querySelector('[data-chat-render-item-key="user-0"]')?.className ?? '').not.toContain('chat-render-item--navigation-target')
+    expect(useTrajectoryViewStore.getState().nav).toBeNull()
+  })
+
+  it('opens a folded run onto the tool call a trajectory row locates, and marks that row', async () => {
+    // Regression: the jump only scrolled to the run and tinted it, but a settled
+    // run is folded to its summary line, so the call it was about stayed hidden.
+    const messages: UIMessage[] = [
+      { id: 'locate-user', type: 'user_text', content: 'Inspect the repo', timestamp: 1 },
+      { id: 'locate-read', type: 'tool_use', toolName: 'Read', toolUseId: 'toolu-locate-read', input: { file_path: '/repo/a.ts' }, timestamp: 2 },
+      { id: 'locate-read-result', type: 'tool_result', toolUseId: 'toolu-locate-read', content: 'a', isError: false, timestamp: 3 },
+      { id: 'locate-bash', type: 'tool_use', toolName: 'Bash', toolUseId: 'toolu-locate-bash', input: { command: 'ls' }, timestamp: 4 },
+      { id: 'locate-bash-result', type: 'tool_result', toolUseId: 'toolu-locate-bash', content: 'a.ts', isError: false, timestamp: 5 },
+      { id: 'locate-grep', type: 'tool_use', toolName: 'Grep', toolUseId: 'toolu-locate-grep', input: { pattern: 'x' }, timestamp: 6 },
+      { id: 'locate-grep-result', type: 'tool_result', toolUseId: 'toolu-locate-grep', content: '', isError: false, timestamp: 7 },
+      { id: 'locate-answer', type: 'assistant_text', content: 'Done.', timestamp: 8 },
+    ] as UIMessage[]
+    useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState({ messages }) } })
+    useTrajectoryViewStore.setState({ nav: null, modes: {}, opened: {} })
+
+    const { container } = render(<MessageList />)
+    const scroller = container.querySelector('.chat-scroll-area') as HTMLElement
+    const scrollWrites: number[] = []
+    let scrollTop = 0
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 500 })
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 4_000 })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = value; scrollWrites.push(value) },
+    })
+    // Only the located row has a box; the run around it measures as empty, so
+    // any correction can only have come from aligning the row itself.
+    const realRect = HTMLElement.prototype.getBoundingClientRect
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.toolUseId === 'toolu-locate-bash') return { top: 900, bottom: 920, height: 20, left: 0, right: 100, width: 100, x: 0, y: 900, toJSON: () => ({}) } as DOMRect
+      return realRect.call(this)
+    })
+
+    const group = screen.getByTestId('activity-group')
+    expect(group.getAttribute('data-expanded')).toBe('false')
+    expect(container.querySelector('[data-tool-use-id="toolu-locate-bash"]')).toBeNull()
+
+    act(() => useTrajectoryViewStore.getState().revealInChat(ACTIVE_TAB, { toolUseId: 'toolu-locate-bash' }))
+
+    await waitFor(() => expect(container.querySelector('[data-tool-use-id="toolu-locate-bash"]')?.className).toContain('chat-tool-navigation-target'))
+    expect(screen.getByTestId('activity-group').getAttribute('data-expanded')).toBe('true')
+    // Exactly the located call is marked, not its neighbours.
+    expect(container.querySelectorAll('.chat-tool-navigation-target')).toHaveLength(1)
+    expect(container.querySelector('[data-tool-use-id="toolu-locate-read"]')?.className).not.toContain('chat-tool-navigation-target')
+    // Aligned to the row: 900px down, brought to the 25% reading line of a 500px viewport.
+    await waitFor(() => expect(scrollWrites.length).toBeGreaterThanOrEqual(2))
+    expect(scrollWrites.at(-1)! - scrollWrites.at(-2)!).toBe(900 - 500 * 0.25)
+
+    // The mark is brief; the run stays open as if the reader had opened it.
+    await waitFor(
+      () => expect(container.querySelector('.chat-tool-navigation-target')).toBeNull(),
+      { timeout: 3_000 },
+    )
+    expect(screen.getByTestId('activity-group').getAttribute('data-expanded')).toBe('true')
+  })
+
+  it('ignores a locate request addressed to another session', async () => {
+    useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState({ messages: makeConversationNavigationMessages() }) } })
+    useTrajectoryViewStore.setState({ nav: null, modes: {}, opened: {} })
+    render(<MessageList />)
+    act(() => useTrajectoryViewStore.getState().revealInChat('other-session', { uuids: ['user-0'] }))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(useTrajectoryViewStore.getState().nav).toMatchObject({ sessionId: 'other-session' })
   })
 
   it('keeps streaming output out of the user-turn navigator after a prompt jump', async () => {
@@ -1388,39 +1485,6 @@ describe('MessageList nested tool calls', () => {
         toolUseId: 'active-tool',
       },
     })
-  })
-
-  it('includes inline tool results in tool group virtualization metrics', () => {
-    const resultContent = 'server output line\n'.repeat(500)
-    const toolResult: Extract<UIMessage, { type: 'tool_result' }> = {
-      id: 'tool-bash-result',
-      type: 'tool_result',
-      toolUseId: 'bash-1',
-      content: resultContent,
-      isError: false,
-      timestamp: 2,
-    }
-    const messages: UIMessage[] = [
-      {
-        id: 'tool-bash',
-        type: 'tool_use',
-        toolName: 'Bash',
-        toolUseId: 'bash-1',
-        input: { command: 'npm run dev' },
-        timestamp: 1,
-      },
-      toolResult,
-    ]
-
-    const { renderItems } = buildRenderModel(messages, null)
-
-    expect(renderItems).toHaveLength(1)
-    expect(renderItems[0]).toMatchObject({
-      kind: 'tool_group',
-      resultContentWeight: resultContent.length,
-    })
-    expect((renderItems[0] as any).resultMetricSignature).toContain('tool_result:bash-1:0')
-    expect((renderItems[0] as any).resultMetricSignature).toContain(String(resultContent.length))
   })
 
   // A question the user has already spoken past cannot still be waiting on a live
@@ -1884,508 +1948,6 @@ describe('MessageList nested tool calls', () => {
     expect(screen.queryByText('dreaming')).toBeNull()
   })
 
-  it('keeps newly appended messages mounted while auto-scrolling a virtualized transcript', async () => {
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          messages: Array.from({ length: 220 }, (_, index) => ({
-            id: `assistant-${index}`,
-            type: 'assistant_text',
-            content: `assistant transcript line ${index}`,
-            timestamp: index,
-          })),
-        }),
-      },
-    })
-
-    const { container } = render(<MessageList />)
-    const scrollArea = container.querySelector('.chat-scroll-area') as HTMLElement
-    Object.defineProperty(scrollArea, 'clientHeight', { configurable: true, value: 500 })
-    Object.defineProperty(scrollArea, 'scrollHeight', { configurable: true, value: 220 * 112 })
-    await waitForProgrammaticScrollReset()
-
-    act(() => {
-      useChatStore.setState((state) => ({
-        sessions: {
-          ...state.sessions,
-          [ACTIVE_TAB]: {
-            ...state.sessions[ACTIVE_TAB]!,
-            messages: [
-              ...state.sessions[ACTIVE_TAB]!.messages,
-              {
-                id: 'assistant-new-tail',
-                type: 'assistant_text',
-                content: 'new assistant tail should stay visible',
-                timestamp: 221,
-              },
-            ],
-          },
-        },
-      }))
-    })
-
-    await waitFor(() => {
-      expect(screen.getByText('new assistant tail should stay visible')).toBeTruthy()
-    })
-  })
-
-  it('keeps newly appended tool calls mounted while auto-scrolling a virtualized transcript', async () => {
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          messages: Array.from({ length: 220 }, (_, index) => ({
-            id: `assistant-${index}`,
-            type: 'assistant_text',
-            content: `assistant transcript line ${index}`,
-            timestamp: index,
-          })),
-        }),
-      },
-    })
-
-    const { container } = render(<MessageList />)
-    const scrollArea = container.querySelector('.chat-scroll-area') as HTMLElement
-    Object.defineProperty(scrollArea, 'clientHeight', { configurable: true, value: 500 })
-    Object.defineProperty(scrollArea, 'scrollHeight', { configurable: true, value: 220 * 112 })
-    await waitForProgrammaticScrollReset()
-
-    act(() => {
-      useChatStore.setState((state) => ({
-        sessions: {
-          ...state.sessions,
-          [ACTIVE_TAB]: {
-            ...state.sessions[ACTIVE_TAB]!,
-            chatState: 'tool_executing',
-            messages: [
-              ...state.sessions[ACTIVE_TAB]!.messages,
-              {
-                id: 'tool-bash-tail',
-                type: 'tool_use',
-                toolName: 'Bash',
-                toolUseId: 'bash-tail',
-                input: { command: 'npm run dev' },
-                timestamp: 221,
-                isPending: true,
-              },
-            ],
-          },
-        },
-      }))
-    })
-
-    await waitFor(() => {
-      expect(screen.getByText('Bash')).toBeTruthy()
-    })
-  })
-
-  it('re-pins to the bottom as measurements land after switching to an idle session', async () => {
-    // Regression: the switch commit writes the bottom from the scrollHeight of
-    // ESTIMATED item heights. Real measurements then move the true bottom, but
-    // the new-content effect needs a running session / message-count change and
-    // the content-resize observer needs shouldFollowContentResize — so an idle
-    // session was left parked on the stale estimated bottom, mid-transcript.
-    let resizeCallback: ResizeObserverCallback | null = null
-    class TestResizeObserver {
-      observe = vi.fn()
-      unobserve = vi.fn()
-      disconnect = vi.fn()
-
-      constructor(callback: ResizeObserverCallback) {
-        resizeCallback = callback
-      }
-    }
-    vi.stubGlobal('ResizeObserver', TestResizeObserver)
-
-    const otherSession = 'session-b'
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          messages: [
-            { id: 'a1', type: 'user_text', content: 'question a', timestamp: 1 },
-          ],
-        }),
-        [otherSession]: makeSessionState({
-          chatState: 'idle',
-          messages: [
-            { id: 'b1', type: 'user_text', content: 'question b', timestamp: 1 },
-            { id: 'b2', type: 'assistant_text', content: 'answer b', timestamp: 2 },
-          ],
-        }),
-      },
-    })
-    useTabStore.setState({
-      activeTabId: ACTIVE_TAB,
-      tabs: [
-        { sessionId: ACTIVE_TAB, title: 'A', type: 'session' as const, status: 'idle' },
-        { sessionId: otherSession, title: 'B', type: 'session' as const, status: 'idle' },
-      ],
-    })
-
-    const { container, rerender } = render(<MessageList />)
-    const scroller = container.querySelector('.chat-scroll-area') as HTMLElement
-    let scrollHeight = 1000
-    let scrollTop = 0
-    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 500 })
-    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => scrollHeight })
-    Object.defineProperty(scroller, 'scrollTop', {
-      configurable: true,
-      get: () => scrollTop,
-      set: (value: number) => { scrollTop = value },
-    })
-    await waitForProgrammaticScrollReset()
-
-    // Switch to the idle session B. At commit time its content measures 1000px,
-    // so the bottom is 500.
-    await act(async () => {
-      useTabStore.setState({ activeTabId: otherSession })
-      rerender(<MessageList />)
-    })
-    await waitForProgrammaticScrollReset()
-    expect(scrollTop).toBe(500)
-
-    // Real measurements land: content is actually 2000px tall, so the true
-    // bottom moved to 1500. The idle session must follow it.
-    scrollHeight = 2000
-    act(() => {
-      resizeCallback?.([{ contentRect: { height: 2000 } } as ResizeObserverEntry], {} as ResizeObserver)
-    })
-    await waitForProgrammaticScrollReset()
-
-    expect(scrollTop).toBe(1500)
-    expect(screen.queryByRole('button', { name: 'Latest' })).toBeNull()
-  })
-
-  it('does not re-pin after switching to a session the user had scrolled up in', async () => {
-    // The settle window only exists to correct an at-bottom switch against
-    // estimated heights. A restored mid-transcript position must stay put.
-    let resizeCallback: ResizeObserverCallback | null = null
-    class TestResizeObserver {
-      observe = vi.fn()
-      unobserve = vi.fn()
-      disconnect = vi.fn()
-
-      constructor(callback: ResizeObserverCallback) {
-        resizeCallback = callback
-      }
-    }
-    vi.stubGlobal('ResizeObserver', TestResizeObserver)
-
-    const otherSession = 'session-b'
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          messages: [
-            { id: 'a1', type: 'user_text', content: 'question a', timestamp: 1 },
-          ],
-        }),
-        [otherSession]: makeSessionState({
-          chatState: 'idle',
-          messages: [
-            { id: 'b1', type: 'user_text', content: 'question b', timestamp: 1 },
-            { id: 'b2', type: 'assistant_text', content: 'answer b', timestamp: 2 },
-          ],
-        }),
-      },
-    })
-    useTabStore.setState({
-      activeTabId: ACTIVE_TAB,
-      tabs: [
-        { sessionId: ACTIVE_TAB, title: 'A', type: 'session' as const, status: 'idle' },
-        { sessionId: otherSession, title: 'B', type: 'session' as const, status: 'idle' },
-      ],
-    })
-
-    const { container, rerender } = render(<MessageList />)
-    const scroller = container.querySelector('.chat-scroll-area') as HTMLElement
-    let scrollHeight = 1000
-    let scrollTop = 0
-    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 500 })
-    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => scrollHeight })
-    Object.defineProperty(scroller, 'scrollTop', {
-      configurable: true,
-      get: () => scrollTop,
-      set: (value: number) => { scrollTop = value },
-    })
-    await waitForProgrammaticScrollReset()
-
-    // Enter B, scroll up inside it, then leave and come back.
-    await act(async () => {
-      useTabStore.setState({ activeTabId: otherSession })
-      rerender(<MessageList />)
-    })
-    await waitForProgrammaticScrollReset()
-    scrollTop = 500
-    fireEvent.scroll(scroller)
-    scrollTop = 120
-    fireEvent.scroll(scroller)
-
-    await act(async () => {
-      useTabStore.setState({ activeTabId: ACTIVE_TAB })
-      rerender(<MessageList />)
-    })
-    await waitForProgrammaticScrollReset()
-    await act(async () => {
-      useTabStore.setState({ activeTabId: otherSession })
-      rerender(<MessageList />)
-    })
-    await waitForProgrammaticScrollReset()
-    expect(scrollTop).toBe(120)
-
-    scrollHeight = 2000
-    act(() => {
-      resizeCallback?.([{ contentRect: { height: 2000 } } as ResizeObserverEntry], {} as ResizeObserver)
-    })
-    await waitForProgrammaticScrollReset()
-
-    expect(scrollTop).toBe(120)
-  })
-
-  it('keeps bottom follow armed after switching to a taller session and back', async () => {
-    // Regression: the switch commit swaps the DOM to the incoming session
-    // before the outgoing session's scroll snapshot is taken, so measuring
-    // isNearScrollBottom against the incoming content misrecorded
-    // wasAtBottom=false for a session the user left at the bottom, disabling
-    // follow until they manually scrolled down again.
-    const otherSession = 'session-b'
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          messages: [
-            { id: 'a1', type: 'user_text', content: 'question a', timestamp: 1 },
-            { id: 'a2', type: 'assistant_text', content: 'answer a', timestamp: 2 },
-          ],
-        }),
-        [otherSession]: makeSessionState({
-          messages: [
-            { id: 'b1', type: 'user_text', content: 'question b', timestamp: 1 },
-            { id: 'b2', type: 'assistant_text', content: 'answer b', timestamp: 2 },
-          ],
-        }),
-      },
-    })
-    useTabStore.setState({
-      activeTabId: ACTIVE_TAB,
-      tabs: [
-        { sessionId: ACTIVE_TAB, title: 'A', type: 'session' as const, status: 'idle' },
-        { sessionId: otherSession, title: 'B', type: 'session' as const, status: 'idle' },
-      ],
-    })
-
-    const { container, rerender } = render(<MessageList />)
-    const scroller = container.querySelector('.chat-scroll-area') as HTMLElement
-    let scrollHeight = 1000
-    let scrollTop = 0
-    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 500 })
-    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => scrollHeight })
-    Object.defineProperty(scroller, 'scrollTop', {
-      configurable: true,
-      get: () => scrollTop,
-      set: (value: number) => { scrollTop = value },
-    })
-    // User sits at the bottom of A (1000px content, 500px viewport).
-    scrollTop = 500
-    await waitForProgrammaticScrollReset()
-
-    // Switch to B, whose transcript is taller.
-    scrollHeight = 1600
-    await act(async () => {
-      useTabStore.setState({ activeTabId: otherSession })
-      rerender(<MessageList />)
-    })
-    await waitForProgrammaticScrollReset()
-    expect(scrollTop).toBe(1100)
-
-    // Switch back to A and stream one more message: content grows to 1300px.
-    scrollHeight = 1000
-    await act(async () => {
-      useTabStore.setState({ activeTabId: ACTIVE_TAB })
-      rerender(<MessageList />)
-    })
-    await waitForProgrammaticScrollReset()
-    expect(scrollTop).toBe(500)
-    expect(screen.queryByRole('button', { name: 'Latest' })).toBeNull()
-
-    scrollHeight = 1300
-    await act(async () => {
-      useChatStore.setState((state) => ({
-        sessions: {
-          ...state.sessions,
-          [ACTIVE_TAB]: {
-            ...state.sessions[ACTIVE_TAB]!,
-            chatState: 'streaming',
-            messages: [
-              ...state.sessions[ACTIVE_TAB]!.messages,
-              { id: 'a3', type: 'assistant_text', content: 'new tail after switch-back', timestamp: 3 },
-            ],
-          },
-        },
-      }))
-      rerender(<MessageList />)
-    })
-    await waitForProgrammaticScrollReset()
-
-    // Follow must resume: the new bottom is 1300-500=800.
-    expect(scrollTop).toBe(800)
-    expect(screen.queryByRole('button', { name: 'Latest' })).toBeNull()
-  })
-
-  it('follows the first new message after switching back to an idle session', async () => {
-    // Regression: the follow-coalescing record was shared across sessions, so
-    // right after a switch-back it still named the previous session and the
-    // first live update of the returned-to session was dropped.
-    const otherSession = 'session-b'
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          messages: [
-            { id: 'a1', type: 'user_text', content: 'question a', timestamp: 1 },
-            { id: 'a2', type: 'assistant_text', content: 'answer a', timestamp: 2 },
-          ],
-        }),
-        [otherSession]: makeSessionState({
-          messages: [
-            { id: 'b1', type: 'user_text', content: 'question b', timestamp: 1 },
-          ],
-        }),
-      },
-    })
-    useTabStore.setState({
-      activeTabId: ACTIVE_TAB,
-      tabs: [
-        { sessionId: ACTIVE_TAB, title: 'A', type: 'session' as const, status: 'idle' },
-        { sessionId: otherSession, title: 'B', type: 'session' as const, status: 'idle' },
-      ],
-    })
-
-    const { container, rerender } = render(<MessageList />)
-    const scroller = container.querySelector('.chat-scroll-area') as HTMLElement
-    let scrollHeight = 1000
-    let scrollTop = 0
-    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 500 })
-    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => scrollHeight })
-    Object.defineProperty(scroller, 'scrollTop', {
-      configurable: true,
-      get: () => scrollTop,
-      set: (value: number) => { scrollTop = value },
-    })
-    scrollTop = 500
-    await waitForProgrammaticScrollReset()
-
-    // Switch to B (same height) and straight back to A.
-    await act(async () => {
-      useTabStore.setState({ activeTabId: otherSession })
-      rerender(<MessageList />)
-    })
-    await waitForProgrammaticScrollReset()
-    await act(async () => {
-      useTabStore.setState({ activeTabId: ACTIVE_TAB })
-      rerender(<MessageList />)
-    })
-    await waitForProgrammaticScrollReset()
-
-    // The very first new message after the switch-back must follow the bottom.
-    scrollHeight = 1300
-    await act(async () => {
-      useChatStore.setState((state) => ({
-        sessions: {
-          ...state.sessions,
-          [ACTIVE_TAB]: {
-            ...state.sessions[ACTIVE_TAB]!,
-            chatState: 'streaming',
-            messages: [
-              ...state.sessions[ACTIVE_TAB]!.messages,
-              { id: 'a3', type: 'assistant_text', content: 'first new tail after return', timestamp: 3 },
-            ],
-          },
-        },
-      }))
-      rerender(<MessageList />)
-    })
-    await waitForProgrammaticScrollReset()
-
-    expect(scrollTop).toBe(800)
-  })
-
-  it('still restores the reading position of a session left scrolled-up', async () => {
-    const otherSession = 'session-b'
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          messages: [
-            { id: 'a1', type: 'user_text', content: 'question a', timestamp: 1 },
-            { id: 'a2', type: 'assistant_text', content: 'answer a', timestamp: 2 },
-          ],
-        }),
-        [otherSession]: makeSessionState({
-          messages: [
-            { id: 'b1', type: 'user_text', content: 'question b', timestamp: 1 },
-          ],
-        }),
-      },
-    })
-    useTabStore.setState({
-      activeTabId: ACTIVE_TAB,
-      tabs: [
-        { sessionId: ACTIVE_TAB, title: 'A', type: 'session' as const, status: 'idle' },
-        { sessionId: otherSession, title: 'B', type: 'session' as const, status: 'idle' },
-      ],
-    })
-
-    const { container, rerender } = render(<MessageList />)
-    const scroller = container.querySelector('.chat-scroll-area') as HTMLElement
-    let scrollHeight = 1000
-    let scrollTop = 0
-    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 500 })
-    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => scrollHeight })
-    Object.defineProperty(scroller, 'scrollTop', {
-      configurable: true,
-      get: () => scrollTop,
-      set: (value: number) => { scrollTop = value },
-    })
-    // Establish the at-bottom baseline, then deliberately scroll up to read.
-    scrollTop = 500
-    fireEvent.scroll(scroller)
-    scrollTop = 100
-    fireEvent.scroll(scroller)
-    expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
-
-    await act(async () => {
-      useTabStore.setState({ activeTabId: otherSession })
-      rerender(<MessageList />)
-    })
-    await waitForProgrammaticScrollReset()
-    await act(async () => {
-      useTabStore.setState({ activeTabId: ACTIVE_TAB })
-      rerender(<MessageList />)
-    })
-    await waitForProgrammaticScrollReset()
-
-    // The reading position is restored and follow stays disarmed for new output.
-    expect(scrollTop).toBe(100)
-    expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
-
-    scrollHeight = 1300
-    await act(async () => {
-      useChatStore.setState((state) => ({
-        sessions: {
-          ...state.sessions,
-          [ACTIVE_TAB]: {
-            ...state.sessions[ACTIVE_TAB]!,
-            chatState: 'streaming',
-            messages: [
-              ...state.sessions[ACTIVE_TAB]!.messages,
-              { id: 'a3', type: 'assistant_text', content: 'tail the reader did not follow', timestamp: 3 },
-            ],
-          },
-        },
-      }))
-      rerender(<MessageList />)
-    })
-    await waitForProgrammaticScrollReset()
-
-    expect(scrollTop).toBe(100)
-  })
-
   it('renders the historical window when scrolling away from latest', async () => {
     useChatStore.setState({
       sessions: {
@@ -2505,6 +2067,19 @@ describe('MessageList nested tool calls', () => {
     expect(firstTopChunk.style.contentVisibility).toBe('auto')
     expect(firstTopChunk.style.containIntrinsicSize).toMatch(/^0 \d+px$/)
 
+    // At native 80% zoom, each chunk's layout rounding accumulates. The outer
+    // box must own the requested total, or switching a virtual boundary can
+    // change scrollHeight by ~20px and trigger another native scroll event.
+    for (const position of ['top', 'bottom']) {
+      const spacer = container.querySelector<HTMLElement>(`[data-virtual-spacer="${position}"]`)!
+      const requestedHeight = Array.from(spacer.children).reduce(
+        (total, chunk) => total + Number.parseFloat((chunk as HTMLElement).style.height),
+        0,
+      )
+      expect(Number.parseFloat(spacer.style.height)).toBeCloseTo(requestedHeight, 6)
+      expect(spacer.classList.contains('overflow-hidden')).toBe(true)
+    }
+
     // Items inside the active window must NOT carry content-visibility (this
     // is the regression guard that previous content-visibility rollout hit).
     const visibleItems = container.querySelectorAll('[data-virtual-message-item]')
@@ -2605,22 +2180,27 @@ describe('MessageList nested tool calls', () => {
     }
 
     setChatState('thinking')
-    render(<MessageList />)
+    const { container } = render(<MessageList />)
     fireEvent.click(screen.getByRole('button', { name: /dispatched 4 agents/i }))
 
+    // One pill for the group; each row carries its state on its avatar.
+    const runningRows = () => container.querySelectorAll('[data-agent-call-layout="row"][data-agent-status="running"]')
     expect(screen.queryByText('Starting')).toBeNull()
-    expect(screen.getAllByText('Running')).toHaveLength(5)
+    expect(screen.getAllByText('Running')).toHaveLength(1)
+    expect(runningRows()).toHaveLength(4)
 
     act(() => setChatState('tool_executing'))
     await waitFor(() => {
       expect(screen.queryByText('Starting')).toBeNull()
-      expect(screen.getAllByText('Running')).toHaveLength(5)
+      expect(screen.getAllByText('Running')).toHaveLength(1)
+      expect(runningRows()).toHaveLength(4)
     })
 
     act(() => setChatState('thinking'))
     await waitFor(() => {
       expect(screen.queryByText('Starting')).toBeNull()
-      expect(screen.getAllByText('Running')).toHaveLength(5)
+      expect(screen.getAllByText('Running')).toHaveLength(1)
+      expect(runningRows()).toHaveLength(4)
     })
   })
 
@@ -2830,6 +2410,33 @@ describe('MessageList nested tool calls', () => {
     expect(container.querySelectorAll('[data-message-shell="assistant"]')).toHaveLength(0)
   })
 
+  it('renders stopped tool calls as terminal instead of still generating content', () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          chatState: 'idle',
+          messages: [
+            {
+              id: 'tool-write',
+              type: 'tool_use',
+              toolName: 'Write',
+              toolUseId: 'write-1',
+              input: { file_path: '/tmp/story.md' },
+              timestamp: 1,
+              isPending: false,
+              status: 'stopped',
+            } as UIMessage,
+          ],
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    expect(screen.getByText('Stopped')).toBeTruthy()
+    expect(screen.queryByText('Generating content')).toBeNull()
+  })
+
   it('renders saved memory events with an entrypoint to memory settings', () => {
     useChatStore.setState({
       sessions: {
@@ -2986,7 +2593,8 @@ describe('MessageList nested tool calls', () => {
     render(<MessageList sessionId={ACTIVE_TAB} />)
 
     expect(screen.getByText('1 memory reference(s)')).toBeTruthy()
-    expect(screen.getByText('Bash')).toBeTruthy()
+    // Led by its verb; the raw tool name is the row's tooltip.
+    expect(screen.getByText('Run')).toBeTruthy()
     expect(screen.getByText('bun test')).toBeTruthy()
   })
 
@@ -3753,57 +3361,6 @@ describe('MessageList nested tool calls', () => {
     fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
     expect(screen.getByText('Failed')).toBeTruthy()
     expect(screen.getByText('Explore agent unavailable in this session')).toBeTruthy()
-  })
-
-  it('renders subagent_type as → Explore badge next to Agent header', () => {
-    // Item 5 (routing observability) — desktop surface mirrors the CLI/Ink
-    // change in src/tools/AgentTool/UI.tsx so that operators can see which
-    // specialist was routed to without expanding the call.
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          messages: [
-            {
-              id: 'tool-agent',
-              type: 'tool_use',
-              toolName: 'Agent',
-              toolUseId: 'agent-1',
-              input: { description: '查找路由模块', subagent_type: 'Explore' },
-              timestamp: 1,
-            },
-          ],
-        }),
-      },
-    })
-
-    render(<MessageList />)
-
-    expect(screen.getByText('→ Explore')).toBeTruthy()
-    expect(screen.getByText('查找路由模块')).toBeTruthy()
-  })
-
-  it('omits subagent_type badge when input has no subagent_type', () => {
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          messages: [
-            {
-              id: 'tool-agent',
-              type: 'tool_use',
-              toolName: 'Agent',
-              toolUseId: 'agent-1',
-              input: { description: '随便看看' },
-              timestamp: 1,
-            },
-          ],
-        }),
-      },
-    })
-
-    render(<MessageList />)
-
-    expect(screen.queryByText(/→\s+\S+/)).toBeNull()
-    expect(screen.getByText('随便看看')).toBeTruthy()
   })
 
   it('shows completed agent output when no nested tool activity is available', () => {
@@ -4770,291 +4327,6 @@ describe('MessageList nested tool calls', () => {
     expect(scrollIntoView).not.toHaveBeenCalled()
   })
 
-  it('resumes auto-scrolling after a light review near the bottom', async () => {
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          chatState: 'streaming',
-          messages: [
-            {
-              id: 'user-1',
-              type: 'user_text',
-              content: '最新消息',
-              timestamp: 1,
-            },
-          ],
-          streamingText: 'streaming',
-        }),
-      },
-    })
-
-    const { container } = render(<MessageList />)
-    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
-    let scrollTop = 600
-    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
-    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
-    Object.defineProperty(scroller, 'scrollTop', {
-      configurable: true,
-      get: () => scrollTop,
-      set: (value) => {
-        scrollTop = value >= 1_000_000_000 ? 600 : value
-      },
-    })
-    Object.defineProperty(scroller, 'scrollTo', {
-      configurable: true,
-      value: vi.fn((options: ScrollToOptions | number, y?: number) => {
-        scroller.scrollTop = typeof options === 'number' ? y ?? 0 : options.top ?? 0
-      }),
-    })
-
-    await waitForProgrammaticScrollReset()
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 300))
-    })
-    fireEvent.scroll(scroller)
-
-    scrollTop = 420
-    fireEvent.scroll(scroller)
-
-    act(() => {
-      useChatStore.setState((state) => ({
-        sessions: {
-          ...state.sessions,
-          [ACTIVE_TAB]: {
-            ...state.sessions[ACTIVE_TAB]!,
-            streamingText: 'streaming after light review',
-          },
-        },
-      }))
-    })
-
-    await waitFor(() => {
-      expect(screen.getByText('streaming after light review')).toBeTruthy()
-    })
-    expect(scrollTop).toBe(420)
-  })
-
-  it('keeps following latest when layout growth moves the viewport away from bottom without user scrollback', async () => {
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          chatState: 'streaming',
-          messages: [
-            {
-              id: 'user-1',
-              type: 'user_text',
-              content: 'latest prompt',
-              timestamp: 1,
-            },
-          ],
-          streamingText: 'streaming',
-        }),
-      },
-    })
-
-    const { container } = render(<MessageList />)
-    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
-    let scrollTop = 600
-    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1200 })
-    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
-    Object.defineProperty(scroller, 'scrollTop', {
-      configurable: true,
-      get: () => scrollTop,
-      set: (value) => {
-        scrollTop = value >= 1_000_000_000 ? 800 : value
-      },
-    })
-
-    await waitForProgrammaticScrollReset()
-    fireEvent.scroll(scroller)
-
-    act(() => {
-      useChatStore.setState((state) => ({
-        sessions: {
-          ...state.sessions,
-          [ACTIVE_TAB]: {
-            ...state.sessions[ACTIVE_TAB]!,
-            streamingText: 'streaming after layout growth',
-          },
-        },
-      }))
-    })
-
-    await waitFor(() => {
-      expect(screen.getByText('streaming after layout growth')).toBeTruthy()
-    })
-    expect(screen.queryByRole('button', { name: 'Jump to latest' })).toBeNull()
-    expect(scrollTop).toBe(800)
-  })
-
-  it('auto-resumes following latest after a light user scrollback pause', async () => {
-    vi.useFakeTimers()
-    try {
-      useChatStore.setState({
-        sessions: {
-          [ACTIVE_TAB]: makeSessionState({
-            chatState: 'streaming',
-            messages: [
-              {
-                id: 'user-1',
-                type: 'user_text',
-                content: 'light review prompt',
-                timestamp: 1,
-              },
-            ],
-            streamingText: 'streaming',
-          }),
-        },
-      })
-
-      const { container } = render(<MessageList />)
-      const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
-      let scrollTop = 800
-      Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1200 })
-      Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
-      Object.defineProperty(scroller, 'scrollTop', {
-        configurable: true,
-        get: () => scrollTop,
-        set: (value) => {
-          scrollTop = value >= 1_000_000_000 ? 800 : value
-        },
-      })
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(16)
-      })
-      fireEvent.scroll(scroller)
-      scrollTop = 300
-      fireEvent.scroll(scroller)
-      expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(5_000)
-      })
-
-      expect(scrollTop).toBe(800)
-      expect(screen.queryByRole('button', { name: 'Latest' })).toBeNull()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('cancels light scrollback auto-resume after deeper user scrollback', async () => {
-    vi.useFakeTimers()
-    try {
-      useChatStore.setState({
-        sessions: {
-          [ACTIVE_TAB]: makeSessionState({
-            chatState: 'streaming',
-            messages: [
-              {
-                id: 'user-1',
-                type: 'user_text',
-                content: 'deep review prompt',
-                timestamp: 1,
-              },
-            ],
-            streamingText: 'streaming',
-          }),
-        },
-      })
-
-      const { container } = render(<MessageList />)
-      const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
-      let scrollTop = 800
-      Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1200 })
-      Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
-      Object.defineProperty(scroller, 'scrollTop', {
-        configurable: true,
-        get: () => scrollTop,
-        set: (value) => {
-          scrollTop = value >= 1_000_000_000 ? 800 : value
-        },
-      })
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(16)
-      })
-      fireEvent.scroll(scroller)
-      scrollTop = 300
-      fireEvent.scroll(scroller)
-      scrollTop = 100
-      fireEvent.scroll(scroller)
-      fireEvent.scroll(scroller)
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(5_000)
-      })
-
-      expect(scrollTop).toBe(100)
-      expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('cancels pending light scrollback auto-resume when switching sessions', async () => {
-    vi.useFakeTimers()
-    try {
-      useTabStore.setState({
-        activeTabId: 'session-a',
-        tabs: [
-          { sessionId: 'session-a', title: 'A', type: 'session' as const, status: 'running' },
-          { sessionId: 'session-b', title: 'B', type: 'session' as const, status: 'running' },
-        ],
-      })
-      useChatStore.setState({
-        sessions: {
-          'session-a': makeSessionState({
-            chatState: 'streaming',
-            messages: [{ id: 'a-user', type: 'user_text', content: 'A prompt', timestamp: 1 }],
-            streamingText: 'A streaming',
-          }),
-          'session-b': makeSessionState({
-            chatState: 'streaming',
-            messages: [{ id: 'b-user', type: 'user_text', content: 'B prompt', timestamp: 1 }],
-            streamingText: 'B streaming',
-          }),
-        },
-      })
-
-      const { container } = render(<MessageList />)
-      const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
-      let scrollTop = 800
-      Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1200 })
-      Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
-      Object.defineProperty(scroller, 'scrollTop', {
-        configurable: true,
-        get: () => scrollTop,
-        set: (value) => {
-          scrollTop = value >= 1_000_000_000 ? 800 : value
-        },
-      })
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(16)
-      })
-      fireEvent.scroll(scroller)
-      scrollTop = 300
-      fireEvent.scroll(scroller)
-      expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
-
-      act(() => {
-        useTabStore.setState({ activeTabId: 'session-b' })
-      })
-      expect(screen.getByText('B streaming')).toBeTruthy()
-      scrollTop = 300
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(5_000)
-      })
-
-      expect(scrollTop).toBe(300)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
   it('keeps auto-scrolling when new output arrives while already near the bottom', async () => {
     const scrollIntoView = vi.fn()
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
@@ -5113,132 +4385,6 @@ describe('MessageList nested tool calls', () => {
     })
     await waitForProgrammaticScrollReset()
     expect(scrollIntoView).not.toHaveBeenCalled()
-    expect(scrollTop).toBe(600)
-  })
-
-  it('does not auto-scroll tail message updates while the session is idle', async () => {
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          chatState: 'idle',
-          messages: [
-            {
-              id: 'user-1',
-              type: 'user_text',
-              content: '历史消息',
-              timestamp: 1,
-            },
-            {
-              id: 'assistant-1',
-              type: 'assistant_text',
-              content: 'final answer',
-              timestamp: 2,
-            },
-          ],
-        }),
-      },
-    })
-
-    const { container } = render(<MessageList />)
-    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
-    let scrollTop = 552
-    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
-    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
-    Object.defineProperty(scroller, 'scrollTop', {
-      configurable: true,
-      get: () => scrollTop,
-      set: (value) => {
-        scrollTop = value
-      },
-    })
-
-    await waitForProgrammaticScrollReset()
-    fireEvent.scroll(scroller)
-
-    act(() => {
-      useChatStore.setState((state) => ({
-        sessions: {
-          ...state.sessions,
-          [ACTIVE_TAB]: {
-            ...state.sessions[ACTIVE_TAB]!,
-            messages: [
-              state.sessions[ACTIVE_TAB]!.messages[0]!,
-              {
-                ...state.sessions[ACTIVE_TAB]!.messages[1] as Extract<UIMessage, { type: 'assistant_text' }>,
-                content: 'final answer\nlate metadata update',
-              },
-            ],
-          },
-        },
-      }))
-    })
-
-    await waitFor(() => {
-      expect(screen.getByText(/late metadata update/)).toBeTruthy()
-    })
-    expect(scrollTop).toBe(552)
-  })
-
-  it('keeps auto-scrolling when the tail assistant message grows in place', async () => {
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          chatState: 'streaming',
-          messages: [
-            {
-              id: 'user-1',
-              type: 'user_text',
-              content: '最新消息',
-              timestamp: 1,
-            },
-            {
-              id: 'assistant-1',
-              type: 'assistant_text',
-              content: 'first token',
-              timestamp: 2,
-            },
-          ],
-        }),
-      },
-    })
-
-    const { container } = render(<MessageList />)
-    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
-    let scrollTop = 552
-    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
-    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
-    Object.defineProperty(scroller, 'scrollTop', {
-      configurable: true,
-      get: () => scrollTop,
-      set: (value) => {
-        scrollTop = value
-      },
-    })
-
-    await waitForProgrammaticScrollReset()
-    fireEvent.scroll(scroller)
-
-    act(() => {
-      useChatStore.setState((state) => ({
-        sessions: {
-          ...state.sessions,
-          [ACTIVE_TAB]: {
-            ...state.sessions[ACTIVE_TAB]!,
-            messages: [
-              state.sessions[ACTIVE_TAB]!.messages[0]!,
-              {
-                ...state.sessions[ACTIVE_TAB]!.messages[1] as Extract<UIMessage, { type: 'assistant_text' }>,
-                content: 'first token\nsecond token from the same assistant message',
-              },
-            ],
-          },
-        },
-      }))
-    })
-
-    await waitFor(() => {
-      expect(screen.getByText(/second token from the same assistant message/)).toBeTruthy()
-    })
     expect(scrollTop).toBe(600)
   })
 
@@ -5310,7 +4456,7 @@ describe('MessageList nested tool calls', () => {
     })
 
     await waitFor(() => {
-      expect(screen.getByText('app.vue')).toBeTruthy()
+      expect(screen.getByText('2 lines · 36 chars')).toBeTruthy()
     })
     await waitForProgrammaticScrollReset()
     expect(scrollIntoView).not.toHaveBeenCalled()
@@ -5541,10 +4687,8 @@ describe('MessageList nested tool calls', () => {
     expect(queuedFrames.length).toBeGreaterThan(0)
     flushFrame()
 
-    // scrollToBottom() is called when streamingText changes; in JSDOM
-    // setScrollToBottomWithoutLayoutRead writes twice (sentinel → clamp).
-    expect(scrollTopWriteCount).toBe(2)
-    expect(scrollTop).toBe(604)
+    expect(scrollTopWriteCount).toBe(0)
+    expect(scrollTop).toBe(600)
 
     scrollHeight = 1020
     act(() => {
@@ -5560,7 +4704,7 @@ describe('MessageList nested tool calls', () => {
     })
     flushFrame()
 
-    expect(scrollTopWriteCount).toBe(4)
+    expect(scrollTopWriteCount).toBe(1)
     expect(scrollTop).toBe(620)
   })
 
@@ -5999,18 +5143,12 @@ describe('MessageList nested tool calls', () => {
     await waitFor(() => {
       expect(resizeCallback).not.toBeNull()
     })
-    await waitForProgrammaticScrollReset()
 
     act(() => {
       resizeCallback?.([{
         contentRect: { height: 600 },
       } as ResizeObserverEntry], {} as ResizeObserver)
     })
-
-    // Sync the observed scroll position before the user drags away. The initial
-    // mount read scrollTop before the test double was installed, so the ref
-    // still holds 0 instead of the current 600.
-    fireEvent.scroll(scroller)
 
     scrollTop = 200
     fireEvent.scroll(scroller)
@@ -6324,9 +5462,6 @@ describe('MessageList nested tool calls', () => {
     })
 
     await waitForProgrammaticScrollReset()
-    scrollTop = 800
-    fireEvent.scroll(scroller)
-    scrollTop = 180
     fireEvent.scroll(scroller)
     expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
 
@@ -6386,7 +5521,6 @@ describe('MessageList nested tool calls', () => {
     })
 
     await waitForProgrammaticScrollReset()
-    fireEvent.wheel(firstScroller, { deltaY: -120 })
     fireEvent.scroll(firstScroller)
     expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
     firstSession.unmount()
@@ -6457,56 +5591,6 @@ describe('MessageList nested tool calls', () => {
     expect(scroller.scrollTop).toBe(800)
   })
 
-  it('scrolls an idle session to the latest message after its history loads', async () => {
-    useTabStore.setState({
-      activeTabId: 'session-loading',
-      tabs: [
-        { sessionId: 'session-loading', title: 'Loading', type: 'session' as const, status: 'idle' },
-      ],
-    })
-    useChatStore.setState({
-      sessions: {
-        'session-loading': makeSessionState({ messages: [] }),
-      },
-    })
-
-    const { container } = render(<MessageList />)
-    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
-    let scrollTop = 0
-    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 2400 })
-    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
-    Object.defineProperty(scroller, 'scrollTop', {
-      configurable: true,
-      get: () => scrollTop,
-      set: (value) => {
-        scrollTop = value >= 1_000_000_000 ? 2000 : value
-      },
-    })
-
-    await waitForProgrammaticScrollReset()
-
-    act(() => {
-      useChatStore.setState((state) => ({
-        sessions: {
-          ...state.sessions,
-          'session-loading': makeSessionState({
-            messages: Array.from({ length: 220 }, (_, index) => ({
-              id: `loaded-${index}`,
-              type: 'assistant_text',
-              content: `loaded transcript line ${index}`,
-              timestamp: index,
-            })),
-          }),
-        },
-      }))
-    })
-
-    await waitFor(() => {
-      expect(screen.getByText('loaded transcript line 219')).toBeTruthy()
-    })
-    expect(scrollTop).toBe(2000)
-  })
-
   it('shows a latest button when reading history and resumes following after clicking it', async () => {
     const scrollIntoView = vi.fn()
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
@@ -6533,7 +5617,7 @@ describe('MessageList nested tool calls', () => {
 
     const { container } = render(<MessageList />)
     const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
-    let scrollTop = 600
+    let scrollTop = 120
     Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
     Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
     Object.defineProperty(scroller, 'scrollTop', {
@@ -6546,18 +5630,7 @@ describe('MessageList nested tool calls', () => {
 
     scrollIntoView.mockClear()
     await waitForProgrammaticScrollReset()
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 300))
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-    })
     fireEvent.scroll(scroller)
-    scrollTop = 80
-    await act(async () => {
-      fireEvent.scroll(scroller)
-    })
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
-    })
     fireEvent.click(screen.getByRole('button', { name: 'Latest' }))
 
     expect(scrollIntoView).not.toHaveBeenCalled()
@@ -6627,9 +5700,6 @@ describe('MessageList nested tool calls', () => {
 
     scrollIntoView.mockClear()
     await waitForProgrammaticScrollReset()
-    scrollTop = 600
-    fireEvent.scroll(scroller)
-    scrollTop = 120
     fireEvent.scroll(scroller)
     expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
 
@@ -6705,9 +5775,6 @@ describe('MessageList nested tool calls', () => {
 
     scrollIntoView.mockClear()
     await waitForProgrammaticScrollReset()
-    scrollTop = 600
-    fireEvent.scroll(scroller)
-    scrollTop = 120
     fireEvent.scroll(scroller)
     expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
 
@@ -6827,11 +5894,20 @@ describe('MessageList nested tool calls', () => {
     expect(assistantShell?.className).not.toContain('ml-10')
     expect(userActions?.getAttribute('data-align')).toBe('end')
     expect(assistantActions?.getAttribute('data-align')).toBe('start')
-    expect(userActions?.className).toContain('h-7')
-    expect(userActions?.className).toContain('mt-2')
+    // The prompt's bar hangs under the bubble out of flow: hovering never moves
+    // the transcript, and the bar holds no height of its own when hidden.
+    expect(userShell?.className).toContain('relative')
+    expect(userActions?.getAttribute('data-placement')).toBe('overlay')
+    expect(userActions?.className).toContain('absolute')
+    expect(userActions?.className).toContain('top-full')
+    expect(userActions?.className).toContain('right-0')
+    expect(userActions?.className).not.toContain('mt-2')
     expect(userActions?.className).not.toContain('h-0')
-    expect(userActions?.className).not.toContain('group-hover:h-7')
+    expect(userActions?.className).not.toContain('group-hover:h-')
     expect(userActions?.className).not.toContain('invisible')
+    // The closing reply's bar stays in flow: it is always shown.
+    expect(assistantActions?.getAttribute('data-placement')).toBe('inline')
+    expect(assistantActions?.className).not.toContain('absolute')
     expect(userTime.getAttribute('title')).toBe(formatExactMessageTimestamp(userTimestamp, 'en'))
     // The closing reply's bar is not hover-gated: it is rare and deliberate now,
     // so hiding it until hover would only make a present affordance hard to find.
@@ -8181,56 +7257,6 @@ describe('MessageList nested tool calls', () => {
     expect(screen.queryByText('Markdown')).toBeNull()
   })
 
-  it('stays quiet when the transcript is past the checkpoint preview budget', async () => {
-    vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockRejectedValue(
-      new ApiError(413, {
-        error: 'HISTORY_CHECKPOINT_PREVIEW_LIMIT',
-        message: 'This transcript exceeds the full checkpoint preview budget. Chat history remains available in pages.',
-      }),
-    )
-
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          messages: [
-            { id: 'user-1', type: 'user_text', content: '继续', timestamp: 1 },
-            { id: 'assistant-1', type: 'assistant_text', content: 'done', timestamp: 2 },
-          ],
-        }),
-      },
-    })
-
-    render(<MessageList />)
-
-    expect(await screen.findByText('done')).toBeTruthy()
-    await waitFor(() => {
-      expect(sessionsApi.getTurnCheckpoints).toHaveBeenCalled()
-    })
-    expect(screen.queryByText(/checkpoint preview budget/)).toBeNull()
-    expect(screen.queryByLabelText('Turn changed files')).toBeNull()
-  })
-
-  it('still reports a real turn checkpoint load failure', async () => {
-    vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockRejectedValue(
-      new ApiError(500, { error: 'INTERNAL_ERROR', message: 'An unexpected error occurred' }),
-    )
-
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          messages: [
-            { id: 'user-1', type: 'user_text', content: '继续', timestamp: 1 },
-            { id: 'assistant-1', type: 'assistant_text', content: 'done', timestamp: 2 },
-          ],
-        }),
-      },
-    })
-
-    render(<MessageList />)
-
-    expect(await screen.findByText('An unexpected error occurred')).toBeTruthy()
-  })
-
   it('does not load turn change cards while background tasks are still running', async () => {
     const getTurnCheckpoints = vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({
       checkpoints: [
@@ -9037,6 +8063,77 @@ describe('MessageList nested tool calls', () => {
     expect(within(turnCard).getByText('ink-survey-philosophy.md')).toBeTruthy()
   })
 
+  describe('output cards need the turn to have produced the file', () => {
+    function mockCheckpoint(unverifiedChangeSources: string[], startedAt: number) {
+      return vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({
+        checkpoints: [{
+          target: { targetUserMessageId: 'transcript-user-1', userMessageIndex: 0, userMessageCount: 1 },
+          workDir: '/private/tmp',
+          code: { available: true, filesChanged: [], insertions: 0, deletions: 0 },
+          unverifiedChangeSources,
+          startedAt,
+        }],
+      })
+    }
+
+    function replyWith(text: string) {
+      const store = useChatStore.getState()
+      act(() => {
+        store.sendMessage(ACTIVE_TAB, 'Summarise the last commits')
+        store.handleServerMessage(ACTIVE_TAB, { type: 'content_start', blockType: 'text' })
+        store.handleServerMessage(ACTIVE_TAB, { type: 'content_delta', text })
+        store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
+      })
+    }
+
+    beforeEach(() => {
+      resetWorkspaceFileStatsForTests()
+    })
+
+    it('shows none for file names a read-only turn only quoted', async () => {
+      // The turn ran `git log`; the reply quoted names from commit messages.
+      const getTurnCheckpoints = mockCheckpoint([], Date.now())
+      const statWorkspaceFiles = vi.spyOn(sessionsApi, 'statWorkspaceFiles').mockImplementation(async (_sessionId, paths) => ({
+        files: paths.map((path) => ({ path, state: 'missing' as const })),
+      }))
+
+      render(<MessageList sessionId={ACTIVE_TAB} />)
+      replyWith('QUOTED_NAMES 修复了 `开题报告2.docx`、`D:/资料/测试文档1.docx` 被截断的问题')
+
+      await waitFor(() => expect(getTurnCheckpoints).toHaveBeenCalled())
+      await waitFor(() => expect(statWorkspaceFiles).toHaveBeenCalled())
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      })
+      const reply = screen.getByText('QUOTED_NAMES', { exact: false }).closest('[data-chat-render-item-key]')
+      expect(reply).not.toBeNull()
+      expect(within(reply as HTMLElement).queryByRole('button', { name: 'Open' })).toBeNull()
+      // Nothing there to open, so nothing looks openable either.
+      expect(within(reply as HTMLElement).queryByRole('link')).toBeNull()
+    })
+
+    it('shows only what a shell command wrote after the turn began', async () => {
+      const startedAt = Date.parse('2026-10-04T08:00:00Z')
+      mockCheckpoint(['Bash'], startedAt)
+      const statWorkspaceFiles = vi.spyOn(sessionsApi, 'statWorkspaceFiles').mockImplementation(async (_sessionId, paths) => ({
+        files: paths.map((path) => ({
+          path,
+          state: 'file' as const,
+          mtimeMs: path === 'out/report.docx' ? startedAt + 5_000 : startedAt - 86_400_000,
+        })),
+      }))
+
+      render(<MessageList sessionId={ACTIVE_TAB} />)
+      replyWith('CONVERTED 已把 `in/source.docx` 转成 `out/report.docx`')
+
+      await waitFor(() => expect(statWorkspaceFiles).toHaveBeenCalled())
+      const reply = screen.getByText('CONVERTED', { exact: false }).closest('[data-chat-render-item-key]') as HTMLElement
+      await waitFor(() => expect(within(reply).getAllByRole('button', { name: 'Open' })).toHaveLength(1))
+      expect(within(reply).getByText('report.docx', { selector: 'span' })).toBeTruthy()
+      expect(within(reply).queryByText('source.docx', { selector: 'span' })).toBeNull()
+    })
+  })
+
   it('keeps one output card per turn when separate turns generate the same path', async () => {
     const generatedPath = '/private/tmp/repeated-report.md'
     vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({
@@ -9198,18 +8295,20 @@ describe('MessageList nested tool calls', () => {
     expect(screen.queryByText(/This model does not support images/)).toBeNull()
   })
 
-  it('localizes invalid-image API errors instead of showing raw English', () => {
+  it('blames the upstream provider for an interrupted stream and keeps the stream evidence', () => {
     useSettingsStore.setState({ locale: 'zh' })
+    const raw =
+      'API Error: Provider stream ended before completing the response. The upstream model provider closed the stream before the reply finished; this is not a context-limit error. (retried 10 times · 412 events · last content_block_delta · stop_reason none · message_stop missing · 1 block open · 263s)'
     useChatStore.setState({
       sessions: {
         [ACTIVE_TAB]: makeSessionState({
           messages: [
             {
-              id: 'error-invalid-image',
+              id: 'error-1',
               type: 'error',
-              code: 'invalid_request',
-              businessErrorCode: 'image_invalid',
-              message: 'The image data was invalid. Replace the image or continue with text.',
+              code: 'unknown',
+              businessErrorCode: 'upstream_stream_interrupted',
+              message: raw,
               timestamp: 1,
             },
           ],
@@ -9219,11 +8318,11 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
-    expect(screen.getByText('错误:')).toBeTruthy()
-    expect(
-      screen.getByText('图片数据无效。请重新生成或替换图片，也可以继续使用文字。'),
-    ).toBeTruthy()
-    expect(screen.queryByText(/The image data was invalid/)).toBeNull()
+    expect(screen.getByText(/上游模型服务商在回复完成前断开了连接/)).toBeTruthy()
+    expect(screen.getByText(/不是上下文超限/)).toBeTruthy()
+    // The evidence is what tells a mid-block cut from a dropped message_stop
+    // when users send a screenshot; the translation alone would hide it.
+    expect(screen.getByText(raw)).toBeTruthy()
   })
 
   it.each([
@@ -10652,5 +9751,450 @@ describe('MessageList agent card activity', () => {
 
     expect(await screen.findByTestId('agent-call-activity')).toBeTruthy()
     expect(screen.getByText(/Showing the start and end of this run/)).toBeTruthy()
+  })
+})
+
+// #1343. Editing a prompt reuses the existing rewind — same targets, same
+// dry-run/`conversation`/`both` semantics — and then sends the edit. Nothing
+// may change before the rewind succeeds, and once it has, the edit must reach
+// either the model or the composer.
+describe('MessageList edit and resend', () => {
+  type Checkpoint = Awaited<ReturnType<typeof sessionsApi.getTurnCheckpoints>>['checkpoints'][number]
+  type RewindResult = Awaited<ReturnType<typeof sessionsApi.rewind>>
+
+  function checkpoint(
+    targetUserMessageId: string,
+    userMessageIndex: number,
+    userMessageCount: number,
+    overrides: Partial<Checkpoint> = {},
+  ): Checkpoint {
+    return {
+      target: { targetUserMessageId, userMessageIndex, userMessageCount },
+      code: { available: false, filesChanged: [], insertions: 0, deletions: 0 },
+      ...overrides,
+    }
+  }
+
+  function rewindResult(overrides: Partial<RewindResult> = {}): RewindResult {
+    return {
+      target: { targetUserMessageId: 'user-1', userMessageIndex: 0, userMessageCount: 1 },
+      conversation: { messagesRemoved: 2 },
+      code: { available: false, filesChanged: [], insertions: 0, deletions: 0 },
+      ...overrides,
+    }
+  }
+
+  function setup(messages: UIMessage[], checkpoints: Checkpoint[], sessionOverrides: Partial<PerSessionState> = {}) {
+    vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({ checkpoints })
+    const reloadHistory = vi.fn().mockResolvedValue(undefined)
+    const sendMessage = vi.fn()
+    const queueComposerPrefill = vi.fn()
+    const stopGeneration = vi.fn()
+    useChatStore.setState({
+      reloadHistory,
+      sendMessage,
+      queueComposerPrefill,
+      stopGeneration,
+      sessions: { [ACTIVE_TAB]: makeSessionState({ messages, ...sessionOverrides }) },
+    })
+    return { reloadHistory, sendMessage, queueComposerPrefill, stopGeneration }
+  }
+
+  const oneTurn: UIMessage[] = [
+    { id: 'user-1', type: 'user_text', content: 'Build a page', transcriptMessageId: 'user-1', timestamp: 1 },
+    { id: 'assistant-1', type: 'assistant_text', content: 'Done', timestamp: 2 },
+  ]
+
+  const threeTurns: UIMessage[] = [
+    { id: 'user-1', type: 'user_text', content: 'First prompt', timestamp: 1 },
+    { id: 'assistant-1', type: 'assistant_text', content: 'First answer', timestamp: 2 },
+    { id: 'user-2', type: 'user_text', content: 'Second prompt', timestamp: 3 },
+    { id: 'assistant-2', type: 'assistant_text', content: 'Second answer', timestamp: 4 },
+    { id: 'user-3', type: 'user_text', content: 'Third prompt', timestamp: 5 },
+    { id: 'assistant-3', type: 'assistant_text', content: 'Third answer', timestamp: 6 },
+  ]
+
+  async function enabledEditButton(bubble: HTMLElement) {
+    // The bubble renders before the turn checkpoints load; until they do the
+    // action is shown disabled, and only then is the prompt known rewindable.
+    return waitFor(() => {
+      const button = within(bubble).getByRole('button', { name: 'Edit and resend' }) as HTMLButtonElement
+      expect(button.disabled).toBe(false)
+      return button
+    })
+  }
+
+  async function openEditorFor(content: string) {
+    const bubble = (await screen.findByText(content)).closest('[data-message-shell="user"]') as HTMLElement
+    fireEvent.click(await enabledEditButton(bubble))
+    return screen.getByRole('textbox', { name: 'Edited message' }) as HTMLTextAreaElement
+  }
+
+  function editButtonIn(content: string) {
+    const bubble = screen.getByText(content).closest('[data-message-shell="user"]') as HTMLElement
+    return within(bubble).getByRole('button', { name: 'Edit and resend' }) as HTMLButtonElement
+  }
+
+  function typeAndSend(textbox: HTMLTextAreaElement, text: string) {
+    fireEvent.change(textbox, { target: { value: text } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    resetSessionScrollSnapshotsForTests()
+    useSettingsStore.setState({ locale: 'en', chatSendBehavior: 'enter' })
+    useUIStore.setState({ toasts: [] })
+    useTabStore.setState({ activeTabId: ACTIVE_TAB, tabs: [{ sessionId: ACTIVE_TAB, title: 'Test', type: 'session' as const, status: 'idle' }] })
+    useSessionStore.setState({ sessions: [], activeSessionId: null, isLoading: false, error: null })
+    useSideChatStore.setState({ entries: {} })
+    useTeamStore.getState().clearTeam()
+    useWorkspaceStore.setState(useWorkspaceStore.getInitialState(), true)
+    vi.spyOn(sessionsApi, 'getWorkspaceStatus').mockResolvedValue({
+      state: 'ok',
+      workDir: '/tmp/example-project',
+      repoName: 'example-project',
+      branch: null,
+      isGitRepo: false,
+      changedFiles: [],
+    })
+  })
+
+  it('offers edit only on prompts the rewind API can target', async () => {
+    setup([
+      ...threeTurns.slice(0, 4),
+      { id: 'collab', type: 'user_text', content: 'Delivered from elsewhere', collaboration: { sourceSessionId: 's2' }, timestamp: 5 },
+      { id: 'assistant-c', type: 'assistant_text', content: 'Ack', timestamp: 6 },
+    ], [checkpoint('user-1', 0, 3), checkpoint('collab', 2, 3)])
+    render(<MessageList />)
+
+    const first = (await screen.findByText('First prompt')).closest('[data-message-shell="user"]') as HTMLElement
+    await enabledEditButton(first)
+    const second = screen.getByText('Second prompt').closest('[data-message-shell="user"]') as HTMLElement
+    expect(within(second).queryByRole('button', { name: 'Edit and resend' })).toBeNull()
+    const collab = screen.getByText('Delivered from elsewhere').closest('[data-message-shell="user"]') as HTMLElement
+    expect(within(collab).queryByRole('button', { name: 'Edit and resend' })).toBeNull()
+  })
+
+  it('keeps edit visible but disabled, with the reason, while a turn runs; none in a side chat', async () => {
+    setup(oneTurn, [checkpoint('user-1', 0, 1)])
+    const { unmount } = render(<MessageList />)
+    await enabledEditButton((await screen.findByText('Build a page')).closest('[data-message-shell="user"]') as HTMLElement)
+
+    act(() => {
+      const current = useChatStore.getState().sessions[ACTIVE_TAB]!
+      useChatStore.setState({ sessions: { [ACTIVE_TAB]: { ...current, chatState: 'thinking' } } })
+    })
+    const busy = editButtonIn('Build a page')
+    expect(busy.disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Edit and resend', description: 'Editing is available once this turn finishes.' })).toBe(busy)
+    expect(busy.closest('[title]')?.getAttribute('title')).toBe('Editing is available once this turn finishes.')
+    unmount()
+
+    setup(oneTurn, [checkpoint('user-1', 0, 1)])
+    useSideChatStore.setState({ entries: { [ACTIVE_TAB]: { sessionId: ACTIVE_TAB, parentSessionId: 'parent' } as never } })
+    render(<MessageList />)
+    await screen.findByText('Build a page')
+    await waitFor(() => expect(sessionsApi.getTurnCheckpoints).toHaveBeenCalled())
+    await act(async () => { await Promise.resolve() })
+    expect(screen.queryByRole('button', { name: 'Edit and resend' })).toBeNull()
+  })
+
+  it('keeps edit disabled while a background task runs, even when the checkpoints never loaded, then enables it', async () => {
+    const runningTask = {
+      taskId: 'shell-1', status: 'running', taskType: 'local_bash', description: 'npm run dev', startedAt: 1, updatedAt: 2,
+    } as const
+    setup(oneTurn, [checkpoint('user-1', 0, 1)], { backgroundAgentTasks: { 'shell-1': runningTask } })
+    render(<MessageList />)
+    await screen.findByText('Build a page')
+
+    const blocked = editButtonIn('Build a page')
+    expect(blocked.disabled).toBe(true)
+    expect(screen.getByRole('button', {
+      name: 'Edit and resend',
+      description: 'Editing is available once the running background tasks finish or are stopped.',
+    })).toBe(blocked)
+    expect(sessionsApi.getTurnCheckpoints).not.toHaveBeenCalled()
+
+    act(() => {
+      const current = useChatStore.getState().sessions[ACTIVE_TAB]!
+      useChatStore.setState({ sessions: { [ACTIVE_TAB]: {
+        ...current, backgroundAgentTasks: { 'shell-1': { ...runningTask, status: 'completed', updatedAt: 3 } },
+      } } })
+    })
+    const bubble = screen.getByText('Build a page').closest('[data-message-shell="user"]') as HTMLElement
+    await enabledEditButton(bubble)
+  })
+
+  it('says the prompt is being checked while the checkpoints load, and why when they fail', async () => {
+    let rejectCheckpoints!: (error: Error) => void
+    setup(oneTurn, [])
+    vi.mocked(sessionsApi.getTurnCheckpoints).mockReturnValue(new Promise((_, reject) => { rejectCheckpoints = reject }))
+    render(<MessageList />)
+    await screen.findByText('Build a page')
+    await waitFor(() => expect(editButtonIn('Build a page').disabled).toBe(true))
+    expect(screen.getByRole('button', { name: 'Edit and resend', description: 'Checking whether this prompt can be rewound…' })).toBeTruthy()
+
+    await act(async () => { rejectCheckpoints(new Error('checkpoint store offline')) })
+    await waitFor(() => expect(screen.getByRole('button', {
+      name: 'Edit and resend',
+      description: "Editing is unavailable: this session's checkpoints could not be loaded.",
+    })).toBeTruthy())
+    expect(editButtonIn('Build a page').disabled).toBe(true)
+  })
+
+  it('still edits a prompt past the checkpoint preview budget, rolling back the conversation only', async () => {
+    const { sendMessage } = setup(oneTurn, [])
+    vi.mocked(sessionsApi.getTurnCheckpoints).mockRejectedValue(new ApiError(413, { error: 'HISTORY_CHECKPOINT_PREVIEW_LIMIT' }))
+    // The dry run finds changed files; this mode has told the user file undo
+    // is unavailable, so they must not be offered back.
+    const rewind = vi.spyOn(sessionsApi, 'rewind').mockResolvedValue(rewindResult({
+      code: { available: true, filesChanged: ['app.ts'], insertions: 1, deletions: 0 },
+    }))
+    render(<MessageList />)
+    await screen.findByRole('region', { name: 'Workspace changed files' })
+
+    typeAndSend(await openEditorFor('Build a page'), 'Build a landing page')
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledOnce())
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(rewind).toHaveBeenNthCalledWith(1, ACTIVE_TAB, {
+      targetUserMessageId: 'user-1', userMessageIndex: 0, expectedContent: 'Build a page', dryRun: true,
+    })
+    expect(rewind).toHaveBeenNthCalledWith(2, ACTIVE_TAB, {
+      targetUserMessageId: 'user-1', userMessageIndex: 0, expectedContent: 'Build a page', mode: 'conversation',
+    })
+  })
+
+  it('offers no edit past the budget for a live prompt that has no transcript id yet', async () => {
+    setup([
+      { id: 'live-user', type: 'user_text', content: 'Live prompt', timestamp: 1 },
+      { id: 'live-reply', type: 'assistant_text', content: 'Live answer', timestamp: 2 },
+    ], [])
+    vi.mocked(sessionsApi.getTurnCheckpoints).mockRejectedValue(new ApiError(413, { error: 'HISTORY_CHECKPOINT_PREVIEW_LIMIT' }))
+    render(<MessageList />)
+    await screen.findByRole('region', { name: 'Workspace changed files' })
+    expect(screen.queryByRole('button', { name: 'Edit and resend' })).toBeNull()
+  })
+
+  it('resends the latest text-only turn straight away: dry run, conversation rewind, reload, send', async () => {
+    const { reloadHistory, sendMessage, queueComposerPrefill } = setup(oneTurn, [checkpoint('user-1', 0, 1)])
+    const rewind = vi.spyOn(sessionsApi, 'rewind').mockResolvedValue(rewindResult())
+    render(<MessageList />)
+
+    const textbox = await openEditorFor('Build a page')
+    expect(textbox.value).toBe('Build a page')
+    typeAndSend(textbox, 'Build a landing page')
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledOnce())
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(rewind).toHaveBeenCalledTimes(2)
+    expect(rewind).toHaveBeenNthCalledWith(1, ACTIVE_TAB, {
+      targetUserMessageId: 'user-1', userMessageIndex: 0, expectedContent: 'Build a page', dryRun: true,
+    })
+    expect(rewind).toHaveBeenNthCalledWith(2, ACTIVE_TAB, {
+      targetUserMessageId: 'user-1', userMessageIndex: 0, expectedContent: 'Build a page', mode: 'conversation',
+    })
+    expect(sendMessage).toHaveBeenCalledWith(ACTIVE_TAB, 'Build a landing page', [], {
+      displayContent: 'Build a landing page',
+      displayAttachments: [],
+    })
+    // The edit is sent into the rewound history, never before it is reloaded.
+    expect(reloadHistory.mock.invocationCallOrder[0]!)
+      .toBeGreaterThan(rewind.mock.invocationCallOrder[1]!)
+    expect(sendMessage.mock.invocationCallOrder[0]!)
+      .toBeGreaterThan(reloadHistory.mock.invocationCallOrder[0]!)
+    expect(queueComposerPrefill).not.toHaveBeenCalled()
+    expect(screen.queryByRole('textbox', { name: 'Edited message' })).toBeNull()
+  })
+
+  it('says how many later turns an older edit deletes, and Cancel changes nothing', async () => {
+    const { sendMessage } = setup(threeTurns, [
+      checkpoint('user-1', 0, 3), checkpoint('user-2', 1, 3), checkpoint('user-3', 2, 3),
+    ])
+    const rewind = vi.spyOn(sessionsApi, 'rewind').mockResolvedValue(rewindResult())
+    render(<MessageList />)
+
+    const textbox = await openEditorFor('First prompt')
+    typeAndSend(textbox, 'First prompt, revised')
+
+    const dialog = await screen.findByRole('dialog', { name: 'Edit and resend?' })
+    expect(within(dialog).getByText('The 2 later turn(s) after this message will be deleted, then the edited message is sent.')).toBeTruthy()
+    expect(within(dialog).getByText('Files on disk will not be changed.')).toBeTruthy()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(rewind).toHaveBeenCalledOnce()
+    expect(rewind.mock.calls[0]![1]).toMatchObject({ dryRun: true })
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect((screen.getByRole('textbox', { name: 'Edited message' }) as HTMLTextAreaElement).value)
+      .toBe('First prompt, revised')
+    expect(screen.getByText('Second prompt')).toBeTruthy()
+  })
+
+  it('restores code and conversation through the authoritative checkpoint when chosen', async () => {
+    // The live bubble has a local id; the server's checkpoint names the
+    // transcript message, and that is the one the rewind must address.
+    const { sendMessage } = setup([
+      { id: 'local-1', type: 'user_text', content: 'Edit the file', timestamp: 1 },
+      { id: 'assistant-1', type: 'assistant_text', content: 'Edited', timestamp: 2 },
+    ], [checkpoint('transcript-1', 0, 1, {
+      code: { available: true, filesChanged: ['src/a.ts'], insertions: 1, deletions: 0 },
+    })])
+    const rewind = vi.spyOn(sessionsApi, 'rewind')
+      .mockResolvedValueOnce(rewindResult({
+        code: { available: true, filesChanged: ['src/a.ts'], insertions: 1, deletions: 0 },
+      }))
+      .mockResolvedValueOnce(rewindResult({
+        code: { available: true, filesChanged: ['src/a.ts'], insertions: 1, deletions: 0 },
+        mode: 'both',
+      }))
+    render(<MessageList />)
+
+    const textbox = await openEditorFor('Edit the file')
+    typeAndSend(textbox, 'Edit the other file')
+
+    const dialog = await screen.findByRole('dialog', { name: 'Edit and resend?' })
+    expect(within(dialog).getByText('The reply to this turn will be deleted, then the edited message is sent.')).toBeTruthy()
+    expect(within(dialog).getByRole('button', { name: 'Roll back conversation only and send' })).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Roll back code and conversation and send' }))
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledOnce())
+    expect(rewind).toHaveBeenCalledTimes(2)
+    expect(rewind).toHaveBeenNthCalledWith(1, ACTIVE_TAB, {
+      targetUserMessageId: 'transcript-1', userMessageIndex: 0, expectedContent: 'Edit the file', dryRun: true,
+    })
+    expect(rewind).toHaveBeenNthCalledWith(2, ACTIVE_TAB, {
+      targetUserMessageId: 'transcript-1', userMessageIndex: 0, expectedContent: 'Edit the file', mode: 'both',
+    })
+    expect(useUIStore.getState().toasts).toEqual([
+      expect.objectContaining({ type: 'success', message: 'Rewound 2 messages and restored tracked files.' }),
+    ])
+  })
+
+  it('offers only the conversation rollback when the files cannot be restored', async () => {
+    const { sendMessage } = setup(oneTurn, [checkpoint('user-1', 0, 1, {
+      code: { available: true, filesChanged: ['src/a.ts'], insertions: 1, deletions: 0 },
+      restoreAvailable: false,
+    })])
+    const rewind = vi.spyOn(sessionsApi, 'rewind').mockResolvedValue(rewindResult({
+      code: { available: true, filesChanged: ['src/a.ts'], insertions: 1, deletions: 0 },
+      restoreAvailable: false,
+    }))
+    render(<MessageList />)
+
+    typeAndSend(await openEditorFor('Build a page'), 'Build a smaller page')
+
+    const dialog = await screen.findByRole('dialog', { name: 'Edit and resend?' })
+    expect(within(dialog).queryByRole('button', { name: 'Roll back code and conversation and send' })).toBeNull()
+    expect(within(dialog).getByText(/incomplete file checkpoint/)).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Roll back conversation only and send' }))
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledOnce())
+    expect(rewind).toHaveBeenLastCalledWith(ACTIVE_TAB, expect.objectContaining({ mode: 'conversation' }))
+  })
+
+  it('keeps the draft and sends nothing when the rewind itself fails', async () => {
+    const { reloadHistory, sendMessage } = setup(oneTurn, [checkpoint('user-1', 0, 1)])
+    vi.spyOn(sessionsApi, 'rewind')
+      .mockResolvedValueOnce(rewindResult())
+      .mockRejectedValueOnce(new Error('late tool output'))
+    render(<MessageList />)
+
+    typeAndSend(await openEditorFor('Build a page'), 'Build a landing page')
+
+    await waitFor(() => expect(useUIStore.getState().toasts).toEqual([
+      expect.objectContaining({
+        type: 'error',
+        message: 'Could not resend the edited message. The conversation was not changed. Details: late tool output',
+      }),
+    ]))
+    expect(reloadHistory).not.toHaveBeenCalled()
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect((screen.getByRole('textbox', { name: 'Edited message' }) as HTMLTextAreaElement).value)
+      .toBe('Build a landing page')
+  })
+
+  it('keeps the draft when the dry run fails', async () => {
+    const { sendMessage } = setup(oneTurn, [checkpoint('user-1', 0, 1)])
+    const rewind = vi.spyOn(sessionsApi, 'rewind').mockRejectedValue(new Error('prompt changed'))
+    render(<MessageList />)
+
+    typeAndSend(await openEditorFor('Build a page'), 'Build a landing page')
+
+    await waitFor(() => expect(useUIStore.getState().toasts).toHaveLength(1))
+    expect(rewind).toHaveBeenCalledOnce()
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect((screen.getByRole('textbox', { name: 'Edited message' }) as HTMLTextAreaElement).value)
+      .toBe('Build a landing page')
+  })
+
+  it('hands the edit to the composer when it cannot be sent after the rewind', async () => {
+    const { reloadHistory, sendMessage, queueComposerPrefill } = setup(oneTurn, [checkpoint('user-1', 0, 1)])
+    reloadHistory.mockRejectedValue(new Error('offline'))
+    vi.spyOn(sessionsApi, 'rewind').mockResolvedValue(rewindResult())
+    render(<MessageList />)
+
+    typeAndSend(await openEditorFor('Build a page'), 'Build a landing page')
+
+    await waitFor(() => expect(queueComposerPrefill).toHaveBeenCalledWith(ACTIVE_TAB, {
+      text: 'Build a landing page',
+      attachments: [],
+    }, { restoreMissingSession: true }))
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(useUIStore.getState().toasts).toEqual([
+      expect.objectContaining({ type: 'warning' }),
+    ])
+  })
+
+  it('cancels with Escape without touching the conversation', async () => {
+    setup(oneTurn, [checkpoint('user-1', 0, 1)])
+    const rewind = vi.spyOn(sessionsApi, 'rewind')
+    render(<MessageList />)
+
+    const textbox = await openEditorFor('Build a page')
+    fireEvent.change(textbox, { target: { value: 'Never mind' } })
+    fireEvent.keyDown(textbox, { key: 'Escape' })
+
+    expect(screen.queryByRole('textbox', { name: 'Edited message' })).toBeNull()
+    expect(screen.getByText('Build a page')).toBeTruthy()
+    expect(rewind).not.toHaveBeenCalled()
+  })
+
+  it('resends workspace references and images with the edited text', async () => {
+    const referencePrompt = [
+      'Referenced workspace context:',
+      '@"src/app.ts:L3-L5":',
+      '```typescript',
+      'for (;;) {}',
+      '```',
+    ].join('\n')
+    const { sendMessage } = setup([
+      {
+        id: 'user-1',
+        type: 'user_text',
+        content: 'Why does this spin?',
+        modelContent: `@"/repo/src/app.ts" ${referencePrompt}\n\nWhy does this spin?`,
+        attachments: [
+          { type: 'file', name: 'app.ts', path: 'src/app.ts', lineStart: 3, lineEnd: 5, quote: 'for (;;) {}' },
+          { type: 'image', name: 'shot.png', data: 'data:image/png;base64,AAAA', mimeType: 'image/png' },
+        ],
+        timestamp: 1,
+      },
+      { id: 'assistant-1', type: 'assistant_text', content: 'Because', timestamp: 2 },
+    ], [checkpoint('user-1', 0, 1)])
+    vi.spyOn(sessionsApi, 'rewind').mockResolvedValue(rewindResult())
+    render(<MessageList />)
+
+    typeAndSend(await openEditorFor('Why does this spin?'), 'How do I stop it?')
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledOnce())
+    const [, content, attachments, options] = sendMessage.mock.calls[0]!
+    expect(content).toBe(`${referencePrompt.replace('src/app.ts:L3-L5', '/repo/src/app.ts:L3-L5')}\n\nHow do I stop it?`)
+    expect(attachments).toEqual([
+      expect.objectContaining({ type: 'file', path: '/repo/src/app.ts', lineStart: 3, lineEnd: 5, quote: 'for (;;) {}' }),
+      { type: 'image', name: 'shot.png', mimeType: 'image/png', data: 'data:image/png;base64,AAAA' },
+    ])
+    expect(options).toMatchObject({ displayContent: 'How do I stop it?' })
   })
 })

@@ -1,9 +1,12 @@
 import { isComposerReferenceVisible, isComposerSlashCommandVisible } from '@/lib/composerCapabilityVisibility'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useDismissable } from '@/hooks/useDismissable'
+import { ArrowUp, Cpu, Plus, ShieldCheck } from 'lucide-react'
 import { BrandSeal } from '@/components/composite/BrandSeal'
+import { NewSessionStarter } from '@/components/layout/NewSessionStarter'
+import { projectTitle } from '@/components/layout/sidebarTaskGroups'
+import { resolveProjectDisplayName } from '../stores/projectDisplayNameStore'
 import { Button } from '@/components/ui/Button'
-import { IconButton } from '@/components/ui/IconButton'
 import { ApiError } from '../api/client'
 import { agentsApi } from '../api/agents'
 import { providersApi } from '../api/providers'
@@ -21,7 +24,8 @@ import { useSettingsStore } from '../stores/settingsStore'
 import { useUIStore } from '../stores/uiStore'
 import { SETTINGS_TAB_ID, useTabStore } from '../stores/tabStore'
 import { RepositoryLaunchControls } from '@/components/chat/RepositoryLaunchControls'
-import { PermissionModeSelector } from '../components/controls/PermissionModeSelector'
+import { PermissionModeSelector, type PermissionModeSelectorHandle } from '../components/controls/PermissionModeSelector'
+import { PERMISSION_MODE_LABEL_KEYS } from '../components/controls/permissionModeState'
 import { ModelSelector, type ModelSelectorHandle } from '../components/controls/ModelSelector'
 import { AttachmentGallery } from '../components/chat/AttachmentGallery'
 import { ImageAnnotationModal } from '../components/chat/ImageAnnotationModal'
@@ -37,6 +41,8 @@ import {
   SlashCommandMenu,
 } from '../components/chat/SlashCommandMenu'
 import { useMobileViewport } from '../hooks/useMobileViewport'
+import { GROK_OFFICIAL_PROVIDER_ID } from '../constants/grokOfficialProvider'
+import { OPENAI_OFFICIAL_PROVIDER_ID } from '../constants/openaiOfficialProvider'
 import { isDesktopRuntime } from '../lib/desktopRuntime'
 import {
   normalizeRuntimeSelection,
@@ -56,6 +62,7 @@ import {
   findMentionRanges,
   insertMentionIntoText,
   type ComposerMention,
+  type NewComposerMention,
 } from '../lib/composerMentions'
 import {
   appendAgentSlashCommands,
@@ -71,7 +78,12 @@ import {
   resolveSlashUiAction,
 } from '../components/chat/composerUtils'
 import { ComposerCapabilityMenu } from '@/components/chat/ComposerCapabilityMenu'
+import { MobileComposerSheet, type MobileComposerSetting } from '@/components/chat/MobileComposerSheet'
 import { useCapabilityMenu } from '@/components/chat/useCapabilityMenu'
+import { AgentTeamChip } from '@/components/chat/AgentTeamChip'
+import { ComputerUseEnableDialog } from '@/components/computer-use/ComputerUseEnableDialog'
+import { withAgentTeamRequest } from '@/lib/agentTeamRequest'
+import { recordRecentSkills } from '@/lib/recentSkills'
 import type { AttachmentRef } from '../types/chat'
 import { attachmentImageSource } from '../lib/attachmentImages'
 import type { PermissionMode } from '../types/settings'
@@ -81,6 +93,7 @@ import { RecentActivityCard } from '../components/welcome/RecentActivityCard'
 import { pickReusableEmptySession } from '../lib/sessionReuse'
 import { useComposerDictation } from '@/features/voiceInput/useComposerDictation'
 import { VoiceInputButton } from '@/features/voiceInput/VoiceInputButton'
+import { VoiceRecordingBar } from '@/features/voiceInput/VoiceRecordingBar'
 
 type Attachment = ComposerAttachment
 
@@ -124,7 +137,12 @@ function resolveCreateSessionErrorMessage(error: unknown, t: Translate): string 
 
 const EMPTY_COMPOSER_REFERENCES: ComposerReferenceCandidate[] = []
 
-export function EmptySession() {
+type EmptySessionProps = {
+  /** The folder the task starts in; the phone's new-task sheet suggests one. */
+  initialWorkDir?: string
+}
+
+export function EmptySession({ initialWorkDir = '' }: EmptySessionProps = {}) {
   const t = useTranslation()
   const [input, setInput] = useState('')
   const [mentions, setMentions] = useState<ComposerMention[]>([])
@@ -132,13 +150,16 @@ export function EmptySession() {
   const [referenceOptionId, setReferenceOptionId] = useState<string | undefined>()
   const [referenceState, setReferenceState] = useState<{ context: string, items: ComposerReferenceCandidate[], loading: boolean, error: boolean } | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [workDir, setWorkDir] = useState('')
+  const [workDir, setWorkDir] = useState(initialWorkDir)
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null)
   const [useWorktree, setUseWorktree] = useState(false)
-  const [repositoryLaunchReady, setRepositoryLaunchReady] = useState(true)
+  // Same rule as picking a folder: hold Send until its repository is read.
+  const [repositoryLaunchReady, setRepositoryLaunchReady] = useState(!initialWorkDir)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [annotationTarget, setAnnotationTarget] = useState<Attachment | null>(null)
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
+  // Bumped when the + menu installs a skill, so the mention list reloads.
+  const [referencesVersion, setReferencesVersion] = useState(0)
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
   // Tracks whether a welcome-screen task card requested orchestration mode for
   // the not-yet-created session. Applied right after createSession() resolves
@@ -158,6 +179,7 @@ export function EmptySession() {
   const panelRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const modelSelectorRef = useRef<ModelSelectorHandle>(null)
+  const permissionSelectorRef = useRef<PermissionModeSelectorHandle>(null)
   const plusMenuRef = useRef<HTMLDivElement>(null)
   const slashMenuRef = useRef<HTMLDivElement>(null)
   const fileSearchRef = useRef<ComposerReferenceMenuHandle>(null)
@@ -193,7 +215,7 @@ export function EmptySession() {
       if (active) setReferenceState({ context: referenceContext, items: [], loading: false, error: true })
     })
     return () => { active = false }
-  }, [referenceContext, workDir, referenceProviderId, lastPluginReloadSummary, slashMenuOpen, fileSearchOpen, plusMenuOpen])
+  }, [referenceContext, workDir, referenceProviderId, lastPluginReloadSummary, slashMenuOpen, fileSearchOpen, plusMenuOpen, referencesVersion])
   useEffect(() => {
     setReferenceDetail(null)
     setReferenceOptionId(undefined)
@@ -211,14 +233,21 @@ export function EmptySession() {
     draft: input,
     blocked: isSubmitting,
     contextKey: 'empty-session',
+    // Called from an effect, after this render has declared `handleSubmit`.
+    onSubmit: () => { void handleSubmit() },
   })
+  // While dictating, the toolbar's controls stay mounted but hidden, and the
+  // recording bar takes their row.
+  const dictationLive = dictation.phase !== 'idle'
 
   useEffect(() => {
     composerRef.current?.focus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useDismissable({
-    open: plusMenuOpen,
+    // On a phone the + opens a sheet that closes itself; see ChatInput.
+    open: plusMenuOpen && !isMobileComposer,
     refs: [plusMenuRef],
     onDismiss: () => setPlusMenuOpen(false),
   })
@@ -413,7 +442,15 @@ export function EmptySession() {
           activeCustomProvider.apiFormat,
           getBundledPresetReasoningProviderKind(activeCustomProvider.presetId),
         )
-        : defaultActiveProviderSelection
+        : defaultActiveProviderSelection && (
+          defaultActiveProviderSelection.providerId === OPENAI_OFFICIAL_PROVIDER_ID ||
+          defaultActiveProviderSelection.providerId === GROK_OFFICIAL_PROVIDER_ID
+        )
+          // Built-in providers are not in the saved list. Without an explicit
+          // effort the server runs the model default while the selector shows
+          // the global value, so resolve it against the model's catalog here.
+          ? normalizeRuntimeSelection({ ...defaultActiveProviderSelection, effortLevel })
+          : defaultActiveProviderSelection
       const claudeOAuthRuntimeSelection = !explicitDraftSelection &&
         authStatus.source === 'claude-oauth' &&
         activeProviderId === null &&
@@ -465,9 +502,14 @@ export function EmptySession() {
       // Inline @-mentions go out as the `@"absolute path"` text the CLI parses,
       // serialized from the live document; the bubble keeps the pill text.
       const serializedText = (composerRef.current?.getModelContent() ?? input).trim()
+      // Agent Team armed in the + menu: the model gets the team instruction,
+      // the bubble keeps what the user typed.
+      const sendAsTeam = capabilityMenu.agentTeamArmed
       if (serializedText || attachmentPayload.length > 0) {
-        sendMessage(sessionId, serializedText, attachmentPayload, { displayContent: text })
+        sendMessage(sessionId, sendAsTeam ? withAgentTeamRequest(serializedText) : serializedText, attachmentPayload, { displayContent: text })
       }
+      recordRecentSkills(mentions.flatMap(mention => mention.kind === 'skill' && mention.id ? [mention.id] : []))
+      if (sendAsTeam) capabilityMenu.disarmAgentTeam()
       setInput('')
       setMentions([])
       setAttachments([])
@@ -719,6 +761,43 @@ export function EmptySession() {
     })
   }
 
+  const insertSelectedFileMention = (mention: NewComposerMention) => {
+    const cursorPos = composerRef.current?.getSelectionOffsets().start ?? input.length
+    const inserted = insertMentionIntoText(input, mentions, cursorPos, cursorPos, mention)
+    setInput(inserted.text)
+    setMentions(inserted.mentions)
+    requestAnimationFrame(() => {
+      composerRef.current?.focus()
+      composerRef.current?.setSelectionOffsets(inserted.cursorPos)
+    })
+  }
+
+  // See ChatInput: the phone's + sheet holds the controls that left the
+  // toolbar, and a row hands over to that control's own sheet.
+  const openFromComposerSheet = (open: () => void) => {
+    setPlusMenuOpen(false)
+    requestAnimationFrame(open)
+  }
+  const mobileComposerSettings: MobileComposerSetting[] = isMobileComposer
+    ? [
+      {
+        key: 'permission',
+        icon: <ShieldCheck size={16} strokeWidth={1.75} aria-hidden="true" />,
+        label: t('permMode.executionPermissions'),
+        value: t(PERMISSION_MODE_LABEL_KEYS[draftPermissionMode]),
+        onSelect: () => openFromComposerSheet(() => permissionSelectorRef.current?.open()),
+      },
+      {
+        key: 'model',
+        icon: <Cpu size={16} strokeWidth={1.75} aria-hidden="true" />,
+        label: t('chat.mobileSheet.model'),
+        value: draftModelLabel,
+        disabled: isSubmitting,
+        onSelect: () => openFromComposerSheet(() => modelSelectorRef.current?.open()),
+      },
+    ]
+    : []
+
   // The "+" capability menu: the shared hook owns data and navigation actions,
   // these handlers are only the composer-local edits. Kept identical to
   // ChatInput's block on purpose — the two composers are one control.
@@ -750,46 +829,64 @@ export function EmptySession() {
           composerRef.current?.setSelectionOffsets(replacement.cursorPos)
         })
       },
-      onInsertPromptSeed: (text) => {
-        const next = input.trim() ? `${input}\n${text}` : text
-        setInput(next)
-        requestAnimationFrame(() => {
-          composerRef.current?.focus()
-          composerRef.current?.setSelectionOffsets(next.length)
-        })
-      },
       onAttachment: openAttachmentPicker,
       onSlashTrigger: insertSlashCommand,
       onSaveWorkflow: () => setLocalSlashPanel('save-workflow'),
+      onReferencesChanged: () => setReferencesVersion(version => version + 1),
       onClose: () => setPlusMenuOpen(false),
     },
   })
 
+  const heroProject = workDir ? (resolveProjectDisplayName(workDir) ?? projectTitle(workDir)) : null
+  // A draft already typed is kept: the suggestion goes on a new line.
+  const insertSuggestion = (text: string) => {
+    const next = input.trim() ? `${input}\n${text}` : text
+    setInput(next)
+    requestAnimationFrame(() => {
+      composerRef.current?.focus()
+      composerRef.current?.setSelectionOffsets(next.length)
+    })
+  }
 
   return (
+    // The new-session page (「素」, su-12). On desktop the composer sits in the
+    // flow between the hero (bottom-aligned) and the starter row (top-aligned),
+    // which puts it just above the middle of the page. On a phone it stays
+    // docked to the bottom edge, above the keyboard, and the project sits at
+    // the top, where the keyboard cannot cover it and it is read before Send.
     <div className="relative flex flex-1 flex-col overflow-hidden bg-[var(--color-surface)]">
-      <div className={`brand-seal-glow flex flex-1 flex-col items-center justify-center ${
-        isMobileComposer ? 'px-6 pb-[230px] pt-10' : 'p-8 pb-32'
+      {isMobileComposer && (
+        <div data-testid="empty-session-mobile-launch" className="flex shrink-0 justify-center px-4 pt-1">
+            <RepositoryLaunchControls
+              workDir={workDir}
+              onWorkDirChange={handleWorkDirChange}
+              branch={selectedBranch}
+              onBranchChange={setSelectedBranch}
+              useWorktree={useWorktree}
+              onUseWorktreeChange={setUseWorktree}
+              onLaunchReadyChange={setRepositoryLaunchReady}
+              disabled={isSubmitting}
+            />
+        </div>
+      )}
+      <div className={`flex flex-col items-center text-center ${
+        isMobileComposer
+          ? 'min-h-0 flex-1 justify-center overflow-hidden px-6 pb-[230px] pt-6'
+          : 'min-h-0 flex-1 justify-end overflow-hidden px-8 pb-7 pt-8'
       }`}>
-        <div className={`flex flex-col items-center text-center ${
-          isMobileComposer ? 'max-w-[300px] gap-3' : 'max-w-[420px] gap-[13px]'
-        }`}>
-          <BrandSeal size={isMobileComposer ? 'lg' : 'xl'} />
+        <div className={`flex flex-col items-center gap-2.5 ${isMobileComposer ? 'max-w-[300px]' : 'max-w-[600px]'}`}>
+          <BrandSeal size={isMobileComposer ? 'md' : 'lg'} />
           <h1
-            className={`font-bold tracking-tight text-[var(--color-text-primary)] ${
-              isMobileComposer ? 'text-2xl' : 'text-[27px]'
+            className={`mt-2 font-semibold leading-[1.3] tracking-tight text-[var(--color-text-primary)] ${
+              isMobileComposer ? 'text-[22px]' : 'text-[26px]'
             }`}
-            style={{ fontFamily: 'var(--font-headline)' }}
           >
-            {t('empty.title')}
+            {heroProject
+              ? t('empty.heroTitle', { project: heroProject })
+              : t('empty.heroTitleNoProject')}
           </h1>
-          <p
-            className={`mx-auto -mt-1 text-[var(--color-text-secondary)] ${
-              isMobileComposer ? 'max-w-[280px] text-sm leading-6' : 'text-[15px] leading-[1.7]'
-            }`}
-            style={{ fontFamily: 'var(--font-body)' }}
-          >
-            {t('empty.subtitle')}
+          <p className="text-[14px] leading-6 text-[var(--color-text-tertiary)]">
+            {t('empty.heroSubtitle')}
           </p>
         </div>
         {!isMobileComposer && workDir && (
@@ -910,19 +1007,20 @@ export function EmptySession() {
 
       <div
         data-testid="empty-session-composer-shell"
-        className={`absolute left-0 right-0 z-[var(--z-nav)] flex justify-center ${
+        className={`flex justify-center ${
         isMobileComposer
-          ? 'bottom-0 px-3 pb-[calc(env(safe-area-inset-bottom)+10px)]'
-          : 'bottom-4 px-8'
+          ? 'absolute bottom-0 left-0 right-0 z-[var(--z-nav)] px-3 pb-[calc(env(safe-area-inset-bottom)+10px)]'
+          : 'relative z-[var(--z-raised)] shrink-0 px-8'
       }`}
       >
         <div className={`flex w-full flex-col ${isMobileComposer ? 'max-w-none' : 'max-w-3xl'}`}>
           <div
             ref={panelRef}
             data-testid="empty-session-composer-panel"
-            className={`glass-panel glass-panel--composer relative flex flex-col gap-3 overflow-visible rounded-[var(--radius-2xl)] ${
-              isMobileComposer ? 'p-3' : 'p-0'
-            } ${isDragActive ? 'composer-drop-target-active' : ''}`}
+            // Kept identical to ChatInput's floating card: `--radius-xl`, the
+            // composer shadow step from `glass-panel--composer`, and an 8px
+            // inset that the editor and toolbar pad themselves within.
+            className={`glass-panel glass-panel--composer relative flex flex-col overflow-visible rounded-[var(--radius-xl)] p-2 ${isDragActive ? 'composer-drop-target-active' : ''}`}
             {...dragHandlers}
           >
             {isDragActive && (
@@ -933,7 +1031,7 @@ export function EmptySession() {
               />
             )}
 
-            <div className={isMobileComposer ? 'contents' : 'flex flex-col gap-3 p-4'}>
+            <div className="contents">
               {fileSearchOpen && (
                 <ComposerReferenceMenu
                   ref={fileSearchRef}
@@ -1002,15 +1100,17 @@ export function EmptySession() {
               )}
 
               {attachments.length > 0 && (
-                <AttachmentGallery
-                  attachments={attachments}
-                  variant="composer"
-                  onRemove={removeAttachment}
-                  onAnnotate={(attachment) => setAnnotationTarget(attachment as Attachment)}
-                />
+                <div className="px-2 pt-2">
+                  <AttachmentGallery
+                    attachments={attachments}
+                    variant="composer"
+                    onRemove={removeAttachment}
+                    onAnnotate={(attachment) => setAnnotationTarget(attachment as Attachment)}
+                  />
+                </div>
               )}
 
-              <div className="flex items-start gap-3">
+              <div className="flex items-start">
                 <MentionComposer
                   ref={composerRef}
                   rootRef={composerContainerRef}
@@ -1022,12 +1122,12 @@ export function EmptySession() {
                   onPaste={handleComposerPaste}
                   onCompositionStart={dictation.compositionHandlers.onCompositionStart}
                   onCompositionEnd={dictation.compositionHandlers.onCompositionEnd}
-                  placeholder={t('empty.placeholder')}
+                  placeholder={capabilityMenu.agentTeamArmed ? t('chat.capabilities.teamPlaceholder') : t('empty.placeholder')}
                   // `min-w-0`: see ChatInput — an unbreakable long run (URL,
                   // hash) otherwise grows this flex item past the panel.
                   className="flex-1 min-w-0"
-                  editorClassName={`overflow-y-auto leading-relaxed text-[var(--color-text-primary)] ${
-                    isMobileComposer ? 'max-h-[132px] min-h-[72px] py-1.5 text-base' : 'max-h-[200px] py-2'
+                  editorClassName={`chat-reading-text min-h-[72px] overflow-y-auto px-2.5 pb-1 pt-2 text-[var(--color-text-primary)] ${
+                    isMobileComposer ? 'max-h-[132px]' : 'max-h-[200px]'
                   }`}
                   aria={{
                     role: isSlashMenuVisible || fileSearchOpen ? 'combobox' : 'textbox',
@@ -1041,50 +1141,67 @@ export function EmptySession() {
                 />
               </div>
 
-              <div className={`border-t border-[var(--color-border-separator)] pt-3 ${
-                isMobileComposer ? 'flex flex-wrap items-center gap-2' : 'flex items-center justify-between'
+              {/* No divider: the editor's bottom inset and this row's top inset
+                  separate the two, exactly as in ChatInput. */}
+              <div className={`flex min-w-0 items-center justify-between pt-1.5 ${
+                isMobileComposer ? 'flex-wrap gap-1' : 'gap-2'
               }`}>
-                <div className="flex min-w-0 shrink items-center gap-2">
+                {dictationLive && <VoiceRecordingBar dictation={dictation} mobile={isMobileComposer} />}
+                <div hidden={dictationLive} className="flex min-w-0 shrink items-center gap-1">
                   <div ref={plusMenuRef} className="relative shrink-0">
-                    <IconButton
-                      icon="add"
-                      label={t('chat.composerTools')}
-                      showTooltip={false}
-                      tone="secondary"
-                      size={isMobileComposer ? 'xl' : 'md'}
-                      className={isMobileComposer ? 'h-11 w-11' : undefined}
+                    {/* Hand-rolled like ChatInput's: a quiet 28px square on
+                        desktop, the 44px touch minimum on a phone. */}
+                    <button
+                      type="button"
+                      onClick={() => setPlusMenuOpen((prev) => !prev)}
+                      aria-label={t('chat.composerTools')}
                       aria-haspopup="menu"
                       aria-expanded={plusMenuOpen}
-                      onClick={() => setPlusMenuOpen((prev) => !prev)}
-                    />
+                      className={`inline-flex items-center justify-center rounded-[var(--radius-sm)] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${
+                        plusMenuOpen ? 'bg-[var(--color-surface-hover)] text-[var(--color-text-primary)]' : ''
+                      } ${isMobileComposer ? 'h-11 w-11' : 'h-7 w-7'}`}
+                    >
+                      <Plus size={isMobileComposer ? 18 : 16} strokeWidth={1.75} aria-hidden="true" />
+                    </button>
 
-                    {plusMenuOpen && (
+                    {plusMenuOpen && !isMobileComposer && (
                       <ComposerCapabilityMenu
                         cwd={workDir}
                         referencesLoading={referenceCurrent?.loading ?? true}
                         referencesError={referenceCurrent?.error}
-                        onSelectFile={mention => {
-                          const cursorPos = composerRef.current?.getSelectionOffsets().start ?? input.length
-                          const inserted = insertMentionIntoText(input, mentions, cursorPos, cursorPos, mention)
-                          setInput(inserted.text)
-                          setMentions(inserted.mentions)
-                          requestAnimationFrame(() => {
-                            composerRef.current?.focus()
-                            composerRef.current?.setSelectionOffsets(inserted.cursorPos)
-                          })
-                        }}
+                        onSelectFile={insertSelectedFileMention}
                         id={capabilityMenuId}
                         sections={capabilityMenu.sections}
                         onAction={capabilityMenu.onAction}
                         onClose={() => setPlusMenuOpen(false)}
-                        mobile={isMobileComposer}
                       />
                     )}
+                    {isMobileComposer && (
+                      <MobileComposerSheet
+                        open={plusMenuOpen}
+                        onClose={() => setPlusMenuOpen(false)}
+                        menuId={capabilityMenuId}
+                        settings={mobileComposerSettings}
+                        sections={capabilityMenu.sections}
+                        cwd={workDir}
+                        referencesLoading={referenceCurrent?.loading ?? true}
+                        referencesError={referenceCurrent?.error}
+                        onSelectFile={insertSelectedFileMention}
+                        onAction={capabilityMenu.onAction}
+                      />
+                    )}
+                    <ComputerUseEnableDialog {...capabilityMenu.computerUseConsent} />
                   </div>
 
+                  {capabilityMenu.agentTeamArmed ? (
+                    <AgentTeamChip touch={isMobileComposer} onRemove={capabilityMenu.disarmAgentTeam} />
+                  ) : null}
+
                   <PermissionModeSelector
+                    ref={permissionSelectorRef}
                     workDir={workDir}
                     compact={isMobileComposer}
+                    trigger={isMobileComposer ? 'elevatedOnly' : 'chip'}
                     value={draftPermissionMode}
                     onChange={setDraftPermissionMode}
                   />
@@ -1104,22 +1221,29 @@ export function EmptySession() {
                   )}
                 </div>
 
-                <div className={`${isMobileComposer ? 'flex min-w-0 flex-1 items-center justify-end gap-2' : 'flex shrink-0 items-center gap-3'}`}>
-                  <ContextUsageIndicator
-                    chatState="idle"
-                    messageCount={0}
-                    runtimeSelectionKey={draftRuntimeSelectionKey}
-                    fallbackModelLabel={draftModelLabel}
-                    draft
-                    compact={isMobileComposer}
-                  />
+                <div
+                  hidden={dictationLive}
+                  className={`${isMobileComposer ? 'flex min-w-0 flex-1 items-center justify-end gap-1' : 'flex shrink-0 items-center gap-1'}`}
+                >
+                  {/* A draft has used none of its context; on a phone that is not
+                      worth one of the toolbar's few touch targets. */}
+                  {!isMobileComposer && (
+                    <ContextUsageIndicator
+                      chatState="idle"
+                      messageCount={0}
+                      runtimeSelectionKey={draftRuntimeSelectionKey}
+                      fallbackModelLabel={draftModelLabel}
+                      draft
+                      compact={isMobileComposer}
+                    />
+                  )}
                   <ModelSelector ref={modelSelectorRef} runtimeKey={DRAFT_RUNTIME_SELECTION_KEY} disabled={isSubmitting} compact={isMobileComposer} />
                   <VoiceInputButton dictation={dictation} blocked={isSubmitting} mobile={isMobileComposer} />
                   {/* Kept identical to ChatInput's send button — same
                       component, shape, size and icon. See the note there for
                       why the label went away. */}
                   <Button
-                    variant="primary"
+                    variant="accent"
                     size="base"
                     shape="circle"
                     onClick={handleSubmit}
@@ -1127,28 +1251,25 @@ export function EmptySession() {
                     aria-label={t('common.run')}
                     title={t('common.run')}
                     className={`shrink-0 ${isMobileComposer ? 'h-11 w-11' : ''}`}
-                    icon={<span className="material-symbols-outlined text-[18px]">arrow_upward</span>}
+                    icon={<ArrowUp data-icon="send" size={isMobileComposer ? 18 : 16} strokeWidth={2} aria-hidden="true" />}
                   />
                 </div>
               </div>
             </div>
 
           </div>
-
-          {isMobileComposer && (
-            <RepositoryLaunchControls
-              workDir={workDir}
-              onWorkDirChange={handleWorkDirChange}
-              branch={selectedBranch}
-              onBranchChange={setSelectedBranch}
-              useWorktree={useWorktree}
-              onUseWorktreeChange={setUseWorktree}
-              onLaunchReadyChange={setRepositoryLaunchReady}
-              disabled={isSubmitting}
-            />
-          )}
         </div>
       </div>
+
+      {!isMobileComposer && (
+        <div className="flex min-h-0 flex-[1.3] flex-col items-center overflow-y-auto px-8 pb-8 pt-4">
+          <NewSessionStarter
+            projectPath={workDir || null}
+            projectLabel={heroProject}
+            onSuggestion={insertSuggestion}
+          />
+        </div>
+      )}
 
       <ComposerReferenceDetail mention={referenceDetail} onClose={() => setReferenceDetail(null)} />
       <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
