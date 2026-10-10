@@ -1612,6 +1612,30 @@
   --color-activity-tooltip-border: rgba(var(--cc-bg-rgb), 0.28);
 }
 
+/* The icon-font class binding. 27 fork components still render named glyphs
+   (`<span className="material-symbols-outlined">dns</span>`); without this
+   rule the glyph name shows as raw text. `font-size: 24px` lives in the base
+   layer so a `text-[14px]` utility still wins wherever one is present. */
+@layer base {
+  .material-symbols-outlined {
+    font-family: 'Material Symbols Outlined';
+    font-weight: normal;
+    font-style: normal;
+    font-size: 24px;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    display: inline-block;
+    white-space: nowrap;
+    word-wrap: normal;
+    direction: ltr;
+    -webkit-font-feature-settings: 'liga';
+    -webkit-font-smoothing: antialiased;
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+    vertical-align: middle;
+  }
+}
+
 /* ─── Base styles ──────────────────────────────────────────────── */
 * {
   box-sizing: border-box;

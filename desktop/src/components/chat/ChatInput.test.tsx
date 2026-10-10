@@ -74,6 +74,14 @@ vi.mock('../../api/composerReferences', async (importOriginal) => ({
   composerReferencesApi: { list: mocks.listReferences },
 }))
 
+// jsdom never decodes images, so the real compressor's `img.onload` never
+// fires and every image paste hangs forever. Pass the data URL through.
+// (Desktop-path tests need no runtime mock: `installElectronFileHost` below
+// installs a real `window.desktopHost`, which `isDesktopRuntime` reads live.)
+vi.mock('../../lib/imageCompress', () => ({
+  compressDataUrl: vi.fn(async (dataUrl: string) => dataUrl),
+}))
+
 vi.mock('@/api/voice', () => ({
   voiceApi: {
     catalog: mocks.voiceCatalog,

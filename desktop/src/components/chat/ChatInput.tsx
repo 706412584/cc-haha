@@ -90,6 +90,8 @@ import { hasRunningSubagentTasks } from '../../lib/backgroundTasks'
 import { useComposerDictation } from '@/features/voiceInput/useComposerDictation'
 import { VoiceInputButton } from '@/features/voiceInput/VoiceInputButton'
 import { VoiceRecordingBar } from '@/features/voiceInput/VoiceRecordingBar'
+import { ImageAnnotationModal } from './ImageAnnotationModal'
+import { attachmentImageSource } from '../../lib/attachmentImages'
 
 type GitInfo = SessionGitInfo
 
@@ -173,6 +175,7 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
   const [referenceOptionId, setReferenceOptionId] = useState<string | undefined>()
   const [referenceState, setReferenceState] = useState<{ context: string, items: ComposerReferenceCandidate[], loading: boolean, error: boolean } | null>(null)
   const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [annotationTarget, setAnnotationTarget] = useState<Attachment | null>(null)
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
   const [fileSearchOpen, setFileSearchOpen] = useState(false)
@@ -1211,6 +1214,23 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
   const removeAttachment = (id: string) => {
     setComposerAttachments((prev) => prev.filter((attachment) => attachment.id !== id))
     if (activeTabId) removeWorkspaceReference(activeTabId, id)
+    if (annotationTarget?.id === id) setAnnotationTarget(null)
+  }
+
+  const saveAnnotatedImage = (dataUrl: string) => {
+    if (!annotationTarget?.id) return
+    setComposerAttachments((prev) => prev.map((attachment) => {
+      if (attachment.id !== annotationTarget.id) return attachment
+      return {
+        ...attachment,
+        name: attachment.name.replace(/(\.[^.]+)?$/, '-annotated.png'),
+        path: undefined,
+        data: dataUrl,
+        previewUrl: dataUrl,
+        mimeType: 'image/png',
+      }
+    }))
+    setAnnotationTarget(null)
   }
 
   const startEditingQueuedMessage = (messageId: string, content: string) => {
@@ -1385,10 +1405,6 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
       ref={shellRef}
       data-testid="chat-input-shell"
       data-session-id={activeTabId ?? undefined}
-      // The H5 toolbar scrolls horizontally (globals.css), and that overflow
-      // clips the capability menu that pops above it. The menu-open state lets
-      // the H5 CSS release the clip while the menu is up.
-      data-capability-menu-open={plusMenuOpen || undefined}
       // The docked composer floats over the end of the transcript: no top
       // divider, and `composer-fade` dissolves the last 28px of the thread into
       // the page ground above the card instead of cutting it off. The hero
@@ -1608,7 +1624,7 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
 
           {composerAttachments.length > 0 && (
             <div className="px-2 pt-2">
-              <AttachmentGallery attachments={composerAttachments} variant="composer" onRemove={removeAttachment} />
+              <AttachmentGallery attachments={composerAttachments} variant="composer" onRemove={removeAttachment} onAnnotate={(attachment) => setAnnotationTarget(attachment as Attachment)} />
             </div>
           )}
 
@@ -1890,6 +1906,13 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
         </div>
 
         <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
+
+        <ImageAnnotationModal
+          open={!!annotationTarget}
+          image={annotationTarget ? { src: attachmentImageSource(annotationTarget) ?? '', name: annotationTarget.name } : null}
+          onClose={() => setAnnotationTarget(null)}
+          onSave={saveAnnotatedImage}
+        />
 
         {/* On a phone, a session under way names its project in the top bar;
             only a session still choosing where to run needs the picker here. */}

@@ -971,11 +971,13 @@ export function Sidebar({
             {/* One form, at every width. The header used to carry "Claude Code
                 Haha" and swap to this below ~230px of title region, which meant
                 the app answered to two names depending on how the sidebar was
-                dragged. It goes by the short one. */}
+                dragged. It goes by the short one. (Fork: "Code Council" — the
+                upstream merge rewrote this to "cc-haha"; CLAUDE.md pins the
+                wordmark.) */}
             <span
               className={`sidebar-copy ${expanded ? 'sidebar-copy--visible' : 'sidebar-copy--hidden'} text-[15px] font-semibold leading-5 tracking-tight text-[var(--color-text-primary)]`}
             >
-              cc-<span className="text-[var(--color-brand)]">haha</span>
+              Code <span className="text-[var(--color-brand)]">Council</span>
             </span>
           </div>
           <div className={`flex items-center ${expanded ? 'gap-0.5' : 'flex-col gap-2'}`}>
@@ -1000,7 +1002,7 @@ export function Sidebar({
               />
             </span>
             <a
-              href="https://github.com/NanmiCoder/cc-haha"
+              href="https://github.com/706412584/cc-haha"
               target="_blank"
               rel="noopener noreferrer"
               className={`sidebar-copy ${expanded ? 'sidebar-copy--visible' : 'sidebar-copy--hidden'} inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-sm)] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]`}
