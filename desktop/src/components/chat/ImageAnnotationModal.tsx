@@ -36,20 +36,31 @@ async function imageSourceToDataUrl(src: string): Promise<string> {
   // origin is `file://`, and with H5 access enabled the server refuses that
   // credential-less cross-site fetch. The thumbnail's `<img>` gets the header
   // injected by the Electron session; this path has to fetch through the
-  // authenticated client instead (same route as AuthedImage).
-  let blob: Blob
+  // authenticated client instead (same route as AuthedImage). A src that is
+  // not on the local server (a remote URL) falls back to the bare fetch,
+  // which is what loaded it before this change.
   if (src.startsWith('blob:')) {
     const response = await fetch(src)
     if (!response.ok) throw new Error(`Failed to load image: HTTP ${response.status}`)
-    blob = await response.blob()
-  } else {
-    const blobUrl = await fetchServerImageBlobUrl(src)
-    try {
-      blob = await (await fetch(blobUrl)).blob()
-    } finally {
-      URL.revokeObjectURL(blobUrl)
-    }
+    return readBlobAsDataUrl(await response.blob())
   }
+
+  let blobUrl: string
+  try {
+    blobUrl = await fetchServerImageBlobUrl(src)
+  } catch {
+    const response = await fetch(src)
+    if (!response.ok) throw new Error(`Failed to load image: HTTP ${response.status}`)
+    return readBlobAsDataUrl(await response.blob())
+  }
+  try {
+    return readBlobAsDataUrl(await (await fetch(blobUrl)).blob())
+  } finally {
+    URL.revokeObjectURL(blobUrl)
+  }
+}
+
+function readBlobAsDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => resolve(reader.result as string)
