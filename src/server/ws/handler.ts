@@ -187,14 +187,19 @@ const sessionSlashCommands = new Map<string, SessionSlashCommand[]>()
  * drops every time). Five minutes still covers a reconnect or a quick Wi-Fi
  * flap while bounding what an abandoned prompt can hold.
  *
- * Merge note (upstream v0.6.7): upstream raised this to 31 minutes to leave room
- * for its auto-answer feature, whose longest timeout is 30 minutes. That feature
- * ships disabled by default (`DEFAULT_AUTO_QUESTION_SETTINGS.enabled === false`),
- * so the 5-minute ceiling is kept: the resource problem it fixes is unconditional,
- * while the auto-answer case only affects users who opt in. Revisit if the
- * defaults ever flip.
+ * An AskUserQuestion is the exception: upstream's auto-answer feature may be
+ * waiting on it for up to its 30-minute ceiling, and answering a question is
+ * exactly what a user who lost the socket briefly comes back to do. Those
+ * requests keep the long window (see ASK_USER_QUESTION_DISCONNECT_CLEANUP_MS);
+ * every prompt that names another tool takes the short one.
  */
 const PENDING_PERMISSION_DISCONNECT_CLEANUP_MS = 5 * 60_000
+/**
+ * Upstream raised the abandoned-prompt ceiling to 31 minutes to leave room for
+ * its auto-answer feature, whose longest configured timeout is 30 minutes.
+ * That room is only needed while an AskUserQuestion is actually pending.
+ */
+const ASK_USER_QUESTION_DISCONNECT_CLEANUP_MS = 31 * 60_000
 let disableDisconnectCleanupForTests = false
 // A background shell task may legitimately outlive a disconnected client, but
 // nothing else bounds one that never emits a terminal notification — so a
@@ -3038,6 +3043,17 @@ function handleStopGeneration(
           [...(activeAgentTasks.get(sessionId)?.values() ?? [])].some(
             (task) => !task.localStopConfirmed,
           )
+        // A user Stop reaps background shell tasks too (reapBackgroundTasks).
+        // One that has not confirmed its stop by this bound still pins the
+        // runtime, so the force-kill below has to treat it as live work — the
+        // Agent-only check above would let it outlive the Stop. (Upstream
+        // #1441, restored after the v0.7.0 merge dropped it.)
+        const stoppedBackgroundStillActive =
+          nonAgentStopRequestedSessions.has(sessionId) &&
+          backgroundTasks.some((task) =>
+            activeNonAgentTasks.get(sessionId)?.get(task.taskId) === task &&
+            !task.localStopConfirmed,
+          )
 
         if (armForegroundLatch && sessionStopRequested.has(sessionId) && instanceId) {
           if (conversationService.stopSessionInstance(sessionId, instanceId)) {
@@ -3050,9 +3066,10 @@ function handleStopGeneration(
           return
         }
 
-        if (stoppedAgentsStillActive) {
-          // Agent-only (or no instance id): shared runtime must go down so hung
-          // Agents cannot outlive the user's Stop.
+        if (stoppedAgentsStillActive || stoppedBackgroundStillActive) {
+          // Agent-only or background-shell-only stop (or no instance id):
+          // shared runtime must go down so hung Agents or shells cannot
+          // outlive the user's Stop.
           forceStopSharedRuntimeForAgentCancellation(sessionId)
           void emitAuthoritativeStoppedForActiveAgents(sessionId)
           if (armForegroundLatch) clearStoppedTurnLatch(sessionId)
@@ -5177,14 +5194,22 @@ function sendError(ws: SessionConnection, message: string, code: string) {
 
 /**
  * Idle disconnect cleanup delay. A session waiting on a pending permission
- * keeps the long 30-minute window so a transient renderer disconnect does not
- * abort a prompt the user is about to answer. Otherwise we honor the
- * user-configured grace period (issue #764).
+ * keeps a longer window so a transient renderer disconnect does not abort a
+ * prompt the user is about to answer. An AskUserQuestion may sit through the
+ * auto-answer wait (up to 30 minutes), so it keeps the full upstream window;
+ * any other prompt takes the shorter fork bound, which still covers a
+ * reconnect while releasing the CLI far sooner than half an hour. Otherwise we
+ * honor the user-configured grace period (issue #764).
  */
 function getDisconnectCleanupDelayMs(sessionId: string): number {
-  return conversationService.getPendingPermissionRequests(sessionId).length > 0
-    ? PENDING_PERMISSION_DISCONNECT_CLEANUP_MS
-    : getDisconnectGraceMs()
+  const pending = conversationService.getPendingPermissionRequests(sessionId)
+  if (pending.length === 0) return getDisconnectGraceMs()
+  // An unnamed tool is treated as question-like: the long window is the safe
+  // side to be wrong on, and question prompts are the ones with a live timer
+  // of their own to protect.
+  return pending.some((request) => !request.toolName || request.toolName === 'AskUserQuestion')
+    ? ASK_USER_QUESTION_DISCONNECT_CLEANUP_MS
+    : PENDING_PERMISSION_DISCONNECT_CLEANUP_MS
 }
 
 /**

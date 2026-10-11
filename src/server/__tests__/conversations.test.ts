@@ -2866,6 +2866,21 @@ describe('WebSocket Chat Integration', () => {
       return {}
     }
 
+    // A live CLI session: with none, the merged server converges the task
+    // locally instead of forwarding (upstream #1441), and the forward path
+    // this test exists to lock would not be reached. Only the fields the
+    // connect/disconnect path touches are needed.
+    const sid = 'chat-test-stop-background-task'
+    const liveSession = {
+      proc: { kill() {}, exited: Promise.resolve(0) },
+      outputCallbacks: [] as Array<(msg: any) => void>,
+      workDir: process.cwd(),
+      permissionMode: 'default',
+      sdkMessages: [],
+      pendingPermissionRequests: new Map(),
+    }
+    ;(conversationService as any).sessions.set(sid, liveSession)
+
     try {
       const ws = new WebSocket(`${wsUrl}/ws/chat-test-stop-background-task`)
 
@@ -2891,6 +2906,7 @@ describe('WebSocket Chat Integration', () => {
       })
     } finally {
       conversationService.requestControl = originalRequestControl
+      ;(conversationService as any).sessions.delete(sid)
     }
 
     expect(controlRequests).toEqual([
