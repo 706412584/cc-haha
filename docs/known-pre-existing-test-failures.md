@@ -295,6 +295,27 @@ SearchService / agent 加载 / E2E 等套件依赖真实 `rg` 二进制，导致
 `sudo apt-get install -y ripgrep`（与 `pr-quality.yml` 各 job 对齐）。
 本地 Windows 有 rg 时这些用例通过；上述团队 supervisor 失败与本条无关。
 
+### `cron-scheduler-launcher.test.ts` 的 sidecar 死锁（已修）
+
+7 个 unix-only `executeTask` 夹具写一个 `#!/bin/sh` sidecar，第二行是前台
+`/bin/cat >/dev/null`。`executeTask` 要读到 result 行才关 stdin，而 result 在
+`cat` 之后才写——`cat` 等一个永远不会来的 EOF，唯一出路是任务超时。CI 上
+全部 7 个用例以 12s/20s 超时收场（`status: "timeout"` 而非 `"completed"`）。
+夹具在 fork 的 Windows 机器上全被 `unixOnly` 跳过、上游也从未在 CI 跑过这个
+sweep，所以一直不可见。**已修**：`cat` 放后台（`&`），保留消费 stdin 的意图、
+不再阻塞 result 写入。
+
+### `workspace-path-edge-cases.test.ts` 的 NFC 用例（上游测试超前于实现）
+
+`finds a CJK-named file when the request uses the other Unicode normalization form`
+（上游 `3a9cf107` 引入）断言「磁盘上存 NFD 名字、用 NFC 请求能读到」。但同一批
+上游提交（`3a9cf107` / `54a77db9`）只改了 desktop 侧的文件名解析，**没有**在
+`workspaceService.ts` / `previewFs.ts` 加任何 NFC 回退——本仓库这两个文件与上游
+v0.7.0 逐字节相同，且都没有该逻辑。该用例在 macOS（APFS 对规范化不敏感）上会
+被文件系统掩盖，在 Linux（ext4 字节精确）上必红。上游自己的 CI 从未跑过
+Full Quality，所以从未暴露。**判定**：上游测试超前于实现，非合并回归；
+实现该回退是功能开发（建议独立批次），不是修测试。其余 3 个用例通过。
+
 ## 上游 v0.6.8 新增文件在 Windows 本地的失败（非合并引入）
 
 以下文件由上游 v0.6.8 引入，其**源码与测试与本仓库逐字节相同**（仅行尾差异），
