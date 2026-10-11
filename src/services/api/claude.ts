@@ -233,14 +233,11 @@ import {
   stopSessionActivity,
 } from "../../utils/sessionActivity.js";
 import {
-  EmptyStreamError,
   shouldTriggerNonStreamingFallbackForEmptyStream,
-} from "./streamFallback.js";
-import { isOpenAIPolicyError } from "../openaiAuth/policyError.js"
-import {
   StreamEndedEarlyError,
   type StreamEndedEarlyEvidence,
 } from "./streamFallback.js";
+import { isOpenAIPolicyError } from "../openaiAuth/policyError.js"
 import { StreamAssistantCommitBuffer } from "./streamAssistantCommitBuffer.js";
 import {
   commitOutputLimitResponse,
