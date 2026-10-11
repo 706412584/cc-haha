@@ -88,6 +88,7 @@ import {
   LITE_READ_BUF_SIZE,
   readHeadAndTail,
   readTranscriptForLoad,
+  resolveSessionFilePath,
   SKIP_PRECOMPACT_THRESHOLD,
 } from './sessionStoragePortable.js'
 import { getSettings_DEPRECATED } from './settings/settings.js'
@@ -4103,6 +4104,15 @@ export async function loadTranscriptFile(
 
 /**
  * Loads all messages, summaries, file history snapshots, and attribution snapshots from a specific session file.
+ *
+ * The transcript normally sits in the current session's project directory,
+ * but a session started in one directory can be resumed from another: a
+ * worktree switch records `session-meta.workDir` while the transcript stays
+ * in the project dir it was created in. The desktop server then spawns the
+ * CLI with the worktree as cwd, and a cwd-derived lookup finds nothing —
+ * "No conversation found with session ID". Resolve the file the same way
+ * the cross-worktree resume list does (exact project dir, then sibling
+ * worktrees) so a resumed session is found wherever it lives.
  */
 async function loadSessionFile(sessionId: UUID): Promise<{
   messages: Map<UUID, TranscriptMessage>
@@ -4116,12 +4126,36 @@ async function loadSessionFile(sessionId: UUID): Promise<{
   contentReplacements: Map<UUID, ContentReplacementRecord[]>
   contextCollapseCommits: ContextCollapseCommitEntry[]
   contextCollapseSnapshot: ContextCollapseSnapshotEntry | undefined
+  /** Path actually read — the cwd-derived one, or a sibling worktree's. */
+  filePath: string
 }> {
-  const sessionFile = join(
+  const directSessionFile = join(
     getSessionProjectDir() ?? getProjectDir(getOriginalCwd()),
     `${sessionId}.jsonl`,
   )
-  return loadTranscriptFile(sessionFile)
+  let sessionFile = directSessionFile
+  try {
+    const s = await stat(directSessionFile)
+    // A zero-byte file is a truncated copy, not the session — keep searching,
+    // the same rule resolveSessionFilePath applies (a valid copy may sit in a
+    // sibling worktree).
+    if (s.size === 0) throw new Error('empty transcript')
+  } catch {
+    // Not in the cwd-derived project dir — the session may live in a sibling
+    // worktree of the same repository. resolveSessionFilePath covers exactly
+    // that shape (exact project dir, then the repo's worktree roots); it
+    // never scans unrelated projects, so a shared machine cannot leak across
+    // repositories. It takes a real directory, not a projects-dir path, so
+    // the search is rooted at the original cwd — a superset of the direct
+    // lookup when `sessionProjectDir` was set.
+    const resolved = await resolveSessionFilePath(
+      sessionId,
+      getOriginalCwd(),
+    ).catch(() => undefined)
+    if (resolved) sessionFile = resolved.filePath
+  }
+  const loaded = await loadTranscriptFile(sessionFile)
+  return { ...loaded, filePath: sessionFile }
 }
 
 /**
@@ -4171,6 +4205,7 @@ export async function getLastSessionLog(
     contentReplacements,
     contextCollapseCommits,
     contextCollapseSnapshot,
+    filePath,
   } = await loadSessionFile(sessionId)
   if (messages.size === 0) return null
   // Prime getSessionMessages cache so recordTranscript (called after REPL
@@ -4204,7 +4239,10 @@ export async function getLastSessionLog(
       customTitle,
       buildFileHistorySnapshotChain(fileHistorySnapshots, transcript),
       tag,
-      getTranscriptPathForSession(sessionId),
+      // The path actually read, not a cwd-derived guess: resume switches the
+      // active project dir to this path's directory, so a wrong guess would
+      // write the resumed session's new messages into the wrong project.
+      filePath,
       buildAttributionSnapshotChain(attributionSnapshots, transcript),
       agentSetting,
       contentReplacements.get(sessionId) ?? [],
