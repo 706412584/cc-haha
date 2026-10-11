@@ -5,6 +5,7 @@ import { CSS } from '@dnd-kit/utilities'
 import {
   ArrowLeftRight,
   ArrowUpRight,
+  Brain,
   ChevronDown,
   ChevronUp,
   CircleAlert,
@@ -26,12 +27,13 @@ import {
   Plus,
   Route,
   Shrink,
-  Star,
+  TriangleAlert,
   Wrench,
 } from 'lucide-react'
 import aruhubLogo from '../../../../docs/images/sponsors/aruhub-logo.png'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useProviderStore } from '../../stores/providerStore'
+import { useProviderCompatStore, PROVIDER_COMPAT_WARN_THRESHOLD } from '../../stores/providerCompatStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useTranslation, type TranslationKey } from '../../i18n'
 import { Modal } from '@/components/ui/Modal'
@@ -45,7 +47,7 @@ import { Spinner } from '@/components/ui/Spinner'
 import { SettingsPageHeader, SettingsPill } from '@/components/settings/SettingsSection'
 import { Dropdown } from '@/components/ui/Dropdown'
 import { Tooltip } from '@/components/ui/Tooltip'
-import type { SavedProvider, UpdateProviderInput, ProviderTestResult, ModelMapping, Model1mSupport, ApiFormat, ProviderAuthStrategy, ProviderModelInfo, ProviderModelsErrorCode } from '../../types/provider'
+import type { SavedProvider, UpdateProviderInput, ProviderTestResult, ProviderTestStepResult, ModelMapping, Model1mSupport, ApiFormat, ProviderAuthStrategy, ProviderModelInfo, ProviderModelsErrorCode } from '../../types/provider'
 import { groupProviderModels, providerModelsErrorKey } from '../../lib/providerModels'
 import { resolveModelApiFormat } from '../../../../src/shared/modelApiFormats'
 import { apply1mSupportToContextInput, apply1mSupportToContextInputs, getAutoCompactWindowErrorKey, getModelContextWindowErrorKey, MODEL_SLOTS, parseAutoCompactWindowInput, parseModelContextWindowsInput, type ModelContextInputs, type ModelSlot } from '../../lib/providerModelContext'
@@ -186,6 +188,14 @@ export function ProviderSettings({ browserMode = false }: { browserMode?: boolea
     testProvider,
   } = useProviderStore()
   const fetchSettings = useSettingsStore((s) => s.fetchAll)
+  // Compatibility events keyed by provider id. Subscribed at this scope so a
+  // toast-triggered count change re-renders the badge in the same Settings tab
+  // the user is already looking at. (Fork feature; the merge dropped the
+  // subscription and the badges below.)
+  const compatEvents = useProviderCompatStore((s) => s.events)
+  const thinkingIncompatibleProviderIds = useProviderCompatStore(
+    (s) => s.thinkingIncompatibleProviderIds,
+  )
   const t = useTranslation()
   const [editingProvider, setEditingProvider] = useState<SavedProvider | null>(null)
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -223,6 +233,9 @@ export function ProviderSettings({ browserMode = false }: { browserMode?: boolea
     setActionFailed(false)
     try {
       await deleteProvider(pendingDeleteProvider.id)
+      // Its compatibility history goes with it, or a re-created provider
+      // under the same id would inherit the old warnings.
+      useProviderCompatStore.getState().clearProvider(pendingDeleteProvider.id)
       setPendingDeleteProvider(null)
     } catch {
       setActionFailed(true)
@@ -421,6 +434,30 @@ export function ProviderSettings({ browserMode = false }: { browserMode?: boolea
                         <Badge tone="warning">
                           {provider.apiFormat === 'openai_chat' ? 'OpenAI Chat' : 'OpenAI Responses'}
                         </Badge>
+                      )}
+                      {(() => {
+                        const compat = compatEvents[provider.id]
+                        if (!compat || compat.count < PROVIDER_COMPAT_WARN_THRESHOLD) return null
+                        return (
+                          <span
+                            data-testid={`provider-compat-badge-${provider.id}`}
+                            title={t('providerCompat.badge.tooltip', { count: String(compat.count) })}
+                            className="inline-flex items-center gap-1 rounded border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 px-1.5 py-0.5 text-[11px] font-semibold leading-none text-[var(--color-warning)]"
+                          >
+                            <TriangleAlert size={12} strokeWidth={2} aria-hidden="true" className="shrink-0" />
+                            {t('providerCompat.badge.label')}
+                          </span>
+                        )
+                      })()}
+                      {thinkingIncompatibleProviderIds.has(provider.id) && (
+                        <span
+                          data-testid={`provider-thinking-badge-${provider.id}`}
+                          title={t('providerCompat.thinkingBadge.tooltip')}
+                          className="inline-flex items-center gap-1 rounded border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 px-1.5 py-0.5 text-[11px] font-semibold leading-none text-[var(--color-warning)]"
+                        >
+                          <Brain size={12} strokeWidth={2} aria-hidden="true" className="shrink-0" />
+                          {t('providerCompat.thinkingBadge.label')}
+                        </span>
                       )}
                       {isActive && (
                         <Badge tone="brand">{t('settings.providers.default')}</Badge>
@@ -651,6 +688,30 @@ function ProviderModelChips({ models, labels }: { models: ModelMapping; labels: 
   )
 }
 
+/**
+ * The label for the proxy step, keyed by what actually forced local handling.
+ * `reason` is absent on results from older servers, where the only path was the
+ * protocol one. (Fork feature; the merge flattened every step to "protocol
+ * translation", which read as a misconfiguration for a native-format provider
+ * whose only local handling is nested tool-result media.)
+ */
+function proxyStepLabel(
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string,
+  proxy: ProviderTestStepResult,
+): string {
+  const mediaOnly = proxy.reason === 'nested_tool_result_media'
+  const latency = { latency: String(proxy.latencyMs) }
+  if (proxy.success) {
+    return mediaOnly
+      ? t('settings.providers.proxyMediaOk', latency)
+      : t('settings.providers.proxyOk', latency)
+  }
+  const error = { error: proxy.error || '' }
+  return mediaOnly
+    ? t('settings.providers.proxyMediaFailed', error)
+    : t('settings.providers.proxyFailed', error)
+}
+
 /** The two-step connection test result: direct connectivity, then the proxy pipeline. */
 function ProviderTestResultLines({ result }: { result: ProviderTestResult }) {
   const t = useTranslation()
@@ -666,9 +727,7 @@ function ProviderTestResultLines({ result }: { result: ProviderTestResult }) {
       ? [{
           key: 'proxy',
           success: result.proxy.success,
-          text: result.proxy.success
-            ? t('settings.providers.proxyOk', { latency: String(result.proxy.latencyMs) })
-            : t('settings.providers.proxyFailed', { error: result.proxy.error || '' }),
+          text: proxyStepLabel(t, result.proxy),
         }]
       : []),
   ]
@@ -1699,7 +1758,9 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, browserMode
     >
       {preset.id === 'aruhub' && <img src={aruhubLogo} alt="" className="size-4 rounded-[var(--radius-sm)] object-contain" />}
       {presetLabel(preset)}
-      {preset.id === 'aruhub' && <Star size={12} className="fill-[var(--color-warning)] text-[var(--color-warning)]" aria-label={t('settings.providers.sponsor')} />}
+      {/* The upstream sponsor star is deliberately not shown: the fork's
+          de-advertising policy strips sponsor badges from presets. */}
+
       {preset.isNew && (
         <Badge tone="warning" size="xs" className="absolute -right-1 -top-2">
           {t('settings.providers.new')}

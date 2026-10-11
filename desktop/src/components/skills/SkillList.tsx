@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   Box,
   ChevronRight,
+  Download,
   FileStack,
   Folder,
   Layers,
@@ -15,8 +16,10 @@ import {
 import { useSkillStore } from '../../stores/skillStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useTranslation } from '../../i18n'
+import type { TranslationKey } from '../../i18n'
 import { cx } from '@/lib/cx'
 import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
 import { Card } from '@/components/ui/Card'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { ErrorState } from '@/components/ui/ErrorState'
@@ -38,6 +41,35 @@ function estimateTokens(contentLength: number) {
   return Math.ceil(contentLength / 4)
 }
 
+// Localized labels for built-in catalog skills. Keyed by the stable catalog
+// `name` / `category`; falls back to the server-provided English value when a
+// key is absent (e.g. a newly added catalog entry without translations yet).
+const CATALOG_DESC_KEY: Record<string, TranslationKey> = {
+  'coderabbit-review': 'settings.skills.catalog.coderabbit-review.desc',
+  'circleci-cli': 'settings.skills.catalog.circleci-cli.desc',
+  'react-best-practices': 'settings.skills.catalog.react-best-practices.desc',
+  'frontend-testing-debugging': 'settings.skills.catalog.frontend-testing-debugging.desc',
+  'stripe-best-practices': 'settings.skills.catalog.stripe-best-practices.desc',
+  'supabase-best-practices': 'settings.skills.catalog.supabase-best-practices.desc',
+  'temporal-developer': 'settings.skills.catalog.temporal-developer.desc',
+  'karpathy-guidelines': 'settings.skills.catalog.karpathy-guidelines.desc',
+  'mattpocock-grilling': 'settings.skills.catalog.mattpocock-grilling.desc',
+  'mattpocock-tdd': 'settings.skills.catalog.mattpocock-tdd.desc',
+  'mattpocock-diagnosing-bugs': 'settings.skills.catalog.mattpocock-diagnosing-bugs.desc',
+}
+
+const CATEGORY_LABEL_KEY: Record<string, TranslationKey> = {
+  'Code Review': 'settings.skills.category.codeReview',
+  'CI/CD': 'settings.skills.category.cicd',
+  Frontend: 'settings.skills.category.frontend',
+  Payments: 'settings.skills.category.payments',
+  Database: 'settings.skills.category.database',
+  Workflows: 'settings.skills.category.workflows',
+  Workflow: 'settings.skills.category.workflow',
+  Productivity: 'settings.skills.category.productivity',
+  Engineering: 'settings.skills.category.engineering',
+}
+
 /**
  * The installed-skill browser.
  *
@@ -48,8 +80,17 @@ function estimateTokens(contentLength: number) {
  * status colors standing in for categories that have no state.
  */
 export function SkillList({ compact = false }: { compact?: boolean }) {
-  const { skills, isLoading, error, fetchSkills, fetchSkillDetail } =
-    useSkillStore()
+  const {
+    skills,
+    isLoading,
+    error,
+    fetchSkills,
+    fetchSkillDetail,
+    catalog,
+    installingName,
+    fetchCatalog,
+    installSkill,
+  } = useSkillStore()
   const sessions = useSessionStore((s) => s.sessions)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const t = useTranslation()
@@ -61,6 +102,10 @@ export function SkillList({ compact = false }: { compact?: boolean }) {
   useEffect(() => {
     fetchSkills(currentWorkDir)
   }, [fetchSkills, currentWorkDir])
+
+  useEffect(() => {
+    fetchCatalog()
+  }, [fetchCatalog])
 
   const filteredSkills = useMemo(() => {
     if (!normalizedSearchQuery) return skills
@@ -91,6 +136,19 @@ export function SkillList({ compact = false }: { compact?: boolean }) {
     return result
   }, [filteredSkills])
 
+  const filteredCatalog = useMemo(() => {
+    // Defensive: zustand store always seeds `catalog: []`, but a partial
+    // store mock or an initialization race could surface `undefined`.
+    // Guarding here keeps the whole Skills page from white-screening.
+    const list = catalog ?? []
+    if (!normalizedSearchQuery) return list
+    return list.filter((entry) =>
+      [entry.name, entry.displayName, entry.description, entry.category].some(
+        (field) => field?.toLocaleLowerCase().includes(normalizedSearchQuery),
+      ),
+    )
+  }, [catalog, normalizedSearchQuery])
+
   const totalTokens = useMemo(
     () => filteredSkills.reduce((sum, skill) => sum + estimateTokens(skill.contentLength), 0),
     [filteredSkills],
@@ -111,15 +169,10 @@ export function SkillList({ compact = false }: { compact?: boolean }) {
     return <ErrorState title={error} />
   }
 
-  if (skills.length === 0) {
-    return (
-      <EmptyState
-        icon={<Box size={20} strokeWidth={1.75} aria-hidden="true" />}
-        title={t('settings.skills.empty')}
-        description={t('settings.skills.emptyHint')}
-      />
-    )
-  }
+  // An empty installed list is no longer an early return — the recommended
+  // catalog must stay reachable so a first-time user with zero skills can
+  // still install one. The notice renders inline where the groups would be.
+  const showInstalledEmptyState = skills.length === 0
 
   return (
     <div className="flex min-w-0 flex-col gap-5">
@@ -164,13 +217,93 @@ export function SkillList({ compact = false }: { compact?: boolean }) {
         </div>
       )}
 
-      {filteredSkills.length === 0 && (
+      {filteredSkills.length === 0 && normalizedSearchQuery && (
         <EmptyState
           icon={<SearchX size={20} strokeWidth={1.75} aria-hidden="true" />}
           title={t('settings.skills.noSearchResults')}
           description={t('settings.skills.noSearchResultsHint')}
           action={{ label: t('settings.skills.clearSearch'), onClick: () => setSearchQuery('') }}
         />
+      )}
+
+      {showInstalledEmptyState && !normalizedSearchQuery && (
+        <EmptyState
+          icon={<Box size={20} strokeWidth={1.75} aria-hidden="true" />}
+          title={t('settings.skills.empty')}
+          description={t('settings.skills.emptyHint')}
+        />
+      )}
+
+      {/* The recommended catalog (fork feature): curated installable skills
+          from the server, one click to install, localized descriptions and
+          category badges. Restored after the upstream merge dropped it. */}
+      {filteredCatalog.length > 0 && (
+        <section className="min-w-0">
+          <div className="mb-2 flex items-center gap-2 px-0.5">
+            <Download className="flex-shrink-0 text-[var(--color-text-tertiary)]" size={14} strokeWidth={1.75} aria-hidden="true" />
+            <h4 className="text-[13px] font-semibold text-[var(--color-text-secondary)]">
+              {t('settings.skills.recommended.title')}
+            </h4>
+            <span className="font-mono text-[11px] tabular-nums text-[var(--color-text-tertiary)]">
+              {filteredCatalog.length}
+            </span>
+            <span className="min-w-0 truncate text-xs text-[var(--color-text-tertiary)]">
+              {t('settings.skills.recommended.description')}
+            </span>
+          </div>
+          <Card
+            radius="lg"
+            surface="lowest"
+            padding="none"
+            className="divide-y divide-[var(--color-border)] overflow-hidden"
+          >
+            {filteredCatalog.map((entry) => {
+              const isInstalling = installingName === entry.name
+              const descKey = CATALOG_DESC_KEY[entry.name]
+              const catKey = CATEGORY_LABEL_KEY[entry.category]
+              return (
+                <div
+                  key={entry.name}
+                  className="flex min-w-0 items-start gap-3 px-4 py-3"
+                >
+                  <span className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-surface-container)] text-[var(--color-text-tertiary)]">
+                    <Download size={14} strokeWidth={1.75} aria-hidden="true" />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="break-all text-[13px] font-medium text-[var(--color-text-primary)]">
+                        {entry.displayName}
+                      </span>
+                      <Badge variant="outline">
+                        {catKey ? t(catKey) : entry.category}
+                      </Badge>
+                    </div>
+                    <p className="mt-0.5 break-words text-xs leading-5 text-[var(--color-text-secondary)]">
+                      {descKey ? t(descKey) : entry.description}
+                    </p>
+                  </div>
+                  {entry.installed ? (
+                    <span className="mt-0.5 flex-shrink-0 text-xs font-medium text-[var(--color-success)]">
+                      {t('settings.skills.recommended.installed')}
+                    </span>
+                  ) : (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="flex-shrink-0"
+                      loading={isInstalling}
+                      onClick={() => void installSkill(entry.name, currentWorkDir)}
+                    >
+                      {isInstalling
+                        ? t('settings.skills.recommended.installing')
+                        : t('settings.skills.recommended.install')}
+                    </Button>
+                  )}
+                </div>
+              )
+            })}
+          </Card>
+        </section>
       )}
 
       {/* Two columns only where the list owns a wide page; the settings pane

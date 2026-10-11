@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
-import { ChevronLeft, ChevronRight, ExternalLink, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, ExternalLink, PenLine, X } from 'lucide-react'
+import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { Modal } from '@/components/ui/Modal'
 import { ZoomableImage, type ZoomableImageProps } from '@/components/ui/ZoomableImage'
@@ -26,6 +27,12 @@ type Props = {
   activeIndex: number
   onClose: () => void
   onSelect: (index: number) => void
+  /**
+   * Fork feature: opens the annotation editor for the active picture, so a
+   * follow-up question can point at a spot on it. Absent surfaces (e.g. a
+   * gallery with no session to send into) keep the lightbox read-only.
+   */
+  onAnnotate?: (image: GalleryImage) => void
 }
 
 /** The lightbox picture, which also loads where a bare request is refused (web UI, H5). */
@@ -34,7 +41,7 @@ function AuthedZoomableImage({ src, onError, ...props }: ZoomableImageProps) {
   return <ZoomableImage {...props} src={image.src ?? src} onError={image.onError} />
 }
 
-export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect }: Props) {
+export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect, onAnnotate }: Props) {
   const t = useTranslation()
   const activeImage = images[activeIndex]
 
@@ -70,15 +77,27 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
           <span className="font-mono text-xs tabular-nums text-[var(--color-media-muted)]">
             {activeIndex + 1} / {images.length}
           </span>
-          <IconButton
-            icon={<X />}
-            label={t('workbench.close')}
-            size="lg"
-            tone="secondary"
-            shape="circle"
-            surface="media"
-            onClick={onClose}
-          />
+          <div className="flex items-center gap-2">
+            {onAnnotate && (
+              <Button
+                variant="secondary"
+                size="md"
+                icon={<PenLine size={15} strokeWidth={1.75} aria-hidden="true" />}
+                onClick={() => onAnnotate(activeImage)}
+              >
+                {t('chat.annotateAndAsk')}
+              </Button>
+            )}
+            <IconButton
+              icon={<X />}
+              label={t('workbench.close')}
+              size="lg"
+              tone="secondary"
+              shape="circle"
+              surface="media"
+              onClick={onClose}
+            />
+          </div>
         </div>
 
         <div className="relative flex min-h-0 flex-1 flex-col px-4 pb-4">

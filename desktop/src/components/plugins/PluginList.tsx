@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   ChevronRight,
   CircleCheck,
+  Code2,
   ListChecks,
   Puzzle,
   RefreshCw,
@@ -122,6 +123,11 @@ export function PluginList() {
 
     return buckets
   }, [plugins])
+
+  const languageServerPlugins = useMemo(
+    () => plugins.filter((plugin) => plugin.componentCounts.lspServers > 0),
+    [plugins],
+  )
 
   useEffect(() => {
     setSelectedPluginIds((current) => {
@@ -408,6 +414,13 @@ export function PluginList() {
         onToggleSelection: togglePluginSelection,
       })}
 
+      <LanguageServersSection
+        plugins={languageServerPlugins}
+        fetchPluginDetail={fetchPluginDetail}
+        cwd={currentWorkDir}
+        t={t}
+      />
+
       {showInstalledEmptyState && (
         <Card radius="lg" surface="lowest" padding="none" className="px-6 py-8 text-center">
           <Puzzle className="mx-auto mb-2 text-[var(--color-text-tertiary)]" size={28} strokeWidth={1.5} aria-hidden="true" />
@@ -619,8 +632,75 @@ function renderGroup(
           )
         })}
       </Card>
+    </section>
+  )
+}
 
-      <KnownLanguageServersPanel t={t} />
+/**
+ * Language services on the plugins page (fork feature, restored after the
+ * upstream merge dropped it): the installed LSP-providing plugins, then the
+ * known-server detection panel with one-click installs. Mounted once, after
+ * the plugin groups — not per group.
+ */
+function LanguageServersSection({
+  plugins,
+  fetchPluginDetail,
+  cwd,
+  t,
+}: {
+  plugins: PluginSummary[]
+  fetchPluginDetail: (id: string, cwd?: string) => Promise<void>
+  cwd: string | undefined
+  t: ReturnType<typeof useTranslation>
+}) {
+  return (
+    <section className="min-w-0">
+      <GroupHeading
+        title={t('settings.plugins.languageServers.title')}
+        hint={t('settings.plugins.languageServers.description')}
+      />
+      {plugins.length === 0 ? (
+        <Card radius="lg" surface="lowest" padding="none" className="px-5 py-4">
+          <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
+            {t('settings.plugins.languageServers.empty')}
+          </p>
+        </Card>
+      ) : (
+        <Card radius="lg" surface="lowest" padding="none" className="divide-y divide-[var(--color-border)] overflow-hidden">
+          {plugins.map((plugin) => (
+            <button
+              key={plugin.id}
+              type="button"
+              onClick={() => void fetchPluginDetail(plugin.id, cwd)}
+              className="group flex w-full items-start gap-3 px-4 py-3 text-left transition-colors duration-150 hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]"
+            >
+              <span className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-surface-container)] text-[var(--color-text-tertiary)]">
+                <Code2 size={14} strokeWidth={1.75} aria-hidden="true" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="break-all text-[13px] font-medium text-[var(--color-text-primary)]">
+                    {plugin.name}
+                  </span>
+                  <Badge mono>
+                    {t('settings.plugins.capability.lspServers', { count: String(plugin.componentCounts.lspServers) })}
+                  </Badge>
+                  <StatusPill plugin={plugin} />
+                </div>
+                <p className="mt-0.5 break-words text-xs leading-5 text-[var(--color-text-secondary)]">
+                  {plugin.description || t('settings.plugins.noDescription')}
+                </p>
+                <p className="mt-1 break-all text-[11px] text-[var(--color-text-tertiary)]">
+                  {plugin.id}
+                </p>
+              </div>
+            </button>
+          ))}
+        </Card>
+      )}
+      <div className="mt-2 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]">
+        <KnownLanguageServersPanel t={t} />
+      </div>
     </section>
   )
 }

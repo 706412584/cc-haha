@@ -596,6 +596,13 @@ describe('ActiveSession task polling', () => {
 
     const hero = screen.getByTestId('empty-session-hero')
     expect(within(hero).getByRole('heading', { level: 1 })).toHaveTextContent('project')
+    // The welcome cards can outgrow the pane on a short window; the seal and
+    // title must stay reachable by scrolling instead of being clipped above the
+    // scroll origin. Regression: `justify-end overflow-hidden` cut the title in
+    // half with no way to scroll to it.
+    expect(hero).toHaveClass('overflow-y-auto')
+    expect(hero).not.toHaveClass('justify-end')
+    expect(within(hero).getByRole('heading', { level: 1 }).parentElement).toHaveClass('mt-auto')
     // Only this project's threads with something in them, newest first; the
     // blank session itself is not "recent".
     const starter = screen.getByTestId('new-session-starter')
@@ -945,6 +952,7 @@ describe('ActiveSession task polling', () => {
 
   it('keeps persistent activity surfaces out of the composer area', () => {
     const sessionId = 'activity-clean-composer-session'
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
 
     useCLITaskStore.setState({
       sessionId,
@@ -1026,6 +1034,7 @@ describe('ActiveSession task polling', () => {
 
   it('renders the activity panel as a rail and hides it when the workspace opens', async () => {
     const sessionId = 'activity-panel-open-session'
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
 
     useCLITaskStore.setState({
       sessionId,
@@ -1278,6 +1287,7 @@ describe('ActiveSession task polling', () => {
 
   it('auto-opens for current activity and seals unfinished tasks when the turn becomes idle', async () => {
     const sessionId = 'activity-auto-open-session'
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
     const fetchSessionTasks = vi.fn().mockResolvedValue(undefined)
 
     useCLITaskStore.setState({ fetchSessionTasks })
@@ -1438,6 +1448,7 @@ describe('ActiveSession task polling', () => {
 
   it('isolates Agent Teams tasks before the first workbench snapshot while preserving lead activity', async () => {
     const sessionId = 'team-task-ownership-session'
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
     vi.useFakeTimers()
 
     useActivityPanelStore.getState().open(sessionId)
@@ -1588,6 +1599,7 @@ describe('ActiveSession task polling', () => {
   it('opens a SubAgent detail tab from the activity panel', () => {
     const sessionId = 'activity-subagent-open-session'
 
+    useSettingsStore.setState({ locale: 'en', unifiedActivityPanelEnabled: true })
     useActivityPanelStore.getState().open(sessionId)
     useSessionStore.setState({
       sessions: [{
@@ -1660,7 +1672,7 @@ describe('ActiveSession task polling', () => {
 
     render(<ActiveSession />)
 
-    fireEvent.click(screen.getByRole('button', { name: /Open run Review workspace seams.*Completed/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Open full run for Review workspace seams.*Completed/ }))
 
     const tab = useTabStore.getState().tabs.find((candidate) => candidate.sessionId === '__subagent__activity-subagent-open-session__agent-tool-1')
     expect(tab).toMatchObject({
@@ -1801,6 +1813,7 @@ describe('ActiveSession task polling', () => {
 
   it('updates the Team workbench without leaking its DAG, roster, or transcript spawns into main Activity', async () => {
     const sessionId = 'team-activity-runtime-state-session'
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
     const teamName = 'runtime-state-team'
     const taskDefinitions = [
       { id: 'A', subject: 'Map routes' },
@@ -2026,6 +2039,7 @@ describe('ActiveSession task polling', () => {
 
   it('clears the last visible background task by closing Activity while preserving later runs', async () => {
     const sessionId = 'activity-background-clear-session'
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
     const otherSessionId = 'activity-background-other-session'
 
     useActivityPanelStore.getState().open(sessionId)
@@ -2917,6 +2931,7 @@ describe('ActiveSession activity panel auto-close grace', () => {
   const sessionId = 'activity-grace-session'
 
   function seedActivitySession(overrides: Record<string, unknown> = {}) {
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
     useSessionStore.setState({
       sessions: [{
         id: sessionId,

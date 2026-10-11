@@ -139,6 +139,22 @@ fork 之前把后台 agent 的完成通知从「完成即直塞命令队列」�
   `labels a cached workflow agent explicitly instead of calling it merely completed` / `renders a workflow as phase headers with their agents, each opening the subagent page`
 - `src/components/layout/Sidebar.test.tsx`（多个，基线同样红）— project display-name / repo 上下文相关的一组。
 
+### `src/theme/designSystem.test.ts`（10 个，全部红）——上游新门禁 vs fork 存量视觉
+
+该测试由**上游 v0.7.0**（`760ee4e4` Porcelain 重设计）引入，在 fork 顶点（v0.7.13）上**不存在**，
+因此基线对照法不适用。它全量扫描 `desktop/src`，要求所有代码只用 lucide 图标、只用
+11/12/13/14/15/18/22/26 字号档、只用 radius token 等——而 fork 的存量视觉体系大量使用
+Material Symbols 字形与 `text-[10px]`（约 179 处违规分布在 30+ 文件，`AgentOfficeRuntime`、
+`PluginList`、`McpMarketplace`、`SessionTaskBar`、`SoloCouncilPanel` 等）。
+
+- **判定**：上游门禁与 fork 存量视觉的系统性冲突。合并当天（`d37c52e4`）即全红，与任何单次改动无关；
+  本仓库 v0.8.4 批次已保证**零新增违规**（恢复的兼容性徽章与欢迎卡片均改用 lucide 与合规字号）。
+- **影响**：`check:desktop`（PR Quality 与 Nightly 都会跑）会因此红。若要转绿，须逐文件迁移
+  Material Symbols → lucide、`text-[10px]` → `text-[11px]`（纯视觉迁移，涉及 30+ 文件），
+  建议作为独立批次处理，不要在合并找回批次里夹带。
+- **注意**：不要删测试或放宽规则——那是上游的视觉不变量；要么完成迁移，要么在迁移前接受该红并在
+  PR 描述里引用本条。
+
 ### `claudeBetas.integration.test.ts`（Windows 本地专用，CI 正常）
 
 7 个用例在 **Windows 本地**全部报 `EBUSY: resource busy or locked, rm 'C:\Users\...\cc-haha-context-beta-*'`

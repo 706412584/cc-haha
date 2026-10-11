@@ -52,6 +52,7 @@ import {
   composerAttachmentToPayload,
   filesToComposerAttachments,
   getDataTransferFiles,
+  selectNativeFileAttachments,
   type ComposerAttachment,
 } from '../lib/composerAttachments'
 import { useComposerFileDrop } from '../components/chat/useComposerFileDrop'
@@ -675,7 +676,24 @@ export function EmptySession({ initialWorkDir = '' }: EmptySessionProps = {}) {
 
   const openAttachmentPicker = useCallback(() => {
     setPlusMenuOpen(false)
-    fileInputRef.current?.click()
+    // Desktop: the OS file dialog hands back absolute paths, which is what the
+    // attachment payload needs — a browser file input's `File` objects have no
+    // path. Fall back to the input when the dialog is unavailable (H5, or the
+    // picker failed), and when the user cancels, keep the selection as it was.
+    if (!isDesktopRuntime()) {
+      fileInputRef.current?.click()
+      return
+    }
+    void selectNativeFileAttachments()
+      .then((nativeAttachments) => {
+        if (nativeAttachments) {
+          if (nativeAttachments.length > 0) {
+            setAttachments((prev) => [...prev, ...nativeAttachments])
+          }
+          return
+        }
+        fileInputRef.current?.click()
+      })
   }, [])
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -869,12 +887,19 @@ export function EmptySession({ initialWorkDir = '' }: EmptySessionProps = {}) {
             />
         </div>
       )}
-      <div className={`flex flex-col items-center text-center ${
-        isMobileComposer
-          ? 'min-h-0 flex-1 justify-center overflow-hidden px-6 pb-[230px] pt-6'
-          : 'min-h-0 flex-1 justify-end overflow-hidden px-8 pb-7 pt-8'
-      }`}>
-        <div className={`flex flex-col items-center gap-2.5 ${isMobileComposer ? 'max-w-[300px]' : 'max-w-[600px]'}`}>
+      <div
+        data-testid="empty-session-hero"
+        className={`flex flex-col items-center text-center ${
+          isMobileComposer
+            ? 'min-h-0 flex-1 justify-center overflow-hidden px-6 pb-[230px] pt-6'
+            : 'min-h-0 flex-1 overflow-y-auto px-8 pb-7 pt-8'
+        }`}
+      >
+        {/* Bottom-aligned via `mt-auto`, not `justify-end`: with the welcome
+            cards the content can outgrow this pane on a short window, and
+            `justify-end` + a clip hides the seal and title above the scroll
+            origin. Scrolling keeps every row reachable. */}
+        <div className={`flex flex-col items-center gap-2.5 ${isMobileComposer ? 'max-w-[300px]' : 'mt-auto max-w-[600px]'}`}>
           <BrandSeal size={isMobileComposer ? 'md' : 'lg'} />
           <h1
             className={`mt-2 font-semibold leading-[1.3] tracking-tight text-[var(--color-text-primary)] ${

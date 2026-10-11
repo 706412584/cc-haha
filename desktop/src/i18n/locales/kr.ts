@@ -3250,6 +3250,7 @@ export const kr: Record<TranslationKey, string> = {
   'chat.imageLoadFailedHint': '파일이 손상되었거나 로컬 서버가 응답하지 않았습니다.',
   'chat.imageCountOne': '이미지 {count}개',
   'chat.imageCountOther': '이미지 {count}개',
+  'chat.annotateAndAsk': '주석 달고 질문',
   'chat.retryImage': '이미지 다시 시도: {name}',
   'chat.imageRetrying': '다시 시도 중…',
   'chat.branchFromHere': '새 대화 분기',

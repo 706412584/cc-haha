@@ -21,6 +21,7 @@ import { getAssistantMessageFromError } from "./errors.js";
 import {
   getMaxStreamRetries,
   getRetryDelay,
+  getStreamTransientRetryBudgetMs,
   RetriableStreamError,
 } from "./withRetry.js";
 
@@ -71,6 +72,12 @@ export async function* withStreamRetry(
   messages: Message[],
   { signal, sleep: wait = sleep }: StreamRetryOptions = {},
 ): AsyncGenerator<StreamQueryMessage, void> {
+  // Wall-clock ceiling for the whole loop (fork customization): the retry
+  // count bounds fast-failing transients, but a provider that accepts the
+  // request then hangs ~30s before returning an empty stream turns "4
+  // retries" into minutes of dead-silent UI. Defaults to 60s; 0 disables.
+  const budgetMs = getStreamTransientRetryBudgetMs();
+  const startedAt = Date.now();
   for (let retries = 0; ; retries++) {
     let committedOutput = false;
     try {
@@ -84,7 +91,11 @@ export async function* withStreamRetry(
         throw error;
       }
       const maxRetries = getMaxStreamRetries(error.kind);
-      if (committedOutput || retries >= maxRetries) {
+      // Stop when the retry count is spent OR the wall-clock budget is used
+      // up, so a slow-failing upstream surfaces its error in bounded time.
+      const elapsedMs = Date.now() - startedAt;
+      const overBudget = budgetMs > 0 && elapsedMs >= budgetMs;
+      if (committedOutput || retries >= maxRetries || overBudget) {
         // Surface the original error as an assistant message, matching
         // queryModel's normal terminal-error behavior.
         logForDebugging(
@@ -92,9 +103,13 @@ export async function* withStreamRetry(
             ? `Mid-stream ${error.kind} error after the attempt committed output; not replaying: ${errorMessage(
                 error.originalError,
               )}`
-            : `Mid-stream ${error.kind} error: retries exhausted after ${maxRetries} attempt(s): ${errorMessage(
-                error.originalError,
-              )}`,
+            : overBudget
+              ? `Mid-stream ${error.kind} error: retry budget ${budgetMs}ms exhausted after ${retries + 1} attempt(s), ${elapsedMs}ms elapsed: ${errorMessage(
+                  error.originalError,
+                )}`
+              : `Mid-stream ${error.kind} error: retries exhausted after ${maxRetries} attempt(s): ${errorMessage(
+                  error.originalError,
+                )}`,
           { level: "error" },
         );
         logEvent("tengu_stream_transient_retry_exhausted", {
@@ -114,7 +129,14 @@ export async function* withStreamRetry(
         return;
       }
       const retryAttempt = retries + 1;
-      const delayMs = getRetryDelay(retryAttempt);
+      let delayMs = getRetryDelay(retryAttempt);
+      // Don't sleep past the wall-clock budget: a full backoff here would just
+      // burn the remaining time on a wait whose next attempt we'd immediately
+      // abandon at the top of the loop. Clamp so the final attempt still runs.
+      if (budgetMs > 0) {
+        const remainingMs = budgetMs - (Date.now() - startedAt);
+        delayMs = Math.max(0, Math.min(delayMs, remainingMs));
+      }
       logForDebugging(
         `Mid-stream ${error.kind} error, retrying in ${Math.round(delayMs)}ms (attempt ${retryAttempt}/${maxRetries}): ${errorMessage(
           error.originalError,

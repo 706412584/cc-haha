@@ -31,7 +31,7 @@ const warmSyntaxTheme: PrismTheme = {
     backgroundColor: 'transparent',
   },
   styles: [
-    { types: ['comment', 'prolog', 'doctype', 'cdata'], style: { color: 'var(--color-code-comment)' } },
+    { types: ['comment', 'prolog', 'doctype', 'cdata'], style: { color: 'var(--color-code-comment)', fontStyle: 'italic' as const } },
     { types: ['string', 'attr-value', 'template-string'], style: { color: 'var(--color-code-string)' } },
     { types: ['keyword', 'selector', 'important', 'atrule'], style: { color: 'var(--color-code-keyword)' } },
     { types: ['function'], style: { color: 'var(--color-code-function)' } },

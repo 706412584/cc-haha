@@ -39,16 +39,23 @@ describe('chat blocks', () => {
     expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull()
   })
 
-  it('keeps thinking collapsed by default', () => {
+  it('shows thinking expanded while the turn is live', () => {
+    // Fork behavior, restored after the upstream merge: the live block force-
+    // expands so the reader can watch the stream; `thinkingAutoCollapse`
+    // (default on) collapses it once the turn finishes.
     const { container } = render(<ThinkingBlock content="this is a long internal reasoning trace" isActive />)
 
     expect(screen.getByText(/Thinking/)).toBeTruthy()
-    // The row previews the reasoning; what stays shut is the full block. A
-    // label with nothing beside it was the old standalone form, and it made the
-    // opening thought of a turn — usually the substantial one — the least
-    // informative thing on screen.
+    expect(container.textContent).toContain('this is a long internal reasoning trace')
+    expect(container.querySelector('.thinking-cursor')).not.toBeNull()
+  })
+
+  it('collapses a live block again once the turn finishes', () => {
+    const { container, rerender } = render(<ThinkingBlock content="reasoning" isActive />)
+    expect(container.querySelector('[data-thinking-content="expanded"]')).not.toBeNull()
+
+    rerender(<ThinkingBlock content="reasoning" isActive={false} />)
     expect(container.querySelector('[data-thinking-content="expanded"]')).toBeNull()
-    expect(container.querySelector('.thinking-cursor')).toBeNull()
   })
 
   it('does not animate inactive historical thinking blocks', () => {

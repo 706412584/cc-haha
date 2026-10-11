@@ -3,6 +3,7 @@ import { Image as ImageIcon, Maximize2 } from 'lucide-react'
 import { ErrorState } from '@/components/ui/ErrorState'
 import { useTranslation } from '@/i18n'
 import { AuthedImage } from './AuthedImage'
+import { ImageAnnotationModal } from './ImageAnnotationModal'
 import { ImageGalleryModal } from './ImageGalleryModal'
 import { isManagedGeneratedImagePath, localImageFileUrl } from '../../lib/attachmentImages'
 import {
@@ -13,6 +14,7 @@ import { isAbsoluteLocalPath, previewFsUrl } from '../../lib/handlePreviewLink'
 import { getServerBaseUrl } from '../../lib/desktopRuntime'
 import { resolveAbsoluteOpenPath } from '../../lib/systemFileOpen'
 import { useDiskConfirmedTargets } from '../../hooks/useDiskConfirmedTargets'
+import { useChatStore } from '../../stores/chatStore'
 
 const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|svg|bmp|avif|ico)$/i
 
@@ -93,6 +95,9 @@ type Props = {
 export function InlineImageGallery({ text, sessionId, workDir, changedFiles, suppressManagedGeneratedImages = false, allowRemoteImages = false }: Props) {
   const t = useTranslation()
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
+  // Fork feature: annotate an inline picture, then land the marked-up copy in
+  // the composer as a follow-up attachment.
+  const [annotationTarget, setAnnotationTarget] = useState<GalleryImage | null>(null)
   const [failureState, setFailureState] = useState(() => ({
     sessionId,
     workDir,
@@ -112,6 +117,14 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
   const remoteUrls = useMemo(
     () => (allowRemoteImages ? extractRemoteImageUrls(text) : []),
     [allowRemoteImages, text],
+  )
+
+  // When a remote previewUrl is rendered, its on-disk sibling (absolutePath /
+  // localPath) is the SAME image — dropping it avoids a second, sandbox-403
+  // duplicate tile. Only meaningful once remote URLs are actually surfaced.
+  const siblingLocalPaths = useMemo(
+    () => (remoteUrls.length > 0 ? extractSiblingLocalPaths(text) : new Set<string>()),
+    [remoteUrls.length, text],
   )
 
   const markdownImageSources = useMemo(
@@ -159,10 +172,15 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
 
   const images = useMemo<GalleryImage[]>(() => {
     // 1. Absolute paths (legacy behavior) — served via /api/filesystem/file.
-    const absolute: GalleryImage[] = imagePaths.map((p) => ({ src: localImageFileUrl(p), name: fileName(p), path: p }))
+    // A path that is the on-disk sibling of a rendered remote previewUrl is
+    // skipped: it is the same image, and the sandbox usually 403s it anyway.
+    const absolute: GalleryImage[] = imagePaths
+      .filter((p) => !siblingLocalPaths.has(p))
+      .map((p) => ({ src: localImageFileUrl(p), name: fileName(p), path: p }))
 
     if (!sessionId) {
-      return absolute
+      const remoteOnly: GalleryImage[] = remoteUrls.map((u) => ({ src: u, name: fileName(u) }))
+      return [...absolute, ...remoteOnly]
     }
 
     // 2. Relative workspace images — only when a sessionId is available so we can
@@ -183,6 +201,12 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
       if (absoluteNames.has(name)) {
         continue
       }
+      // The same sibling check as the absolute route: a path marked as the
+      // on-disk twin of a rendered remote URL must not come back through the
+      // relative-target extractor either.
+      if (isAbsoluteLocalPath(relPath) && siblingLocalPaths.has(relPath)) {
+        continue
+      }
       const src = isAbsoluteLocalPath(relPath)
         ? localImageFileUrl(relPath)
         : previewFsUrl(base, sessionId, relPath)
@@ -195,7 +219,7 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
 
     const remote: GalleryImage[] = remoteUrls.map((u) => ({ src: u, name: fileName(u) }))
     return [...absolute, ...relative, ...remote]
-  }, [imagePaths, relativeTargets, remoteUrls, sessionId, workDir])
+  }, [imagePaths, relativeTargets, remoteUrls, sessionId, siblingLocalPaths, workDir])
 
   // A picture the server will not serve — missing, outside the readable roots, not
   // an image — leaves no trace. The reply only named it, and its text still does:
@@ -203,6 +227,23 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
   // that should have worked is an error worth a retry.
   const visibleImages = images.filter((img) => !failureState.unavailable.has(img.src))
   if (visibleImages.length === 0) return null
+
+  const saveAnnotatedImage = (dataUrl: string) => {
+    if (!sessionId || !annotationTarget) return
+    useChatStore.getState().queueComposerPrefill(sessionId, {
+      text: '',
+      mode: 'append',
+      attachments: [{
+        type: 'image',
+        name: annotationTarget.name.replace(/(\.[^.]+)?$/, '-annotated.png'),
+        data: dataUrl,
+        previewUrl: dataUrl,
+        mimeType: 'image/png',
+      }],
+    })
+    setAnnotationTarget(null)
+    setActiveIndex(null)
+  }
 
   return (
     <>
@@ -270,8 +311,21 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
           activeIndex={activeIndex}
           onClose={() => setActiveIndex(null)}
           onSelect={setActiveIndex}
+          // Annotation needs somewhere to send the marked-up copy: the
+          // composer prefill targets a session.
+          onAnnotate={sessionId ? (image) => {
+            setActiveIndex(null)
+            setAnnotationTarget(image)
+          } : undefined}
         />
       )}
+
+      <ImageAnnotationModal
+        open={!!annotationTarget}
+        image={annotationTarget}
+        onClose={() => setAnnotationTarget(null)}
+        onSave={saveAnnotatedImage}
+      />
     </>
   )
 }
@@ -291,5 +345,26 @@ function extractRemoteImageUrls(text: string): string[] {
   }
 
   return urls
+}
+
+/**
+ * Extracts local image paths that are the download sibling of a remote
+ * `previewUrl`.
+ *
+ * Tools like taptap-maker return one logical image as BOTH a remote
+ * `previewUrl` and a local `absolutePath`/`localPath` (the on-disk copy). The
+ * local copy usually sits outside the filesystem sandbox and 403s, so if it is
+ * also surfaced as a gallery source the user sees a second, broken duplicate.
+ * These keys explicitly mark a path as that sibling, so their values are
+ * excluded from the local-path sources whenever the remote URL is rendered.
+ */
+export function extractSiblingLocalPaths(text: string): Set<string> {
+  const regex = /"(?:absolutePath|localPath)"\s*:\s*"([^"]+)"/gi
+  const paths = new Set<string>()
+  let match: RegExpExecArray | null
+  while ((match = regex.exec(text)) !== null) {
+    paths.add(match[1]!.trim())
+  }
+  return paths
 }
 

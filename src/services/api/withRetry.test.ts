@@ -807,8 +807,10 @@ describe('getMaxStreamRetries', () => {
   test('gives transport failures the API retry budget instead of the transient one', () => {
     withEnv({ [TRANSIENT_ENV]: undefined, [API_ENV]: undefined }, () => {
       expect(getMaxStreamRetries('transport')).toBe(10)
-      expect(getMaxStreamRetries('watchdog')).toBe(2)
-      expect(getMaxStreamRetries('transient')).toBe(2)
+      // Fork default: the wider 4-retry transient window (relay providers rely
+      // on it; see getMaxStreamTransientRetries). Upstream ships 2.
+      expect(getMaxStreamRetries('watchdog')).toBe(4)
+      expect(getMaxStreamRetries('transient')).toBe(4)
     })
     withEnv({ [TRANSIENT_ENV]: undefined, [API_ENV]: '4' }, () => {
       expect(getMaxStreamRetries('transport')).toBe(4)

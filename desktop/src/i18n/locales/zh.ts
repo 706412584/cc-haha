@@ -3252,6 +3252,7 @@ export const zh: Record<TranslationKey, string> = {
   'chat.imageLoadFailedHint': '文件可能已损坏，或本地服务暂时没有响应。',
   'chat.imageCountOne': '{count} 张图片',
   'chat.imageCountOther': '{count} 张图片',
+  'chat.annotateAndAsk': '标注并提问',
   'chat.retryImage': '重试图片：{name}',
   'chat.imageRetrying': '正在重试…',
   'chat.branchFromHere': 'Fork 一个新对话',

@@ -76,12 +76,19 @@ export function StreamingIndicator() {
 
   if (apiRetry) {
     const remainingMs = Math.max(0, apiRetry.retryDelayMs - (now - apiRetry.receivedAt))
+    // A mid-stream disconnect is neither a rate limit nor an HTTP status: the
+    // connection dropped after the response began. Say so instead of degrading
+    // to a generic network error. (Fork feature; the upstream merge
+    // overwrote it — keep the Porcelain banner skeleton, restore the branch.)
+    const isStreamDisconnect = apiRetry.errorType === 'stream_disconnect'
     const httpStatusText = apiRetry.errorStatus !== null
       ? t('chat.retry.httpStatus', { status: apiRetry.errorStatus })
       : null
     const statusText = apiRetry.errorType === 'rate_limit'
       ? [t('chat.retry.rateLimit'), httpStatusText].filter(Boolean).join(' · ')
-      : httpStatusText ?? formatErrorType(apiRetry.errorType) ?? t('chat.retry.networkError')
+      : isStreamDisconnect
+        ? t('chat.retry.streamDisconnect')
+        : httpStatusText ?? formatErrorType(apiRetry.errorType) ?? t('chat.retry.networkError')
     const detailText = apiRetry.errorMessage?.trim()
     const waitText = remainingMs <= 0
       ? t('chat.retry.retrying')
@@ -94,12 +101,15 @@ export function StreamingIndicator() {
     return (
       <div
         data-testid="api-retry-indicator"
+        data-retry-kind={isStreamDisconnect ? 'stream_disconnect' : 'api'}
         role="status"
         aria-live="polite"
         className="mb-2 flex w-full flex-wrap items-center gap-2 rounded-[var(--radius-md)] bg-[var(--color-warning-container)] px-3 py-2 text-xs text-[var(--color-on-warning-container)]"
       >
         <RefreshCw size={14} strokeWidth={1.75} className="shrink-0 animate-spin" aria-hidden="true" />
-        <span className="font-medium">{t('chat.retry.title')}</span>
+        <span className="font-medium">
+          {t(isStreamDisconnect ? 'chat.retry.streamTitle' : 'chat.retry.title')}
+        </span>
         {/*
           Neutral rather than `tone="warning"`: these chips sit on the warning
           container itself, so a warning-tinted chip would disappear into it,

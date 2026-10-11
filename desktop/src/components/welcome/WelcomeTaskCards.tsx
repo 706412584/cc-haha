@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Bug, Compass, Eye, FlaskConical, Network, type LucideIcon } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { projectsApi, type RecentActivityResult } from '../../api/projects'
 
@@ -30,8 +31,8 @@ export type WelcomeTaskCardKey =
 
 export type WelcomeTaskCard = {
   key: WelcomeTaskCardKey
-  /** Material symbol icon name. Already used elsewhere in the desktop UI. */
-  icon: string
+  /** Lucide icon rendered on the card. */
+  icon: LucideIcon
   /** When true, the card auto-enables Orchestration mode for the session. */
   orchestrate: boolean
   /**
@@ -77,7 +78,7 @@ function pickSourceFile(ctx: RecentActivityResult | null): string | null {
 export const WELCOME_TASK_CARDS: ReadonlyArray<WelcomeTaskCard> = [
   {
     key: 'preMergeReview',
-    icon: 'rate_review',
+    icon: Eye,
     orchestrate: true,
     resolvePrompt: (t, ctx) => {
       const branch = ctx?.git?.defaultBranch || 'main'
@@ -86,7 +87,7 @@ export const WELCOME_TASK_CARDS: ReadonlyArray<WelcomeTaskCard> = [
   },
   {
     key: 'investigateTest',
-    icon: 'bug_report',
+    icon: Bug,
     orchestrate: true,
     resolvePrompt: (t, ctx) => {
       const suggested = pickTestFile(ctx)
@@ -98,7 +99,7 @@ export const WELCOME_TASK_CARDS: ReadonlyArray<WelcomeTaskCard> = [
   },
   {
     key: 'writeTests',
-    icon: 'verified',
+    icon: FlaskConical,
     orchestrate: false,
     resolvePrompt: (t, ctx) => {
       const suggested = pickSourceFile(ctx)
@@ -110,7 +111,7 @@ export const WELCOME_TASK_CARDS: ReadonlyArray<WelcomeTaskCard> = [
   },
   {
     key: 'understandProject',
-    icon: 'travel_explore',
+    icon: Compass,
     orchestrate: false,
     resolvePrompt: (t, ctx) => {
       const branch = ctx?.git?.branch || ctx?.git?.defaultBranch || 'main'
@@ -204,21 +205,19 @@ export function WelcomeTaskCards({ workDir, excludeSessionId, onApplyTask }: Pro
               aria-label={`${t(titleKey)} — ${resolvedPrompt}`}
               className="group flex items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-3 text-left transition-colors hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)]"
             >
-              <span
-                className="material-symbols-outlined mt-0.5 text-[20px] text-[var(--color-text-secondary)] group-hover:text-[var(--color-primary)]"
+              <card.icon
+                size={20}
+                strokeWidth={1.75}
                 aria-hidden="true"
-              >
-                {card.icon}
-              </span>
+                className="mt-0.5 shrink-0 text-[var(--color-text-secondary)] group-hover:text-[var(--color-primary)]"
+              />
               <span className="flex min-w-0 flex-1 flex-col gap-1">
                 <span className="text-sm font-medium text-[var(--color-text-primary)]">
                   {t(titleKey)}
                 </span>
                 {card.orchestrate && (
                   <span className="inline-flex items-center gap-1 text-[11px] text-[var(--color-text-tertiary)]">
-                    <span className="material-symbols-outlined text-[12px]" aria-hidden="true">
-                      hub
-                    </span>
+                    <Network size={12} strokeWidth={1.75} aria-hidden="true" className="shrink-0" />
                     {t('empty.tasks.orchestratedHint')}
                   </span>
                 )}

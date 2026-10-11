@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import {
   BookMarked,
   Bot,
@@ -10,7 +10,7 @@ import {
   LoaderCircle,
   Settings,
 } from 'lucide-react'
-import { ToolCallBlock, formatDuration, type ToolCallChrome } from './ToolCallBlock'
+import { ToolCallBlock, formatDuration, ImageBlockGallery, type ImageBlock, type ToolCallChrome } from './ToolCallBlock'
 import { ActivityGroup, ToolTimeline } from './ActivityGroup'
 import { ThinkingBlock } from './ThinkingBlock'
 import {
@@ -70,12 +70,34 @@ function imageGenerationItems(
   })
 }
 
-function useExpandableCardState() {
-  const [expanded, setExpanded] = useState(false)
+/**
+ * Expand state for a card that may open on its own when the run reaches an
+ * edge (fork feature, restored after the upstream merge dropped it): it starts
+ * at `initialExpanded`, and when `autoOpenSignal` turns true after having been
+ * false — the run went live, or its first result landed — the card opens once.
+ * A user who collapsed it by hand keeps it shut; the hook will not fight them
+ * for the rest of the mount.
+ */
+function useEdgeAutoExpanded(initialExpanded: boolean, autoOpenSignal: boolean) {
+  const [expanded, setExpanded] = useState(initialExpanded)
+  const manuallyCollapsedRef = useRef(false)
+  const previousAutoOpenSignalRef = useRef(autoOpenSignal)
 
-  const toggleExpanded = useCallback(() => {
-    setExpanded((value) => !value)
-  }, [])
+  useEffect(() => {
+    const crossedIntoAutoOpen = autoOpenSignal && !previousAutoOpenSignalRef.current
+    previousAutoOpenSignalRef.current = autoOpenSignal
+    if (crossedIntoAutoOpen && !manuallyCollapsedRef.current) {
+      setExpanded(true)
+    }
+  }, [autoOpenSignal])
+
+  const toggleExpanded = () => {
+    setExpanded((value) => {
+      const nextValue = !value
+      manuallyCollapsedRef.current = !nextValue
+      return nextValue
+    })
+  }
 
   return { expanded, toggleExpanded }
 }
@@ -323,6 +345,7 @@ function ToolCallGroupContent({
         agentTaskNotifications={agentTaskNotifications}
         agentTaskStatuses={agentTaskStatuses}
         showOpenRun={showOpenRun}
+        isStreaming={isStreaming}
       />
     )
   }
@@ -384,7 +407,8 @@ function MemoryToolActivityGroup({
   childToolCallsByParent: Map<string, ToolCall[]>
   isStreaming?: boolean
 }) {
-  const { expanded, toggleExpanded } = useExpandableCardState()
+  // Opens on its own when the run it reports goes live (fork behavior).
+  const { expanded, toggleExpanded } = useEdgeAutoExpanded(false, !!isStreaming)
   const [detailsExpanded, setDetailsExpanded] = useState(false)
   const t = useTranslation()
   const titleKey = activity.action === 'saved'
@@ -505,18 +529,39 @@ function AgentToolGroup({
   agentTaskNotifications,
   agentTaskStatuses,
   showOpenRun = true,
+  isStreaming,
 }: Props) {
-  const { expanded, toggleExpanded } = useExpandableCardState()
   const t = useTranslation()
   const statuses = toolCalls.map((toolCall) =>
     getAgentStatus({
       hasResult: resultMap.has(toolCall.toolUseId),
       isError: !!resultMap.get(toolCall.toolUseId)?.isError,
       isLaunchResult: isAgentLaunchResult(resultMap.get(toolCall.toolUseId)?.content),
+      isStreaming: !!isStreaming && !resultMap.has(toolCall.toolUseId),
       childCount: (childToolCallsByParent.get(toolCall.toolUseId) ?? []).length,
       taskStatus: agentTaskNotifications[toolCall.toolUseId]?.status ?? agentTaskStatuses?.[toolCall.toolUseId],
     }),
   )
+  // The card opens on its own only when content arrives while it is on screen
+  // — children start streaming in, or a result lands — never for content it
+  // was mounted with. A card mounted mid-turn starts open. A manual collapse
+  // wins from then on. (Fork behavior restored after the merge; see
+  // useEdgeAutoExpanded.)
+  const hasNestedToolCalls = toolCalls.some(
+    (toolCall) => (childToolCallsByParent.get(toolCall.toolUseId)?.length ?? 0) > 0,
+  )
+  const hasVisibleResult = toolCalls.some((toolCall) => {
+    const result = resultMap.get(toolCall.toolUseId)
+    const notification = agentTaskNotifications[toolCall.toolUseId]
+    return !!result?.isError || (
+      !!result &&
+      !isAgentLaunchResult(result.content) &&
+      !isAgentLifecycleResult(result.content)
+    ) || !!notification?.result?.trim() || !!notification?.summary?.trim()
+  })
+  const shouldAutoOpen = !!isStreaming || hasNestedToolCalls || hasVisibleResult
+  const initiallyExpanded = !!isStreaming
+  const { expanded, toggleExpanded } = useEdgeAutoExpanded(initiallyExpanded, shouldAutoOpen)
   const groupStatus: AgentStatus = statuses.some((status) => status === 'running' || status === 'starting')
     ? 'running'
     : statuses.some((status) => status === 'failed')
@@ -563,6 +608,7 @@ function AgentToolGroup({
               agentTaskNotification={agentTaskNotifications[toolCall.toolUseId]}
               agentTaskStatus={agentTaskStatuses?.[toolCall.toolUseId]}
               showOpenRun={showOpenRun}
+              isStreaming={!!isStreaming && !resultMap.has(toolCall.toolUseId)}
             />
           ))}
         </div>
@@ -606,6 +652,7 @@ function AgentCallCard({
   agentTaskNotification,
   agentTaskStatus,
   showOpenRun = true,
+  isStreaming = false,
 }: {
   sessionId?: string | null
   onOpenAgentRun?: (payload: OpenAgentRunPayload) => void
@@ -616,6 +663,7 @@ function AgentCallCard({
   agentTaskNotification?: AgentTaskNotification
   agentTaskStatus?: BackgroundAgentTask['status']
   showOpenRun?: boolean
+  isStreaming?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
@@ -651,6 +699,7 @@ function AgentCallCard({
     hasResult: !!result,
     isError: !!result?.isError,
     isLaunchResult,
+    isStreaming,
     childCount: childToolCalls.length || (lazyActivity?.toolCalls.length ?? 0),
     taskStatus: agentTaskNotification?.status ?? agentTaskStatus,
   })
@@ -671,6 +720,11 @@ function AgentCallCard({
   const terminalTaskSummary = status === 'done' || status === 'stopped' ? taskSummary : ''
   const previewText = terminalTaskReport || fullOutputText || terminalTaskSummary
   const outputSummary = previewText ? getAgentOutputSummary(previewText) : ''
+  const agentType = typeof input.subagent_type === 'string' ? input.subagent_type : ''
+  // Media agents report the pictures they generated as markdown/URL lines in
+  // their report; show them as a gallery under the row instead of leaving the
+  // reader to click through to the run (fork feature).
+  const inlineImages = agentType.includes('media-gen') ? extractMediaAgentImages(previewText) : []
   const description = typeof input.description === 'string' ? input.description : ''
   const openRunTitle = description.trim() || 'Agent'
   const canOpenRun = showOpenRun && !!sessionId && !!toolCall.toolUseId
@@ -795,6 +849,11 @@ function AgentCallCard({
 
       {expanded && (
         <div className="pb-2.5 pl-[52px] pr-3">
+          {inlineImages.length > 0 && (
+            <div className="mb-2">
+              <ImageBlockGallery imageBlocks={inlineImages} />
+            </div>
+          )}
           {errorText && (
             <div className="mb-2 rounded-[var(--radius-md)] bg-[var(--color-error-container)] px-3 py-2 text-[12px] text-[var(--color-on-error-container)]">
               {errorText}
@@ -868,7 +927,47 @@ function AgentCallCard({
         width={900}
       >
         <div className="max-h-[70vh] overflow-y-auto">
-          <MarkdownRenderer content={previewText || errorText} />
+          {(() => {
+            const body = previewText || errorText
+            const { text, truncated } = truncateAgentPreview(body)
+            return (
+              <>
+                <MarkdownRenderer content={text} />
+                {truncated && (
+                  <div className="mt-3 flex items-center justify-between gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3 py-2 text-[12px] text-[var(--color-text-secondary)]">
+                    <span>
+                      {t('agentStatus.previewTruncated', {
+                        shown: text.length,
+                        total: body.length,
+                      })}
+                    </span>
+                    {canOpenRun && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setPreviewOpen(false)
+                          if (onOpenAgentRun) {
+                            onOpenAgentRun({
+                              sessionId,
+                              toolUseId: toolCall.toolUseId,
+                              title: openRunTitle,
+                            })
+                            return
+                          }
+                          useTabStore.getState().openSubagentTab(sessionId, toolCall.toolUseId, openRunTitle)
+                        }}
+                        className="shrink-0 border border-[var(--color-border)]"
+                      >
+                        {t('toolGroup.openRun')}
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </>
+            )
+          })()}
         </div>
       </Modal>
     </div>
@@ -1056,12 +1155,14 @@ function getAgentStatus({
   hasResult,
   isError,
   isLaunchResult,
+  isStreaming,
   childCount,
   taskStatus,
 }: {
   hasResult: boolean
   isError: boolean
   isLaunchResult: boolean
+  isStreaming: boolean
   childCount: number
   taskStatus?: AgentTaskStatus
 }): AgentStatus {
@@ -1071,7 +1172,12 @@ function getAgentStatus({
   if (taskStatus === 'running') return 'running'
   if (hasResult && isError && !isLaunchResult) return 'failed'
   if (hasResult && !isLaunchResult) return 'done'
-  if (childCount > 0 || isLaunchResult) return 'running'
+  // Live stream or backgrounded (launch-only) agent still in flight.
+  if (isStreaming || isLaunchResult) return 'running'
+  // Nested tools alone do not mean the parent Agent is still running —
+  // after a missed terminal notification, finished child Grep/Read rows
+  // previously kept the card stuck on "running".
+  if (!hasResult && childCount > 0) return 'running'
   return 'starting'
 }
 
@@ -1367,4 +1473,47 @@ function extractTextContent(content: unknown): string {
     return JSON.stringify(content)
   }
   return ''
+}
+
+/**
+ * The result-preview modal renders the full agent report through
+ * MarkdownRenderer. Reports from exploration agents can reach hundreds of KB;
+ * parsing is fast (~60ms per 500KB) but injecting the resulting ~1MB of DOM
+ * into a 70vh scroll container freezes the renderer for seconds on Windows.
+ * Cap the inline preview and point at the full run transcript for the rest.
+ * (Fork feature; the upstream merge dropped it.)
+ */
+const AGENT_PREVIEW_MAX_CHARS = 20_000
+
+function truncateAgentPreview(content: string): { text: string; truncated: boolean } {
+  if (content.length <= AGENT_PREVIEW_MAX_CHARS) {
+    return { text: content, truncated: false }
+  }
+  // Cut at a paragraph boundary so the markdown does not end mid-structure.
+  const cut = content.lastIndexOf('\n\n', AGENT_PREVIEW_MAX_CHARS)
+  const sliceEnd = cut > AGENT_PREVIEW_MAX_CHARS / 2 ? cut : AGENT_PREVIEW_MAX_CHARS
+  return { text: `${content.slice(0, sliceEnd)}\n\n…`, truncated: true }
+}
+
+/**
+ * Pulls the pictures a media agent reported out of its markdown report —
+ * `![alt](url)` lines and bare `URL: https://…` lines — so they can render as
+ * a gallery under the agent row instead of only as report text. Bounded to
+ * eight images, deduplicated by URL. (Fork feature; restored after the merge.)
+ */
+function extractMediaAgentImages(text: string): ImageBlock[] {
+  if (!text) return []
+
+  const urls = new Set<string>()
+  const patterns = [
+    /!\[[^\]]*\]\((https?:\/\/[^\s)]+)(?:\s+["'][^"']*["'])?\)/gi,
+    /^URL:\s*(https?:\/\/\S+)\s*$/gim,
+  ]
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null
+    while ((match = pattern.exec(text)) !== null && urls.size < 8) {
+      urls.add(match[1]!)
+    }
+  }
+  return [...urls].map((src) => ({ src, mimeType: 'image/png' }))
 }

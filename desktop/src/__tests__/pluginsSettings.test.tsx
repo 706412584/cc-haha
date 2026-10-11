@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
 import { DesktopSettings as Settings } from '../pages/Settings'
@@ -267,6 +267,67 @@ describe('Settings > Plugins tab', () => {
     expect(screen.getByText('github')).toBeInTheDocument()
     expect(screen.getAllByText('Python language tooling').length).toBeGreaterThan(0)
     expect(screen.getByText('Known marketplaces')).toBeInTheDocument()
+  })
+
+  it('mounts the language-services section exactly once, with the LSP plugins in it', () => {
+    // Regression: the panel lived inside the per-group renderer, so a list with
+    // several non-empty buckets mounted it up to three times — and a list with
+    // none never showed it at all. It is one section after the groups now.
+    usePluginStore.setState({
+      plugins: [
+        {
+          id: 'pyright-lsp@claude-plugins-official',
+          name: 'pyright-lsp',
+          marketplace: 'claude-plugins-official',
+          scope: 'user',
+          enabled: true,
+          hasErrors: false,
+          isBuiltin: false,
+          description: 'Python language tooling',
+          componentCounts: {
+            commands: 0,
+            agents: 0,
+            skills: 0,
+            hooks: 0,
+            mcpServers: 0,
+            lspServers: 1,
+          },
+          errors: [],
+        },
+        {
+          id: 'plain-plugin@claude-plugins-official',
+          name: 'plain-plugin',
+          marketplace: 'claude-plugins-official',
+          scope: 'user',
+          enabled: false,
+          hasErrors: false,
+          isBuiltin: false,
+          description: 'No language services',
+          componentCounts: {
+            commands: 0,
+            agents: 0,
+            skills: 0,
+            hooks: 0,
+            mcpServers: 0,
+            lspServers: 0,
+          },
+          errors: [],
+        },
+      ],
+      summary: { total: 2, enabled: 1, errorCount: 0, marketplaceCount: 0 },
+      marketplaces: [],
+    })
+
+    render(<Settings />)
+    switchToPluginsTab()
+
+    // One section heading, whatever the number of non-empty buckets (here two:
+    // enabled + disabled).
+    expect(screen.getAllByText('Language Servers')).toHaveLength(1)
+    // The LSP-providing plugin is listed in it; the plain one is not.
+    const section = screen.getByText('Language Servers').closest('section')!
+    expect(within(section).getByText('pyright-lsp')).toBeInTheDocument()
+    expect(within(section).queryByText('plain-plugin')).not.toBeInTheDocument()
   })
 
   it('bulk enables selected disabled plugins from the list after confirmation', async () => {

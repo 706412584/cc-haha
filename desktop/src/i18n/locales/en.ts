@@ -3283,6 +3283,7 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   'chat.imageLoadFailedHint': 'The file may be damaged, or the local server did not respond.',
   'chat.imageCountOne': '{count} image',
   'chat.imageCountOther': '{count} images',
+  'chat.annotateAndAsk': 'Annotate & ask',
   'chat.retryImage': 'Retry image: {name}',
   'chat.imageRetrying': 'Retrying…',
   'chat.branchFromHere': 'Fork a new conversation',

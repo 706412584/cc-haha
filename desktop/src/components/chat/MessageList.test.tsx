@@ -3415,6 +3415,100 @@ describe('MessageList nested tool calls', () => {
     expect(screen.getByRole('button', { name: 'Close dialog' })).toBeTruthy()
   })
 
+  it('caps the agent result preview at 20k chars and says what was cut', () => {
+    // Fork feature restored after the upstream merge dropped it: a huge report
+    // froze the renderer when fully mounted into the modal's scroll container.
+    const head = 'H'.repeat(20_000)
+    const tailMarker = 'TAIL-MARKER-BEYOND-THE-CAP'
+    const hugeResult = `${head}\n\n${tailMarker}`
+
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            {
+              id: 'tool-agent',
+              type: 'tool_use',
+              toolName: 'Agent',
+              toolUseId: 'agent-1',
+              input: { description: 'Huge report' },
+              timestamp: 1,
+            },
+            {
+              id: 'result-agent',
+              type: 'tool_result',
+              toolUseId: 'agent-1',
+              content: { status: 'completed', content: [{ type: 'text', text: hugeResult }] },
+              isError: false,
+              timestamp: 2,
+            },
+          ],
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'View result' }))
+
+    const dialog = screen.getByRole('dialog')
+    // The tail beyond the cap is not rendered…
+    expect(within(dialog).queryByText(new RegExp(tailMarker))).toBeNull()
+    // …and the truncation notice explains the cut: the full body length
+    // (~20k + the tail) against the rendered length (the cap + ellipsis).
+    expect(within(dialog).getByText(/Result is very large \(200\d\d characters\)/)).toBeTruthy()
+    expect(within(dialog).getByText(/showing the first 200\d\d/)).toBeTruthy()
+  })
+
+  it('renders the pictures a media agent reported as a gallery under its row', () => {
+    // Fork feature restored after the upstream merge dropped it.
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            {
+              id: 'tool-agent',
+              type: 'tool_use',
+              toolName: 'Agent',
+              toolUseId: 'agent-1',
+              input: { description: 'Generate art', subagent_type: 'media-gen' },
+              timestamp: 1,
+            },
+            {
+              id: 'result-agent',
+              type: 'tool_result',
+              toolUseId: 'agent-1',
+              content: {
+                status: 'completed',
+                content: [{
+                  type: 'text',
+                  text: 'Done!\n\n![concept](https://cdn.example.com/concept.png)\n\nURL: https://cdn.example.com/scene.png',
+                }],
+              },
+              isError: false,
+              timestamp: 2,
+            },
+          ],
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand agent' }))
+
+    // The gallery labels its tiles by position; the sources are the report URLs.
+    const gallerySources = screen.getAllByRole('img')
+      .map((img) => img.getAttribute('src'))
+      .filter((src): src is string => src?.startsWith('https://cdn.example.com/') === true)
+    expect(gallerySources).toEqual([
+      'https://cdn.example.com/concept.png',
+      'https://cdn.example.com/scene.png',
+    ])
+  })
+
   it('opens the SubAgent run tab from an agent tool card', () => {
     useChatStore.setState({
       sessions: {

@@ -26,9 +26,25 @@ vi.mock('../../lib/authedImage', () => ({ fetchServerImageBlobUrl }))
 const getWorkspaceTree = vi.hoisted(() => vi.fn())
 vi.mock('../../api/sessions', () => ({ sessionsApi: { getWorkspaceTree } }))
 
+// The annotation editor draws on a real canvas; here only the wiring is under
+// test — which image it opens on and where its saved data URL goes.
+vi.mock('./ImageAnnotationModal', () => ({
+  ImageAnnotationModal: ({ open, image, onSave }: {
+    open: boolean
+    image: { name: string } | null
+    onSave: (dataUrl: string) => void
+  }) => open ? (
+    <div data-testid="image-annotation-modal">
+      <span>{image?.name}</span>
+      <button type="button" onClick={() => onSave('data:image/png;base64,ANNOTATED')}>Save</button>
+    </div>
+  ) : null,
+}))
+
 import { InlineImageGallery } from './InlineImageGallery'
 import { resetDiskListingCacheForTests } from '../../hooks/useDiskConfirmedTargets'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { createDefaultSessionState, useChatStore } from '../../stores/chatStore'
 
 beforeEach(() => {
   useSettingsStore.setState({ locale: 'en' })
@@ -541,5 +557,66 @@ describe('InlineImageGallery', () => {
     expect(srcs[0]).toBe(
       'http://127.0.0.1:3456/api/filesystem/file?path=' + encodeURIComponent('/w/outputs/a/frame.png'),
     )
+  })
+
+  it('annotates an inline image and appends the result to the session composer', () => {
+    // Fork feature restored after the upstream merge dropped it: the lightbox
+    // offers "Annotate & ask" when there is a session to send into, and the
+    // saved data URL lands in that session's composer as an attachment.
+    useChatStore.setState({ sessions: { s1: createDefaultSessionState() } })
+
+    render(
+      <InlineImageGallery
+        text={'render saved to outputs/a/frame.png'}
+        sessionId="s1"
+        workDir="/w"
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /frame\.png/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Annotate & ask' }))
+
+    // The annotation editor opens on the same picture; saving routes the
+    // result into the composer.
+    expect(screen.getByTestId('image-annotation-modal')).toHaveTextContent('frame.png')
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    const prefill = useChatStore.getState().sessions['s1']?.composerPrefill
+    expect(prefill).toMatchObject({
+      text: '',
+      mode: 'append',
+      attachments: [{
+        type: 'image',
+        name: 'frame-annotated.png',
+        data: 'data:image/png;base64,ANNOTATED',
+        previewUrl: 'data:image/png;base64,ANNOTATED',
+        mimeType: 'image/png',
+      }],
+    })
+  })
+
+  it('does not offer annotation without a session to send the result into', () => {
+    render(<InlineImageGallery text="See /tmp/chart.png" />)
+
+    fireEvent.click(screen.getByRole('button', { name: /chart\.png/ }))
+
+    expect(screen.getByRole('dialog')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Annotate & ask' })).not.toBeInTheDocument()
+  })
+
+  it('drops the local sibling of a remote previewUrl instead of rendering a broken duplicate', () => {
+    // taptap-maker returns one image as BOTH a remote previewUrl and a local
+    // absolutePath; the local copy usually 403s outside the sandbox.
+    render(
+      <InlineImageGallery
+        text={'{"previewUrl":"https://cdn.example.com/pic.png","absolutePath":"/tmp/outside/pic.png"}'}
+        sessionId="s1"
+        workDir="/w"
+        allowRemoteImages
+      />,
+    )
+
+    const srcs = imgSrcs()
+    expect(srcs).toEqual(['https://cdn.example.com/pic.png'])
   })
 })

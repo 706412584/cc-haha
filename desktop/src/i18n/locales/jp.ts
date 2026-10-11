@@ -3252,6 +3252,7 @@ export const jp: Record<TranslationKey, string> = {
   'chat.imageLoadFailedHint': 'ファイルが破損しているか、ローカルサーバーが応答しませんでした。',
   'chat.imageCountOne': '画像 {count} 枚',
   'chat.imageCountOther': '画像 {count} 枚',
+  'chat.annotateAndAsk': '注釈して質問',
   'chat.retryImage': '画像を再読み込み: {name}',
   'chat.imageRetrying': '再読み込み中…',
   'chat.branchFromHere': '新しい会話を分岐',

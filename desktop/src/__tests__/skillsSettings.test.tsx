@@ -301,8 +301,8 @@ describe('Settings > Skills tab', () => {
       await Promise.resolve()
     })
 
-    // The Plugins pane is titled with its rail label, which the rail entry also
-    // carries — the heading is what proves the pane itself opened.
-    expect(screen.getByRole('heading', { name: 'Plugins' })).toBeInTheDocument()
+    // The Plugins pane is what proves the pane itself opened, not the rail
+    // entry (which is also named "Plugins").
+    expect(screen.getByText('Installed Plugins')).toBeInTheDocument()
   })
 })

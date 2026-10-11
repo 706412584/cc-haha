@@ -368,6 +368,18 @@ describe('EmptySession', () => {
     await waitFor(() => expect(getComposerText()).toBe('Fix the failing tests\nBuild a new feature'))
   })
 
+  it('keeps the seal and title reachable when the welcome cards outgrow the hero pane', () => {
+    render(<EmptySession />)
+
+    // Regression: the hero used `justify-end` + `overflow-hidden`, so on a short
+    // window the seal and the top half of the title were clipped above the
+    // scroll origin with no way to scroll to them.
+    const hero = screen.getByTestId('empty-session-hero')
+    expect(hero).toHaveClass('overflow-y-auto')
+    expect(hero).not.toHaveClass('justify-end')
+    expect(within(hero).getByRole('heading', { level: 1 }).parentElement).toHaveClass('mt-auto')
+  })
+
   it('keeps the starter row off the phone layout, where the composer docks to the bottom', () => {
     mocks.isMobile = true
 
@@ -915,6 +927,8 @@ describe('EmptySession', () => {
         'draft-session',
         {
           type: 'set_runtime_config',
+          // The fork's stale-ack guard: every config carries a request id.
+          requestId: expect.any(String),
           providerId: 'provider-explicit',
           modelId: 'model-explicit',
         },
@@ -998,25 +1012,33 @@ describe('EmptySession', () => {
       modelId: enabled ? 'MiniMax-M3[1m]' : 'MiniMax-M3',
       effortLevel: 'low',
     })
-    expect(mocks.wsSend.mock.calls.slice(0, 3)).toEqual([
-      [
-        'draft-session',
-        {
-          type: 'set_runtime_config',
-          providerId: 'provider-minimax',
-          modelId: enabled ? 'MiniMax-M3[1m]' : 'MiniMax-M3',
-          effortLevel: 'low',
-        },
-      ],
-      ['draft-session', { type: 'prewarm_session' }],
-      [
-        'draft-session',
-        {
-          type: 'user_message',
-          content: 'draft question',
-          attachments: [],
-        },
-      ],
+    // The fork replays the runtime mode alignment ahead of every user turn,
+    // so set_coordinator_mode sits between prewarm and the user message —
+    // assert by position instead of an exact slice.
+    const runtimeCallTypes = mocks.wsSend.mock.calls.map((call) => {
+      const payload = call[1] as Record<string, unknown>
+      return payload.type
+    })
+    expect(runtimeCallTypes[0]).toBe('set_runtime_config')
+    expect(runtimeCallTypes).toContain('prewarm_session')
+    expect(runtimeCallTypes[runtimeCallTypes.length - 1]).toBe('user_message')
+    expect(mocks.wsSend.mock.calls[0]).toEqual([
+      'draft-session',
+      {
+        type: 'set_runtime_config',
+        requestId: expect.any(String),
+        providerId: 'provider-minimax',
+        modelId: enabled ? 'MiniMax-M3[1m]' : 'MiniMax-M3',
+        effortLevel: 'low',
+      },
+    ])
+    expect(mocks.wsSend.mock.calls[mocks.wsSend.mock.calls.length - 1]).toEqual([
+      'draft-session',
+      {
+        type: 'user_message',
+        content: 'draft question',
+        attachments: [],
+      },
     ])
   })
 
@@ -1056,26 +1078,40 @@ describe('EmptySession', () => {
       modelId: 'claude-sonnet-5',
       effortLevel: 'high',
     })
-    expect(mocks.wsSend.mock.calls.slice(0, 3)).toEqual([
-      [
-        'draft-session',
-        {
-          type: 'set_runtime_config',
-          providerId: null,
-          modelId: 'claude-sonnet-5',
-          effortLevel: 'high',
-        },
-      ],
-      ['draft-session', { type: 'prewarm_session' }],
-      [
-        'draft-session',
-        {
-          type: 'user_message',
-          content: 'Claude OAuth question',
-          attachments: [],
-        },
-      ],
-    ])
+    // set_runtime_config now carries a requestId so stale acks can be
+    // dropped (see setSessionRuntime in chatStore); assert the shape instead
+    // of the generated uuid.
+    const [runtimeConfigCall] = mocks.wsSend.mock.calls
+    expect(runtimeConfigCall?.[0]).toBe('draft-session')
+    expect(runtimeConfigCall?.[1]).toMatchObject({
+      type: 'set_runtime_config',
+      providerId: null,
+      modelId: 'claude-sonnet-5',
+      effortLevel: 'high',
+    })
+    expect(typeof runtimeConfigCall?.[1]?.requestId).toBe('string')
+    // The fork replays the runtime mode alignment ahead of every user turn:
+    // connectToSession fires set_coordinator_mode(false) before the user
+    // message, and prewarm stays the second call overall.
+    const remainingCalls = mocks.wsSend.mock.calls.slice(1).map((call) => {
+      const payload = call[1] as Record<string, unknown>
+      return { sessionId: call[0], type: payload.type, enabled: payload.enabled }
+    })
+    expect(remainingCalls).toEqual(expect.arrayContaining([
+      { sessionId: 'draft-session', type: 'prewarm_session', enabled: undefined },
+    ]))
+    const messageTypes = remainingCalls.map((call) => call.type)
+    expect(messageTypes[0]).toBe('prewarm_session')
+    expect(messageTypes).toContain('set_coordinator_mode')
+    expect(remainingCalls.find((call) => call.type === 'set_coordinator_mode')?.enabled).toBe(false)
+    expect(messageTypes[messageTypes.length - 1]).toBe('user_message')
+    const userMessage = mocks.wsSend.mock.calls[mocks.wsSend.mock.calls.length - 1]
+    expect(userMessage?.[0]).toBe('draft-session')
+    expect(userMessage?.[1]).toEqual({
+      type: 'user_message',
+      content: 'Claude OAuth question',
+      attachments: [],
+    })
   })
 
   it('opens provider settings instead of creating a session when no model authentication exists', async () => {

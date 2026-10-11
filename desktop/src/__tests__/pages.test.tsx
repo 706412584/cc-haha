@@ -637,7 +637,9 @@ describe('Content-only pages render without errors', () => {
     expect(screen.getByText('Slash commands')).toBeInTheDocument()
     expect(screen.getByText('/compact')).toBeInTheDocument()
     expect(screen.getByText('/cost')).toBeInTheDocument()
-    expect(screen.getByText('10 more commands available. Type / to search the full command list.')).toBeInTheDocument()
+    // `/btw` stays hidden until the session has a conversation (upstream #1455),
+    // so one fewer command lands in the "more" bucket than before that change.
+    expect(screen.getByText('9 more commands available. Type / to search the full command list.')).toBeInTheDocument()
 
     resetPageStores()
   })

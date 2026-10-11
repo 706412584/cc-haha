@@ -232,4 +232,97 @@ describe('SkillList', () => {
     expect(screen.getByText('Legacy Skill')).toBeInTheDocument()
     expect(screen.queryByText('.agents')).not.toBeInTheDocument()
   })
+
+  it('offers the recommended catalog with a localized description and installs on click', () => {
+    // Fork feature restored after the upstream merge dropped it: the curated
+    // catalog must render, use the localized description when a key exists,
+    // and fall back to the server text otherwise.
+    const installSkill = vi.fn()
+    useSkillStore.setState({
+      skills: [
+        {
+          name: 'alpha',
+          displayName: 'Alpha Skill',
+          description: 'First skill description',
+          source: 'user',
+          userInvocable: true,
+          contentLength: 400,
+          hasDirectory: true,
+        },
+      ],
+      catalog: [
+        {
+          name: 'karpathy-guidelines',
+          displayName: 'Karpathy Guidelines',
+          description: 'Server English description',
+          category: 'Engineering',
+          source: 'bundled',
+          installed: false,
+        },
+        {
+          name: 'brand-new-skill',
+          displayName: 'Brand New Skill',
+          description: 'Untranslated catalog entry',
+          category: 'Something New',
+          source: 'bundled',
+          installed: false,
+        },
+        {
+          name: 'already-there',
+          displayName: 'Already Installed',
+          description: 'Ships with the app',
+          category: 'Engineering',
+          source: 'bundled',
+          installed: true,
+        },
+      ],
+      installingName: null,
+      fetchCatalog: vi.fn(),
+      installSkill,
+    })
+
+    render(<SkillList />)
+
+    expect(screen.getByText('Recommended skills')).toBeInTheDocument()
+    // Localized via CATALOG_DESC_KEY; the raw server text must not leak.
+    expect(screen.queryByText('Server English description')).not.toBeInTheDocument()
+    expect(screen.getByText('Brand New Skill')).toBeInTheDocument()
+    expect(screen.getByText('Untranslated catalog entry')).toBeInTheDocument()
+    // A category without a mapping falls back to the server value.
+    expect(screen.getByText('Something New')).toBeInTheDocument()
+    // Installed entries show their state instead of an install button.
+    expect(screen.getByText('Installed')).toBeInTheDocument()
+
+    const installButtons = screen.getAllByRole('button', { name: 'Install' })
+    expect(installButtons).toHaveLength(2)
+    fireEvent.click(installButtons[0]!)
+    expect(installSkill).toHaveBeenCalledWith('karpathy-guidelines', '/workspace/project')
+  })
+
+  it('keeps the recommended catalog reachable with zero installed skills', () => {
+    // Regression: the page used to early-return an empty state, hiding the
+    // catalog from a first-time user with nothing installed yet.
+    useSkillStore.setState({
+      skills: [],
+      catalog: [
+        {
+          name: 'karpathy-guidelines',
+          displayName: 'Karpathy Guidelines',
+          description: 'Server English description',
+          category: 'Engineering',
+          source: 'bundled',
+          installed: false,
+        },
+      ],
+      installingName: null,
+      fetchCatalog: vi.fn(),
+      installSkill: vi.fn(),
+    })
+
+    render(<SkillList />)
+
+    expect(screen.getByText('Karpathy Guidelines')).toBeInTheDocument()
+    // The empty notice renders inline instead of replacing the whole page.
+    expect(screen.getByText('No skills installed')).toBeInTheDocument()
+  })
 })

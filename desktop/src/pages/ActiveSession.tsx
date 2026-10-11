@@ -1119,11 +1119,16 @@ export function ActiveSession({ sessionId, active = true }: { sessionId?: string
             <div
               data-testid="empty-session-hero"
               className={[
-                'flex min-h-0 flex-1 flex-col items-center justify-end overflow-hidden px-8',
+                // Bottom-aligned via the first child's `mt-auto`, not
+                // `justify-end`: with the welcome cards the content can outgrow
+                // this pane on a short window, and `justify-end` + a clip hides
+                // the seal and title above the scroll origin. Scrolling keeps
+                // every row reachable.
+                'flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-8',
                 compactEmptyHero ? 'pb-6 pt-6' : 'pb-7 pt-8',
               ].join(' ')}
             >
-              <div className="flex max-w-[600px] flex-col items-center gap-2.5 text-center">
+              <div className="mt-auto flex max-w-[600px] flex-col items-center gap-2.5 text-center">
                 <BrandSeal size={compactEmptyHero ? 'md' : 'lg'} />
                 <h1
                   className={`mt-2 font-semibold leading-[1.3] tracking-tight text-[var(--color-text-primary)] ${compactEmptyHero ? 'text-[22px]' : 'text-[26px]'}`}

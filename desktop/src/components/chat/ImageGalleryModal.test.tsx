@@ -222,3 +222,45 @@ describe('ImageGalleryModal · open the original', () => {
     await waitFor(() => expect(reportOpenFailure).toHaveBeenCalledWith('/Users/me/chart.png'))
   })
 })
+
+describe('ImageGalleryModal · annotation entry', () => {
+  it('offers annotation only when requested and returns the active image', () => {
+    // Fork feature restored after the upstream merge dropped it: a caller
+    // with a session to send into passes `onAnnotate`; others stay read-only.
+    const onAnnotate = vi.fn()
+    const { rerender } = render(
+      <ImageGalleryModal open images={images} activeIndex={0} onClose={() => {}} onSelect={() => {}} />,
+    )
+
+    expect(screen.queryByRole('button', { name: 'Annotate & ask' })).not.toBeInTheDocument()
+
+    rerender(
+      <ImageGalleryModal
+        open
+        images={images}
+        activeIndex={0}
+        onClose={() => {}}
+        onSelect={() => {}}
+        onAnnotate={onAnnotate}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Annotate & ask' }))
+    expect(onAnnotate).toHaveBeenCalledWith(images[0])
+  })
+
+  it('annotates the picture on show, not another', () => {
+    const onAnnotate = vi.fn()
+    const { rerender } = render(
+      <ImageGalleryModal open images={gallery} activeIndex={1} onClose={() => {}} onSelect={() => {}} onAnnotate={onAnnotate} />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Annotate & ask' }))
+    expect(onAnnotate).toHaveBeenCalledWith(gallery[1])
+
+    rerender(
+      <ImageGalleryModal open images={gallery} activeIndex={2} onClose={() => {}} onSelect={() => {}} onAnnotate={onAnnotate} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Annotate & ask' }))
+    expect(onAnnotate).toHaveBeenLastCalledWith(gallery[2])
+  })
+})

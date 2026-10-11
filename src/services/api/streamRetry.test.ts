@@ -384,6 +384,61 @@ describe('withStreamRetry backoff and budgets', () => {
     }
   })
 
+  test('stops retrying once the wall-clock budget is exhausted, before maxRetries', async () => {
+    // Fork feature: high retry count, but each attempt "hangs" ~40ms before
+    // failing and the budget is 50ms — so the loop must give up on time, not on
+    // count. This is the empty-stream-that-takes-30s scenario in miniature.
+    const restore = withEnv({
+      [RETRY_ENV]: '10',
+      CLAUDE_STREAM_TRANSIENT_RETRY_BUDGET_MS: '50',
+    })
+    try {
+      let calls = 0
+      const attempt = () =>
+        // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+        (async function* (): AsyncGenerator<any, void> {
+          calls++
+          await new Promise((resolve) => setTimeout(resolve, 40))
+          throw retriableError()
+        })()
+
+      const out = await collect(withStreamRetry(attempt, 'test-model', [], { sleep: noSleep }))
+
+      // Would be 11 attempts on count alone; the budget cuts it far shorter.
+      expect(calls).toBeLessThan(11)
+      expect(calls).toBeGreaterThanOrEqual(1)
+      expect(out.at(-1)?.type).toBe('assistant')
+      expect(out.at(-1)?.isApiErrorMessage).toBe(true)
+    } finally {
+      restore()
+    }
+  })
+
+  test('budget=0 disables the wall-clock cap (count-only, legacy behavior)', async () => {
+    const restore = withEnv({
+      [RETRY_ENV]: '2',
+      CLAUDE_STREAM_TRANSIENT_RETRY_BUDGET_MS: '0',
+    })
+    try {
+      let calls = 0
+      const attempt = () =>
+        // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+        (async function* (): AsyncGenerator<any, void> {
+          calls++
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          throw retriableError()
+        })()
+
+      const out = await collect(withStreamRetry(attempt, 'test-model', [], { sleep: noSleep }))
+
+      // 1 initial + 2 retries: the elapsed time never terminates the loop.
+      expect(calls).toBe(3)
+      expect(out.at(-1)?.isApiErrorMessage).toBe(true)
+    } finally {
+      restore()
+    }
+  })
+
   test('discards the failed attempt and reports the retry before waiting', async () => {
     const restore = withEnv({ [RETRY_ENV]: undefined, [API_RETRY_ENV]: undefined })
     try {
