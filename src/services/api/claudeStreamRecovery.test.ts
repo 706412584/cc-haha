@@ -275,7 +275,10 @@ test('an idle stall after a completed tool block is re-sent on the watchdog budg
   expect(requests).toHaveLength(2)
   expect(errors).toHaveLength(0)
   const statuses = out.filter(message => message.type === 'system' && message.subtype === 'api_error')
-  expect(statuses.map(message => message.maxRetries)).toEqual([2])
+  // The fork raises the transient-retry default to 4 (relay providers need the
+  // wider window; see getMaxStreamTransientRetries); upstream asserts its own
+  // default of 2 here.
+  expect(statuses.map(message => message.maxRetries)).toEqual([4])
   const toolIds = replies.flatMap(message => message.message.content)
     .flatMap(block => block.type === 'tool_use' ? [block.id] : [])
   expect(toolIds).toEqual(['toolu_second'])
