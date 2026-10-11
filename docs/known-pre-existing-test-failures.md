@@ -270,6 +270,31 @@ Bun 的 `fs.watch` 在 Linux 与 Windows 上都把 rename 的目标事件丢掉�
 
 「1 红 55 绿」类文件（agentToolUtils、tasks、ws-memory-events 等）**不 quarantine**——不值当丢覆盖，靠本清单记录即可。
 
+## 上游 v0.7.0 团队 supervisor 测试 vs fork 恢复语义（合并时即红）
+
+`src/server/services/teamPlanRuntime.supervisor.test.ts`（上游 v0.7.0 新增，864 行）：
+合并提交 `d37c52e4` 上 **16 pass / 10 fail**，HEAD 上 16 pass / 11 fail（同一集合，
+失败项随负载波动 ±1）。在合并提交 worktree 上逐项对照，失败集合与 HEAD **逐项相同** ——
+属合并时即红，非本批次引入。
+
+- **根因**：fork 的「团队中断恢复」定制（`teamPlanRuntime.ts` 相对上游 +108 行：
+  resume 时释放 confirmed-held 任务、复用 stale member 记录、idle 通知改走 fork 语义）
+  与上游新 supervisor 测试断言的**生命周期/通知时序**不同。测试断言 fork 从不发出的
+  特定 idle 通知形状与重试计数。
+- **判定**：架构分歧，与 inbox 类分歧（根因 A）同类。测试文件本身与上游逐字节相同，
+  实现是 fork 有意定制（用户可见的恢复行为），**不改实现迎合测试**。
+- **处置**：不 quarantine（14 个用例仍提供覆盖），靠本清单记录。CI 的 `check:server`
+  会因此红——先对照本条。若要转绿，需按 fork 语义重写这些 supervisor 用例（工作量较大，
+  建议独立批次）。
+
+### `check:server` 的 ripgrep 依赖（Full Quality 工作流已修复）
+
+`nightly-quality.yml`（Full Quality）此前未安装 ripgrep，而 `check:server` 的
+SearchService / agent 加载 / E2E 等套件依赖真实 `rg` 二进制，导致 CI 上
+约 60 个用例报 `ripgrep is not available`。**已修**：在安装依赖前加
+`sudo apt-get install -y ripgrep`（与 `pr-quality.yml` 各 job 对齐）。
+本地 Windows 有 rg 时这些用例通过；上述团队 supervisor 失败与本条无关。
+
 ## 上游 v0.6.8 新增文件在 Windows 本地的失败（非合并引入）
 
 以下文件由上游 v0.6.8 引入，其**源码与测试与本仓库逐字节相同**（仅行尾差异），

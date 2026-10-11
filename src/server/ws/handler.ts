@@ -6214,7 +6214,10 @@ export async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSet
       // Skipped for the OpenAI Official built-in (no editable mapping).
       if (!isOpenAIOfficialProviderId(runtimeOverride.providerId)) {
         const provider = providers.find((p) => p.id === runtimeOverride.providerId)
-        if (provider) {
+        // A provider record without a model map (external or older configs)
+        // cannot tell us whether the persisted id is stale; skip the guard
+        // rather than dereferencing it.
+        if (provider?.models) {
           // Compare on the base id: the fork carries a runtime `[1m]` (or `:1m`)
           // suffix that the provider's slot map never stores, so a raw compare
           // would treat every 1M selection as a stale model.

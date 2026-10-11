@@ -38,6 +38,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
+      # check:server exercises the real ripgrep-backed search paths; without the
+      # binary those suites fail with "ripgrep is not available" instead of
+      # testing behavior. The PR gate installs it per job; this sweep runs every
+      # lane, so it needs the same tool.
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Install root dependencies
         run: bun install --frozen-lockfile
       - name: Install desktop dependencies
