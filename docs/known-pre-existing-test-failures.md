@@ -316,6 +316,14 @@ v0.7.0 逐字节相同，且都没有该逻辑。该用例在 macOS（APFS 对�
 Full Quality，所以从未暴露。**判定**：上游测试超前于实现，非合并回归；
 实现该回退是功能开发（建议独立批次），不是修测试。其余 3 个用例通过。
 
+### `voice/download/downloader.test.ts` 的墙钟断言（CI 负载型 flaky）
+
+`downloadAsset > classifies a stalled transfer as a timeout and keeps what arrived`
+断言「超时后保留已到达的字节数 > 0」。Full Quality 在共享 runner 上负载高，
+180ms 的传输窗口内流数据来不及到达（`Received: 0`）。本地单跑 23/23 通过。
+该文件在 fork 顶点即存在（378 行），与本次合并无关。**处置**：重跑即过；
+若持续红再考虑把「先到达的字节」做成确定性注入。
+
 ## 上游 v0.6.8 新增文件在 Windows 本地的失败（非合并引入）
 
 以下文件由上游 v0.6.8 引入，其**源码与测试与本仓库逐字节相同**（仅行尾差异），
