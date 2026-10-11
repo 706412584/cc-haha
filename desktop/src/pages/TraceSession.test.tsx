@@ -327,7 +327,9 @@ describe('TraceSession', () => {
 
     fireEvent.click(within(screen.getByTestId('trace-tree')).getByText('claude-sonnet-4-5'))
 
-    await waitFor(() => expect(sessionsApi.getTraceCall).toHaveBeenCalledWith(SESSION_ID, 'call-1'))
+    // The record locator (`at`) rides along for calls outside the indexed
+    // window; this call resolves inside it, so the third argument is undefined.
+    await waitFor(() => expect(sessionsApi.getTraceCall).toHaveBeenCalledWith(SESSION_ID, 'call-1', undefined))
     const detail = within(screen.getByTestId('trace-detail'))
     expect(await detail.findByText('Hi from the full record')).toBeInTheDocument()
 
@@ -929,7 +931,9 @@ describe('TraceSession', () => {
     expect(overview.getByText('Input → output')).toBeInTheDocument()
     expect(overview.getByText('107.6k → 11.4k')).toBeInTheDocument()
     expect(overview.getByText('Cache read → write')).toBeInTheDocument()
-    expect(overview.getByText('5m → 10k')).toBeInTheDocument()
+    // Millions take an uppercase "M" (upstream formatTokenCount change): a
+    // lowercase "5m" next to durations would read as minutes.
+    expect(overview.getByText('5M → 10k')).toBeInTheDocument()
     expect(screen.getByText('Input + output')).toBeInTheDocument()
   })
 
