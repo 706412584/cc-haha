@@ -6113,6 +6113,7 @@ export class SessionService {
         runtimeProviderId: undefined as string | null | undefined,
         runtimeModelId: undefined as string | undefined, effortLevel: undefined as string | undefined,
         thinkingEnabled: undefined as boolean | undefined,
+        openAIFastMode: undefined as boolean | undefined,
         providerTransition: undefined as SessionProviderTransition | undefined,
         customTitle: null as string | null, nonemptyCustomTitle: null as string | null,
         goalTitle: null as string | null, aiTitle: null as string | null, firstUserTitle: null as string | null,
@@ -6151,6 +6152,7 @@ export class SessionService {
             state.effortLevel = undefined
           }
           if (typeof record.thinkingEnabled === 'boolean') state.thinkingEnabled = record.thinkingEnabled
+          if (typeof record.openAIFastMode === 'boolean') state.openAIFastMode = record.openAIFastMode
           if (record.providerTransition && typeof record.providerTransition === 'object') {
             const transition = record.providerTransition as Record<string, unknown>
             if (typeof transition.sourceSessionId === 'string' && typeof transition.selectionHash === 'string') {
@@ -6188,6 +6190,7 @@ export class SessionService {
         ...(state.runtimeModelId ? { runtimeModelId: state.runtimeModelId } : {}),
         ...(state.effortLevel ? { effortLevel: state.effortLevel } : {}),
         ...(state.thinkingEnabled !== undefined ? { thinkingEnabled: state.thinkingEnabled } : {}),
+        ...(state.openAIFastMode !== undefined ? { openAIFastMode: state.openAIFastMode } : {}),
         ...(state.providerTransition ? { providerTransition: state.providerTransition } : {}),
         ...(state.repository ? { repository: state.repository } : {}),
         ...(state.worktreeSession !== undefined ? { worktreeSession: state.worktreeSession } : {}),
