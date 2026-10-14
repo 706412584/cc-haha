@@ -764,8 +764,12 @@ describe('TabBar', () => {
       const { TabBar } = await import('./TabBar')
       const { useTabStore } = await import('../../stores/tabStore')
       const { useChatStore } = await import('../../stores/chatStore')
+      const { useSettingsStore } = await import('../../stores/settingsStore')
       const onScreen = makeChatSession('idle')
       onScreen.messages = [completedTodoWriteMessage()]
+      // Fork guard: the activity button renders only when the unified panel
+      // setting is on (legacy mode keeps activity in SessionTaskBar).
+      useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
       useTabStore.setState({
         tabs: [
           { sessionId: 'session-1', title: 'On screen', type: 'session', status: 'idle' },
@@ -815,6 +819,10 @@ describe('TabBar', () => {
     const { TabBar } = await import('./TabBar')
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
+    // Fork guard: the activity button renders only when the unified panel
+    // setting is on (legacy mode keeps activity in SessionTaskBar).
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
     useTabStore.setState({
       tabs: [{ sessionId: 'session-1', title: 'Chat', type: 'session', status: 'idle' }],
       activeTabId: 'session-1',
