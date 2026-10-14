@@ -4,7 +4,7 @@
 
 > 验证方法：在 pre-merge 基线（合并 commit 的第一父，`git worktree add <tmp> <first-parent> --detach`）上重跑同一批测试。若基线同样红 → 预存。
 
-最后核对日期：2026-09-29（合并上游 v0.6.7；`check:policy` / desktop / adapters 三处重新逐条对照 fork main `601230e0`，无新增）。
+最后核对日期：2026-10-14（合并上游 v0.7.1；`check:policy` / `check:server` / desktop 三处逐条对照 fork main `0077c5b6`，无新增——本地失败集合与基线一致或更少，新文件失败均在上游干净检出复现）。
 
 ---
 
@@ -364,3 +364,13 @@ desktop 侧整套带插桩并发，负载显著高于 `desktop-checks` / `server
 - **分支长度实测类**（`branch name past the length cap` 等）：依赖文件系统/命令实际行为，Windows 与 Linux 不同（清单既有条目）。
 - **大套件资源抖动**：`MessageList.test.tsx`、`diagnosticsSettings.test.tsx` 在全套件并发跑时超时/崩溃（tinypool ERR_IPC_CHANNEL_CLOSED），**单独跑全绿**。CI 分片跑不受影响。
 - **本地 shell 携带 `CC_HAHA_TRACE_API_CALLS=1`**（桌面端启动的终端会继承）：会覆盖 managed settings，使 `trace-capture.test.ts > respects managed...` 失败。已在测试 beforeEach 隔离该 env（合并提交内）。其它从桌面 shell 跑测试的人若遇同类覆盖，同样处理。
+
+## 2026-10-14 合并上游 v0.7.1 后的 Windows 本地实测补充
+
+- **symlink EPERM（上游 v0.7.1 新增文件）**：
+  - `src/server/services/workspaceWatchState.test.ts > does not descend into a directory or follow an entry symlink`（2 用例组 1 fail）
+  - `src/server/services/workspaceWatchReconciliation.test.ts`（10 用例 2 fail：`revalidates symlink replacements...`、`rejects a directory swapped to an outside symlink...`）
+  — 均因 `fs.symlink` 在 Windows 非管理员下报 `EPERM`。已在上游干净检出（v0.7.1，同一台机器）复现**相同失败数**（1/1、8/2），非合并引入；CI(Linux) 不受影响。
+- **CLI 启动器不可直接执行（上游 v0.7.1 新增文件，不在 check:server 扫描范围）**：
+  - `src/cli/print.compaction.test.ts`（3 fail）
+  — 用例经 `Bun.spawn([join(cwd,'bin','claude-haha'), ...])` 启动 CLI；Windows 上无扩展名的 shebang 脚本不能被 spawn（`ENOENT`）。上游干净检出上同样 3/3 失败，非合并引入。CI(Linux/macOS) 上该文件走真实 CLI，需以 CI 为准。
