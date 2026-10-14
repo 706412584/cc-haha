@@ -972,6 +972,9 @@ function createRuntime(options: {
   sleep?: (delayMs: number) => Promise<void>
   proxyBridge?: SystemProxyBridgeLike
   fetchFn?: typeof fetch
+  // Passed through to deps.fetch (the migration loopback probe), not the
+  // fetchFn option the runtime uses for tunnel traffic.
+  fetch?: typeof fetch
 } = {}) {
   return new ElectronServerRuntime({
     desktopRoot: '/isolated/desktop',

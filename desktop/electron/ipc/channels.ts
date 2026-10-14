@@ -20,7 +20,6 @@ export const ELECTRON_IPC_CHANNELS = {
   shellOpen: 'desktop:shell:open',
   shellOpenPath: 'desktop:shell:open-path',
   shellShowItemInFolder: 'desktop:shell:show-item-in-folder',
-  traceOpenWindow: 'desktop:trace:open-window',
   petsList: 'desktop:pets:list',
   petsCreateFromImage: 'desktop:pets:create-from-image',
   petsCreateFromAtlas: 'desktop:pets:create-from-atlas',

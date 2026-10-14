@@ -217,12 +217,13 @@ const workspaceBrowserTab: Validator = value =>
 
 const workspaceBrowserCreate: Validator = value =>
   isRecord(value)
-  && hasOnlyKeys(value, ['tabId', 'storageId', 'url', 'bounds', 'visible'])
+  && hasOnlyKeys(value, ['tabId', 'storageId', 'url', 'webContentsId'])
   && isWorkspaceBrowserId(value.tabId)
   && isWorkspaceBrowserId(value.storageId)
   && (value.url === undefined || (typeof value.url === 'string' && value.url.length <= 8_192))
-  && (value.bounds === undefined || boundsPayload(value.bounds))
-  && (value.visible === undefined || typeof value.visible === 'boolean')
+  && typeof value.webContentsId === 'number'
+  && Number.isSafeInteger(value.webContentsId)
+  && value.webContentsId > 0
 
 const workspaceBrowserMenuLabelKeys = ['find', 'print', 'zoom', 'zoomIn', 'zoomOut', 'zoomReset', 'capture', 'pickElement', 'downloads', 'history', 'openExternal']
 
@@ -360,7 +361,6 @@ export const ELECTRON_IPC_VALIDATORS = {
   [ELECTRON_IPC_CHANNELS.shellOpen]: stringPayload,
   [ELECTRON_IPC_CHANNELS.shellOpenPath]: stringPayload,
   [ELECTRON_IPC_CHANNELS.shellShowItemInFolder]: stringPayload,
-  [ELECTRON_IPC_CHANNELS.traceOpenWindow]: sessionIdPayload,
   [ELECTRON_IPC_CHANNELS.petsList]: noPayload,
   [ELECTRON_IPC_CHANNELS.petsCreateFromImage]: petCreateFromAtlas,
   [ELECTRON_IPC_CHANNELS.petsCreateFromAtlas]: petCreateFromAtlas,
