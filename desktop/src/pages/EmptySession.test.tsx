@@ -1647,7 +1647,7 @@ describe('EmptySession', () => {
 
     async function dictate() {
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: 'Dictate' }))
+        fireEvent.click(screen.getByRole('button', { name: /^Dictate( \(.+\))?$/ }))
       })
       await act(async () => {
         fireEvent.click(await screen.findByRole('button', { name: 'Stop recording and transcribe' }))
@@ -1695,7 +1695,7 @@ describe('EmptySession', () => {
     it('starts the session with the dictated text when sent from the recording bar', async () => {
       render(<EmptySession />)
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: 'Dictate' }))
+        fireEvent.click(screen.getByRole('button', { name: /^Dictate( \(.+\))?$/ }))
       })
       // The bar takes the toolbar's row: its controls, Run included, are hidden.
       expect(screen.getByTestId('voice-recording-bar')).toBeVisible()
@@ -1748,7 +1748,7 @@ describe('EmptySession', () => {
     it('releases the microphone when the page is left mid-recording', async () => {
       const { unmount } = render(<EmptySession />)
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: 'Dictate' }))
+        fireEvent.click(screen.getByRole('button', { name: /^Dictate( \(.+\))?$/ }))
       })
       await screen.findByRole('button', { name: 'Stop recording and transcribe' })
 

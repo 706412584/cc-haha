@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from 'bun:test'
-import { existsSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { runSwiftChecks } from './run-swift-checks'
 
@@ -76,6 +76,23 @@ describe('Swift platform checks', () => {
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toContain('could not remove sandbox')
     expect(warnings[0]).toContain('EROFS')
+  })
+
+  // Upstream #1511: the default remover opens a test-created read-only tree
+  // back up before deleting, so a leftover cannot redden a passing lane.
+  test('a passing run stays green when a test leaves a read-only directory behind', async () => {
+    let home = ''
+    const run = mock(async (_command: string[], options: { env: Record<string, string> }) => {
+      home = options.env.HOME!
+      const locked = join(home, 'tmp', 'locked')
+      mkdirSync(join(locked, 'inner'), { recursive: true })
+      writeFileSync(join(locked, 'inner', 'file'), 'x')
+      chmodSync(join(locked, 'inner'), 0o500)
+      chmodSync(locked, 0o500)
+      return 0
+    })
+    expect(await runSwiftChecks({ platform: 'darwin', run })).toBe(0)
+    expect(existsSync(home)).toBe(false)
   })
 
   test('cleans the sandbox and reports a Swift launch failure', async () => {

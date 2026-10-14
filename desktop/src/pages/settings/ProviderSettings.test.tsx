@@ -58,7 +58,7 @@ describe('ApiSmart sponsor provider', () => {
     expect(within(sponsor).queryByText('New')).not.toBeInTheDocument()
     expect(within(sponsor).queryByLabelText('Sponsor')).not.toBeInTheDocument()
     fireEvent.click(sponsor)
-    expect(dialog.getByDisplayValue('https://direct.aruhub.com:8443')).toBeInTheDocument()
+    expect(dialog.getByDisplayValue('https://agent.aruhub.com')).toBeInTheDocument()
     expect(dialog.getAllByDisplayValue('claude-opus-5')).toHaveLength(2)
     expect(dialog.getAllByDisplayValue('claude-sonnet-5')).toHaveLength(2)
     // No signup offer copy survives the de-advertising policy.
@@ -71,7 +71,7 @@ describe('ApiSmart sponsor provider', () => {
     fireEvent.click(dialog.getByRole('button', { name: 'Add' }))
     await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({
       presetId: 'aruhub',
-      baseUrl: 'https://direct.aruhub.com:8443',
+      baseUrl: 'https://agent.aruhub.com',
       apiFormat: 'anthropic',
       authStrategy: 'api_key',
       apiKey: 'fake-aruhub-key',
@@ -98,13 +98,13 @@ describe('ApiSmart sponsor provider', () => {
 
     expect(dialog.getByText(/point the base URL at an endpoint that serves it/)).toBeInTheDocument()
     // The address is the user's to replace, so switching must not rewrite it.
-    expect(dialog.getByDisplayValue('https://direct.aruhub.com:8443')).toBeInTheDocument()
+    expect(dialog.getByDisplayValue('https://agent.aruhub.com')).toBeInTheDocument()
 
     fireEvent.change(dialog.getAllByPlaceholderText('sk-...')[0]!, { target: { value: 'fake-aruhub-key' } })
     fireEvent.click(dialog.getByRole('button', { name: 'Add' }))
     await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({
       presetId: 'aruhub',
-      baseUrl: 'https://direct.aruhub.com:8443',
+      baseUrl: 'https://agent.aruhub.com',
       apiFormat: 'openai_chat',
       apiKey: 'fake-aruhub-key',
     })))

@@ -15,23 +15,6 @@ function cliCommand(...args: string[]): string[] {
     : ['./bin/claude-haha', ...args]
 }
 
-/**
- * Feed stdin through a pipe rather than `new Blob([...])`.
- *
- * Measured, per platform, with the real CLI and this fixture:
- *   Linux:   Blob → 0 bytes of stdout;  pipe → 173 bytes
- *   Windows: Blob → 173 bytes;          pipe → 173 bytes
- * `Bun.spawn`'s Blob stdin does deliver to a plain child on both platforms
- * (verified separately: 11/11 bytes), so the Linux failure is specific to how
- * this CLI reads its input stream — it produces nothing and exits 0. The pipe
- * form is correct on both, so use it unconditionally rather than branching on
- * the platform and leaving Linux untested.
- */
-function spawnCli(argv: string[], env: Record<string, string>) {
-  const child = Bun.spawn(argv, { env, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
-  return child
-}
-
 function completion() {
   const events = [
     { type: 'message_start', message: { id: 'msg_fixture', type: 'message', role: 'assistant', model: 'claude-sonnet-4-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } },
@@ -42,6 +25,16 @@ function completion() {
     { type: 'message_stop' },
   ]
   return events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('')
+}
+
+// Feed stdin through a pipe, the way the server drives the CLI. On Linux a Blob
+// stdin does not survive bin/claude-haha re-spawning the CLI with inherited stdin:
+// the CLI reads nothing and exits 0 with empty output.
+function spawnWithInput(command: string[], env: Record<string, string>, input: string) {
+  const child = Bun.spawn(command, { env, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
+  child.stdin.write(input)
+  child.stdin.end()
+  return child
 }
 
 test('headless session inbox acknowledges queued then consumed and deduplicates control deliveries', async () => {
@@ -61,9 +54,7 @@ test('headless session inbox acknowledges queued then consumed and deduplicates 
   const payload = { subtype: 'enqueue_session_message', start_if_idle: true, message_id: 'stable', sender_session_id: 'peer', text: '/clear @missing-fixture-file.txt' }
   const input = ['first', 'retry'].map(request_id => JSON.stringify({ type: 'control_request', request_id, request: payload })).join('\n') + '\n'
   try {
-    const child = spawnCli(cliCommand('--bare', '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'), env)
-    child.stdin.write(input)
-    child.stdin.end()
+    const child = spawnWithInput(cliCommand('--bare', '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'), env, input)
     const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
     expect({ code, stderr }).toMatchObject({ code: 0 })
     const events = stdout.trim().split('\n').map(line => JSON.parse(line))
@@ -74,9 +65,7 @@ test('headless session inbox acknowledges queued then consumed and deduplicates 
     expect(events.filter(event => event.subtype === 'session_message_receipt')).toMatchObject([{ message_id: 'stable', status: 'consumed' }])
     expect(requests).toBe(1)
     const sessionId = events.find(event => event.subtype === 'session_message_receipt').session_id
-    const resumed = spawnCli(cliCommand('--bare', '-p', '--resume', sessionId, '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'), env)
-    resumed.stdin.write(input)
-    resumed.stdin.end()
+    const resumed = spawnWithInput(cliCommand('--bare', '-p', '--resume', sessionId, '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'), env, input)
     const [resumedText, resumedError, resumedCode] = await Promise.all([new Response(resumed.stdout).text(), new Response(resumed.stderr).text(), resumed.exited])
     expect({ code: resumedCode, stderr: resumedError, stdout: resumedText }).toMatchObject({ code: 0 })
     const resumedEvents = resumedText.trim().split('\n').map(line => JSON.parse(line))

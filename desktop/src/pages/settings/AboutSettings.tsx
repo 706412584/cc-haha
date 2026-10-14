@@ -5,6 +5,7 @@ import { useTranslation } from '../../i18n'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { Card } from '@/components/ui/Card'
+import { Switch } from '@/components/ui/Switch'
 import type { UpdateProxyMode } from '../../types/settings'
 import { MarkdownRenderer } from '../../components/markdown/MarkdownRenderer'
 import { useUpdateStore } from '../../stores/updateStore'
@@ -39,6 +40,8 @@ export function AboutSettings() {
   const [version, setVersion] = useState('')
   const updateProxy = useSettingsStore((s) => s.updateProxy)
   const setUpdateProxy = useSettingsStore((s) => s.setUpdateProxy)
+  const autoUpdateEnabled = useSettingsStore((s) => s.autoUpdateEnabled)
+  const setAutoUpdateEnabled = useSettingsStore((s) => s.setAutoUpdateEnabled)
   const updateStatus = useUpdateStore((s) => s.status)
   const availableVersion = useUpdateStore((s) => s.availableVersion)
   const releaseNotes = useUpdateStore((s) => s.releaseNotes)
@@ -54,6 +57,8 @@ export function AboutSettings() {
   const [updateProxyDraft, setUpdateProxyDraft] = useState(updateProxy)
   const [updateProxySaveError, setUpdateProxySaveError] = useState<string | null>(null)
   const [isSavingUpdateProxy, setIsSavingUpdateProxy] = useState(false)
+  const [isSavingAutoUpdate, setIsSavingAutoUpdate] = useState(false)
+  const [autoUpdateSaveError, setAutoUpdateSaveError] = useState<string | null>(null)
   const [communityOpen, setCommunityOpen] = useState(false)
 
   useEffect(() => {
@@ -73,8 +78,8 @@ export function AboutSettings() {
   }, [])
 
   useEffect(() => {
-    void initialize()
-  }, [initialize])
+    if (autoUpdateEnabled) void initialize()
+  }, [autoUpdateEnabled, initialize])
 
   useEffect(() => {
     setUpdateProxyDraft(updateProxy)
@@ -135,6 +140,18 @@ export function AboutSettings() {
       setUpdateProxySaveError(error instanceof Error ? error.message : String(error))
     } finally {
       setIsSavingUpdateProxy(false)
+    }
+  }
+
+  const saveAutoUpdateEnabled = async (enabled: boolean) => {
+    setIsSavingAutoUpdate(true)
+    setAutoUpdateSaveError(null)
+    try {
+      await setAutoUpdateEnabled(enabled)
+    } catch (error) {
+      setAutoUpdateSaveError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setIsSavingAutoUpdate(false)
     }
   }
 
@@ -201,6 +218,22 @@ export function AboutSettings() {
           >
             {t('update.checkNow')}
           </Button>
+        </div>
+
+        {/* Upstream #1482: auto-update master switch, rendered in the fork card style. */}
+        <div className="mt-4 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3">
+          <Switch
+            checked={autoUpdateEnabled}
+            disabled={isSavingAutoUpdate}
+            onChange={(enabled) => void saveAutoUpdateEnabled(enabled)}
+            label={t('update.autoUpdate')}
+            description={t('update.autoUpdateDescription')}
+          />
+          {autoUpdateSaveError && (
+            <p role="alert" className="mt-1 text-xs leading-[1.5] text-[var(--color-error)]">
+              {t('update.autoUpdateSaveFailed', { error: autoUpdateSaveError })}
+            </p>
+          )}
         </div>
 
         <div className="mt-4 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3">

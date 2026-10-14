@@ -443,6 +443,11 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => {
           ...(session.thinkingEnabled !== undefined
             ? { thinkingEnabled: session.thinkingEnabled }
             : {}),
+          ...(session.openAIFastMode !== undefined
+            ? { openAIFastMode: session.openAIFastMode }
+            : current?.providerId === session.runtimeProviderId && current.modelId === session.runtimeModelId && current.openAIFastMode !== undefined
+              ? { openAIFastMode: current.openAIFastMode }
+              : {}),
         })
         const matchesCurrent = selection &&
           current?.providerId === selection.providerId &&
@@ -451,7 +456,8 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => {
           // Code Council fork behaviour: a `thinkingEnabled` override that changed on the
           // server must still be applied, otherwise toggling thinking in the CLI leaves the
           // desktop composer showing a stale override.
-          current.thinkingEnabled === selection.thinkingEnabled
+          current.thinkingEnabled === selection.thinkingEnabled &&
+          (current.openAIFastMode ?? false) === (selection.openAIFastMode ?? false)
         const pending = current && pendingRuntimes.has(current)
         if (pending && !matchesCurrent) continue
         if (!selection) {

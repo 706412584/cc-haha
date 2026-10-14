@@ -52,7 +52,7 @@ async function ensureLeaderStartedForPlanAction(
 
 export async function handleTeamsApi(
   req: Request,
-  _url: URL,
+  requestUrl: URL,
   segments: string[],
 ): Promise<Response> {
   try {
@@ -79,7 +79,12 @@ export async function handleTeamsApi(
       const action = segments[4]
       if (action === 'approve') {
         await ensureLeaderStartedForPlanAction(teamName, parsed.data, new URL(req.url), 'review_pending')
-        return Response.json({ plan: await teamPlanService.approve(teamName, parsed.data) })
+        return Response.json({ plan: await teamPlanService.approve(teamName, parsed.data, {
+          // Upstream #1479 also threads a leader starter into approve itself:
+          // its state check is narrower (review_pending only) and its failure
+          // message names the plan, so both run and the first refusal wins.
+          startLeader: sessionId => ensureCliSessionStartedForControl(sessionId, requestUrl),
+        }) })
       }
       if (action === 'resume') {
         // Resume re-launches workers too, so it needs the same live leader.

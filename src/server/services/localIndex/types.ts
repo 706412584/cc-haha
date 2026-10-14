@@ -48,6 +48,7 @@ export type SessionListSummary = {
   runtimeModelId?: string
   effortLevel?: string
   thinkingEnabled?: boolean
+  openAIFastMode?: boolean
   repository?: PersistedRepositorySession
   worktreeSession?: PersistedWorktreeSession | null
 }

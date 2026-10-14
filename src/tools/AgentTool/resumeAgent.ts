@@ -10,6 +10,7 @@ import { asAgentId } from '../../types/ids.js'
 import { runWithAgentContext } from '../../utils/agentContext.js'
 import { runWithCwdOverride } from '../../utils/cwd.js'
 import { logForDebugging } from '../../utils/debug.js'
+import { errorMessage } from '../../utils/errors.js'
 import {
   createUserMessage,
   filterOrphanedThinkingOnlyMessages,
@@ -37,6 +38,7 @@ import { FORK_AGENT, isForkSubagentEnabled } from './forkSubagent.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 import { isBuiltInAgent } from './loadAgentsDir.js'
 import { resolvePersistedAgentType, runAgent } from './runAgent.js'
+import { reserveSubagentSlot } from './subagentConcurrency.js'
 
 export type ResumeAgentResult = {
   agentId: string
@@ -74,6 +76,14 @@ export async function resumeAgentBackground({
   canUseTool: CanUseToolFn
   invokingRequestId?: string
 }): Promise<ResumeAgentResult> {
+  // 恢复已结束的普通 SubAgent 也会启动模型，必须与新建任务共用名额。
+  const releaseSubagentSlot = reserveSubagentSlot()
+  let slotTransferred = false
+  using _subagentSlot = {
+    [Symbol.dispose]: () => {
+      if (!slotTransferred) releaseSubagentSlot()
+    },
+  }
   const startTime = Date.now()
   const appState = toolUseContext.getAppState()
   // In-process teammates get a no-op setAppState; setAppStateForTasks
@@ -280,7 +290,7 @@ export async function resumeAgentBackground({
   const wrapWithCwd = <T>(fn: () => T): T =>
     resumedWorktreePath ? runWithCwdOverride(resumedWorktreePath, fn) : fn()
 
-  void runWithAgentContext(asyncAgentContext, () =>
+  const asyncLifecycle = runWithAgentContext(asyncAgentContext, () =>
     wrapWithCwd(() =>
       runAsyncAgentLifecycle({
         taskId: agentBackgroundTask.agentId,
@@ -318,6 +328,10 @@ export async function resumeAgentBackground({
       }),
     ),
   )
+  slotTransferred = true
+  void asyncLifecycle.finally(releaseSubagentSlot).catch(error => {
+    logForDebugging(`Async agent resume lifecycle failed: ${errorMessage(error)}`)
+  })
 
   return {
     agentId,

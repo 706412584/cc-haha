@@ -277,13 +277,13 @@ test('catalog upgrades retain the old installation on failure and commit the new
 })
 test('legacy missing installed version advertises an update; invalid stored versions cannot select runtime paths', async () => {
   const f = fixture()
+  // Versionless records only exist from macOS/Windows installs (the platforms
+  // connectors ship for), so pin one instead of borrowing the test host's.
+  f.deps.platform = 'darwin-arm64'
+  f.deps.definitions = [{ ...definition, platforms: ['darwin-arm64'] }]
   try {
     const record = { installed: true, enabled: false, sharedCredentialsAcknowledged: true, installation: {
-      // A legacy directory names a platform the catalog actually publishes.
-      // Using the host's own platform made this pass only where connectors are
-      // installable: on Linux the name matched nothing, the legacy version fell
-      // through to the catalog's, and the assertions below saw '1.0.0'.
-      directory: join(f.deps.root, 'runtime', 'feishu', '0.9.0-win32-x64'), command: 'legacy', args: [], env: {},
+      directory: join(f.deps.root, 'runtime', 'feishu', '0.9.0-darwin-arm64'), command: 'legacy', args: [], env: {},
     } }
     writeFileSync(join(f.deps.root, 'state.json'), JSON.stringify({ schemaVersion: 1, connectors: { feishu: record } }))
     const legacy = new ConnectorService(f.deps)

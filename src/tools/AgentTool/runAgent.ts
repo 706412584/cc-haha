@@ -81,7 +81,8 @@ import type { ContentReplacementState } from '../../utils/toolResultStorage.js'
 import { createAgentId } from '../../utils/uuid.js'
 import { emitAgentRunMessage } from '../../utils/sdkEventQueue.js'
 import { getTeammateContext } from '../../utils/teammateContext.js'
-import { resolveAgentTools } from './agentToolUtils.js'
+import { filterToolsForAgent, resolveAgentTools } from './agentToolUtils.js'
+import { createDenialTrackingState } from '../../utils/permissions/denialTracking.js'
 import {
   createStallDetector,
   type StallStatus,
@@ -329,6 +330,7 @@ export async function* runAgent({
   toolUseContext,
   canUseTool,
   isAsync,
+  isBackgrounded,
   canShowPermissionPrompts,
   forkContextMessages,
   querySource,
@@ -359,6 +361,8 @@ export async function* runAgent({
   toolUseContext: ToolUseContext
   canUseTool: CanUseToolFn
   isAsync: boolean
+  /** 前台转后台时切换交互边界，但不重建查询或重放已执行的工具。 */
+  isBackgrounded?: () => boolean
   /** Whether this agent can show permission prompts. Defaults to !isAsync.
    * Set to true for in-process teammates that run async but share the terminal. */
   canShowPermissionPrompts?: boolean
@@ -553,6 +557,7 @@ export async function* runAgent({
     isRepositoryAgent && requestedAgentPermissionMode === 'bypassPermissions'
       ? undefined
       : requestedAgentPermissionMode
+  const runsInBackground = () => isAsync || (isBackgrounded?.() ?? false)
   const agentGetAppState = () => {
     const state = toolUseContext.getAppState()
     let toolPermissionContext = state.toolPermissionContext
@@ -582,7 +587,7 @@ export async function* runAgent({
         ? !canShowPermissionPrompts
         : agentPermissionMode === 'bubble'
           ? false
-          : isAsync
+          : runsInBackground()
     if (shouldAvoidPrompts) {
       toolPermissionContext = {
         ...toolPermissionContext,
@@ -595,7 +600,7 @@ export async function* runAgent({
     // Since these are background agents, waiting is fine — the user should
     // only be interrupted when automated checks can't resolve the permission.
     // This applies to bubble mode (always) and explicit canShowPermissionPrompts.
-    if (isAsync && !shouldAvoidPrompts) {
+    if (runsInBackground() && !shouldAvoidPrompts) {
       toolPermissionContext = {
         ...toolPermissionContext,
         awaitAutomatedChecksBeforeDialog: true,
@@ -803,15 +808,19 @@ export async function* runAgent({
       ? uniqBy([...resolvedTools, ...agentMcpTools], 'name')
       : resolvedTools
 
+  const backgroundTools = isBackgrounded && !useExactTools
+    ? filterToolsForAgent({ tools: allTools, isBuiltIn: isBuiltInAgent(agentDefinition), isAsync: true, permissionMode: agentDefinition.permissionMode })
+    : allTools
+
   // Build agent-specific options
   const agentOptions: ToolUseContext['options'] = {
-    isNonInteractiveSession: useExactTools
-      ? toolUseContext.options.isNonInteractiveSession
-      : isAsync
-        ? true
-        : (toolUseContext.options.isNonInteractiveSession ?? false),
+    get isNonInteractiveSession() {
+      return useExactTools
+        ? toolUseContext.options.isNonInteractiveSession
+        : runsInBackground() || (toolUseContext.options.isNonInteractiveSession ?? false)
+    },
     appendSystemPrompt: toolUseContext.options.appendSystemPrompt,
-    tools: allTools,
+    get tools() { return runsInBackground() ? backgroundTools : allTools },
     commands: [],
     debug: toolUseContext.options.debug,
     verbose: toolUseContext.options.verbose,
@@ -858,6 +867,15 @@ export async function* runAgent({
       agentDefinition.criticalSystemReminder_EXPERIMENTAL,
     contentReplacementState,
   })
+
+  if (isBackgrounded) {
+    const foregroundSetAppState = agentToolUseContext.setAppState
+    agentToolUseContext.setAppState = updater => {
+      if (!runsInBackground()) foregroundSetAppState(updater)
+    }
+    // query 会复制上下文，计数对象必须从启动起稳定，转后台不能丢失或污染父回合。
+    agentToolUseContext.localDenialTracking = createDenialTrackingState()
+  }
 
   // Preserve tool use results for subagents with viewable transcripts (in-process teammates)
   if (preserveToolUseResults) {

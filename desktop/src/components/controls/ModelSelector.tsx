@@ -540,6 +540,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   const selectedRuntimeThinkingEnabled =
     activeRuntimeSelection?.thinkingEnabled ?? globalThinkingEnabled
   const showEffortPill = canEditRuntimeEffort && !!selectedRuntimeEffort && runtimeEffortOptions.length > 0
+  const showOpenAIFastMode = activeRuntimeSelection?.providerId === OPENAI_OFFICIAL_PROVIDER_ID && lockedProviderId === undefined
 
   const navigateToProviderSettings = useCallback(() => {
     setOpen(false)
@@ -642,6 +643,11 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
       ...activeRuntimeSelection,
       effortLevel: level,
     })
+  }
+
+  const handleOpenAIFastModeChange = (enabled: boolean) => {
+    if (!activeRuntimeSelection || !showOpenAIFastMode) return
+    handleRuntimeSelect({ ...activeRuntimeSelection, openAIFastMode: enabled })
   }
 
   const hasMatchingModels = isRuntimeScoped
@@ -755,6 +761,11 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
                             providerId: choice.providerId,
                             modelId: model.id,
                             ...(nextEffort ? { effortLevel: nextEffort } : {}),
+                            ...(choice.providerId === OPENAI_OFFICIAL_PROVIDER_ID &&
+                              activeRuntimeSelection?.providerId === OPENAI_OFFICIAL_PROVIDER_ID &&
+                              activeRuntimeSelection.openAIFastMode !== undefined
+                              ? { openAIFastMode: activeRuntimeSelection.openAIFastMode }
+                              : {}),
                           })
                         }}
                         aria-current={isSelected || undefined}
@@ -983,7 +994,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
             ref={effortButtonRef}
             type="button"
             disabled={disabled || lockedProviderId !== undefined}
-            aria-label={`${t('model.effort')}: ${effortLabels[selectedRuntimeEffort]}`}
+            aria-label={`${t('model.effort')}: ${effortLabels[selectedRuntimeEffort]}${showOpenAIFastMode && activeRuntimeSelection?.openAIFastMode ? ` · ${t('model.openAIFastMode')}` : ''}`}
             aria-expanded={effortOpen}
             onClick={() => {
               if (disabled) return
@@ -997,6 +1008,9 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
             <span className="inline-flex h-[18px] items-center rounded-full bg-[var(--color-surface-container)] px-1.5 text-[11px]">
               {effortLabels[selectedRuntimeEffort]}
             </span>
+            {showOpenAIFastMode && activeRuntimeSelection?.openAIFastMode && (
+              <span className="text-[11px] text-[var(--color-text-secondary)]">{t('model.openAIFastMode')}</span>
+            )}
             <ChevronDown aria-hidden="true" size={12} strokeWidth={2} className="flex-shrink-0" />
           </button>
         )}
@@ -1011,6 +1025,10 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
           labels={effortLabels}
           ariaLabel={t('model.effort')}
           onChange={handleRuntimeEffortSelect}
+          {...(showOpenAIFastMode ? {
+            fastMode: activeRuntimeSelection?.openAIFastMode === true,
+            onFastModeChange: handleOpenAIFastModeChange,
+          } : {})}
           onClose={() => setEffortOpen(false)}
         />
       )}
