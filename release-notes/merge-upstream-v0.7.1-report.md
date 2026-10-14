@@ -107,6 +107,16 @@
 - **本机 `check:server` 退出码不可用**（Windows EBUSY,基线同红,见已知失败清单）;本轮以「基线失败集合 ⊆」比对 + 上游新增测试逐个跑补齐覆盖。CI(Linux) 为最终权威。
 - **`src/` 无独立类型检查 lane**（既有问题）;root 改动由测试验证。
 - **上游新增测试的 Windows 平台差异已登记**（print.compaction / workspaceWatch 系列）;CI 上需确认其绿。
+- **CI `server-checks` 因已登记的 supervisor 预存红恒红**（12 用例,随负载 ±1 波动）;`coverage-checks` 为 advisory。PR 门禁的 `pr-quality-gate` 因此红——与文档既有判定一致（架构分歧,不 quarantine,待独立批次按 fork 语义重写用例）。
+
+## 本地打包（v0.8.7）
+
+- **产物**:`desktop/build-artifacts/windows-x64/Claude-Code-Haha-0.8.7-win-x64.exe`(208.7 MB,NSIS) + `win-unpacked`(`Code Council.exe` FileVersion 0.8.7)。
+- **package-smoke**:PASS(静态产物检查,ripgrep/node-pty/sidecar 全在)。
+- **构建路径**:sidecars(Bun.build)→plugin-seed→renderer(vite)→electron main→electron-builder(NSIS x64,镜像走 npmmirror)。
+- **本机环境注记**:
+  - `build-windows-x64.ps1` 硬性要求 VS 2022 Build Tools(vswhere),本机无——但脚本中 MSVC 环境导入只服务于可选的 `REBUILD_NATIVE=1`(node-pty 走 prebuilds、sidecars 走 Bun.build、Electron 为预编译包),本轮按脚本等价步骤手动执行,全部成功。
+  - `winCodeSign-2.6.0` 缓存的 7z 在非管理员下因 `darwin/10.12/lib` 的符号链接报 EPERM,解压后目录从未重命名为 `winCodeSign-2.6.0`,导致 electron-builder 每次重试新目录;手工补全 dylib 并以最终名落盘后缓存命中。
 
 ## 独立审核结论
 
