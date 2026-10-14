@@ -82,13 +82,20 @@ describe('Swift platform checks', () => {
   // back up before deleting, so a leftover cannot redden a passing lane.
   test('a passing run stays green when a test leaves a read-only directory behind', async () => {
     let home = ''
+    let lockedTreeBuilt = false
     const run = mock(async (_command: string[], options: { env: Record<string, string> }) => {
       home = options.env.HOME!
-      const locked = join(home, 'tmp', 'locked')
-      mkdirSync(join(locked, 'inner'), { recursive: true })
-      writeFileSync(join(locked, 'inner', 'file'), 'x')
-      chmodSync(join(locked, 'inner'), 0o500)
-      chmodSync(locked, 0o500)
+      // Two invocations (swift, then packaging); build the tree once. On
+      // Windows a second recursive mkdir into the chmod-0o500 directory
+      // throws EEXIST where POSIX treats it as success.
+      if (!lockedTreeBuilt) {
+        lockedTreeBuilt = true
+        const locked = join(home, 'tmp', 'locked')
+        mkdirSync(join(locked, 'inner'), { recursive: true })
+        writeFileSync(join(locked, 'inner', 'file'), 'x')
+        chmodSync(join(locked, 'inner'), 0o500)
+        chmodSync(locked, 0o500)
+      }
       return 0
     })
     expect(await runSwiftChecks({ platform: 'darwin', run })).toBe(0)
