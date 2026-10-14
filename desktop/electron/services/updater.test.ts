@@ -183,6 +183,22 @@ describe('Electron updater service', () => {
     expect(localUpdater.checkForUpdates).toHaveBeenCalledTimes(3)
   })
 
+  it('disables differential download so update downloads run at full bandwidth', () => {
+    const localUpdater = fakeUpdater()
+
+    void new ElectronUpdaterService(localUpdater)
+
+    expect(localUpdater.disableDifferentialDownload).toBe(true)
+  })
+
+  it('maps proxy settings to the updater net session proxy config', () => {
+    expect(updaterSessionProxyConfig(null)).toEqual({ mode: 'system' })
+    expect(updaterSessionProxyConfig('http://127.0.0.1:7890')).toEqual({
+      proxyRules: 'http://127.0.0.1:7890',
+      proxyBypassRules: '<local>',
+    })
+  })
+
   it('does not hide non-metadata updater failures', async () => {
     const service = new ElectronUpdaterService(updater)
     updater.checkForUpdates.mockRejectedValueOnce(new Error('feed unavailable'))
