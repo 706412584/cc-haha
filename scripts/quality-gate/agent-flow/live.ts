@@ -340,8 +340,13 @@ export const LIVE_SCENARIO_RUNNERS: Record<string, LiveScenarioRunner> = {
       await socket.waitFor((m) => m.type === 'content_delta', ctx.stepTimeoutMs, 'first content_delta', start)
 
       socket.send({ type: 'stop_generation' })
+      // The fork emits `generation_stopped` as its settle signal and suppresses
+      // the CLI's interrupted result (which upstream surfaces as
+      // message_complete); accept either shape so this lane runs on both.
       await socket.waitFor(
-        (m) => m.type === 'message_complete' || m.type === 'session_state_changed',
+        (m) => m.type === 'message_complete' ||
+          m.type === 'session_state_changed' ||
+          (m.type === 'system_notification' && (m as { subtype?: string }).subtype === 'generation_stopped'),
         ctx.stepTimeoutMs,
         'stream to settle after stop',
         start,

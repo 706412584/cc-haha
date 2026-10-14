@@ -174,7 +174,16 @@ export function createMockOnlyRunners(requests: readonly RecordedRequest[]): Rec
           ctx.stepTimeoutMs, 'pending AskUserQuestion', questionStart)
         const stopStart = socket.messages.length
         socket.send({ type: 'stop_generation' })
-        await socket.waitFor(m => m.type === 'message_complete', ctx.stepTimeoutMs, 'interrupted result', stopStart)
+        // The fork emits `generation_stopped` as its settle signal and suppresses
+        // the CLI's interrupted result (which upstream surfaces as
+        // message_complete); accept either shape so this lane runs on both.
+        await socket.waitFor(
+          m => m.type === 'message_complete' ||
+            (m.type === 'system_notification' && (m as { subtype?: string }).subtype === 'generation_stopped'),
+          ctx.stepTimeoutMs,
+          'interrupted result',
+          stopStart,
+        )
         const compactStart = socket.messages.length
         socket.send({ type: 'user_message', content: '/compact' })
         const progress = await socket.waitFor(m => m.type === 'status' && m.state === 'compacting' &&

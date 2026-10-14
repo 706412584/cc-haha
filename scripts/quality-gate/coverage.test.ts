@@ -814,7 +814,10 @@ describe('coverage subprocess output', () => {
         console.warn = originalWarn
       }
       expect(result.exitCode).toBe(0)
-      expect(result.output).toContain('cc-haha-coverage-test-')
+      // The fork shortened this prefix in 07f66bbbc ("cch-cov-") to keep
+      // Windows paths under the legacy MAX_PATH budget; runCommand is the
+      // fork's implementation, so its prefix is the correct expectation.
+      expect(result.output).toContain('cch-cov-')
       expect(existsSync(result.output)).toBe(false)
       expect(warnings).toEqual([])
     } finally {

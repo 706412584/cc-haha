@@ -129,6 +129,9 @@ describe('Windows window and pinned taskbar identity', () => {
         preloadPath: () => 'preload.cjs',
         MIN_WINDOW_WIDTH: 400,
         MIN_WINDOW_HEIGHT: 300,
+        // The fork's createMainWindow reads the background-activity preference
+        // to set backgroundThrottling; the sandbox needs the symbol defined.
+        readKeepActiveInBackground: () => true,
         BrowserWindow,
         resolveWindowsWindowIcon: (paths: Parameters<typeof resolveWindowsWindowIcon>[0]) => resolveWindowsWindowIcon(paths, 'win32'),
         applyWindowsTaskbarIdentity: (host: Parameters<typeof applyWindowsTaskbarIdentity>[0], paths: Parameters<typeof applyWindowsTaskbarIdentity>[1]) => applyWindowsTaskbarIdentity(host, paths, 'win32'),
