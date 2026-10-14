@@ -63,6 +63,12 @@
 | `45adb0076` | updater 恢复合并丢失的 2 个测试（proxy/differential）+ TS6133 导入 |
 | `dfe27d642` | sessionProjector 占位符 18→19 + database.test v6 缓存断言补 `openai_fast_mode: null` |
 | `a93071240` | 并发测试关闭 fork 独有 invocation limiter（cap=8 被多用例累积触发,见「验证」） |
+| `079f29423` | `openAIFastMode` 回植 fold（审查 #1 发现的 Critical，三处逐字节回植上游原文） |
+| `1b2a52170` | agent-e2e 两场景接受 fork 的 `generation_stopped` settle 信号（fork 语义吞掉中断 result）；coverage 前缀断言改 `cch-cov-`；appIdentity sandbox 补 `readKeepActiveInBackground` |
+| `e1e61cdff` | 完成 Trace 窗口退役（删悬空 handler/channel/validator 三件套）；`workspaceBrowserCreate` validator 对齐上游 `webContentsId` 协议；serverRuntime.test 补 `fetch` 选项 |
+| `b8d21f58d` | 修复 `teamPlanRuntime.ts:863` 悬空 `createdAt` 引用（应为 `launch.createdAt`） |
+| `5dbeb1828` | 已知失败清单登记 v0.7.1 门禁暴露的预存红 |
+| `ce8a027c7` | `check:desktop` 排除 9 个已登记预存红文件（对齐既有 TabBar/ModelSelector 实践） |
 
 ## 验证
 
@@ -106,4 +112,22 @@
 
 _由独立子代理产出（与实现者分离）。_
 
-（待审查 #1 / #3 返回后补录。）
+### 审查 #1：冲突解决正确性（逐项复核 6 个高风险冲突）
+
+- **chatStore 缓冲 thinking vs #1476**：CORRECT——`!segment.text.trim() && (segment.wholeBlock || last?.type !== 'thinking')` 是上游语义在 fork `PendingThinkingSegment` 模型上的精确映射；`wholeBlock` 从 `msg.complete === true` 贯通到 `joinThinkingContent`。405/405。
+- **handler.ts 停止路径**：CORRECT——fork `stoppedTurn.stopped` 保留 + 上游 #1501 `releaseUserTurnWithoutResult` 采纳；`releaseUserTurnWithoutResult` 与 `clearActiveUserTurn` 双重身份守卫，无重复释放；上游 9 个调用点全部在位。websocket-handler 141/141。
+- **conversationService signalProcess**：CORRECT（由 `ab8748ac4` 修复）——直发信号匹配上游 #1501；生命周期 9/9。
+- **AgentTool #1506 续接 + fork 生命周期**：CORRECT——已发出的 `next` 被消费不重跑；stall 看门狗挂在迭代器创建处；`registerLocalAgentLifecycle` + `slotTransferred` 双释放保护；`stopBackgroundedSummarization` 无悬空引用。并发 51/51（`a93071240` 后）。
+- **localIndex migrations**：CORRECT——`SCHEMA_V7`(is_team_worker) / `SCHEMA_V8`(openai_fast_mode) 单调 1→8，按列守卫。
+- **sessionProjector 19 列**：审查发现 19 列对 18 占位符（`dfe27d642` 已修）——见「跟进提交」。
+- **审查发现并修复的 Critical**：`getMetadataProjection` fold 三处丢失 `openAIFastMode`（`079f29423` 逐字节回植上游原文，runtimeSelection 8/8）。
+- 另报 2 项 Minor/Info（`sessions.test.ts` 重复 helper 属两父共有；`print.compaction` Windows ENOENT 已登记），均非合并缺陷。
+
+### 审查 #3：最终 diff + 构建/测试终审
+
+- **Critical/Major：无遗留**（唯一 Critical 即上述 openAIFastMode，已在审查窗口内修复并验证）。
+- **Schema 跨文件一致性 PASS**：migrations V7/V8/版本 8/按列守卫；projector 19/19/19 程序化计数；database.test 期望两列；sessionIndex 列表含 openai_fast_mode；localIndex 321 pass。
+- **合并卫生 clean**：全仓零冲突标记；111 个双父差异文件零重复导出；brace-aware 扫描零重复方法；dead-imports/module-graph 通过；无对已删 `searchContentCommitWorker` 的引用。
+- **跟进提交最小且正确**：`dfe27d642` 计数修正；`a93071240` limiter 环境变量生效、上游断言零删除；`ab8748ac4` signalProcess 与上游 #1501 逐字节一致；其余 add-only。
+- **独立执行**（终审 HEAD）：desktop tsc exit 0；concurrency 51；invocationLimiter 28；localIndex 321；withRetry+streamRetry+compact 133；lifecycle 9/9；chatStore 405；ModelSelector 44；adapters 800/0；dead-imports 28；runtimeSelection 8；swift 9；CLI `--version` OK。
+- **基线匹配失败**：sessions 4 fail、TabBar 4、electron tsc 9 错（修复前）、workspaceWatch 4、print.compaction 3——均与基线/上游检出逐项相同。
