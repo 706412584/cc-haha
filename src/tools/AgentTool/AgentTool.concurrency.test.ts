@@ -57,6 +57,11 @@ function controlledStream() {
 
 const tick = () => new Promise<void>(resolve => setImmediate(resolve))
 const originalConfig = process.env.CLAUDE_CONFIG_DIR
+// The fork's per-session invocation limiter (upstream has no equivalent) counts
+// every spawn in a module-level map, so a multi-case run trips its cap of 8 and
+// the capped replacement spawn never starts. Slot accounting is what this suite
+// exercises; disable the unrelated gate for its duration.
+const originalLimiterOff = process.env.CLAUDE_CODE_AGENT_LIMITER_OFF
 let configDir: string
 let streams: ReturnType<typeof controlledStream>[]
 let pending: Promise<unknown>[]
@@ -93,6 +98,7 @@ function spawn(background = false, overrides: Record<string, unknown> = {}, ctx 
 beforeEach(() => {
   configDir = mkdtempSync(join(tmpdir(), 'cc-haha-agent-concurrency-'))
   process.env.CLAUDE_CONFIG_DIR = configDir
+  process.env.CLAUDE_CODE_AGENT_LIMITER_OFF = '1'
   resetSettingsCache()
   setLimit(1)
   streams = []
@@ -148,6 +154,8 @@ afterEach(async () => {
   await tick() // 等后台生命周期的清理结束后再恢复 spy。
   mock.restore()
   resetSettingsCache()
+  if (originalLimiterOff === undefined) delete process.env.CLAUDE_CODE_AGENT_LIMITER_OFF
+  else process.env.CLAUDE_CODE_AGENT_LIMITER_OFF = originalLimiterOff
   if (originalConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR
   else process.env.CLAUDE_CONFIG_DIR = originalConfig
   rmSync(configDir, { recursive: true, force: true })
