@@ -876,7 +876,7 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
           modified_at, modified_at_ms, message_count, work_dir, repository_json,
           worktree_session_json, permission_mode, runtime_provider_id,
           runtime_provider_present, runtime_model_id, effort_level, thinking_enabled, is_team_worker, openai_fast_mode
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(transcript_path) DO UPDATE SET
           session_id = excluded.session_id,
           project_path = excluded.project_path,
