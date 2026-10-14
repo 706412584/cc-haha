@@ -6138,7 +6138,9 @@ describe('chatStore history mapping', () => {
     const enabled = { providerId: 'openai-official', modelId: 'gpt-6-sol', effortLevel: 'high' as const, openAIFastMode: true }
     useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, enabled)
     useChatStore.getState().connectToSession(TEST_SESSION_ID, { prewarm: false, minimalBootstrap: true })
-    expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, { type: 'set_runtime_config', ...enabled })
+    // Fork adds a requestId to every set_runtime_config frame; upstream's
+    // assertion predates that field.
+    expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, { type: 'set_runtime_config', requestId: expect.any(String), ...enabled })
 
     const disabled = { ...enabled, openAIFastMode: false }
     useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, disabled)
@@ -6147,7 +6149,7 @@ describe('chatStore history mapping', () => {
     expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(disabled)
     useChatStore.getState().handleServerMessage(TEST_SESSION_ID, { type: 'runtime_config_applied', ...disabled })
     expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(disabled)
-    expect(sendMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, { type: 'set_runtime_config', ...disabled })
+    expect(sendMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, { type: 'set_runtime_config', requestId: expect.any(String), ...disabled })
   })
 
   it.each(['reconnect', 'send'] as const)('recovers a removed provider before %s without replaying its stale model or effort', (action) => {
@@ -17788,6 +17790,9 @@ describe('chatStore streamed turn against its durable copy (#1476)', () => {
     send({ type: 'content_delta', text: REPLY })
     await new Promise((resolve) => setTimeout(resolve, 80))
     send({ type: 'message_complete', usage: { input_tokens: 1, output_tokens: 1 } })
+    // The fork buffers thinking deltas; flush so the live turn is fully in
+    // the transcript before the durable-copy merge under test runs.
+    flushThinking(sessionId)
   }
 
   // The CLI persists each block when it completes, after its first live delta.
@@ -17827,6 +17832,10 @@ describe('chatStore streamed turn against its durable copy (#1476)', () => {
     send({ type: 'thinking', text: '\n\n' })
     send({ type: 'thinking', text: 'second' })
     send({ type: 'thinking', text: '  ', complete: true })
+
+    // The fork buffers thinking deltas (~50ms) before they reach the
+    // transcript; flush explicitly so the merge path under test runs now.
+    flushThinking(sessionId)
 
     expect(useChatStore.getState().sessions[sessionId]?.messages).toMatchObject([
       { type: 'thinking', content: 'first\n\nsecond' },
