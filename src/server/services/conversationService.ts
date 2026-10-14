@@ -2124,20 +2124,26 @@ export class ConversationService {
         console.warn(
           `[ConversationService] taskkill could not stop the CLI process tree for ${sessionId}; terminating the CLI only`,
         )
-        this.signalProcess(sessionId, session, signal)
+        this.signalProcess(sessionId, session, signal, sync)
       })
       return
     }
-    this.signalProcess(sessionId, session, signal)
+    this.signalProcess(sessionId, session, signal, sync)
   }
 
   private signalProcess(
     sessionId: string,
     session: SessionProcess,
     signal?: NodeJS.Signals,
+    _sync = false,
   ): void {
     try {
-      killConversationProcessTree(session.proc, signal, sync)
+      // Direct signal only. The Windows tree stop (taskkill /T) runs in
+      // killProcess before this is reached, and this is also its failure
+      // fallback — re-entering the tree kill here would either duplicate the
+      // taskkill or, on a failed tree stop, loop back into the same failure
+      // instead of ending the CLI (upstream #1501's lifecycle suite).
+      session.proc.kill(signal)
     } catch (error) {
       console.warn(
         `[ConversationService] Failed to kill CLI subprocess for ${sessionId}: ${
