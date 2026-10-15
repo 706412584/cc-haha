@@ -6,4 +6,5 @@ export type RuntimeSelection = {
   effortLevel?: ReasoningEffortLevel
   // Per-session override for thinking mode. Undefined means inherit from global setting.
   thinkingEnabled?: boolean
+  openAIFastMode?: boolean
 }

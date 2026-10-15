@@ -6,23 +6,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CONNECTORS } from './catalog.js'
 import { createConnectorAdapter, parseConnectorCheck, trustedAuthorizationUrl } from './cliAdapter.js'
-import { managedInstallation, type RuntimeDependencies } from './managedRuntime.js'
+import { defaultRuntimeDependencies, managedInstallation, type RuntimeDependencies } from './managedRuntime.js'
+
+// Connectors ship for macOS and Windows only. Tests that exercise the real pins pin a
+// supported host instead of borrowing the runner's, which is Linux in CI.
+const supportedHost: RuntimeDependencies = { ...defaultRuntimeDependencies, platform: 'darwin', arch: 'arm64' }
 
 const result = (value: unknown, code = 0) => ({ stdout: typeof value === 'string' ? value : JSON.stringify(value), stderr: '', code })
 
-/**
- * Fixed platform for cases that assert directory layout or ownership rather
- * than host behaviour. The connectors catalog publishes darwin/win32 builds
- * only, so a case relying on `process.platform` cannot pass on a Linux runner.
- */
-const windowsRuntime: RuntimeDependencies = {
-  platform: 'win32', arch: 'x64',
-  readBinary: async () => Buffer.from('binary'),
-  binaryIntegrity: () => 'sha256-' + createHash('sha256').update('binary').digest('hex'),
-  download: async () => new Uint8Array(),
-  extract: async () => new Uint8Array(),
-  run: async () => result('ok'),
-}
 test('pinned CLI output parsers distinguish configured, verified, expired and malformed results', () => {
   expect(parseConnectorCheck('feishu', result(fixtures.feishuVerified))).toEqual({ authenticated: true, verification: 'remote' })
   expect(parseConnectorCheck('feishu', result({ identity: 'user', verified: false })).authenticated).toBe(false)
@@ -65,7 +56,7 @@ test('authorization reports complete streamed URLs and always disables browser o
 })
 
 test('remove rejects foreign directory instead of deleting user credentials', async () => {
-  const adapter = createConnectorAdapter(CONNECTORS[0]!, '/tmp/managed', windowsRuntime)
+  const adapter = createConnectorAdapter(CONNECTORS[0]!, '/tmp/managed', supportedHost)
   await expect(adapter.remove({ directory: '/tmp/shared-credentials', command: '/tmp/shared-credentials/lark-cli', args: [], env: {} })).rejects.toThrow('Invalid managed')
 })
 
@@ -73,7 +64,7 @@ test('remove cleans only owned versions and interrupted stages, preserving accou
   const root = await mkdtemp(join(tmpdir(), 'connector remove '))
   try {
     const definition = CONNECTORS[0]!
-    const installed = managedInstallation(definition, root, windowsRuntime)
+    const installed = managedInstallation(definition, root, supportedHost)
     await mkdir(installed.directory, { recursive: true })
     await mkdir(join(root, 'runtime', 'feishu', '0.9.0-old'), { recursive: true })
     await mkdir(join(root, 'runtime', 'feishu', '1.0.95.stage-interrupted'), { recursive: true })
@@ -81,7 +72,7 @@ test('remove cleans only owned versions and interrupted stages, preserving accou
     await mkdir(join(root, 'accounts', 'feishu'), { recursive: true })
     const account = join(root, 'accounts', 'feishu', 'fixture.json')
     await writeFile(account, 'keep synthetic credential')
-    await createConnectorAdapter(definition, root, windowsRuntime).remove(installed)
+    await createConnectorAdapter(definition, root, supportedHost).remove(installed)
     await expect(access(join(root, 'runtime', 'feishu'))).rejects.toThrow()
     expect(await readFile(account, 'utf8')).toBe('keep synthetic credential')
     await access(join(root, 'runtime', 'wecom'))
@@ -126,21 +117,9 @@ test('Feishu account label only reads the documented name field, never identity 
 
 test('status check rejects an unknown persisted version before spawning its command', async () => {
   const definition = { ...CONNECTORS[0]!, version: '9.9.9' }
-  // Only the platform is pinned here, deliberately: `getArtifactPins` consults
-  // a fixture `binaryIntegrity` before the real pin table, and this case exists
-  // to prove the unknown version is rejected *by that table*. Injecting a
-  // fixture would satisfy the pin and let the check reach a real spawn.
-  const root = '/tmp/untrusted-version'
-  const platformOnly = { ...windowsRuntime, binaryIntegrity: undefined }
-  // Built by hand rather than through `managedInstallation`, which already
-  // consults the pin table — the rejection under test has to come from `check`.
-  const directory = `${root}/runtime/feishu/9.9.9-win32-x64`
-  await expect(createConnectorAdapter(definition, root, platformOnly).check({
-    directory,
-    command: `${directory}/lark-cli.exe`,
-    args: [],
-    env: {},
-  }, new AbortController().signal)).rejects.toThrow('no pinned artifact')
+  await expect(createConnectorAdapter(definition, '/tmp/untrusted-version', supportedHost).check({
+    directory: '/tmp/untrusted-version/runtime/feishu/9.9.9-darwin-arm64',
+    command: '/tmp/untrusted-version/runtime/feishu/9.9.9-darwin-arm64/lark-cli', args: [], env: {},  }, new AbortController().signal)).rejects.toThrow('no pinned artifact')
 })
 
 test('every check and authentication verifies the installed bytes before executing', async () => {

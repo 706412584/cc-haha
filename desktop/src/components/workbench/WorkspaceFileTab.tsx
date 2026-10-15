@@ -19,7 +19,9 @@ import { useWorkspaceContentStore, type WorkspaceFileView } from '../../stores/w
 import { workspaceOpen } from '../../lib/workspace/openTarget'
 import { isRootedLocalPath } from '../../lib/handlePreviewLink'
 import { resolveAbsoluteOpenPath } from '../../lib/systemFileOpen'
-import type { WorkspaceFileTab as WorkspaceFileTabModel } from '../../lib/workspace/types'
+import type { WorkspaceTextSelection } from '../workspace/surfaces/textSelection'
+import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
+import { basenameOf, type WorkspaceFileTab as WorkspaceFileTabModel } from '../../lib/workspace/types'
 
 const MARKDOWN_EXTENSIONS = ['.md', '.markdown', '.mdx']
 
@@ -125,6 +127,34 @@ export function WorkspaceFileTab({ sessionId, tab }: WorkspaceFileTabProps) {
     if (!path) return
     void loadFile(sessionId, path)
   }, [loadFile, path, sessionId])
+
+  const addSelectionToChat = useCallback((selection: WorkspaceTextSelection) => {
+    useWorkspaceChatContextStore.getState().addReference(sessionId, {
+      kind: 'code-selection',
+      path,
+      name: basenameOf(path),
+      lineStart: selection.startLine,
+      lineEnd: selection.endLine,
+      quote: selection.text,
+    })
+  }, [path, sessionId])
+
+  const addLineComment = useCallback((
+    lineStart: number,
+    lineEnd: number,
+    note: string,
+    quote: string,
+  ) => {
+    useWorkspaceChatContextStore.getState().addReference(sessionId, {
+      kind: 'code-comment',
+      path,
+      name: basenameOf(path),
+      lineStart,
+      lineEnd,
+      quote,
+      note,
+    })
+  }, [path, sessionId])
 
   const closeOpenWith = useCallback(() => setOpenWithOpen(false), [])
 
@@ -303,6 +333,12 @@ export function WorkspaceFileTab({ sessionId, tab }: WorkspaceFileTabProps) {
               previewType={entry.previewType}
               version={entry.version}
               initialView={savedView}
+              source={{
+                reveal: tab.reveal,
+                revealScroll,
+                onAddLineComment: addLineComment,
+                onAddSelection: addSelectionToChat,
+              }}
             />
           ) : (
             /*

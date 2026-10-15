@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { createSandboxedTestEnvironment } from './test-environment'
+import { createSandboxedTestEnvironment, removeTestSandbox } from './test-environment'
 
 type SwiftCheckRunner = (
   command: string[],
@@ -28,7 +28,9 @@ export async function runSwiftChecks(options: {
     return await child.exited
   })
   const removeSandbox = options.removeSandbox ?? ((directory: string) => {
-    rmSync(directory, { recursive: true, force: true })
+    // Upstream #1511: open the tree up (chmod) and retry before warning — a
+    // read-only directory left by a test must not fail the lane on POSIX.
+    removeTestSandbox(directory, 'swift-checks')
   })
   try {
     const env = createSandboxedTestEnvironment(sandboxHome, { CFFIXED_USER_HOME: sandboxHome })
@@ -50,7 +52,9 @@ export async function runSwiftChecks(options: {
     // removal throws EROFS *after* every Swift test has already passed
     // (observed on 2026-09-14 and 2026-09-17). Cleanup is not the signal this
     // lane reports: a failed removal must not turn a green run red. Warn and
-    // let the Swift/packaging exit codes above stay authoritative.
+    // let the Swift/packaging exit codes above stay authoritative. The default
+    // remover opens the tree up first (removeTestSandbox); an injected one that
+    // still throws is caught here rather than failing the lane.
     try {
       removeSandbox(sandboxHome)
     } catch (error) {

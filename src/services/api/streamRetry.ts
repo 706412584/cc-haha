@@ -19,9 +19,11 @@ import {
 } from "../analytics/index.js";
 import { getAssistantMessageFromError } from "./errors.js";
 import {
+  type ApiAttemptBudget,
   getMaxStreamRetries,
   getRetryDelay,
   getStreamTransientRetryBudgetMs,
+  hasApiAttemptsLeft,
   RetriableStreamError,
 } from "./withRetry.js";
 
@@ -37,6 +39,8 @@ type StreamRetryOptions = {
   signal?: AbortSignal;
   /** Injectable for tests. Must resolve (not reject) when `signal` aborts. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** Shared with the attempt's withRetry; a spent budget ends re-sends. */
+  apiAttemptBudget?: ApiAttemptBudget;
 };
 
 /**
@@ -70,7 +74,7 @@ export async function* withStreamRetry(
   attempt: () => AsyncGenerator<StreamQueryMessage, void>,
   model: string,
   messages: Message[],
-  { signal, sleep: wait = sleep }: StreamRetryOptions = {},
+  { signal, sleep: wait = sleep, apiAttemptBudget }: StreamRetryOptions = {},
 ): AsyncGenerator<StreamQueryMessage, void> {
   // Wall-clock ceiling for the whole loop (fork customization): the retry
   // count bounds fast-failing transients, but a provider that accepts the
@@ -92,10 +96,13 @@ export async function* withStreamRetry(
       }
       const maxRetries = getMaxStreamRetries(error.kind);
       // Stop when the retry count is spent OR the wall-clock budget is used
-      // up, so a slow-failing upstream surfaces its error in bounded time.
+      // up (fork), so a slow-failing upstream surfaces its error in bounded
+      // time; upstream's shared attempt budget ends it too when a caller's
+      // outer loop has already spent the allowance.
       const elapsedMs = Date.now() - startedAt;
       const overBudget = budgetMs > 0 && elapsedMs >= budgetMs;
-      if (committedOutput || retries >= maxRetries || overBudget) {
+      const budgetSpent = !hasApiAttemptsLeft(apiAttemptBudget);
+      if (committedOutput || retries >= maxRetries || overBudget || budgetSpent) {
         // Surface the original error as an assistant message, matching
         // queryModel's normal terminal-error behavior.
         logForDebugging(
@@ -107,9 +114,13 @@ export async function* withStreamRetry(
               ? `Mid-stream ${error.kind} error: retry budget ${budgetMs}ms exhausted after ${retries + 1} attempt(s), ${elapsedMs}ms elapsed: ${errorMessage(
                   error.originalError,
                 )}`
-              : `Mid-stream ${error.kind} error: retries exhausted after ${maxRetries} attempt(s): ${errorMessage(
-                  error.originalError,
-                )}`,
+              : budgetSpent
+                ? `Mid-stream ${error.kind} error: shared API attempt budget spent after ${retries} retr${retries === 1 ? "y" : "ies"}: ${errorMessage(
+                    error.originalError,
+                  )}`
+                : `Mid-stream ${error.kind} error: retries exhausted after ${maxRetries} attempt(s): ${errorMessage(
+                    error.originalError,
+                  )}`,
           { level: "error" },
         );
         logEvent("tengu_stream_transient_retry_exhausted", {

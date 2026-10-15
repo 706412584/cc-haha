@@ -63,6 +63,9 @@ export function WorkspaceFileTreePane({
   const selectedTreePath = candidatePath && !/^(?:[\\/]|[a-zA-Z]:)/.test(candidatePath)
     ? candidatePath.replaceAll('\\', '/') : null
   const revealedPath = useRef<string | null>(null)
+  // Search results may include a watched file parent with no cached listing,
+  // so refresh from the accepted watch event rather than tree object identity.
+  const watchRevision = useWorkspaceContentStore(state => state.watchRevisionBySession[sessionId] ?? 0)
 
   useEffect(() => {
     if (autoFocus && treeView.open) inputRef.current?.focus()
@@ -97,7 +100,7 @@ export function WorkspaceFileTreePane({
       clearTimeout(timer)
       controller.abort()
     }
-  }, [filter, sessionId])
+  }, [filter, sessionId, watchRevision])
   const loadTree = useWorkspaceContentStore((state) => state.loadTree)
   const loadStatus = useWorkspaceContentStore((state) => state.loadStatus)
   const toggleDirectory = useWorkspaceContentStore((state) => state.toggleDirectory)

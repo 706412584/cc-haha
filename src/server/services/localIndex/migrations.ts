@@ -1,6 +1,6 @@
 import type { Database } from 'bun:sqlite'
 
-export const LOCAL_INDEX_SCHEMA_VERSION = 7
+export const LOCAL_INDEX_SCHEMA_VERSION = 8
 export const LOCAL_INDEX_SCHEMA_UNSUPPORTED =
   'LOCAL_INDEX_SCHEMA_UNSUPPORTED' as const
 
@@ -207,6 +207,14 @@ const SCHEMA_V7 = `
 ALTER TABLE sessions ADD COLUMN is_team_worker INTEGER NOT NULL DEFAULT 0 CHECK (is_team_worker IN (0, 1));
 `
 
+// Nullable for transcripts created before per-session Fast mode was available.
+// Version 8, not 7: the fork spent v7 on is_team_worker, so a fork-lineage
+// cache can already report v7 while lacking this column; the per-column guard
+// below makes applying it idempotent on either lineage.
+const SCHEMA_V8 = `
+ALTER TABLE sessions ADD COLUMN openai_fast_mode INTEGER CHECK (openai_fast_mode IN (0, 1));
+`
+
 const MIGRATIONS = [
   { version: 1, sql: SCHEMA_V1 },
   { version: 2, sql: SCHEMA_V2 },
@@ -215,6 +223,7 @@ const MIGRATIONS = [
   { version: 5, sql: SCHEMA_V5 },
   { version: 6, sql: SCHEMA_V6 },
   { version: 7, sql: SCHEMA_V7 },
+  { version: 8, sql: SCHEMA_V8 },
 ] as const
 
 export class UnsupportedLocalIndexSchemaError extends Error {
@@ -290,6 +299,10 @@ export function migrateLocalIndexDatabase(database: Database): void {
         }
       } else if (migration.version === 7) {
         if (!hasColumn(database, 'sessions', 'is_team_worker')) {
+          database.exec(migration.sql)
+        }
+      } else if (migration.version === 8) {
+        if (!hasColumn(database, 'sessions', 'openai_fast_mode')) {
           database.exec(migration.sql)
         }
       } else {

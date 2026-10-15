@@ -860,7 +860,7 @@ export async function launchTeamPlanRuntime(plan: TeamPlanRecord): Promise<{ mem
         if (message?.type !== 'result') return
         void withTaskListLifecycleLock(getCanonicalTeamTaskListId(plan.teamName), async () => {
           const team = readTeamFile(plan.teamName)
-          if (!team || team.createdAt !== createdAt) return
+          if (!team || team.createdAt !== launch.createdAt) return
           const entry = team.members.find(entry => entry.sessionId === id)
           if (entry) { entry.isActive = false; if (!conversationService.hasSession(id)) entry.terminated = true; await writeTeamFileAsync(plan.teamName, team) }
         }).catch(error => console.error('[TeamPlanRuntime] cannot update idle member', error))

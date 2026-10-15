@@ -4,7 +4,7 @@
 
 > 验证方法：在 pre-merge 基线（合并 commit 的第一父，`git worktree add <tmp> <first-parent> --detach`）上重跑同一批测试。若基线同样红 → 预存。
 
-最后核对日期：2026-09-29（合并上游 v0.6.7；`check:policy` / desktop / adapters 三处重新逐条对照 fork main `601230e0`，无新增）。
+最后核对日期：2026-10-14（合并上游 v0.7.1；`check:policy` / `check:server` / desktop 三处逐条对照 fork main `0077c5b6`，无新增——本地失败集合与基线一致或更少，新文件失败均在上游干净检出复现）。
 
 ---
 
@@ -364,3 +364,32 @@ desktop 侧整套带插桩并发，负载显著高于 `desktop-checks` / `server
 - **分支长度实测类**（`branch name past the length cap` 等）：依赖文件系统/命令实际行为，Windows 与 Linux 不同（清单既有条目）。
 - **大套件资源抖动**：`MessageList.test.tsx`、`diagnosticsSettings.test.tsx` 在全套件并发跑时超时/崩溃（tinypool ERR_IPC_CHANNEL_CLOSED），**单独跑全绿**。CI 分片跑不受影响。
 - **本地 shell 携带 `CC_HAHA_TRACE_API_CALLS=1`**（桌面端启动的终端会继承）：会覆盖 managed settings，使 `trace-capture.test.ts > respects managed...` 失败。已在测试 beforeEach 隔离该 env（合并提交内）。其它从桌面 shell 跑测试的人若遇同类覆盖，同样处理。
+
+## 2026-10-14 合并上游 v0.7.1 后的 Windows 本地实测补充
+
+- **symlink EPERM（上游 v0.7.1 新增文件）**：
+  - `src/server/services/workspaceWatchState.test.ts > does not descend into a directory or follow an entry symlink`（2 用例组 1 fail）
+  - `src/server/services/workspaceWatchReconciliation.test.ts`（10 用例 2 fail：`revalidates symlink replacements...`、`rejects a directory swapped to an outside symlink...`）
+  — 均因 `fs.symlink` 在 Windows 非管理员下报 `EPERM`。已在上游干净检出（v0.7.1，同一台机器）复现**相同失败数**（1/1、8/2），非合并引入；CI(Linux) 不受影响。
+- **CLI 启动器不可直接执行（上游 v0.7.1 新增文件，不在 check:server 扫描范围）**：
+  - `src/cli/print.compaction.test.ts`（3 fail）
+  — 用例经 `Bun.spawn([join(cwd,'bin','claude-haha'), ...])` 启动 CLI；Windows 上无扩展名的 shebang 脚本不能被 spawn（`ENOENT`）。上游干净检出上同样 3/3 失败，非合并引入。CI(Linux/macOS) 上该文件走真实 CLI，需以 CI 为准。
+
+### v0.7.1 合并后 CI 新门禁暴露的预存红（desktop-checks）
+
+上游 #1511 的 PR Quality 重构让 `desktop-checks`/`desktop-native-checks`/`agent-e2e-checks` 首次成为每 PR 必跑的门禁，把下列**基线 main 上即红**的文件暴露为阻塞。合并批次已修复 4 个（见下），其余登记为预存：
+
+**本批次已修复（合并分支内）**：
+- `electron/ipc/capabilities.test.ts`（`requires the renderer guest id…`）：`workspaceBrowserCreate` validator 是 v0.7.0 半合并残留（渲染层/服务端已用 `webContentsId`，validator 还要求旧 `bounds`/`visible`）——修复后 11/11。
+- `electron/services/appIdentity.test.ts`（sandbox 切片缺 fork 的 `readKeepActiveInBackground`）：测试适配后 8/8。
+- `scripts/quality-gate/coverage.test.ts`（断言上游前缀，fork 已改 `cch-cov-`）：测试适配后通过。
+- `src/server/services/teamPlanRuntime.ts:863` 的 `createdAt is not defined`（fork 回调作用域 bug，静默吞掉 idle 状态更新）：修为 `launch.createdAt`。
+
+**登记为预存（基线同样红，未在本批次转绿）**：
+- `src/theme/contrast.test.ts`（19 fail 组）、`src/theme/globals.test.ts`、`src/theme/designSystem.test.ts`：上游 Porcelain 门禁 vs fork 存量视觉的系统性冲突（designSystem 已在上文登记）。
+- `src/__tests__/untranslatedText.test.ts`（2 fail）：上游用例与 fork 文案豁免表的冲突，基线同红。
+- `src/components/workspace/WorkspaceEditor.test.tsx`（10 fail）：`workspace.file.saved` 无订阅者（上文已登记）。
+- `src/pages/SettingsNavigation.test.tsx`、`src/pages/SettingsOutputStyle.test.tsx`、`src/__tests__/agentsSettings.test.tsx`：fork 设置页布局/Agent Office 与上游断言差异，基线同红。
+- `src/__tests__/componentReachability.test.ts`（14 组件无运行时 importer）：fork 的 Trace 组件家族在上游 #1443 退役后失去页面入口，属退役残余（独立批次清理组件或重建入口）。
+- `electron/services/pets.test.ts > rejects duplicate IDs…`、`electron/services/shell.test.ts > tolerates percent-encoding differences…`：Windows 本地环境类，基线同红（shell 一条在上文 v0.6.8 段已登记）。
+- `src/server/services/teamPlanRuntime.supervisor.test.ts`（8-11 fail，随负载波动）：上文「上游 v0.7.0 团队 supervisor 测试 vs fork 恢复语义」已登记。

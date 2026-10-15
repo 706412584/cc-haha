@@ -54,7 +54,7 @@ describe('provider presets API', () => {
     const aruhub = presets.find((preset: { id: string }) => preset.id === 'aruhub')
     expect(aruhub).toMatchObject({
       id: 'aruhub',
-      baseUrl: 'https://direct.aruhub.com:8443',
+      baseUrl: 'https://agent.aruhub.com',
       apiFormat: 'anthropic',
       authStrategy: 'api_key',
       needsApiKey: true,

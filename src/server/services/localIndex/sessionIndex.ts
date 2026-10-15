@@ -27,6 +27,7 @@ export type IndexedSessionRow = {
   runtimeModelId?: string
   effortLevel?: string
   thinkingEnabled?: boolean
+  openAIFastMode?: boolean
   repository?: PersistedRepositorySession
   worktreeSession?: PersistedWorktreeSession | null
 }
@@ -148,6 +149,7 @@ type SessionRow = {
   runtime_model_id: string | null
   effort_level: string | null
   thinking_enabled: number | null
+  openai_fast_mode: number | null
   repository_json: string | null
   worktree_session_json: string | null
 }
@@ -256,6 +258,7 @@ function sessionFromRow(row: SessionRow): IndexedSessionRow {
     ...(row.thinking_enabled !== null
       ? { thinkingEnabled: row.thinking_enabled === 1 }
       : {}),
+    ...(row.openai_fast_mode != null ? { openAIFastMode: row.openai_fast_mode === 1 } : {}),
     ...(repository ? { repository } : {}),
     ...(row.worktree_session_json !== null ? { worktreeSession } : {}),
   }
@@ -333,7 +336,7 @@ export function createSessionIndex(database: LocalIndexDatabase): SessionIndex {
               SELECT transcript_path, session_id, project_path, title, created_at,
                 modified_at, message_count, work_dir, permission_mode,
                 runtime_provider_id, runtime_provider_present,
-                runtime_model_id, effort_level, thinking_enabled,
+                runtime_model_id, effort_level, thinking_enabled, openai_fast_mode,
                 repository_json, worktree_session_json
               FROM sessions
               WHERE is_team_worker = 0
@@ -344,7 +347,7 @@ export function createSessionIndex(database: LocalIndexDatabase): SessionIndex {
               SELECT transcript_path, session_id, project_path, title, created_at,
                 modified_at, message_count, work_dir, permission_mode,
                 runtime_provider_id, runtime_provider_present,
-                runtime_model_id, effort_level, thinking_enabled,
+                runtime_model_id, effort_level, thinking_enabled, openai_fast_mode,
                 repository_json, worktree_session_json
               FROM sessions
               WHERE is_team_worker = 0 AND project_path = ?
@@ -363,7 +366,7 @@ export function createSessionIndex(database: LocalIndexDatabase): SessionIndex {
         SELECT transcript_path, session_id, project_path, title, created_at,
           modified_at, message_count, work_dir, permission_mode,
           runtime_provider_id, runtime_provider_present, runtime_model_id,
-          effort_level, repository_json, worktree_session_json
+          effort_level, thinking_enabled, openai_fast_mode, repository_json, worktree_session_json
         FROM sessions WHERE session_id IN (${ids.map(() => '?').join(',')})
         ORDER BY modified_at_ms DESC, session_id ASC, transcript_path ASC
         LIMIT 100
@@ -392,7 +395,7 @@ export function createSessionIndex(database: LocalIndexDatabase): SessionIndex {
           SELECT transcript_path, session_id, project_path, title, created_at,
             modified_at, message_count, work_dir, permission_mode,
             runtime_provider_id, runtime_provider_present, runtime_model_id,
-            effort_level, repository_json, worktree_session_json
+            effort_level, thinking_enabled, openai_fast_mode, repository_json, worktree_session_json
           FROM sessions WHERE ${where}
           ORDER BY CASE
             WHEN ? = '' THEN 0
@@ -429,7 +432,7 @@ export function createSessionIndex(database: LocalIndexDatabase): SessionIndex {
           SELECT transcript_path, session_id, project_path, title, created_at,
             modified_at, message_count, work_dir, permission_mode,
             runtime_provider_id, runtime_provider_present,
-            runtime_model_id, effort_level,
+            runtime_model_id, effort_level, thinking_enabled, openai_fast_mode,
             repository_json, worktree_session_json
           FROM sessions
           WHERE session_id = ?
@@ -529,7 +532,7 @@ export function createSessionIndex(database: LocalIndexDatabase): SessionIndex {
             sessions.permission_mode, sessions.runtime_provider_id,
             sessions.runtime_provider_present,
             sessions.runtime_model_id, sessions.effort_level,
-            sessions.thinking_enabled,
+            sessions.thinking_enabled, sessions.openai_fast_mode,
             sessions.repository_json, sessions.worktree_session_json,
             source_files.indexed_bytes, source_files.size_bytes
           FROM sessions
@@ -561,6 +564,7 @@ export function createSessionIndex(database: LocalIndexDatabase): SessionIndex {
             ...(row.thinking_enabled !== null
               ? { thinkingEnabled: row.thinking_enabled === 1 }
               : {}),
+            ...(row.openai_fast_mode != null ? { openAIFastMode: row.openai_fast_mode === 1 } : {}),
             ...(repository ? { repository } : {}),
             ...(row.worktree_session_json !== null
               ? { worktreeSession }

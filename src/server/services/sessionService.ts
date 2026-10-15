@@ -121,6 +121,7 @@ export type SessionListItem = {
   runtimeModelId?: string
   effortLevel?: string
   thinkingEnabled?: boolean
+  openAIFastMode?: boolean
 }
 
 export type SubagentTranscriptFragment = {
@@ -252,6 +253,7 @@ export type SessionLaunchInfo = {
   effortLevel?: string
   thinkingEnabled?: boolean
   providerTransition?: SessionProviderTransition
+  openAIFastMode?: boolean
 }
 
 type ProviderContextWindowHint = Pick<SessionLaunchInfo, 'runtimeProviderId' | 'runtimeModelId'>
@@ -705,6 +707,7 @@ type InspectionFoldState = {
   runtimeProviderId: string | null | undefined
   runtimeModelId: string | undefined
   effortLevel: string | undefined
+  openAIFastMode: boolean | undefined
   customTitle: string | null
   transcriptMessageCount: number
   metadata: TranscriptMetadataSnapshot
@@ -746,6 +749,7 @@ function createInspectionFoldState(): InspectionFoldState {
     runtimeProviderId: undefined,
     runtimeModelId: undefined,
     effortLevel: undefined,
+    openAIFastMode: undefined,
     customTitle: null,
     transcriptMessageCount: 0,
     metadata: {},
@@ -785,6 +789,21 @@ function cloneInspectionFoldState(state: InspectionFoldState): InspectionFoldSta
       [...state.modelRuntimeHints.entries()].map(([key, value]) => [key, { ...value }]),
     ),
   }
+}
+
+type FileIdentity = { dev: bigint, ino: bigint }
+
+async function statFileIdentity(filePath: string): Promise<FileIdentity | null> {
+  try {
+    const stat = await fs.stat(filePath, { bigint: true })
+    return { dev: stat.dev, ino: stat.ino }
+  } catch {
+    return null
+  }
+}
+
+function isSameFileIdentity(left: FileIdentity, right: FileIdentity | null): boolean {
+  return right !== null && left.dev === right.dev && left.ino === right.ino
 }
 
 // ============================================================================
@@ -1436,6 +1455,7 @@ export class SessionService {
       runtimeProviderId?: string | null
       runtimeModelId?: string
       effortLevel?: string
+      openAIFastMode?: boolean
     },
   ): boolean {
     if (!launchInfo) return false
@@ -1471,6 +1491,9 @@ export class SessionService {
       return false
     }
     if (launchInfo.effortLevel !== resolveSessionEffortLevel(metadata, launchInfo.effortLevel)) {
+      return false
+    }
+    if (typeof metadata.openAIFastMode === 'boolean' && launchInfo.openAIFastMode !== metadata.openAIFastMode) {
       return false
     }
     return true
@@ -4208,6 +4231,7 @@ export class SessionService {
     let runtimeProviderId: string | null | undefined = seed.fold.runtimeProviderId
     let runtimeModelId: string | undefined = seed.fold.runtimeModelId
     let effortLevel: string | undefined = seed.fold.effortLevel
+    let openAIFastMode: boolean | undefined = seed.fold.openAIFastMode
     let customTitle: string | null = seed.fold.customTitle
     let transcriptMessageCount = seed.fold.transcriptMessageCount
     const metadata: TranscriptMetadataSnapshot = seed.fold.metadata
@@ -4274,6 +4298,7 @@ export class SessionService {
           runtimeModelId = record.runtimeModelId
         }
         effortLevel = resolveSessionEffortLevel(record, effortLevel)
+        if (typeof record.openAIFastMode === 'boolean') openAIFastMode = record.openAIFastMode
       }
 
       const candidateRepository = (entry as Record<string, unknown>)?.repository
@@ -4404,6 +4429,7 @@ export class SessionService {
       runtimeProviderId,
       runtimeModelId,
       effortLevel,
+      openAIFastMode,
       customTitle,
       transcriptMessageCount,
       metadata,
@@ -4437,6 +4463,7 @@ export class SessionService {
       ...(runtimeProviderId !== undefined ? { runtimeProviderId } : {}),
       ...(runtimeModelId ? { runtimeModelId } : {}),
       ...(effortLevel ? { effortLevel } : {}),
+      ...(openAIFastMode !== undefined ? { openAIFastMode } : {}),
     }
 
     for (const modelUsage of models.values()) {
@@ -4892,6 +4919,7 @@ export class SessionService {
       ...(row.thinkingEnabled !== undefined
         ? { thinkingEnabled: row.thinkingEnabled }
         : {}),
+      ...(row.openAIFastMode !== undefined ? { openAIFastMode: row.openAIFastMode } : {}),
     }
   }
 
@@ -4917,6 +4945,7 @@ export class SessionService {
       'runtimeModelId',
       'effortLevel',
       'thinkingEnabled',
+      'openAIFastMode',
     ]
     const hash = (value: unknown): string => createHash('sha256')
       .update(JSON.stringify(value) ?? 'undefined')
@@ -5070,6 +5099,7 @@ export class SessionService {
           ...(summary.thinkingEnabled !== undefined
             ? { thinkingEnabled: summary.thinkingEnabled }
             : {}),
+          ...(summary.openAIFastMode !== undefined ? { openAIFastMode: summary.openAIFastMode } : {}),
         })
       } catch {
         // Skip unreadable files
@@ -6083,6 +6113,7 @@ export class SessionService {
         runtimeProviderId: undefined as string | null | undefined,
         runtimeModelId: undefined as string | undefined, effortLevel: undefined as string | undefined,
         thinkingEnabled: undefined as boolean | undefined,
+        openAIFastMode: undefined as boolean | undefined,
         providerTransition: undefined as SessionProviderTransition | undefined,
         customTitle: null as string | null, nonemptyCustomTitle: null as string | null,
         goalTitle: null as string | null, aiTitle: null as string | null, firstUserTitle: null as string | null,
@@ -6121,6 +6152,7 @@ export class SessionService {
             state.effortLevel = undefined
           }
           if (typeof record.thinkingEnabled === 'boolean') state.thinkingEnabled = record.thinkingEnabled
+          if (typeof record.openAIFastMode === 'boolean') state.openAIFastMode = record.openAIFastMode
           if (record.providerTransition && typeof record.providerTransition === 'object') {
             const transition = record.providerTransition as Record<string, unknown>
             if (typeof transition.sourceSessionId === 'string' && typeof transition.selectionHash === 'string') {
@@ -6158,6 +6190,7 @@ export class SessionService {
         ...(state.runtimeModelId ? { runtimeModelId: state.runtimeModelId } : {}),
         ...(state.effortLevel ? { effortLevel: state.effortLevel } : {}),
         ...(state.thinkingEnabled !== undefined ? { thinkingEnabled: state.thinkingEnabled } : {}),
+        ...(state.openAIFastMode !== undefined ? { openAIFastMode: state.openAIFastMode } : {}),
         ...(state.providerTransition ? { providerTransition: state.providerTransition } : {}),
         ...(state.repository ? { repository: state.repository } : {}),
         ...(state.worktreeSession !== undefined ? { worktreeSession: state.worktreeSession } : {}),
@@ -6398,6 +6431,7 @@ export class SessionService {
       runtimeProviderId?: string | null
       runtimeModelId?: string
       effortLevel?: string
+      openAIFastMode?: boolean
     }
   ): Promise<void> {
     if (isSideChatId(sessionId)) {
@@ -6405,6 +6439,7 @@ export class SessionService {
       if (side && !side.closed) {
         Object.assign(side.launchInfo, metadata, {
           effortLevel: resolveSessionEffortLevel(metadata, side.launchInfo.effortLevel),
+          openAIFastMode: typeof metadata.openAIFastMode === 'boolean' ? metadata.openAIFastMode : side.launchInfo.openAIFastMode,
         })
       }
       return
@@ -6432,6 +6467,7 @@ export class SessionService {
         ...(metadata.runtimeProviderId !== undefined ? { runtimeProviderId: metadata.runtimeProviderId } : {}),
         ...(metadata.runtimeModelId ? { runtimeModelId: metadata.runtimeModelId } : {}),
         effortLevel: resolveSessionEffortLevel(metadata, previousInfo.effortLevel),
+        openAIFastMode: typeof metadata.openAIFastMode === 'boolean' ? metadata.openAIFastMode : previousInfo.openAIFastMode,
       })
     }
     if (!persist || !this.shouldPersistSession()) {
@@ -6520,6 +6556,7 @@ export class SessionService {
       ...(metadata.effortLevel && VALID_SESSION_EFFORT_LEVELS.has(metadata.effortLevel)
         ? { effortLevel: metadata.effortLevel }
         : {}),
+      ...(typeof metadata.openAIFastMode === 'boolean' ? { openAIFastMode: metadata.openAIFastMode } : {}),
       timestamp: new Date().toISOString(),
     })
 
@@ -6552,6 +6589,11 @@ export class SessionService {
     }
 
     const keepProjectDir = this.sanitizePath(normalizeDriveRootPathForPlatform(keepWorkDir))
+    // Windows and default macOS volumes are case-insensitive: `D--repo` and
+    // `d--repo` are one folder, and readdir reports whichever spelling created
+    // it. Compare file identity so the CLI's own transcript, still metadata-only
+    // when init arrives, is never mistaken for a stray placeholder.
+    const keepFile = await statFileIdentity(path.join(projectsDir, keepProjectDir, `${sessionId}.jsonl`))
     let removed = 0
     for (const projectDir of projectDirs) {
       if (!projectDir.isDirectory()) continue
@@ -6563,6 +6605,7 @@ export class SessionService {
       // Keep the transcript that holds a conversation — including a collaboration
       // delivery persisted as isMeta — rather than only counting ordinary messages.
       if (this.hasConversationTranscript(entries)) continue
+      if (keepFile && isSameFileIdentity(keepFile, await statFileIdentity(filePath))) continue
 
       await fs.rm(filePath, { force: true })
       this.invalidateReadCache(filePath)

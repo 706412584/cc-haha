@@ -23,7 +23,7 @@ import type { NonNullableUsage } from 'src/services/api/logging.js'
 import { EMPTY_USAGE } from 'src/services/api/logging.js'
 import stripAnsi from 'strip-ansi'
 import type { Command } from './commands.js'
-import { getSlashCommandToolSkills } from './commands.js'
+import { findCommand, getSlashCommandToolSkills } from './commands.js'
 import {
   COMMAND_NAME_TAG,
   LOCAL_COMMAND_STDERR_TAG,
@@ -41,7 +41,12 @@ import { query } from './query.js'
 import { categorizeRetryableAPIError } from './services/api/errors.js'
 import type { MCPServerConnection } from './services/mcp/types.js'
 import type { AppState } from './state/AppState.js'
-import { type Tools, type ToolUseContext, toolMatchesName } from './Tool.js'
+import {
+  type SDKStatusDetail,
+  type Tools,
+  type ToolUseContext,
+  toolMatchesName,
+} from './Tool.js'
 import type { AgentDefinition } from './tools/AgentTool/loadAgentsDir.js'
 import { SYNTHETIC_OUTPUT_TOOL_NAME } from './tools/SyntheticOutputTool/SyntheticOutputTool.js'
 import type { Message } from './types/message.js'
@@ -49,6 +54,8 @@ import type { OrphanedPermission } from './types/textInputTypes.js'
 import { createAbortController } from './utils/abortController.js'
 import type { AttributionState } from './utils/commitAttribution.js'
 import { getGlobalConfig } from './utils/config.js'
+import { formatCommandInputTags } from './utils/messages.js'
+import { parseSlashCommand } from './utils/slashCommandParsing.js'
 import { getCwd } from './utils/cwd.js'
 import { isBareMode, isEnvTruthy } from './utils/envUtils.js'
 import { getFastModeState } from './utils/fastMode.js'
@@ -160,7 +167,7 @@ export type QueryEngineConfig = {
   /** Handler for URL elicitations triggered by MCP tool -32042 errors. */
   handleElicitation?: ToolUseContext['handleElicitation']
   includePartialMessages?: boolean
-  setSDKStatus?: (status: SDKStatus) => void
+  setSDKStatus?: (status: SDKStatus, detail?: SDKStatusDetail) => void
   abortController?: AbortController
   orphanedPermission?: OrphanedPermission
   /**
@@ -459,6 +466,28 @@ export class QueryEngine {
       )) {
         yield message
       }
+    }
+
+    // A local command may perform asynchronous work inside processUserInput
+    // (notably /compact). Acknowledge dispatch first so a replacement after
+    // Stop can forward progress as well as the eventual completion. Peer
+    // messages explicitly skip slash interpretation and must never ack this way.
+    const lastInputBlock = typeof prompt === 'string' ? null : prompt.at(-1)
+    const commandInput = typeof prompt === 'string'
+      ? prompt
+      : lastInputBlock?.type === 'text' ? lastInputBlock.text : null
+    const parsedCommand = commandInput?.startsWith('/') ? parseSlashCommand(commandInput) : null
+    const localCommand = parsedCommand && !isPendingSessionMessage(options?.uuid)
+      ? findCommand(parsedCommand.commandName, commands)
+      : undefined
+    if (parsedCommand && localCommand?.type === 'local' && !localCommand.isSensitive) {
+      yield {
+        type: 'system',
+        subtype: 'local_command',
+        content: formatCommandInputTags(parsedCommand.commandName, parsedCommand.args),
+        uuid: options?.uuid ?? randomUUID(),
+        session_id: getSessionId(),
+      } as SDKMessage
     }
 
     const {
@@ -1428,7 +1457,7 @@ export async function* ask({
   includePartialMessages?: boolean
   handleElicitation?: ToolUseContext['handleElicitation']
   agents?: AgentDefinition[]
-  setSDKStatus?: (status: SDKStatus) => void
+  setSDKStatus?: (status: SDKStatus, detail?: SDKStatusDetail) => void
   orphanedPermission?: OrphanedPermission
 }): AsyncGenerator<SDKMessage, void, unknown> {
   const engine = new QueryEngine({

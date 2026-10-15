@@ -61,7 +61,7 @@ import {
 } from './services/appMode'
 import { installMacOsChromiumKeychainPromptGuard } from './services/keychain'
 import { installStdioWriteFailureGuards } from './services/stdioGuards'
-import { applyWindowsAppUserModelId } from './services/appIdentity'
+import { applyWindowsAppUserModelId, applyWindowsTaskbarIdentity, resolveWindowsWindowIcon } from './services/appIdentity'
 import { installMainWindowNavigationGuards, installPreviewNavigationGuards } from './services/navigationGuards'
 import { installPreviewCleanupOnRendererNavigation } from './services/previewLifecycle'
 import { logNotificationSmokeRendererAck, scheduleNotificationSmoke } from './services/notificationSmoke'
@@ -609,7 +609,6 @@ function registerIpcHandlers() {
   registerHandler(ELECTRON_IPC_CHANNELS.shellOpen, (_event, payload) => openExternalUrl(String(payload)))
   registerHandler(ELECTRON_IPC_CHANNELS.shellOpenPath, (_event, payload) => openSystemPath(resolveRelocatedAttachmentPath(String(payload))))
   registerHandler(ELECTRON_IPC_CHANNELS.shellShowItemInFolder, (_event, payload) => showItemInFolder(String(payload)))
-  registerHandler(ELECTRON_IPC_CHANNELS.traceOpenWindow, (_event, payload) => openTraceWindow(String(payload)))
   registerHandler(ELECTRON_IPC_CHANNELS.petsList, () => listCustomPets())
   registerHandler(ELECTRON_IPC_CHANNELS.petsCreateFromImage, async (event, payload) => {
     const input = payload as {
@@ -766,7 +765,7 @@ function registerIpcHandlers() {
   registerHandler(ELECTRON_IPC_CHANNELS.updatePrepareInstall, async () => { await publicAccessManager?.stop(); getServerRuntime().stopAll() })
   registerHandler(ELECTRON_IPC_CHANNELS.updateCancelInstall, () => getUpdaterService().cancelInstall())
   registerHandler(ELECTRON_IPC_CHANNELS.updateRelaunch, () => {
-    if (getUpdaterService().hasDownloadedUpdate()) {
+    if (getUpdaterService().hasStagedUpdate()) {
       isQuitting = true
       getUpdaterService().quitAndInstallDownloadedUpdate()
       return
@@ -921,8 +920,10 @@ function registerIpcHandlers() {
 async function createMainWindow() {
   const restoredState = readWindowState(app, screen.getAllDisplays())
   const bounds = windowOptionsFromState(restoredState)
+  const identityPaths = { desktopRoot: appRoot(), resourcesPath: process.resourcesPath }
   mainWindow = new BrowserWindow({
     ...bounds,
+    icon: resolveWindowsWindowIcon(identityPaths),
     minWidth: MIN_WINDOW_WIDTH,
     minHeight: MIN_WINDOW_HEIGHT,
     show: false,
@@ -942,6 +943,11 @@ async function createMainWindow() {
       // the DOM. Every attach is decided by the guest policy installed below.
       webviewTag: true,
     },
+  })
+  applyWindowsTaskbarIdentity(mainWindow, {
+    ...identityPaths,
+    isPackaged: app.isPackaged,
+    executablePath: process.execPath,
   })
   // Before any guest can exist: its session denies OS permissions, and its
   // preferences are replaced with the sandboxed set the policy pins.

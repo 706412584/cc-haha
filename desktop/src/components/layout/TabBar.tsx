@@ -19,6 +19,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useSessionStore } from '../../stores/sessionStore'
+import type { UIMessage } from '../../types/chat'
 import { isPlaceholderSessionTitle } from '../../lib/sessionTitle'
 import { useWorkspaceStore } from '../../stores/workspaceStore'
 import { releaseWorkspaceSession } from '../../lib/workspace/releaseSession'
@@ -40,7 +41,7 @@ import { AppWindow, Bot, Building2, CalendarClock, ChevronLeft, ChevronRight, Li
 import { WorkspaceLayoutControls } from './WorkspaceLayoutControls'
 import { useWorkspaceHeaderHost } from './WorkspaceHeaderContext'
 import { ActionDialog } from '@/components/ui/ActionDialog'
-import { buildMainSessionActivityModel, hasVisibleSessionActivity } from '../activity/sessionActivityModel'
+import { getMainSessionActivityModel, hasVisibleSessionActivity } from '../activity/sessionActivityModel'
 import { SessionActivityButton } from '../activity/SessionActivityButton'
 import { useActivityPanelStore } from '../../stores/activityPanelStore'
 import { getSessionBrowsablePath } from '../../lib/sessionWorkspace'
@@ -105,6 +106,7 @@ const TAB_TYPE_ICON_FALLBACK: LucideIcon = AppWindow
 const desktopHost = getDesktopHost()
 const isDesktopRuntime = desktopHost.isDesktop
 const EMPTY_DISMISSED_BACKGROUND_TASK_KEYS: readonly string[] = []
+const EMPTY_ACTIVITY_MESSAGES: UIMessage[] = []
 
 type PendingCloseRequest = {
   tabs: Tab[]
@@ -201,30 +203,50 @@ export function TabBar() {
     () => new Set(dismissedBackgroundTaskKeyList),
     [dismissedBackgroundTaskKeyList],
   )
-  const activityState = useChatStore(useShallow((state) => {
-    if (!activeTabId || !isActiveSessionTab) {
-      return { hasVisibleActivity: false }
-    }
-    const sessionState = state.sessions[activeTabId]
-    const includeCliTasks = cliTasksSessionId === activeTabId
-    const teamTaskWindows = teamTaskWindowsForSnapshot(agentTeamsSnapshot, activeTeamStartedAt)
-
-    const model = buildMainSessionActivityModel({
-      sessionId: activeTabId,
-      messages: sessionState?.messages ?? [],
+  // Select the on-screen session's inputs, not the model: a selector runs on
+  // every store update of every session, and the model walks the whole
+  // transcript. Deriving it inside one cost a full pass per streamed token of
+  // any background session (#1480).
+  const activitySessionId = activeTabId && isActiveSessionTab ? activeTabId : null
+  const activityMessages = useChatStore((state) =>
+    activitySessionId ? state.sessions[activitySessionId]?.messages ?? EMPTY_ACTIVITY_MESSAGES : EMPTY_ACTIVITY_MESSAGES)
+  const activityTurnActive = useChatStore((state) => {
+    const sessionState = activitySessionId ? state.sessions[activitySessionId] : undefined
+    return Boolean(sessionState && sessionState.chatState !== 'idle')
+  })
+  const activityBackgroundTaskRecord = useChatStore((state) =>
+    activitySessionId ? state.sessions[activitySessionId]?.backgroundAgentTasks : undefined)
+  const activityNotificationRecord = useChatStore((state) =>
+    activitySessionId ? state.sessions[activitySessionId]?.agentTaskNotifications : undefined)
+  const hasVisibleActivity = useMemo(() => {
+    if (!activitySessionId) return false
+    const includeCliTasks = cliTasksSessionId === activitySessionId
+    return hasVisibleSessionActivity(getMainSessionActivityModel({
+      sessionId: activitySessionId,
+      messages: activityMessages,
       tasks: includeCliTasks ? cliTasks : [],
-      teamTaskWindows,
+      teamTaskWindows: teamTaskWindowsForSnapshot(agentTeamsSnapshot, activeTeamStartedAt),
       completedAndDismissed: includeCliTasks ? cliTasksCompletedAndDismissed : false,
-      isForegroundTurnActive: Boolean(sessionState && sessionState.chatState !== 'idle'),
-      backgroundTasks: Object.values(sessionState?.backgroundAgentTasks ?? {}),
+      isForegroundTurnActive: activityTurnActive,
+      backgroundTasks: Object.values(activityBackgroundTaskRecord ?? {}),
       dismissedBackgroundTaskKeys,
-      agentNotifications: Object.values(sessionState?.agentTaskNotifications ?? {}),
+      agentNotifications: Object.values(activityNotificationRecord ?? {}),
       workflowRuns,
-    })
-    return {
-      hasVisibleActivity: hasVisibleSessionActivity(model),
-    }
-  }))
+    }))
+  }, [
+    activeTeamStartedAt,
+    activityBackgroundTaskRecord,
+    activityMessages,
+    activityNotificationRecord,
+    activitySessionId,
+    activityTurnActive,
+    agentTeamsSnapshot,
+    cliTasks,
+    cliTasksCompletedAndDismissed,
+    cliTasksSessionId,
+    dismissedBackgroundTaskKeys,
+    workflowRuns,
+  ])
   // Fork guards the merge dropped: the unified-panel setting gates the button
   // (with the legacy panel on, activity lives in SessionTaskBar instead), and
   // a team member's transcript never shows it.
@@ -235,7 +257,7 @@ export function TabBar() {
   const showActivityButton = unifiedActivityPanelEnabled &&
     activeTabId &&
     !isActiveMemberSession &&
-    activityState.hasVisibleActivity &&
+    hasVisibleActivity &&
     !isWorkbenchOpen
 
   const moveTab = useTabStore((s) => s.moveTab)

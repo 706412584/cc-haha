@@ -19,6 +19,7 @@ import { useProviderStore } from './providerStore'
 import { reconcileRuntimeSelection, resolveActiveProviderRuntimeSelection } from '../lib/runtimeSelection'
 import { useSettingsStore } from './settingsStore'
 import { isModelReasoningEffort } from '../../../src/shared/modelReasoning'
+import { OPENAI_OFFICIAL_PROVIDER_ID } from '../constants/openaiOfficialProvider'
 import { useTabStore } from './tabStore'
 import { useProviderCompatStore } from './providerCompatStore'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
@@ -47,6 +48,7 @@ import type {
   BackgroundAgentTask,
   BackgroundAgentTaskUsage,
   ChatState,
+  CompactProgress,
   ComputerUsePermissionRequest,
   ComputerUsePermissionResponse,
   DisplayAttachmentRef,
@@ -158,6 +160,13 @@ export type RuntimeConfigError = {
 export type PerSessionState = {
   messages: UIMessage[]
   chatState: ChatState
+  /**
+   * The CLI's own run state (`session_state_changed`). A run stays `running`
+   * while it waits on background tasks and through the replies their
+   * notifications trigger; it turns `idle` only when nothing is left to do.
+   * Undefined until this connection has seen one.
+   */
+  cliRunState?: 'running' | 'idle'
   permissionMode?: PermissionMode
   /**
    * The first prompt is waiting for an empty placeholder session to be
@@ -436,7 +445,12 @@ type ChatStore = {
       minimalBootstrap?: boolean
     },
   ) => void
-  disconnectSession: (sessionId: string) => void
+  /**
+   * Closes the session's socket. `keepTranscript` keeps the cached
+   * conversation (marked disconnected) for a session that is still open but
+   * off screen, so coming back to it redraws at once and only backfills.
+   */
+  disconnectSession: (sessionId: string, options?: { keepTranscript?: boolean }) => void
   sendMessage: (
     sessionId: string,
     content: string,
@@ -1407,9 +1421,15 @@ function flushPendingThinkingDelta(sessionId: string): boolean {
     let activeThinkingId = session.activeThinkingId
     let appendedChars = 0
     for (const segment of segments) {
+      const lastIndex = findStreamMergeTargetIndex(messages)
+      const last = lastIndex >= 0 ? messages[lastIndex] : undefined
       // 服务端两个 thinking 发射点都做了非空过滤，但 `&& delta.thinking` 是真值
       // 判断，纯空白仍能漏过来，落到下面就是一个点开什么都没有的空壳气泡。
-      if (!segment.text.trim()) continue
+      // 只挡整块空白和会新开气泡的空白；正在流式的思考里，单独的空格/换行
+      // 增量是正文的一部分，丢掉它会让实时内容和 transcript 对不上（#1476）。
+      if (!segment.text.trim() && (segment.wholeBlock || last?.type !== 'thinking')) {
+        continue
+      }
       // 真正的重放源已在服务端按 uuid 挡掉（conversationService.isReplayedSdkMessage）。
       // 这里再兜一道：thinking 没有 transcriptMessageId 之类的身份，任何漏网的
       // 重放都只能靠"整块内容与已有 thinking 逐字相同"来认。流式 delta 是碎片，
@@ -1417,8 +1437,6 @@ function flushPendingThinkingDelta(sessionId: string): boolean {
       if (messages.some((message) => message.type === 'thinking' && message.content === segment.text)) {
         continue
       }
-      const lastIndex = findStreamMergeTargetIndex(messages)
-      const last = lastIndex >= 0 ? messages[lastIndex] : undefined
       if (last && last.type === 'thinking') {
         const updated = [...messages]
         updated[lastIndex] = {
@@ -1629,6 +1647,9 @@ function appendOrUpdateTailCompactSummary(
       title: update.title ?? existing.title,
       timestamp: existing.timestamp,
     }
+    // Live progress belongs to a running compaction only; a finished divider
+    // must not keep showing how far the summary had streamed.
+    if (next.phase !== 'compacting') delete next.outputChars
     return [
       ...compactMessages.slice(0, existingIndex),
       next,
@@ -1642,6 +1663,43 @@ function appendOrUpdateTailCompactSummary(
       id: nextId(),
       type: 'compact_summary',
       title: update.title ?? 'Context compacted',
+      ...update,
+      timestamp,
+    },
+  ]
+}
+
+function normalizeCompactOutputChars(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined
+}
+
+/**
+ * Starts or refreshes the tail "compacting" divider from a `status` event.
+ * The divider's timestamp is the compaction start, so a status that continues
+ * a running compaction updates it in place, while any other tail (including a
+ * divider of an already finished compaction) gets a fresh divider. A status
+ * without progress keeps the last known count of the running compaction.
+ */
+function upsertCompactingSummaryFromStatus(
+  messages: UIMessage[],
+  progress: CompactProgress | undefined,
+  timestamp: number,
+): UIMessage[] {
+  const tail = messages[messages.length - 1]
+  const continuing = tail?.type === 'compact_summary' && tail.phase === 'compacting'
+  const outputChars = normalizeCompactOutputChars(progress?.outputChars)
+    ?? (continuing ? tail.outputChars : undefined)
+  const update = {
+    title: 'Context compacted',
+    phase: 'compacting' as const,
+    ...(outputChars !== undefined ? { outputChars } : {}),
+  }
+  if (continuing) return appendOrUpdateTailCompactSummary(messages, update, timestamp)
+  return [
+    ...messages,
+    {
+      id: nextId(),
+      type: 'compact_summary',
       ...update,
       timestamp,
     },
@@ -2315,6 +2373,88 @@ function overlayLiveHistoryMessage(
   return restoredMessage
 }
 
+type CoalescibleProseMessage = Extract<UIMessage, { type: 'thinking' | 'assistant_text' | 'user_text' }>
+
+function isCoalescibleProse(message: UIMessage): message is CoalescibleProseMessage {
+  return message.type === 'thinking' ||
+    message.type === 'assistant_text' ||
+    message.type === 'user_text'
+}
+
+function sameRestoredProse(live: CoalescibleProseMessage, restored: UIMessage): boolean {
+  if (restored.type !== live.type) return false
+  // Live thinking concatenates consecutive streamed blocks while history joins
+  // them with blank lines, so only the non-whitespace text identifies it.
+  if (live.type === 'thinking') {
+    return live.content.replace(/\s+/g, '') === restored.content.replace(/\s+/g, '')
+  }
+  return live.content.trim() === restored.content.trim()
+}
+
+/**
+ * Thinking has no durable identity, and live text only carries a transcript id
+ * once an unchanged cache was hydrated. Without this pass a cold merge keeps
+ * the live copy beside its durable copy (issue #1476). A live row is the same
+ * output only when both lists put it in the same gap between shared rows and
+ * the same number of user turns away from that shared row; equal prose with no
+ * shared anchor may still be a genuine newer reply and stays separate.
+ */
+function coalesceAnchoredLiveProse(
+  merged: UIMessage[],
+  liveIndexes: number[],
+  restoredCount: number,
+): void {
+  const claimed = new Set(liveIndexes.filter((index) => index < restoredCount))
+  const countUserRows = (rows: UIMessage[]) =>
+    rows.reduce((count, row) => count + (row.type === 'user_text' ? 1 : 0), 0)
+  const liveRowsBetween = (from: number, to: number) =>
+    liveIndexes.slice(from, to).map((index) => merged[index]!)
+
+  let previousAnchorOffset = -1
+  for (let offset = 0; offset < liveIndexes.length; offset++) {
+    const index = liveIndexes[offset]!
+    if (index < restoredCount) {
+      previousAnchorOffset = offset
+      continue
+    }
+    const liveMessage = merged[index]!
+    if (!isCoalescibleProse(liveMessage)) continue
+
+    let nextAnchorOffset = offset + 1
+    while (
+      nextAnchorOffset < liveIndexes.length &&
+      liveIndexes[nextAnchorOffset]! >= restoredCount
+    ) nextAnchorOffset++
+    const hasNextAnchor = nextAnchorOffset < liveIndexes.length
+    if (previousAnchorOffset < 0 && !hasNextAnchor) continue
+
+    const lowerBound = previousAnchorOffset < 0 ? -1 : liveIndexes[previousAnchorOffset]!
+    const upperBound = hasNextAnchor ? liveIndexes[nextAnchorOffset]! : restoredCount
+    if (upperBound <= lowerBound) continue
+
+    // Count user turns from the preceding shared row when there is one,
+    // otherwise back from the following shared row.
+    const liveTurnDistance = previousAnchorOffset >= 0
+      ? countUserRows(liveRowsBetween(previousAnchorOffset + 1, offset))
+      : countUserRows(liveRowsBetween(offset + 1, nextAnchorOffset))
+    let matchedIndex: number | undefined
+    for (let candidate = lowerBound + 1; candidate < upperBound; candidate++) {
+      if (claimed.has(candidate) || !sameRestoredProse(liveMessage, merged[candidate]!)) continue
+      const restoredTurnDistance = previousAnchorOffset >= 0
+        ? countUserRows(merged.slice(lowerBound + 1, candidate))
+        : countUserRows(merged.slice(candidate + 1, upperBound))
+      if (restoredTurnDistance !== liveTurnDistance) continue
+      matchedIndex = candidate
+      break
+    }
+    if (matchedIndex === undefined) continue
+
+    claimed.add(matchedIndex)
+    liveIndexes[offset] = matchedIndex
+    previousAnchorOffset = offset
+  }
+}
+
 function mergeColdRestoredHistoryIntoLiveMessages(
   restoredMessages: UIMessage[],
   liveMessages: UIMessage[],
@@ -2382,10 +2522,12 @@ function mergeColdRestoredHistoryIntoLiveMessages(
     }
   }
 
+  const restoredCount = restoredMessages.length
+  coalesceAnchoredLiveProse(merged, liveIndexes, restoredCount)
+
   // A bounded REST page is only a suffix of the transcript. Unmatched live
   // rows can be an older cached prefix, not just new output. Place them by
   // shared identities while leaving the durable page's order untouched.
-  const restoredCount = restoredMessages.length
   const earliestTimestamp = restoredMessages.reduce((earliest, message) =>
     Number.isFinite(message.timestamp) ? Math.min(earliest, message.timestamp) : earliest, Infinity)
   const olderPrefix = new Set<number>()
@@ -3724,7 +3866,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
     }
   },
 
-  disconnectSession: (sessionId) => {
+  disconnectSession: (sessionId, options) => {
     const session = get().sessions[sessionId]
     if (session?.elapsedTimer) clearInterval(session.elapsedTimer)
     if (pendingDeltaBySession.has(sessionId)) {
@@ -3742,6 +3884,17 @@ export const useChatStore = create<ChatStore>((setState, get) => {
     stoppedTurns.delete(sessionId)
     advanceHistoryLifecycle(sessionId)
     wsManager.disconnect(sessionId)
+    if (options?.keepTranscript) {
+      // connectToSession reopens a disconnected session on top of this cache.
+      set((s) => ({
+        sessions: updateSessionIn(s.sessions, sessionId, () => ({
+          connectionState: 'disconnected',
+          connectionSnapshotReady: false,
+          elapsedTimer: null,
+        })),
+      }))
+      return
+    }
     set((s) => {
       const { [sessionId]: _, ...rest } = s.sessions
       const { [sessionId]: _drafts, ...remainingDrafts } = s.askUserQuestionDrafts
@@ -5722,12 +5875,9 @@ export const useChatStore = create<ChatStore>((setState, get) => {
             nextMessages = appendAssistantTextMessage(nextMessages, pendingText, Date.now())
           }
           if (msg.state === 'compacting') {
-            nextMessages = appendOrUpdateTailCompactSummary(
+            nextMessages = upsertCompactingSummaryFromStatus(
               nextMessages,
-              {
-                title: 'Context compacted',
-                phase: 'compacting',
-              },
+              msg.compactProgress,
               Date.now(),
             )
           } else {
@@ -5768,9 +5918,10 @@ export const useChatStore = create<ChatStore>((setState, get) => {
 
       case 'runtime_config_applied': {
         const selected = useSessionRuntimeStore.getState().selections[sessionId]
-        const matchesSelection = (runtime: { providerId: string | null; modelId: string; effortLevel?: string }) =>
+        const matchesSelection = (runtime: { providerId: string | null; modelId: string; effortLevel?: string; openAIFastMode?: boolean }) =>
           Boolean(selected) && selected?.providerId === runtime.providerId &&
-          selected?.modelId === runtime.modelId && selected?.effortLevel === runtime.effortLevel
+          selected?.modelId === runtime.modelId && selected?.effortLevel === runtime.effortLevel &&
+          (selected?.openAIFastMode ?? false) === (runtime.openAIFastMode ?? false)
         const matchesCurrentSelection = matchesSelection(msg)
         const correctsCurrentSelection = msg.requestedConfig && matchesSelection(msg.requestedConfig)
         if (matchesCurrentSelection || correctsCurrentSelection) {
@@ -5778,6 +5929,8 @@ export const useChatStore = create<ChatStore>((setState, get) => {
             useSessionRuntimeStore.getState().setSelection(sessionId, {
               providerId: msg.providerId, modelId: msg.modelId,
               ...(msg.effortLevel && isModelReasoningEffort(msg.effortLevel) ? { effortLevel: msg.effortLevel } : {}),
+              ...(msg.providerId === OPENAI_OFFICIAL_PROVIDER_ID && msg.openAIFastMode !== undefined
+                ? { openAIFastMode: msg.openAIFastMode } : {}),
             })
           }
           useSessionRuntimeStore.getState().settleSelection(sessionId)
@@ -6609,6 +6762,12 @@ export const useChatStore = create<ChatStore>((setState, get) => {
         if (msg.subtype === 'generation_stopped') {
           stoppedTurns.delete(sessionId)
           break
+        }
+        if (msg.subtype === 'session_state_changed') {
+          const runState = (msg.data as { state?: unknown } | undefined)?.state
+          if (runState === 'running' || runState === 'idle') {
+            update(() => ({ cliRunState: runState }))
+          }
         }
         if (msg.subtype === 'session_collaboration_updated') {
           // Collaboration creates/renames sibling sessions and delivers messages
