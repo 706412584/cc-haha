@@ -608,9 +608,17 @@ export function getCommandsByMaxPriority(
  * as slash commands — their text is meant for the model.
  */
 export function isSlashCommand(cmd: QueuedCommand): boolean {
-  return (
-    typeof cmd.value === 'string' &&
-    cmd.value.trim().startsWith('/') &&
-    !cmd.skipSlashCommands
-  )
+  if (cmd.skipSlashCommands) return false
+  if (typeof cmd.value === 'string') {
+    return cmd.value.trim().startsWith('/')
+  }
+  // ContentBlockParam[] (desktop/H5 composer sends block arrays): mirror the
+  // block the turn itself will read — QueryEngine and processUserInput take
+  // the LAST block, and only when it is text — so the routing decision here
+  // matches what the command would be if it ran between turns. String-only
+  // detection let desktop slash commands (e.g. the context panel's /compact)
+  // drain mid-turn as a queued_command text attachment instead of staying
+  // queued for processSlashCommand.
+  const lastBlock = cmd.value.at(-1)
+  return lastBlock?.type === 'text' && lastBlock.text.trim().startsWith('/')
 }
