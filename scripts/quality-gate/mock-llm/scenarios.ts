@@ -103,8 +103,16 @@ export function createMockOnlyRunners(
         const response = await fetch(`${base}/batches/${encodeURIComponent(batch.id)}/confirm`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision: batch.revision }),
         })
-        const launched = await response.json() as any
-        if (!response.ok || launched.state !== 'launched' || !launched.sessions[0]?.sessionId) throw new Error(`confirm did not launch the child: ${JSON.stringify(launched)}`)
+        const accepted = await response.json() as any
+        if (!response.ok || !['launching', 'launched'].includes(accepted.state)) throw new Error(`confirm was not accepted: ${JSON.stringify(accepted)}`)
+        // The UI request answers once the batch is launching; the child starts after it.
+        const deadline = Date.now() + ctx.stepTimeoutMs
+        let launched = accepted
+        while (launched.state !== 'launched' && launched.state !== 'failed' && Date.now() < deadline) {
+          await Bun.sleep(100)
+          launched = (await read()).batches.find((item: any) => item.id === batch.id) ?? launched
+        }
+        if (launched.state !== 'launched' || !launched.sessions[0]?.sessionId) throw new Error(`confirm did not launch the child: ${JSON.stringify(launched)}`)
         const runtime = launched.sessions[0].runtime
         if (runtime.providerId !== ctx.target.providerId || runtime.modelId !== ctx.target.modelId) throw new Error('Child runtime did not preserve the selected provider and model')
         await fetch(`${base}/stop`, { method: 'POST' })

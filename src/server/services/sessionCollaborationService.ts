@@ -72,7 +72,8 @@ export type SessionCollaborationDependencies = {
   }
   now?: () => Date
 }
-type Store = { batches?: Record<string, SessionDelegationBatch & { input: string; stopEpoch: number }>; modelChanges?: Record<string, SessionModelChange & { input: string; continuations?: string[]; stopEpoch?: number }>; version: 1; revision: number; members: Record<string, CollaborationMember>; messages: CollaborationMessage[]; stopEpochs?: Record<string, number>; creations?: Record<string, { input: string; rootSessionId?: string; stopEpoch?: number; result?: { sessionId: string; workDir?: string; messageId: string; title?: string }; failure?: { message: string; code: string; status: number } }> }
+type StoredBatch = SessionDelegationBatch & { input: string; stopEpoch: number }
+type Store = { batches?: Record<string, StoredBatch>; modelChanges?: Record<string, SessionModelChange & { input: string; continuations?: string[]; stopEpoch?: number }>; version: 1; revision: number; members: Record<string, CollaborationMember>; messages: CollaborationMessage[]; stopEpochs?: Record<string, number>; creations?: Record<string, { input: string; rootSessionId?: string; stopEpoch?: number; result?: { sessionId: string; workDir?: string; messageId: string; title?: string }; failure?: { message: string; code: string; status: number } }> }
 /** Pages one ReadSession cursor chain may serve before it stops instead of walking the whole transcript. */
 export const COLLABORATION_READ_MAX_PAGES = 8
 export const COLLABORATION_WAIT_MIN_MS = 10_000
@@ -334,7 +335,13 @@ export class SessionCollaborationService {
     return (await this.listBatches(callerSessionId)).find(item => item.id === id)!
   }
 
-  async confirmBatch(callerSessionId: string, id: string, revision: number): Promise<SessionDelegationBatch> {
+  /**
+   * The model's tool call waits for the launch: it needs the new session ids.
+   * The UI passes `wait: false` and returns once the batch is launching.
+   * Creating each workspace and starting its CLI can take far longer than a
+   * dialog should stay open, and the batch's state already reports the outcome.
+   */
+  async confirmBatch(callerSessionId: string, id: string, revision: number, options: { wait?: boolean } = {}): Promise<SessionDelegationBatch> {
     if (!this.deps.models) throw ApiError.conflict('Model selection is unavailable')
     await this.ready; await this.tail
     const snapshot = structuredClone(this.batch(callerSessionId, id))
@@ -352,6 +359,13 @@ export class SessionCollaborationService {
       batch.state = 'launching'; batch.revision++; delete batch.error
       batch.sessions.forEach((item, index) => { item.runtime = runtimes[index]! })
     })
+    const launch = this.launchBatch(callerSessionId, id, snapshot, runtimes)
+    if (options.wait === false) launch.catch(error => console.error('[SessionCollaboration] Batch launch failed', error))
+    else await launch
+    return (await this.listBatches(callerSessionId)).find(item => item.id === id)!
+  }
+
+  private async launchBatch(callerSessionId: string, id: string, snapshot: StoredBatch, runtimes: SessionRuntimeSelection[]): Promise<void> {
     try {
       for (const entry of snapshot.sessions) {
         const runtime = runtimes[snapshot.sessions.indexOf(entry)]!
@@ -388,10 +402,10 @@ export class SessionCollaborationService {
     } catch (cause) {
       await this.mutate(() => { const batch = this.batch(callerSessionId, id); batch.state = 'failed'; batch.revision++; batch.error = cause instanceof Error ? cause.message : String(cause) })
     }
-    return (await this.listBatches(callerSessionId)).find(item => item.id === id)!
   }
 
-  async changeModels(callerSessionId: string, input: SessionModelChangeInput): Promise<SessionModelChange> {
+  /** As with confirmBatch, the UI passes `wait: false`: stopping and restarting sessions reports through the change's state. */
+  async changeModels(callerSessionId: string, input: SessionModelChangeInput, options: { wait?: boolean } = {}): Promise<SessionModelChange> {
     if (!input.requestId?.trim() || !Array.isArray(input.selections) || !input.selections.length || input.selections.length > 8 || new Set(input.selections.map(item => item.sessionId)).size !== input.selections.length) throw ApiError.badRequest('Choose between one and eight distinct sessions')
     if (!this.deps.models || !this.deps.runtime.apply || !this.deps.runtime.stopAndWait) throw ApiError.conflict('Runtime changes are unavailable')
     if (input.mode !== undefined && input.mode !== 'after_turn' && input.mode !== 'immediate') throw ApiError.badRequest('Invalid change mode')
@@ -430,7 +444,9 @@ export class SessionCollaborationService {
       this.store.modelChanges ??= {}
       this.store.modelChanges[id] = { id, callerSessionId, requestId: input.requestId, revision: 1, mode: input.mode ?? 'after_turn', resume: input.resume !== false, selections, state: 'pending', input: JSON.stringify(input), stopEpoch: this.store.stopEpochs?.[caller.rootSessionId] ?? 0 }
     })
-    await this.processPendingModelChanges()
+    const processing = this.processPendingModelChanges()
+    if (options.wait === false) processing.catch(error => console.error('[SessionCollaboration] Model change failed', error))
+    else await processing
     return (await this.listModelChanges(callerSessionId)).find(item => item.id === id)!
   }
 

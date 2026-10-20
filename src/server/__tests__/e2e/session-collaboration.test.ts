@@ -63,9 +63,10 @@ test('desktop host dispatches independent sessions, exchanges messages, exposes 
     expect(proposals.every(batch => batch.state === 'review' && batch.sessions.every((item: any) => !item.sessionId))).toBe(true)
     const children = []
     for (const batch of proposals) {
-      const confirmed = await api(`/api/session-collaboration/${root.sessionId}/batches/${encodeURIComponent(batch.id)}/confirm`, { expectedRevision: batch.revision })
-      expect(confirmed.state).toBe('launched')
-      children.push(confirmed.sessions[0])
+      const accepted = await api(`/api/session-collaboration/${root.sessionId}/batches/${encodeURIComponent(batch.id)}/confirm`, { expectedRevision: batch.revision })
+      expect(['launching', 'launched']).toContain(accepted.state)
+      const snapshot = await eventually(() => api(`/api/session-collaboration/${root.sessionId}/delegation`), value => value.batches.some((item: any) => item.id === batch.id && item.state === 'launched'), 'batch launched')
+      children.push(snapshot.batches.find((item: any) => item.id === batch.id).sessions[0])
     }
     expect(new Set([root.sessionId, ...children.map(child => child.sessionId)]).size).toBe(3)
     const busyDelivery = await tool('send', { targetSessionId: children[0].sessionId, content: 'Progress while running', messageId: 'busy-message' })

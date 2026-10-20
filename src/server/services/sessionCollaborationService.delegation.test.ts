@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { SessionCollaborationService, type SessionCollaborationDependencies, type CollaborationMessage } from './sessionCollaborationService.js'
 import type { SessionRuntimeSelection } from '../../shared/sessionDelegation.js'
+import { handleSessionCollaborationUiApi } from '../api/sessionCollaboration.js'
 
 let directory: string
 let service: SessionCollaborationService
@@ -343,4 +344,67 @@ test('manual child Stop fences a model change still validating before persistenc
   expect(applied).toEqual([])
   expect(await service.listModelChanges('root')).toEqual([])
   expect((await service.status()).members.find(item => item.sessionId === child.sessionId)?.stopped).toBe(true)
+})
+
+async function until<T>(read: () => Promise<T>, ready: (value: T) => boolean): Promise<T> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const value = await read()
+    if (ready(value)) return value
+    await Bun.sleep(5)
+  }
+  throw new Error('condition was not reached')
+}
+const uiPost = (path: string, body: unknown) => {
+  const url = new URL(`http://localhost/api/session-collaboration/root/${path}`)
+  return handleSessionCollaborationUiApi(new Request(url, { method: 'POST', body: JSON.stringify(body) }), url, service)
+}
+
+// The dialog closes on the response. It used to arrive only after every
+// workspace was created and every CLI had started, with Close ignored meanwhile.
+test('UI Start answers once the batch is launching and the launch finishes on its own', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const create = deps.sessions.create
+  deps.sessions.create = async (...args) => { await gate; return create(...args) }
+  // The batch reads launched before each first message is delivered; a slow
+  // start keeps that window open on every machine.
+  deps.runtime.start = async (_, message) => { await Bun.sleep(20); started.push(message) }
+  const proposal = await service.propose('root', input())
+  const response = await uiPost(`batches/${encodeURIComponent(proposal.id)}/confirm`, { expectedRevision: proposal.revision })
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({ id: proposal.id, state: 'launching' })
+  expect(created).toBe(0)
+  release()
+  await until(async () => started.length, count => count === 2)
+  const [launched] = await service.listBatches('root')
+  expect(launched?.state).toBe('launched')
+  expect(launched?.sessions.every(entry => entry.launched && entry.sessionId)).toBe(true)
+})
+
+test('UI Start still refuses a stale revision, and a launch failing later is recorded on the batch', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  deps.sessions.create = async () => { await gate; throw new Error('workspace failure') }
+  const proposal = await service.propose('root', input())
+  expect((await uiPost(`batches/${encodeURIComponent(proposal.id)}/confirm`, { expectedRevision: proposal.revision + 1 })).status).toBe(409)
+  expect((await uiPost(`batches/${encodeURIComponent(proposal.id)}/confirm`, { expectedRevision: proposal.revision })).status).toBe(200)
+  release()
+  const [failed] = await until(() => service.listBatches('root'), batches => batches[0]?.state === 'failed')
+  expect(failed?.error).toContain('workspace failure')
+  expect(started).toHaveLength(0)
+})
+
+test('UI immediate change answers before running sessions are stopped and restarted', async () => {
+  const child = await service.create('root', { prompt: 'work', runtime })
+  await service.onMessageConsumed(child.messageId)
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  deps.runtime.stopAndWait = async id => { await gate; await service.onStopped(id) }
+  const response = await uiPost('model-changes', { requestId: 'ui', mode: 'immediate', selections: [{ sessionId: child.sessionId, runtime: { ...runtime, modelId: 'better' } }] })
+  expect(response.status).toBe(200)
+  expect(['pending', 'applying']).toContain((await response.json()).state)
+  expect(applied).toEqual([])
+  release()
+  await until(() => service.listModelChanges('root'), changes => changes[0]?.state === 'applied')
+  expect(applied).toEqual([child.sessionId])
 })

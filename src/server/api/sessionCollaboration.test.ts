@@ -66,7 +66,7 @@ test('UI model changes validate input and bind the route session', async () => {
   const input = { requestId: 'change', mode: 'after_turn', selections: [{ sessionId: 'child', runtime: { providerId: 'b', modelId: 'shared' } }] }
   const response = await handleSessionCollaborationUiApi(new Request(url, { method: 'POST', body: JSON.stringify(input) }), url, service)
   expect(response.status).toBe(200)
-  expect(calls).toEqual([['parent', input]])
+  expect(calls).toEqual([['parent', input, { wait: false }]])
   const invalid = await handleSessionCollaborationUiApi(new Request(url, { method: 'POST', body: '{' }), url, service)
   expect(invalid.status).toBe(400)
 })

@@ -78,7 +78,8 @@ function SessionDelegationDialogContent({ sessionId }: { sessionId: string }) {
   const effective = (row: DelegationEntryView) => drafts[row.key] ?? row.entry.runtime
   const conflicted = (batch: SessionDelegationBatch) => draftRevisions.current.has(batch.id) && draftRevisions.current.get(batch.id) !== batch.revision
 
-  const close = () => { if (!busy) setManageOpen(sessionId, false) }
+  // Closing never cancels a request; its outcome shows in the review bar and the Activity rail.
+  const close = () => setManageOpen(sessionId, false)
   /**
    * Forget what a successful action submitted, and close only when nothing else
    * is left. A selection can mix started sessions, which Apply changes, with

@@ -82,6 +82,31 @@ describe('SessionDelegationDialog', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 
+  it('closes while a confirmation is still in flight and stays closed when it answers', async () => {
+    let answer!: (batch: SessionDelegationSnapshot['batches'][number]) => void
+    vi.mocked(sessionCollaborationApi.act).mockReturnValueOnce(new Promise(resolve => { answer = resolve }))
+    openDialog(fixture())
+    fireEvent.click(screen.getByRole('button', { name: 'Start sessions' }))
+    await waitFor(() => expect(sessionCollaborationApi.act).toHaveBeenCalledWith('parent', expect.objectContaining({ id: 'batch' }), 'confirm'))
+    expect(screen.getByRole('button', { name: 'Start sessions' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Close dialog' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(useSessionDelegationStore.getState().bySession.parent?.manageOpen).toBe(false)
+    await act(async () => { answer({ ...fixture().batches[0]!, state: 'launching', revision: 2 }) })
+    await waitFor(() => expect(sessionCollaborationApi.get).toHaveBeenCalled())
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('closes with Escape while a model change is still in flight', async () => {
+    vi.mocked(sessionCollaborationApi.change).mockReturnValueOnce(new Promise(() => {}))
+    openDialog(launchedFixture())
+    fireEvent.click(screen.getByLabelText('Builder'))
+    fireEvent.click(screen.getByRole('button', { name: 'Apply to 1 session' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Apply to 1 session' })).toBeDisabled())
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
   it('blocks unresolved models and can cancel without starting', async () => {
     const data = fixture()
     data.batches[0]!.sessions[0]!.runtime = { providerId: 'deleted', modelId: 'same' }

@@ -99,11 +99,12 @@ export async function handleSessionCollaborationUiApi(req: Request, url: URL, se
         return Response.json(await service.updateBatch(sessionId, batchId, input.expectedRevision, input.selections))
       }
       const input = parse(revisionSchema, body)
-      if (parts[3] === 'confirm') return Response.json(await service.confirmBatch(sessionId, batchId, input.expectedRevision))
+      // The dialog closes on this response; the launch reports through the batch's state.
+      if (parts[3] === 'confirm') return Response.json(await service.confirmBatch(sessionId, batchId, input.expectedRevision, { wait: false }))
       if (parts[3] === 'cancel') return Response.json(await service.cancelBatch(sessionId, batchId, input.expectedRevision))
     }
     if (parts.length === 2 && parts[1] === 'model-changes' && req.method === 'POST') {
-      return Response.json(await service.changeModels(sessionId, parse(changeSchema, await jsonBody(req))))
+      return Response.json(await service.changeModels(sessionId, parse(changeSchema, await jsonBody(req)), { wait: false }))
     }
     if (parts.length === 4 && parts[1] === 'model-changes' && parts[3] === 'cancel' && req.method === 'POST') {
       const input = parse(revisionSchema, await jsonBody(req))
