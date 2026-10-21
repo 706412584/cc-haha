@@ -171,6 +171,7 @@ function seedH5Tunnel(options: {
       tokenPreview: 'h5_tunn...oken',
       allowedOrigins: [],
       publicBaseUrl: options.tunnel.url,
+      tunnelBaseUrl: null,
       fixedPort: null,
       disconnectGraceSeconds: null,
     },
@@ -355,6 +356,79 @@ describe('H5AccessSettings tunnel provider + cloudflared download', () => {
     fireEvent.click(tunnelSection().getByTestId('h5-access-tunnel-switch-route'))
     await waitFor(() => expect(switchProvider).toHaveBeenCalledWith('pinggy', { mode: 'quick' }))
   })
+
+  it('sends the configured domain as namedUrl and never falls back to the LAN address', async () => {
+    seedH5Tunnel({ tunnel: { ...runningCloudflare, status: 'idle', url: null, mode: null }, hostStatus: null })
+    useSettingsStore.setState({
+      h5Access: {
+        enabled: true,
+        token: 'h5_tunnel_token',
+        tokenPreview: 'h5_tunn...oken',
+        allowedOrigins: [],
+        // The LAN address stays on publicBaseUrl; reusing it as namedUrl is the
+        // bug this separate field was split out to fix.
+        publicBaseUrl: 'http://192.168.1.3:58390',
+        tunnelBaseUrl: 'https://codecli.example.online',
+        fixedPort: null,
+        disconnectGraceSeconds: null,
+      },
+    })
+    const startTunnel = vi.spyOn(useSettingsStore.getState(), 'startH5Tunnel').mockResolvedValue()
+    vi.spyOn(useSettingsStore.getState(), 'updateH5AccessSettings').mockResolvedValue()
+
+    render(<H5AccessSettings />)
+    fireEvent.change(screen.getByLabelText('Tunnel mode'), { target: { value: 'named' } })
+    expect(screen.getByLabelText('Tunnel domain')).toHaveValue('https://codecli.example.online')
+
+    fireEvent.click(screen.getByTestId('h5-access-tunnel-toggle'))
+
+    await waitFor(() => expect(startTunnel).toHaveBeenCalledWith({
+      mode: 'named',
+      token: undefined,
+      namedUrl: 'https://codecli.example.online',
+    }))
+  })
+
+  it('refuses to start a named tunnel without a domain instead of publishing the LAN address', async () => {
+    seedH5Tunnel({ tunnel: { ...runningCloudflare, status: 'idle', url: null, mode: null }, hostStatus: null })
+    useSettingsStore.setState({
+      h5Access: {
+        enabled: true,
+        token: 'h5_tunnel_token',
+        tokenPreview: 'h5_tunn...oken',
+        allowedOrigins: [],
+        publicBaseUrl: 'http://192.168.1.3:58390',
+        tunnelBaseUrl: null,
+        fixedPort: null,
+        disconnectGraceSeconds: null,
+      },
+    })
+    const startTunnel = vi.spyOn(h5AccessApi, 'startTunnel')
+    const addToast = vi.fn()
+    useUIStore.setState({ addToast })
+
+    render(<H5AccessSettings />)
+    fireEvent.change(screen.getByLabelText('Tunnel mode'), { target: { value: 'named' } })
+    fireEvent.click(screen.getByTestId('h5-access-tunnel-toggle'))
+
+    await waitFor(() => expect(addToast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error' }),
+    ))
+    expect(startTunnel).not.toHaveBeenCalled()
+  })
+
+  it('rejects a private LAN address typed into the tunnel domain field', () => {
+    seedH5Tunnel({ tunnel: { ...runningCloudflare, status: 'idle', url: null, mode: null }, hostStatus: null })
+    render(<H5AccessSettings />)
+    fireEvent.change(screen.getByLabelText('Tunnel mode'), { target: { value: 'named' } })
+
+    const domain = screen.getByLabelText('Tunnel domain')
+    fireEvent.change(domain, { target: { value: 'http://192.168.1.3:58390' } })
+    expect(screen.getByText('Enter a public hostname, not a LAN IP or localhost')).toBeInTheDocument()
+
+    fireEvent.change(domain, { target: { value: 'codecli.example.online' } })
+    expect(screen.queryByText('Enter a public hostname, not a LAN IP or localhost')).toBeNull()
+  })
 })
 
 // TranslationKey already gates compile-time completeness, but a locale can
@@ -371,6 +445,11 @@ describe('H5 tunnel i18n contract', () => {
     'settings.general.h5AccessTunnelDownloading',
     'settings.general.h5AccessTunnelDownloadFailed',
     'settings.general.h5AccessTunnelDownloadFailedHint',
+    'settings.general.h5AccessTunnelDomain',
+    'settings.general.h5AccessTunnelDomainPlaceholder',
+    'settings.general.h5AccessTunnelDomainHint',
+    'settings.general.h5AccessTunnelDomainInvalid',
+    'settings.general.h5AccessTunnelDomainRequired',
   ] as const
 
   it.each(LOCALES)('defines every new tunnel key in %s', (locale) => {

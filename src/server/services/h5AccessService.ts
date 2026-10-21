@@ -20,6 +20,14 @@ export type H5AccessSettings = {
   allowedOrigins: string[]
   publicBaseUrl: string | null
   /**
+   * Public base URL of the user's own domain for the *named* tunnel mode. Kept
+   * separate from `publicBaseUrl`, which keeps describing the LAN address: one
+   * field cannot be both, and overwriting the LAN URL with the public domain
+   * made the named tunnel report the LAN address while dropping LAN browsers to
+   * 403 (see the CORS allowlist in src/server/index.ts).
+   */
+  tunnelBaseUrl: string | null
+  /**
    * Preferred fixed TCP port for the desktop server. The desktop launchers
    * (Electron and Tauri) read this before spawning the sidecar so reverse
    * proxies and phone bookmarks keep working across app restarts. Applied on
@@ -48,6 +56,8 @@ export type H5AccessDiagnostics = {
   storedHostStaleness: H5HostStaleness
   storedPublicBaseUrl: string | null
   effectivePublicBaseUrl: string | null
+  /** Configured domain for the named tunnel, or null when it has not been set. */
+  tunnelBaseUrl: string | null
   suggestedHost: string | null
   localInterfaceHosts: string[]
   /** Port the running server is actually bound to. Lets the UI flag a fixedPort that has not taken effect yet. */
@@ -97,6 +107,7 @@ const DEFAULT_STORED_SETTINGS: StoredH5AccessSettings = {
   disconnectGraceSeconds: null,
   tunnelToken: null,
   tunnelMode: null,
+  tunnelBaseUrl: null,
 }
 
 const TOKEN_HASH_RE = /^[a-f0-9]{64}$/
@@ -125,6 +136,7 @@ function toPublicSettings(settings: StoredH5AccessSettings): H5AccessSettings {
     allowedOrigins: settings.allowedOrigins,
     fixedPort: settings.fixedPort,
     disconnectGraceSeconds: settings.disconnectGraceSeconds,
+    tunnelBaseUrl: settings.tunnelBaseUrl,
     publicBaseUrl: resolveEffectiveH5PublicBaseUrl({
       enabled: settings.enabled,
       storedPublicBaseUrl: settings.publicBaseUrl,
@@ -169,6 +181,7 @@ function describeH5AccessDiagnostics(stored: StoredH5AccessSettings): H5AccessDi
     storedHostStaleness,
     storedPublicBaseUrl: stored.publicBaseUrl,
     effectivePublicBaseUrl,
+    tunnelBaseUrl: stored.tunnelBaseUrl,
     suggestedHost,
     localInterfaceHosts,
     activePort: ProviderService.getServerPort(),
@@ -712,6 +725,15 @@ function normalizeStoredSettings(value: unknown): StoredH5AccessSettings {
   const tunnelMode: H5TunnelMode | null =
     value.tunnelMode === 'quick' || value.tunnelMode === 'named' ? value.tunnelMode : null
 
+  let tunnelBaseUrl: string | null = null
+  if (typeof value.tunnelBaseUrl === 'string') {
+    try {
+      tunnelBaseUrl = normalizePublicBaseUrl(value.tunnelBaseUrl)
+    } catch {
+      tunnelBaseUrl = null
+    }
+  }
+
   return {
     enabled: value.enabled === true && tokenHash !== null,
     token,
@@ -723,6 +745,7 @@ function normalizeStoredSettings(value: unknown): StoredH5AccessSettings {
     disconnectGraceSeconds: normalizeDisconnectGraceSeconds(value.disconnectGraceSeconds),
     tunnelToken,
     tunnelMode,
+    tunnelBaseUrl,
   }
 }
 
@@ -815,6 +838,7 @@ export class H5AccessService {
   async updateSettings(input: {
     allowedOrigins?: string[]
     publicBaseUrl?: string | null
+    tunnelBaseUrl?: string | null
     fixedPort?: number | null
     disconnectGraceSeconds?: number | null
     tunnelToken?: string | null
@@ -832,6 +856,22 @@ export class H5AccessService {
           if (!validation.ok) {
             throw ApiError.badRequest(validation.reason)
           }
+        }
+      }
+
+      let nextTunnelBaseUrl: string | null
+      if (input.tunnelBaseUrl === undefined) {
+        nextTunnelBaseUrl = h5Access.tunnelBaseUrl
+      } else {
+        nextTunnelBaseUrl = normalizePublicBaseUrl(input.tunnelBaseUrl)
+        // A named tunnel is bound to a domain in Cloudflare, so a bare private
+        // IP here is always a mistake: cloudflared cannot publish it, and the
+        // tunnel would come up reporting an unreachable LAN address (the exact
+        // failure this field was split out of publicBaseUrl to prevent).
+        if (nextTunnelBaseUrl !== null && classifyH5PublicBaseUrl(nextTunnelBaseUrl) === 'plain-lan') {
+          throw ApiError.badRequest(
+            'The tunnel domain must be the public hostname bound to your Cloudflare tunnel, not a private LAN address',
+          )
         }
       }
 
@@ -869,6 +909,7 @@ export class H5AccessService {
           ? h5Access.allowedOrigins
           : normalizeAllowedOrigins(input.allowedOrigins),
         publicBaseUrl: nextPublicBaseUrl,
+        tunnelBaseUrl: nextTunnelBaseUrl,
         fixedPort: nextFixedPort,
         disconnectGraceSeconds: nextDisconnectGraceSeconds,
         tunnelToken: input.tunnelToken === undefined
@@ -890,6 +931,28 @@ export class H5AccessService {
   async getDiagnostics(): Promise<H5AccessDiagnostics> {
     const { h5Access } = await this.readStoredSettings()
     return describeH5AccessDiagnostics(h5Access)
+  }
+
+  /**
+   * Every browser origin this machine has been published under: the stored
+   * (LAN) publicBaseUrl, the named-tunnel domain, and the live tunnel URL when
+   * one is running. Used as the CORS allowlist so switching the tunnel on can
+   * never drop the LAN address — or vice versa — out of reach.
+   */
+  async getKnownOrigins(): Promise<string[]> {
+    const { h5Access } = await this.readStoredSettings()
+    if (!h5Access.enabled) return []
+
+    const origins: string[] = []
+    for (const candidate of [h5Access.publicBaseUrl, h5Access.tunnelBaseUrl, tunnelRuntime.url]) {
+      if (!candidate) continue
+      try {
+        origins.push(normalizeOriginInput(candidate, 'publicBaseUrl'))
+      } catch {
+        // A malformed stored value must not take the whole allowlist down.
+      }
+    }
+    return [...new Set(origins)]
   }
 
   /**

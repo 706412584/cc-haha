@@ -61,6 +61,7 @@ describe('H5AccessService', () => {
       allowedOrigins: [],
       publicBaseUrl: null,
       fixedPort: null,
+      tunnelBaseUrl: null,
       disconnectGraceSeconds: null,
     })
 
@@ -89,6 +90,7 @@ describe('H5AccessService', () => {
       allowedOrigins: [],
       publicBaseUrl: null,
       fixedPort: null,
+      tunnelBaseUrl: null,
       disconnectGraceSeconds: null,
     })
     expect(saved.h5Access.enabled).toBe(true)
@@ -605,6 +607,7 @@ describe('H5AccessService', () => {
       allowedOrigins: ['https://example.com', 'http://localhost:3000'],
       publicBaseUrl: 'https://public.example.com/app',
       fixedPort: null,
+      tunnelBaseUrl: null,
       disconnectGraceSeconds: null,
     })
 
@@ -633,6 +636,60 @@ describe('H5AccessService', () => {
     await expect(service.isOriginAllowed('notaurl')).resolves.toBe(false)
   })
 
+  test('a running named tunnel keeps the LAN origin allowed alongside the public domain', async () => {
+    const service = new H5AccessService()
+
+    await service.enable()
+    await service.updateSettings({
+      publicBaseUrl: 'http://192.168.1.3:58390',
+      tunnelBaseUrl: 'https://codecli.example.online',
+    })
+    // The live tunnel URL becomes the effective publicBaseUrl, which used to be
+    // the *only* origin the CORS allowlist accepted — dropping every LAN
+    // browser to 403 the moment the tunnel came up.
+    setRuntimeTunnelState({
+      status: 'running',
+      url: 'https://codecli.example.online',
+      mode: 'named',
+      provider: 'cloudflare',
+    })
+
+    await expect(service.getSettings()).resolves.toMatchObject({
+      publicBaseUrl: 'https://codecli.example.online',
+      tunnelBaseUrl: 'https://codecli.example.online',
+    })
+
+    const origins = await service.getKnownOrigins()
+    expect(origins).toContain('http://192.168.1.3:58390')
+    expect(origins).toContain('https://codecli.example.online')
+  })
+
+  test('getKnownOrigins reports nothing while H5 access is disabled', async () => {
+    const service = new H5AccessService()
+
+    await service.updateSettings({
+      publicBaseUrl: 'http://192.168.1.3:58390',
+      tunnelBaseUrl: 'https://codecli.example.online',
+    })
+
+    await expect(service.getKnownOrigins()).resolves.toEqual([])
+  })
+
+  test('updateSettings rejects a private LAN address as the tunnel domain', async () => {
+    const service = new H5AccessService()
+
+    // A named tunnel is bound to a public hostname in Cloudflare: accepting a
+    // LAN IP here would bring the tunnel up reporting an address nobody can
+    // reach, which is the failure the separate field exists to prevent.
+    await expect(
+      service.updateSettings({ tunnelBaseUrl: 'http://192.168.1.3:58390' }),
+    ).rejects.toMatchObject({ statusCode: 400 })
+
+    await expect(
+      service.updateSettings({ tunnelBaseUrl: 'https://codecli.example.online/' }),
+    ).resolves.toMatchObject({ tunnelBaseUrl: 'https://codecli.example.online' })
+  })
+
   test('malformed persisted enabled state without token hash is treated as disabled', async () => {
     await fs.mkdir(path.dirname(getManagedSettingsPath()), { recursive: true })
     await fs.writeFile(
@@ -656,6 +713,7 @@ describe('H5AccessService', () => {
       allowedOrigins: ['https://example.com'],
       publicBaseUrl: 'https://public.example.com',
       fixedPort: null,
+      tunnelBaseUrl: null,
       disconnectGraceSeconds: null,
     })
     await expect(service.validateToken('anything')).resolves.toBe(false)

@@ -123,6 +123,36 @@ function buildH5PublicBaseUrlFromHostDraft(draft: string, currentBaseUrl: string
   }
 }
 
+function isPrivateIpv4Host(hostname: string): boolean {
+  if (hostname.startsWith('10.')) return true
+  if (hostname.startsWith('192.168.')) return true
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname)) return true
+  if (hostname.startsWith('169.254.')) return true
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1'
+}
+
+/**
+ * Normalize the named-tunnel domain draft to a bare origin. A tunnel domain is
+ * bound to a public hostname in Cloudflare, so anything without a hostname, or
+ * pointing at a private LAN address, is rejected here rather than silently
+ * producing a tunnel that reports an address nobody can reach (the failure the
+ * separate field exists to prevent).
+ */
+function parseH5TunnelBaseUrlDraft(draft: string): string | null | 'invalid' {
+  const trimmed = draft.trim()
+  if (!trimmed) return null
+
+  try {
+    const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`)
+    if (!['http:', 'https:'].includes(url.protocol)) return 'invalid'
+    if (!url.hostname) return 'invalid'
+    if (isPrivateIpv4Host(url.hostname.toLowerCase())) return 'invalid'
+    return url.origin
+  } catch {
+    return 'invalid'
+  }
+}
+
 /** Which provider the live tunnel is using; `undefined` = not reported yet. */
 function readTunnelProvider(state: H5TunnelStatusView | null | undefined): H5TunnelProvider | null {
   const provider = state?.provider
@@ -169,6 +199,10 @@ export function H5AccessSettings() {
   const [h5TunnelMode, setH5TunnelMode] = useState<'quick' | 'named'>('quick')
   const [h5TunnelTokenDraft, setH5TunnelTokenDraft] = useState('')
   const [h5TunnelTokenVisible, setH5TunnelTokenVisible] = useState(false)
+  // A named tunnel needs both the Cloudflare token and the public hostname it
+  // is bound to. The hostname is its own field: reusing the LAN publicBaseUrl
+  // made the tunnel report the LAN address and broke LAN CORS in the process.
+  const [h5TunnelBaseUrlDraft, setH5TunnelBaseUrlDraft] = useState(h5Access.tunnelBaseUrl ?? '')
   // Host-direct tunnel status. The server's diagnostics mirror the same state
   // but lag by one poll, so the host read gives the download progress and
   // provider without waiting for the next /api/h5-access refresh.
@@ -214,11 +248,14 @@ export function H5AccessSettings() {
     ? String(h5AccessDiagnostics.activePort)
     : extractH5AccessPort(h5AccessUrl)
   const h5NextPublicBaseUrl = buildH5PublicBaseUrlFromHostDraft(h5PublicBaseUrlDraft, h5Access.publicBaseUrl)
+  const h5NextTunnelBaseUrl = parseH5TunnelBaseUrlDraft(h5TunnelBaseUrlDraft)
+  const h5TunnelBaseUrlInvalid = h5NextTunnelBaseUrl === 'invalid'
   const h5NextFixedPort = parseH5FixedPortDraft(h5FixedPortDraft)
   const h5FixedPortInvalid = h5NextFixedPort === 'invalid'
   const h5NextGrace = parseH5GraceDraft(h5GraceDraft)
   const h5GraceInvalid = h5NextGrace === 'invalid'
   const h5AccessDirty = h5NextPublicBaseUrl !== (h5Access.publicBaseUrl ?? null) ||
+    (!h5TunnelBaseUrlInvalid && h5NextTunnelBaseUrl !== (h5Access.tunnelBaseUrl ?? null)) ||
     (!h5FixedPortInvalid && h5NextFixedPort !== h5Access.fixedPort) ||
     (!h5GraceInvalid && h5NextGrace !== h5Access.disconnectGraceSeconds)
   const h5FixedPortPendingRestart = h5Access.fixedPort != null &&
@@ -274,6 +311,7 @@ export function H5AccessSettings() {
 
   useEffect(() => {
     setH5PublicBaseUrlDraft(extractH5AccessAddressDraft(h5Access.publicBaseUrl))
+    setH5TunnelBaseUrlDraft(h5Access.tunnelBaseUrl ?? '')
     setH5FixedPortDraft(h5Access.fixedPort != null ? String(h5Access.fixedPort) : '')
     setH5GraceDraft(h5Access.disconnectGraceSeconds != null ? String(h5Access.disconnectGraceSeconds) : '')
   }, [h5Access])
@@ -312,10 +350,11 @@ export function H5AccessSettings() {
   }
 
   const handleH5SettingsSave = async () => {
-    if (h5FixedPortInvalid || h5GraceInvalid) return
+    if (h5FixedPortInvalid || h5GraceInvalid || h5TunnelBaseUrlInvalid) return
     await runH5Action(async () => {
       await updateH5AccessSettings({
         publicBaseUrl: h5NextPublicBaseUrl,
+        tunnelBaseUrl: h5NextTunnelBaseUrl,
         fixedPort: h5NextFixedPort,
         disconnectGraceSeconds: h5NextGrace,
       })
@@ -350,14 +389,23 @@ export function H5AccessSettings() {
       }
       if (h5TunnelMode === 'named') {
         const token = h5TunnelTokenDraft.trim()
-        if (token) {
-          // Persist the token so the named tunnel survives restarts.
-          await updateH5AccessSettings({ tunnelToken: token, tunnelMode: 'named' })
+        // The bound domain is required: without it the tunnel has nothing to
+        // report, and falling back to the LAN URL is exactly the broken state
+        // the separate field exists to avoid.
+        if (h5NextTunnelBaseUrl === 'invalid' || h5NextTunnelBaseUrl === null) {
+          addToast({ type: 'error', message: t('settings.general.h5AccessTunnelDomainRequired') })
+          return
         }
+        // Persist both so the named tunnel survives a restart.
+        await updateH5AccessSettings({
+          tunnelToken: token || undefined,
+          tunnelMode: 'named',
+          tunnelBaseUrl: h5NextTunnelBaseUrl,
+        })
         await startH5Tunnel({
           mode: 'named',
           token: token || undefined,
-          namedUrl: h5NextPublicBaseUrl || h5Access.publicBaseUrl || undefined,
+          namedUrl: h5NextTunnelBaseUrl,
         })
       } else {
         await startH5Tunnel({ mode: 'quick' })
@@ -672,7 +720,21 @@ export function H5AccessSettings() {
                 {h5TunnelMode === 'named' && !h5TunnelOccupied && (
                   <div className="mt-3">
                     <Input
+                      id="h5-access-tunnel-domain"
+                      label={t('settings.general.h5AccessTunnelDomain')}
+                      value={h5TunnelBaseUrlDraft}
+                      placeholder={t('settings.general.h5AccessTunnelDomainPlaceholder')}
+                      error={h5TunnelBaseUrlInvalid
+                        ? t('settings.general.h5AccessTunnelDomainInvalid')
+                        : undefined}
+                      onChange={(event) => setH5TunnelBaseUrlDraft(event.target.value)}
+                    />
+                    <p className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
+                      {t('settings.general.h5AccessTunnelDomainHint')}
+                    </p>
+                    <Input
                       id="h5-access-tunnel-token"
+                      containerClassName="mt-3"
                       label={t('settings.general.h5AccessTunnelToken')}
                       type={h5TunnelTokenVisible ? 'text' : 'password'}
                       value={h5TunnelTokenDraft}

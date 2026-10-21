@@ -413,11 +413,18 @@ export function startServer(port = PORT, host = HOST) {
           ),
         }
         const h5Settings = await h5AccessService.getSettings()
-        const h5PublicOrigin = originFromUrl(h5Settings.publicBaseUrl)
+        // The allowlist spans every address this machine is published under, so
+        // turning the named tunnel on does not drop LAN browsers (and vice
+        // versa). The effective `publicBaseUrl` alone is not enough: while a
+        // tunnel runs it resolves to the tunnel URL, which used to become the
+        // only accepted origin.
+        const h5KnownOrigins = await h5AccessService.getKnownOrigins()
+        const h5EffectiveOrigin = originFromUrl(h5Settings.publicBaseUrl)
         const cors = await resolveCors(origin, url.origin, {
           h5Enabled: h5Settings.enabled,
           isOriginAllowed: async (candidateOrigin) =>
-            candidateOrigin === h5PublicOrigin ||
+            candidateOrigin === h5EffectiveOrigin ||
+            h5KnownOrigins.includes(candidateOrigin) ||
             await h5AccessService.isOriginAllowed(candidateOrigin),
         })
         const authRequired = shouldRequireH5Token({

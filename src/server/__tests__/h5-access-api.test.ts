@@ -76,6 +76,7 @@ describe('/api/h5-access', () => {
       allowedOrigins: [],
       publicBaseUrl: null,
       fixedPort: null,
+      tunnelBaseUrl: null,
       disconnectGraceSeconds: null,
     })
     expect(body.diagnostics).toBeDefined()
@@ -170,6 +171,7 @@ describe('/api/h5-access', () => {
         allowedOrigins: [],
         publicBaseUrl: null,
         fixedPort: null,
+        tunnelBaseUrl: null,
         disconnectGraceSeconds: null,
       },
     })
@@ -192,6 +194,7 @@ describe('/api/h5-access', () => {
         allowedOrigins: ['https://example.com/path'],
         publicBaseUrl: 'https://public.example.com/app/',
         fixedPort: 28670,
+        tunnelBaseUrl: null,
         disconnectGraceSeconds: null,
       },
     })
@@ -205,6 +208,7 @@ describe('/api/h5-access', () => {
         allowedOrigins: ['https://example.com'],
         publicBaseUrl: 'https://public.example.com/app',
         fixedPort: 28670,
+        tunnelBaseUrl: null,
         disconnectGraceSeconds: null,
       },
     })

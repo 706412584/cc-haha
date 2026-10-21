@@ -8,7 +8,11 @@ import {
   clearFilesystemAccessRootsForTests,
   registerFilesystemAccessRoot,
 } from '../services/filesystemAccessRoots.js'
-import { H5AccessService } from '../services/h5AccessService.js'
+import {
+  H5AccessService,
+  resetRuntimeTunnelState,
+  setRuntimeTunnelState,
+} from '../services/h5AccessService.js'
 import { ProviderService } from '../services/providerService.js'
 import { sessionService } from '../services/sessionService.js'
 
@@ -159,20 +163,23 @@ function localFileUrl(base: string, absPath: string): string {
 async function enableH5Access(options: {
   allowedOrigins?: string[]
   publicBaseUrl?: string | null
+  tunnelBaseUrl?: string | null
 } = {}): Promise<string> {
   const service = new H5AccessService()
-  if (options.allowedOrigins || options.publicBaseUrl !== undefined) {
-    await service.updateSettings({
-      allowedOrigins: options.allowedOrigins,
-      publicBaseUrl: options.publicBaseUrl,
-    })
+  const hasSettings = options.allowedOrigins !== undefined ||
+    options.publicBaseUrl !== undefined ||
+    options.tunnelBaseUrl !== undefined
+  const settings = {
+    allowedOrigins: options.allowedOrigins,
+    publicBaseUrl: options.publicBaseUrl,
+    tunnelBaseUrl: options.tunnelBaseUrl,
+  }
+  if (hasSettings) {
+    await service.updateSettings(settings)
   }
   const { token } = await service.enable()
-  if (options.allowedOrigins || options.publicBaseUrl !== undefined) {
-    await service.updateSettings({
-      allowedOrigins: options.allowedOrigins,
-      publicBaseUrl: options.publicBaseUrl,
-    })
+  if (hasSettings) {
+    await service.updateSettings(settings)
   }
   return token
 }
@@ -283,6 +290,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await stopRemoteServer()
   clearFilesystemAccessRootsForTests()
+  resetRuntimeTunnelState()
   ProviderService.setServerPort(originalServerPort)
 
   if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
@@ -1144,6 +1152,45 @@ describe('remote H5 auth and CORS integration', () => {
 
     expect(response.status).toBe(200)
     expect(response.headers.get('Access-Control-Allow-Origin')).toBe(TUNNEL_ORIGIN)
+  })
+
+  test('keeps the LAN origin reachable while a named tunnel publishes the domain', async () => {
+    // Regression: the allowlist used to be just the *effective* publicBaseUrl
+    // (plus the explicit allowedOrigins list). Bringing the named tunnel up
+    // re-pointed that at the public domain, so every LAN browser — and every
+    // already-connected phone's WebSocket — dropped to 403 with no way back
+    // except editing settings.json by hand.
+    const lanOrigin = 'http://192.168.1.3:58390'
+    await enableH5Access({
+      publicBaseUrl: lanOrigin,
+      tunnelBaseUrl: TUNNEL_ORIGIN,
+    })
+    setRuntimeTunnelState({
+      status: 'running',
+      url: TUNNEL_ORIGIN,
+      mode: 'named',
+      provider: 'cloudflare',
+    })
+    const token = await new H5AccessService().getSettings()
+
+    for (const origin of [lanOrigin, TUNNEL_ORIGIN]) {
+      const preflight = await fetch(`${baseUrl}/api/status`, {
+        method: 'OPTIONS',
+        headers: {
+          Origin: origin,
+          'Access-Control-Request-Method': 'GET',
+        },
+      })
+      // The /api/status reachability probe a phone runs before pairing.
+      const status = await fetch(`${baseUrl}/api/status`, {
+        headers: { Origin: origin, Authorization: `Bearer ${token.token}` },
+      })
+
+      expect(preflight.status).toBe(204)
+      expect(preflight.headers.get('Access-Control-Allow-Origin')).toBe(origin)
+      expect(status.headers.get('Access-Control-Allow-Origin')).toBe(origin)
+      expect(status.status).not.toBe(403)
+    }
   })
 
   test('still requires a valid H5 token for tunnel-origin browser requests', async () => {

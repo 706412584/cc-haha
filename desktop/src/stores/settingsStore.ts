@@ -164,6 +164,7 @@ type SettingsStore = {
   updateH5AccessSettings: (input: {
     allowedOrigins?: string[]
     publicBaseUrl?: string | null
+    tunnelBaseUrl?: string | null
     fixedPort?: number | null
     disconnectGraceSeconds?: number | null
     tunnelToken?: string | null
@@ -187,6 +188,7 @@ const DEFAULT_H5_ACCESS_SETTINGS: H5AccessSettings = {
   tokenPreview: null,
   allowedOrigins: [],
   publicBaseUrl: null,
+  tunnelBaseUrl: null,
   fixedPort: null,
   disconnectGraceSeconds: null,
 }
@@ -1112,6 +1114,7 @@ function normalizeH5AccessSettings(settings: H5AccessSettings | undefined): H5Ac
     tokenPreview: settings?.tokenPreview ?? null,
     allowedOrigins: Array.isArray(settings?.allowedOrigins) ? settings.allowedOrigins : [],
     publicBaseUrl: settings?.publicBaseUrl ?? null,
+    tunnelBaseUrl: settings?.tunnelBaseUrl ?? null,
     fixedPort: typeof settings?.fixedPort === 'number' ? settings.fixedPort : null,
     disconnectGraceSeconds: typeof settings?.disconnectGraceSeconds === 'number' ? settings.disconnectGraceSeconds : null,
   }

@@ -61,6 +61,7 @@ export const h5AccessApi = {
   update(input: {
     allowedOrigins?: string[]
     publicBaseUrl?: string | null
+    tunnelBaseUrl?: string | null
     fixedPort?: number | null
     disconnectGraceSeconds?: number | null
     tunnelToken?: string | null

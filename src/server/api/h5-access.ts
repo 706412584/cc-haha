@@ -61,6 +61,7 @@ export async function handleH5AccessApi(
           const settings = await h5AccessService.updateSettings({
             allowedOrigins: body.allowedOrigins as string[] | undefined,
             publicBaseUrl: body.publicBaseUrl as string | null | undefined,
+            tunnelBaseUrl: body.tunnelBaseUrl as string | null | undefined,
             fixedPort: body.fixedPort as number | null | undefined,
             disconnectGraceSeconds: body.disconnectGraceSeconds as number | null | undefined,
             tunnelToken: body.tunnelToken as string | null | undefined,

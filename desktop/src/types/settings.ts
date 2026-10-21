@@ -130,6 +130,12 @@ export type H5AccessSettings = {
   tokenPreview: string | null
   allowedOrigins: string[]
   publicBaseUrl: string | null
+  /**
+   * Public hostname bound to the user's Cloudflare named tunnel. Separate from
+   * `publicBaseUrl`, which keeps describing the LAN address so LAN browsers
+   * stay reachable while the tunnel publishes the domain.
+   */
+  tunnelBaseUrl: string | null
   /** Preferred fixed server port. Applied by the Tauri launcher on next app start. */
   fixedPort: number | null
   /** Idle grace period (seconds) before a disconnected, idle session's CLI is stopped. null = built-in 30s default. */
@@ -160,6 +166,8 @@ export type H5AccessDiagnostics = {
   storedHostStaleness: H5HostStaleness
   storedPublicBaseUrl: string | null
   effectivePublicBaseUrl: string | null
+  /** Configured domain for the named tunnel. Optional so older payloads stay valid. */
+  tunnelBaseUrl?: string | null
   suggestedHost: string | null
   localInterfaceHosts: string[]
   activePort?: number

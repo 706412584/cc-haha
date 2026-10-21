@@ -393,3 +393,26 @@ desktop 侧整套带插桩并发，负载显著高于 `desktop-checks` / `server
 - `src/__tests__/componentReachability.test.ts`（14 组件无运行时 importer）：fork 的 Trace 组件家族在上游 #1443 退役后失去页面入口，属退役残余（独立批次清理组件或重建入口）。
 - `electron/services/pets.test.ts > rejects duplicate IDs…`、`electron/services/shell.test.ts > tolerates percent-encoding differences…`：Windows 本地环境类，基线同红（shell 一条在上文 v0.6.8 段已登记）。
 - `src/server/services/teamPlanRuntime.supervisor.test.ts`（8-11 fail，随负载波动）：上文「上游 v0.7.0 团队 supervisor 测试 vs fork 恢复语义」已登记。
+
+## 2026-10-21 本地 Windows 实测补充（H5 命名隧道域名修复批次）
+
+在**未改动的 fork main `354788519` 干净检出**上重跑同一批检查，下列失败同样出现，逐项一致，
+故与本次 H5 改动无关：
+
+- `bun run check:persistence-upgrade` → `failed checks: 2`：
+  - `Desktop data migration journal recovery and credential namespace copy`：`vitest --run
+    electron/services/dataMigration.test.ts electron/services/migrationCredentials.test.ts` 抛
+    `Unhandled Rejection: Channel closed`（`ERR_IPC_CHANNEL_CLOSED`，tinypool worker 崩溃），
+    与上文「大套件资源抖动」同源。注意 `dataMigration.test.ts` 甚至没有产生测试结论行。
+  - `Agent Teams teammate resume from agent metadata written before the teammate fields`：
+    `bun test ./src/utils/swarm/inProcessRunner.resume.test.ts --test-name-pattern "metadata written before"`
+    → `Agent preset has no verifiable source`（1 fail / 1 run），抛出点在
+    `src/utils/swarm/teamPlanPresetSource.ts:22`，与 H5 改动无调用关系。
+- `bun run check:server` 整条中止：即上文已登记的 `claudeBetas.integration.test.ts` + `EBUSY`，
+  本次复现形式完全相同。
+
+**处置**：这三项均为平台/环境类预存红，CI(Linux) 不受影响，不要用它们的退出码判断本次改动质量。
+本次改动的针对性验证用下面这些**单独跑**的命令（全绿）：
+`bun test ./src/server/__tests__/h5-access-{service,api,auth}.test.ts ./src/server/middleware/cors.test.ts`
+以及 `cd desktop && bun run test -- --run src/pages/settings/H5Settings.test.tsx
+src/stores/settingsStore.test.ts src/__tests__/generalSettings.test.tsx`。
