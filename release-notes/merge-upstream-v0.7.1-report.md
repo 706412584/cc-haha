@@ -118,6 +118,20 @@
   - `build-windows-x64.ps1` 硬性要求 VS 2022 Build Tools(vswhere),本机无——但脚本中 MSVC 环境导入只服务于可选的 `REBUILD_NATIVE=1`(node-pty 走 prebuilds、sidecars 走 Bun.build、Electron 为预编译包),本轮按脚本等价步骤手动执行,全部成功。
   - `winCodeSign-2.6.0` 缓存的 7z 在非管理员下因 `darwin/10.12/lib` 的符号链接报 EPERM,解压后目录从未重命名为 `winCodeSign-2.6.0`,导致 electron-builder 每次重试新目录;手工补全 dylib 并以最终名落盘后缓存命中。
 
+## 本地打包（v0.8.7 + H5 命名隧道域名修复，2026-10-21）
+
+同一版本号下的第二次打包，含 `fix(h5): give the named tunnel its own domain field`（commit `f996b25a0`）。
+
+- **产物**：`desktop/build-artifacts/windows-x64/Claude-Code-Haha-0.8.7-win-x64.exe`（215,994,234 B，NSIS x64）+ `win-unpacked`（`Code Council.exe` FileVersion/ProductVersion `0.8.7` / `0.8.7.0`）+ `latest.yml` / `.blockmap`。
+- **package-smoke**：PASS（15 项静态检查：installer、app.asar、app-update.yml、node-pty、plugin-seed、sidecar、ripgrep 及三份 license、图标）。
+- **改动确已入包**（`unpacked: true` 条目落在 `app.asar.unpacked/`，**不在** app.asar 头部，用 asar 内字符串搜索会误判为缺失）：
+  - renderer：`resources/app.asar.unpacked/dist/assets/App-DfAPiaRD.js` 含 `h5AccessTunnelDomain`。
+  - server：`resources/app.asar.unpacked/src-tauri/binaries/claude-sidecar-x86_64-pc-windows-msvc.exe` 含 `getKnownOrigins` / `tunnelBaseUrl`。
+- **本机环境注记**（本次新遇，均为本机环境问题，非仓库缺陷）：
+  - `node_modules/electron/dist` 从未下载（`path.txt` 缺失）。用 `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ node node_modules/electron/install.js` 补装（42.7.0）。
+  - `node_modules/7zip-bin/win/x64/7za.exe` 损坏：98,480,216 B（官方约 1.5 MB，且硬链接数为 2），对**任何**参数都以 exit 1、零输出退出，导致 electron-builder 的 NSIS 压缩步骤报 `7za.exe process failed 1`。用 scoop 的 7-Zip 26.02（`7z.exe` + `7z.dll`）替换该文件后通过。（`node_modules/` 不入库，无需回植；`7zip-bin` 亦支持 `USE_SYSTEM_7ZA=true` 绕开。）
+  - VS 2022 Build Tools 仍缺失：脚本第 87 行 `Import-VsDevEnvironment` 是硬门控，但其 MSVC 环境只服务于可选的 `REBUILD_NATIVE=1`，故本次同样按脚本等价步骤手动执行（sidecars → plugin-seed → renderer → electron main → electron-builder）。
+
 ## 独立审核结论
 
 _由独立子代理产出（与实现者分离）。_
