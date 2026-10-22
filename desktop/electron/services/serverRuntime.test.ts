@@ -64,6 +64,7 @@ const harness = String.raw`
     downloadFails: false,
     downloadError: 'cloudflared download failed: HTTP 403',
     downloadSteps: null,
+    namedOptions: [],
   }
 
   const CF_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i
@@ -314,6 +315,82 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
         const reportCall = [...state.fetchCalls].reverse().find((call) => call.url.endsWith('/api/h5-access/tunnel/report'))
         assert(reportCall?.init?.headers?.Authorization === 'Bearer ' + runtime.getLocalAccessToken(), 'tunnel report did not use local access auth')
       })
+    `)
+  })
+
+  it('loads the stored Cloudflare token for a named start instead of failing on a missing token', async () => {
+    await expectIsolatedPass(String.raw`
+      // A named start prints no URL to scrape, so mirror the real factory: it
+      // returns the caller's namedUrl rather than waiting for trycloudflare output.
+      const namedDeps = {
+        createCloudflareTunnel: async (options) => {
+          if (options.resolveBinary) await options.resolveBinary()
+          const child = makeChild(2100)
+          state.tunnelChildren.push(child)
+          state.namedOptions.push(options)
+          return { provider: 'cloudflare', url: options.namedUrl, child, stop: async () => {} }
+        },
+      }
+
+      await withRuntime(async (runtime) => {
+        // The stored token is reachable only through the local-only endpoint;
+        // the renderer never holds it, so a stop/restart (which drops the draft
+        // input) used to start a named tunnel with no token at all.
+        state.fetchMock = async (url, init) => {
+          state.fetchCalls.push({ url: String(url), init })
+          if (String(url).endsWith('/api/h5-access/tunnel/token')) {
+            return Response.json({ token: 'stored-tunnel-token' })
+          }
+          return new Response(null, { status: 200 })
+        }
+        globalThis.fetch = state.fetchMock
+
+        const status = await runtime.startTunnel({ mode: 'named', namedUrl: 'https://code.example.com' })
+
+        const tokenCall = state.fetchCalls.find((call) => call.url.endsWith('/api/h5-access/tunnel/token'))
+        assert(tokenCall, 'the named start never asked the server for the stored token')
+        assert(
+          tokenCall.init?.headers?.Authorization === 'Bearer ' + runtime.getLocalAccessToken(),
+          'the token fetch did not use local access auth',
+        )
+        assertEqual(state.namedOptions[0]?.token, 'stored-tunnel-token', 'the stored token was not passed to cloudflared')
+        assertEqual(status.status, 'running', 'named start with a stored token should reach running')
+        assertEqual(status.error, null, 'named start should not report an error')
+      }, { deps: namedDeps })
+    `)
+  })
+
+  it('fails a named start with an actionable message when no token is stored at all', async () => {
+    await expectIsolatedPass(String.raw`
+      const namedDeps = {
+        createCloudflareTunnel: async (options) => {
+          // Mirror createTunnelPlan: a named tunnel without a token must throw.
+          if (options.mode === 'named' && !options.token) {
+            throw new Error('A Cloudflare tunnel token is required for the named tunnel mode.')
+          }
+          const child = makeChild(2100)
+          state.tunnelChildren.push(child)
+          return { provider: 'cloudflare', url: options.namedUrl, child, stop: async () => {} }
+        },
+      }
+
+      await withRuntime(async (runtime) => {
+        state.fetchMock = async (url, init) => {
+          state.fetchCalls.push({ url: String(url), init })
+          if (String(url).endsWith('/api/h5-access/tunnel/token')) {
+            return Response.json({ token: null })
+          }
+          return new Response(null, { status: 200 })
+        }
+        globalThis.fetch = state.fetchMock
+
+        const status = await runtime.startTunnel({ mode: 'named', namedUrl: 'https://code.example.com' })
+        assertEqual(status.status, 'error', 'a named start with no stored token must fail')
+        assert(
+          String(status.error).includes('token is required'),
+          'the error must say the token is missing, got: ' + status.error,
+        )
+      }, { deps: namedDeps })
     `)
   })
 

@@ -777,6 +777,20 @@ describe('remote H5 auth and CORS integration', () => {
     })
   })
 
+  test('never exposes the stored tunnel token to a remote browser, even with a valid H5 token', async () => {
+    // The endpoint exists so the local main process can launch cloudflared. It
+    // sits under /api/h5-access, which is local-credential-only — a paired phone
+    // must not be able to read the Cloudflare token and re-publish the tunnel.
+    const token = await enableH5Access()
+    await new H5AccessService().updateSettings({ tunnelToken: 'stored-cloudflare-tunnel-token' })
+
+    const remote = await fetch(`${baseUrl}/api/h5-access/tunnel/token`, {
+      headers: { Origin: PHONE_ORIGIN, Authorization: `Bearer ${token}` },
+    })
+    expect(remote.status).toBe(403)
+    await expect(remote.text()).resolves.not.toContain('stored-cloudflare-tunnel-token')
+  })
+
   test('does not keep retired Tauri origins trusted after Electron replacement', async () => {
     const response = await fetch(`${baseUrl}/api/status`, {
       headers: {

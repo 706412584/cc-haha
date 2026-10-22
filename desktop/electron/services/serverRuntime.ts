@@ -706,7 +706,7 @@ export class ElectronServerRuntime {
       instance = await this.deps.createCloudflareTunnel({
         port,
         mode: options.mode,
-        token: options.token,
+        token: await this.resolveTunnelToken(options, context.serverUrl),
         namedUrl: options.namedUrl,
         env,
         timeoutMs: TUNNEL_URL_TIMEOUT_MS,
@@ -1012,6 +1012,35 @@ export class ElectronServerRuntime {
       })
     } catch (error) {
       console.error('[desktop] failed to clear tunnel state on server', error)
+    }
+  }
+
+  /**
+   * Resolve the Cloudflare token for a named start.
+   *
+   * The renderer never holds the token — it is persisted server-side so a named
+   * tunnel survives restarts — so an explicit payload value is only the first
+   * source. Without the fallback a stop/restart (or a reconnect replay) reached
+   * `createCloudflareTunnel` with no token and failed with "A Cloudflare tunnel
+   * token is required", even though one was stored.
+   */
+  private async resolveTunnelToken(options: TunnelStartOptions, serverUrl: string): Promise<string | null> {
+    const explicit = options.token?.trim()
+    if (explicit) return explicit
+    if (options.mode !== 'named') return null
+
+    try {
+      const response = await this.fetchFn(`${serverUrl}/api/h5-access/tunnel/token`, {
+        headers: this.localServerHeaders(),
+      })
+      if (!response.ok) return null
+      const body = await response.json() as { token?: unknown }
+      return typeof body.token === 'string' && body.token.trim() ? body.token.trim() : null
+    } catch (error) {
+      // A lookup failure must surface as the ordinary missing-token error below
+      // rather than a network error the user cannot act on.
+      console.error('[desktop] failed to load the stored tunnel token', error)
+      return null
     }
   }
 

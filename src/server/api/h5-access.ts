@@ -148,6 +148,17 @@ export async function handleH5AccessApi(
           return Response.json({ settings, tunnel: getRuntimeTunnelState() })
         }
 
+        if (action === 'token') {
+          // The desktop main process owns the named-tunnel lifecycle but has no
+          // access to settings.json, so it reads the stored token through here.
+          // Never sent to remote callers: this whole surface (except verify) is
+          // already gated to local-trusted requests upstream.
+          if (req.method !== 'GET') {
+            throw methodNotAllowed(req.method, '/api/h5-access/tunnel/token')
+          }
+          return Response.json({ token: await h5AccessService.getTunnelToken() })
+        }
+
         if (action === 'clear') {
           if (req.method !== 'POST') {
             throw methodNotAllowed(req.method, '/api/h5-access/tunnel/clear')

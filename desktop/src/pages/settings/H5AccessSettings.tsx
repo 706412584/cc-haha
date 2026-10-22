@@ -396,12 +396,16 @@ export function H5AccessSettings() {
           addToast({ type: 'error', message: t('settings.general.h5AccessTunnelDomainRequired') })
           return
         }
-        // Persist both so the named tunnel survives a restart.
+        // Persist the domain so the named tunnel survives a restart. An empty
+        // token draft means "keep the saved one" — sending `undefined` here
+        // would wipe it and leave the main process with nothing to launch.
         await updateH5AccessSettings({
-          tunnelToken: token || undefined,
+          ...(token ? { tunnelToken: token } : {}),
           tunnelMode: 'named',
           tunnelBaseUrl: h5NextTunnelBaseUrl,
         })
+        // The token itself is optional here: the main process falls back to the
+        // stored value, so a stop/restart no longer needs the draft re-typed.
         await startH5Tunnel({
           mode: 'named',
           token: token || undefined,

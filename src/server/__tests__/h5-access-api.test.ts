@@ -274,6 +274,29 @@ describe('/api/h5-access', () => {
     expect(body.tunnel.url).toBe('https://abcd.trycloudflare.com')
   })
 
+  test('tunnel/token returns the stored token to the local main process and never through public settings', async () => {
+    await api('PUT', '/api/h5-access', {
+      body: { tunnelToken: 'stored-cloudflare-tunnel-token', tunnelMode: 'named' },
+    })
+    await api('POST', '/api/h5-access/enable')
+
+    const response = await api('GET', '/api/h5-access/tunnel/token')
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ token: 'stored-cloudflare-tunnel-token' })
+
+    // The token must not leak through the ordinary settings payload.
+    const settingsResponse = await api('GET', '/api/h5-access')
+    const body = await settingsResponse.json() as { settings: Record<string, unknown> }
+    expect(JSON.stringify(body.settings)).not.toContain('stored-cloudflare-tunnel-token')
+  })
+
+  test('tunnel/token reports null before any token has been stored', async () => {
+    await api('POST', '/api/h5-access/enable')
+
+    const response = await api('GET', '/api/h5-access/tunnel/token')
+    await expect(response.json()).resolves.toEqual({ token: null })
+  })
+
   test('tunnel/clear resets the runtime tunnel and falls back to stored URL', async () => {    await api('PUT', '/api/h5-access', { body: { publicBaseUrl: 'https://chat.example.com/app' } })
     await api('POST', '/api/h5-access/enable')
     await api('POST', '/api/h5-access/tunnel/report', {
