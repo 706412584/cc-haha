@@ -132,6 +132,19 @@
   - `node_modules/7zip-bin/win/x64/7za.exe` 损坏：98,480,216 B（官方约 1.5 MB，且硬链接数为 2），对**任何**参数都以 exit 1、零输出退出，导致 electron-builder 的 NSIS 压缩步骤报 `7za.exe process failed 1`。用 scoop 的 7-Zip 26.02（`7z.exe` + `7z.dll`）替换该文件后通过。（`node_modules/` 不入库，无需回植；`7zip-bin` 亦支持 `USE_SYSTEM_7ZA=true` 绕开。）
   - VS 2022 Build Tools 仍缺失：脚本第 87 行 `Import-VsDevEnvironment` 是硬门控，但其 MSVC 环境只服务于可选的 `REBUILD_NATIVE=1`，故本次同样按脚本等价步骤手动执行（sidecars → plugin-seed → renderer → electron main → electron-builder）。
 
+### 第三次打包（2026-10-22，含 LAN 放行缺口修复）
+
+第二次的包**装到实机后 LAN 仍报 403**，暴露了 `getKnownOrigins()` 的缺口（详见 commit `517435454`）：真实机器的 stored
+`publicBaseUrl` 是 `null`（`CLAUDE_H5_AUTO_PUBLIC_URL=1` 自动推导 LAN 地址），而隧道运行时 effective `publicBaseUrl`
+是隧道 URL，于是 LAN origin 没有任何存储来源进入白名单。第二次的测试把 LAN 地址写进了 `publicBaseUrl`——一个真实环境
+不会出现的形态，因此掩盖了缺口。
+
+- **产物**：同上路径，`Claude-Code-Haha-0.8.7-win-x64.exe`（215,993,955 B）+ `win-unpacked` / `latest.yml` / `.blockmap`。
+- **package-smoke**：PASS。
+- **改动确已入包**：sidecar 含 `getKnownOrigins`(2) / `tunnelBaseUrl`(2) / `CLAUDE_H5_AUTO_PUBLIC_URL`(1)。
+  注意 `resolveAutoLanPublicBaseUrl` 是模块内函数，bun build 会重命名——用函数名 grep 会误判为缺失，须用稳定字符串字面量验证。
+- **渲染层未变**，故本次跳过 vite 重建，只重建 sidecar + electron main 后重打包。
+
 ## 独立审核结论
 
 _由独立子代理产出（与实现者分离）。_
