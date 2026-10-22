@@ -664,6 +664,41 @@ describe('H5AccessService', () => {
     expect(origins).toContain('https://codecli.example.online')
   })
 
+  test('a named tunnel keeps the auto-discovered LAN origin allowed when no publicBaseUrl was ever stored', async () => {
+    // The real desktop shape: `CLAUDE_H5_AUTO_PUBLIC_URL=1` is injected
+    // unconditionally by the sidecar env, and the user never set a LAN
+    // publicBaseUrl — so the LAN address exists *only* as the auto-derived
+    // value. Omitting that source from the allowlist dropped every LAN browser
+    // to 403 as soon as the named tunnel came up, with no stored setting to
+    // point at.
+    process.env.CLAUDE_H5_AUTO_PUBLIC_URL = '1'
+    const service = new H5AccessService()
+
+    await service.enable()
+    await service.updateSettings({ tunnelBaseUrl: 'https://xunfei.example.online' })
+    setRuntimeTunnelState({
+      status: 'running',
+      url: 'https://xunfei.example.online',
+      mode: 'named',
+      provider: 'cloudflare',
+    })
+
+    // While the tunnel runs, the *effective* publicBaseUrl is the tunnel URL —
+    // there is no stored LAN value anywhere to fall back on.
+    await expect(service.getSettings()).resolves.toMatchObject({
+      publicBaseUrl: 'https://xunfei.example.online',
+      tunnelBaseUrl: 'https://xunfei.example.online',
+    })
+
+    const lanHost = findPrivateLanAddress()
+    expect(lanHost).not.toBeNull()
+    const lanOrigin = `http://${lanHost}:${ProviderService.getServerPort()}`
+
+    const origins = await service.getKnownOrigins()
+    expect(origins).toContain(lanOrigin)
+    expect(origins).toContain('https://xunfei.example.online')
+  })
+
   test('getKnownOrigins reports nothing while H5 access is disabled', async () => {
     const service = new H5AccessService()
 

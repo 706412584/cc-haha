@@ -935,16 +935,27 @@ export class H5AccessService {
 
   /**
    * Every browser origin this machine has been published under: the stored
-   * (LAN) publicBaseUrl, the named-tunnel domain, and the live tunnel URL when
-   * one is running. Used as the CORS allowlist so switching the tunnel on can
-   * never drop the LAN address — or vice versa — out of reach.
+   * (LAN) publicBaseUrl, the named-tunnel domain, the live tunnel URL, and the
+   * auto-discovered LAN address. Used as the CORS allowlist so switching the
+   * tunnel on can never drop the LAN address — or vice versa — out of reach.
+   *
+   * The auto-discovered value matters on its own: the desktop sidecar always
+   * injects `CLAUDE_H5_AUTO_PUBLIC_URL=1`, and a user who never typed a LAN URL
+   * has *no* stored publicBaseUrl — while a tunnel is running the effective one
+   * is the tunnel URL. Without this source the LAN entry point is dropped
+   * entirely and its browsers get 403 with nothing in settings to point at.
    */
   async getKnownOrigins(): Promise<string[]> {
     const { h5Access } = await this.readStoredSettings()
     if (!h5Access.enabled) return []
 
     const origins: string[] = []
-    for (const candidate of [h5Access.publicBaseUrl, h5Access.tunnelBaseUrl, tunnelRuntime.url]) {
+    for (const candidate of [
+      h5Access.publicBaseUrl,
+      h5Access.tunnelBaseUrl,
+      tunnelRuntime.url,
+      resolveAutoLanPublicBaseUrl(),
+    ]) {
       if (!candidate) continue
       try {
         origins.push(normalizeOriginInput(candidate, 'publicBaseUrl'))

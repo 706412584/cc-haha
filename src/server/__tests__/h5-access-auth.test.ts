@@ -1160,11 +1160,14 @@ describe('remote H5 auth and CORS integration', () => {
     // re-pointed that at the public domain, so every LAN browser — and every
     // already-connected phone's WebSocket — dropped to 403 with no way back
     // except editing settings.json by hand.
-    const lanOrigin = 'http://192.168.1.3:58390'
-    await enableH5Access({
-      publicBaseUrl: lanOrigin,
-      tunnelBaseUrl: TUNNEL_ORIGIN,
-    })
+    //
+    // The realistic desktop shape is used deliberately: AUTO_PUBLIC_URL is on
+    // and no LAN publicBaseUrl is stored, so the LAN origin exists only as the
+    // auto-discovered value — the source the first fix missed.
+    process.env.CLAUDE_H5_AUTO_PUBLIC_URL = '1'
+    const lanOrigin = lanBaseUrl
+    expect(lanOrigin, 'the LAN address must resolve for this test to mean anything').not.toBe('')
+    await enableH5Access({ tunnelBaseUrl: TUNNEL_ORIGIN })
     setRuntimeTunnelState({
       status: 'running',
       url: TUNNEL_ORIGIN,
