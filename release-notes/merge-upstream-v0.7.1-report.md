@@ -145,6 +145,20 @@
   注意 `resolveAutoLanPublicBaseUrl` 是模块内函数，bun build 会重命名——用函数名 grep 会误判为缺失，须用稳定字符串字面量验证。
 - **渲染层未变**，故本次跳过 vite 重建，只重建 sidecar + electron main 后重打包。
 
+### 第四次打包（2026-10-22，含命名隧道 token 修复）
+
+实机反馈「停止隧道再打开容易报错…… A Cloudflare tunnel token is required for the named tunnel mode」。根因：
+`H5AccessService.getTunnelToken()` 注释写明「由桌面主进程调用以启动 cloudflared」，但**全仓库零调用方**——token 只能经
+start IPC 的 payload 从渲染层草稿传入，而停止再启动会清掉草稿，于是主进程拿到空 token 直接抛错。修复见 commit `dc8ed65b4`。
+
+- **产物**：同上路径，`Claude-Code-Haha-0.8.7-win-x64.exe`（215,994,733 B）。
+- **package-smoke**：PASS。
+- **改动确已入包**（三层，分别验证）：
+  - server：sidecar 含 `h5-access/tunnel/token`(1)。
+  - Electron main：`app.asar` 内 `electron-dist/main.cjs` 含 `resolveTunnelToken`(2) / `h5-access/tunnel/token`(1) / `A Cloudflare tunnel token is required`(1)。
+  - renderer：`app.asar.unpacked/dist/assets/` 内含 `h5-access-tunnel-domain`。
+- 注意 `resolveTunnelToken` 只在 Electron main bundle（asar 内），不在 sidecar 里——按名字 grep sidecar 会误判缺失。
+
 ## 独立审核结论
 
 _由独立子代理产出（与实现者分离）。_
