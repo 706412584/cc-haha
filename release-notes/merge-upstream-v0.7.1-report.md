@@ -159,6 +159,16 @@ start IPC 的 payload 从渲染层草稿传入，而停止再启动会清掉草�
   - renderer：`app.asar.unpacked/dist/assets/` 内含 `h5-access-tunnel-domain`。
 - 注意 `resolveTunnelToken` 只在 Electron main bundle（asar 内），不在 sidecar 里——按名字 grep sidecar 会误判缺失。
 
+### 第五次打包（2026-10-23，含固定端口占用诊断）
+
+实机反馈「固定端口开了手动填 58588，每次启动又要提示我重启才会生效」。诊断结论如下，修复见 commit `622eab021`。
+
+- **产物**：`Claude-Code-Haha-0.8.7-win-x64.exe`（215,994,401 B）+ `win-unpacked` / `latest.yml` / `.blockmap`；package-smoke PASS。
+- **入包验证**：sidecar 含 `fixedPortStatus`；renderer 含 `h5AccessFixedPortBlockedNote`。注意 `isPortBindable` 是模块内函数会被 Bun 重命名，不能按名字 grep。
+- **实机诊断（只读）**：
+  - 端口 58588 / 50678 被**幽灵监听**占用：`netstat`/`Get-NetTCPConnection` 显示 OwningProcess 7868 / 2356，但两个 PID 都已不存在（`GetProcessById` 抛「进程当前未运行」），且绑定探测返回 `EADDRINUSE`。因此固定端口永远拿不到，server 每次都回退到新端口。
+  - 旧 UI 只比较「配置端口 ≠ 活跃端口」，把这个状态和「重启即生效」混为一谈，于是形成「重启→端口仍被占→再提示重启」的死循环。这正是本次修复针对的。
+
 ## 独立审核结论
 
 _由独立子代理产出（与实现者分离）。_
