@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
+import net from 'node:net'
 import os from 'node:os'
 import { ApiError } from '../middleware/errorHandler.js'
 import { isBrowserSafePort } from './browserSafePort.js'
@@ -52,6 +53,14 @@ export type H5AccessEnableResult = {
 
 export type H5HostStaleness = 'ok' | 'unreachable' | 'proxy' | 'unset'
 
+/**
+ * Why the configured fixed port is or is not in effect. `pending-restart` and
+ * `in-use` look identical to the UI (configured port differs from the active
+ * one) but need opposite advice: one clears on restart, the other never will
+ * until the port is released.
+ */
+export type H5FixedPortStatus = 'none' | 'applied' | 'pending-restart' | 'in-use'
+
 export type H5AccessDiagnostics = {
   storedHostStaleness: H5HostStaleness
   storedPublicBaseUrl: string | null
@@ -62,6 +71,12 @@ export type H5AccessDiagnostics = {
   localInterfaceHosts: string[]
   /** Port the running server is actually bound to. Lets the UI flag a fixedPort that has not taken effect yet. */
   activePort: number
+  /**
+   * Whether `fixedPort` is in effect, merely waiting for a restart, or blocked
+   * by another process — the last case needs the user to free the port rather
+   * than restart the app.
+   */
+  fixedPortStatus: H5FixedPortStatus
   /**
    * Live Cloudflare tunnel state. `hasToken` reflects whether a named-tunnel
    * token is stored without ever exposing the token itself — the secret stays
@@ -147,7 +162,32 @@ function toPublicSettings(settings: StoredH5AccessSettings): H5AccessSettings {
   }
 }
 
-function describeH5AccessDiagnostics(stored: StoredH5AccessSettings): H5AccessDiagnostics {
+/**
+ * Whether a new server could bind `port` right now. Used to tell a fixed port
+ * that is merely waiting for a restart from one another process is holding —
+ * the two look identical to the UI but need opposite advice.
+ *
+ * Probes the wildcard host because that is what the server itself binds
+ * (`--host 0.0.0.0`); a loopback-only probe can report a port free that the
+ * real bind then loses.
+ */
+async function isPortBindable(port: number): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    const probe = net.createServer()
+    let settled = false
+    const finish = (value: boolean) => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    probe.once('error', () => finish(false))
+    probe.listen(port, '0.0.0.0', () => {
+      probe.close(() => finish(true))
+    })
+  })
+}
+
+async function describeH5AccessDiagnostics(stored: StoredH5AccessSettings): Promise<H5AccessDiagnostics> {
   const localInterfaceHosts = collectLocalIPv4Hosts()
   const autoPublicBaseUrl = resolveAutoLanPublicBaseUrl()
   const configuredPublicBaseUrl = resolveConfiguredPublicBaseUrl()
@@ -177,6 +217,20 @@ function describeH5AccessDiagnostics(stored: StoredH5AccessSettings): H5AccessDi
     }
   }
 
+  const activePort = ProviderService.getServerPort()
+  const fixedPort = stored.fixedPort
+  let fixedPortStatus: H5FixedPortStatus = 'none'
+  if (fixedPort !== null && activePort > 0) {
+    if (fixedPort === activePort) {
+      fixedPortStatus = 'applied'
+    } else {
+      // Distinguish "restart will fix it" from "restart will never fix it": a
+      // preferred port another process already holds is silently skipped, so
+      // the user has to free it rather than restarting forever.
+      fixedPortStatus = await isPortBindable(fixedPort) ? 'pending-restart' : 'in-use'
+    }
+  }
+
   return {
     storedHostStaleness,
     storedPublicBaseUrl: stored.publicBaseUrl,
@@ -185,6 +239,7 @@ function describeH5AccessDiagnostics(stored: StoredH5AccessSettings): H5AccessDi
     suggestedHost,
     localInterfaceHosts,
     activePort: ProviderService.getServerPort(),
+    fixedPortStatus,
     tunnel: {
       status: tunnelRuntime.status,
       url: tunnelRuntime.url,
@@ -930,7 +985,7 @@ export class H5AccessService {
 
   async getDiagnostics(): Promise<H5AccessDiagnostics> {
     const { h5Access } = await this.readStoredSettings()
-    return describeH5AccessDiagnostics(h5Access)
+    return await describeH5AccessDiagnostics(h5Access)
   }
 
   /**

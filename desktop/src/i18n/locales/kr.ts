@@ -2882,6 +2882,7 @@ export const kr: Record<TranslationKey, string> = {
   'settings.general.h5AccessFixedPortInvalid': '포트는 1024~65535 사이의 브라우저에서 허용되는 정수여야 합니다.',
   'settings.general.h5AccessFixedPortHint': '고정 포트를 설정하지 않으면 이전 포트를 자동으로 재사용합니다. 리버스 프록시 등 안정적인 포트가 필요한 경우 고정을 권장합니다. 변경 사항은 앱 재시작 후 적용됩니다.',
   'settings.general.h5AccessFixedPortRestartNote': '고정 포트 {fixedPort}은(는) 앱 재시작 후 적용됩니다. 현재는 {activePort}에서 실행 중입니다.',
+  'settings.general.h5AccessFixedPortBlockedNote': '고정 포트 {fixedPort}을(를) 다른 프로세스가 사용 중이라 재시작해도 적용되지 않습니다. 현재는 {activePort}에서 실행 중입니다. 먼저 {fixedPort}을(를) 해제하세요.',
   'settings.general.h5AccessDisconnectGrace': '연결 끊김 유지(초)',
   'settings.general.h5AccessDisconnectGracePlaceholder': '30',
   'settings.general.h5AccessDisconnectGraceInvalid': '5~86400 사이의 정수(초)여야 합니다.',

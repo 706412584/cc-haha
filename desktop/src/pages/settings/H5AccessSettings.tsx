@@ -258,9 +258,18 @@ export function H5AccessSettings() {
     (!h5TunnelBaseUrlInvalid && h5NextTunnelBaseUrl !== (h5Access.tunnelBaseUrl ?? null)) ||
     (!h5FixedPortInvalid && h5NextFixedPort !== h5Access.fixedPort) ||
     (!h5GraceInvalid && h5NextGrace !== h5Access.disconnectGraceSeconds)
-  const h5FixedPortPendingRestart = h5Access.fixedPort != null &&
-    h5ActivePort != null &&
-    String(h5Access.fixedPort) !== h5ActivePort
+  const h5FixedPortStatus = h5AccessDiagnostics?.fixedPortStatus
+  // The server tells apart "a restart will apply it" from "another process is
+  // holding it" — the second never clears by restarting, so offering that
+  // advice would loop the user forever.
+  const h5FixedPortBlocked = h5FixedPortStatus === 'in-use'
+  // Older server payloads omit fixedPortStatus; keep the previous heuristic so
+  // the note still appears instead of silently vanishing.
+  const h5FixedPortPendingRestart = h5FixedPortStatus === 'pending-restart' ||
+    (h5FixedPortStatus === undefined &&
+      h5Access.fixedPort != null &&
+      h5ActivePort != null &&
+      String(h5Access.fixedPort) !== h5ActivePort)
 
   const refreshH5HostTunnelStatus = useCallback(() => {
     const pending = h5AccessApi.getTunnelStatus()
@@ -637,6 +646,18 @@ export function H5AccessSettings() {
                 {t('settings.general.h5AccessSave')}
               </Button>
             </SettingsBlock>
+            {h5FixedPortBlocked && (
+              <div
+                data-testid="h5-access-fixed-port-blocked-note"
+                role="alert"
+                className="rounded-[var(--radius-lg)] border border-[var(--color-error)] bg-[var(--color-error-container)] px-3 py-2 text-xs leading-5 text-[var(--color-on-error-container)]"
+              >
+                {t('settings.general.h5AccessFixedPortBlockedNote', {
+                  fixedPort: String(h5Access.fixedPort),
+                  activePort: h5ActivePort ?? '',
+                })}
+              </div>
+            )}
             {h5FixedPortPendingRestart && (
               <div
                 data-testid="h5-access-fixed-port-restart-note"

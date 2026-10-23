@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import * as fs from 'node:fs/promises'
+import net from 'node:net'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import {
@@ -885,6 +886,54 @@ describe('H5AccessService', () => {
         cidr: 'fe80::1/64',
       }],
     })).toEqual(['192.168.0.105'])
+  })
+
+  test('fixedPortStatus tells an occupied fixed port apart from one merely awaiting a restart', async () => {
+    // Regression: both cases surfaced the same "takes effect after restarting"
+    // note, so a port another process held sent the user into a restart loop
+    // that could never succeed.
+    const service = new H5AccessService()
+    const originalPort = ProviderService.getServerPort()
+
+    // Hold a real port so the probe has something to collide with.
+    const holder = net.createServer()
+    const blockedPort = await new Promise<number>((resolve, reject) => {
+      holder.once('error', reject)
+      holder.listen(0, '0.0.0.0', () => {
+        const address = holder.address()
+        if (!address || typeof address === 'string') reject(new Error('no port'))
+        else resolve(address.port)
+      })
+    })
+    const freePort = await new Promise<number>((resolve, reject) => {
+      const probe = net.createServer()
+      probe.once('error', reject)
+      probe.listen(0, '0.0.0.0', () => {
+        const address = probe.address()
+        const port = address && typeof address !== 'string' ? address.port : 0
+        probe.close(() => resolve(port))
+      })
+    })
+
+    try {
+      // No fixed port configured.
+      await expect(service.getDiagnostics()).resolves.toMatchObject({ fixedPortStatus: 'none' })
+
+      // The server already runs on the configured port.
+      await service.updateSettings({ fixedPort: originalPort })
+      await expect(service.getDiagnostics()).resolves.toMatchObject({ fixedPortStatus: 'applied' })
+
+      // Configured but free: a restart will apply it.
+      await service.updateSettings({ fixedPort: freePort })
+      await expect(service.getDiagnostics()).resolves.toMatchObject({ fixedPortStatus: 'pending-restart' })
+
+      // Configured and held by another listener: restarting will not help.
+      await service.updateSettings({ fixedPort: blockedPort })
+      await expect(service.getDiagnostics()).resolves.toMatchObject({ fixedPortStatus: 'in-use' })
+    } finally {
+      ProviderService.setServerPort(originalPort)
+      await new Promise<void>((resolve) => holder.close(() => resolve()))
+    }
   })
 
   test('getDiagnostics reports stale, ok, proxy and unset states', async () => {

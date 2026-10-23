@@ -2073,6 +2073,42 @@ describe('Settings > General tab', () => {
     expect(useSettingsStore.getState().updateH5AccessSettings).not.toHaveBeenCalled()
   })
 
+  it('tells the user to free an occupied fixed port instead of promising a restart will apply it', () => {
+    // Regression: an occupied fixed port produced the same "takes effect after
+    // restarting" note as a merely-pending one, so the user restarted forever
+    // while the port stayed held.
+    useSettingsStore.setState({
+      h5Access: {
+        enabled: true,
+        token: 'h5_persisted_token',
+        tokenPreview: 'h5_pers...oken',
+        allowedOrigins: [],
+        publicBaseUrl: 'http://192.168.0.102:54064',
+        tunnelBaseUrl: null,
+        fixedPort: 58588,
+        disconnectGraceSeconds: null,
+      },
+      h5AccessDiagnostics: {
+        storedHostStaleness: 'ok',
+        storedPublicBaseUrl: 'http://192.168.0.102:54064',
+        effectivePublicBaseUrl: 'http://192.168.0.102:54064',
+        suggestedHost: null,
+        localInterfaceHosts: ['192.168.0.102'],
+        activePort: 63565,
+        fixedPortStatus: 'in-use',
+      },
+    })
+    render(<Settings />)
+    fireEvent.click(screen.getByText('H5 Access'))
+    const section = screen.getByRole('region', { name: 'H5 Access' })
+
+    const blocked = within(section).getByTestId('h5-access-fixed-port-blocked-note')
+    expect(blocked.textContent).toContain('58588')
+    expect(blocked.textContent).toContain('63565')
+    // The misleading restart advice must be gone entirely.
+    expect(within(section).queryByTestId('h5-access-fixed-port-restart-note')).toBeNull()
+  })
+
   it('shows a restart note while the saved fixed port is not active yet', () => {
     useSettingsStore.setState({
       h5Access: {

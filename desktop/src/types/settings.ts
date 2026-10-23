@@ -171,8 +171,15 @@ export type H5AccessDiagnostics = {
   suggestedHost: string | null
   localInterfaceHosts: string[]
   activePort?: number
+  /**
+   * Whether the configured fixed port is in effect, waiting for a restart, or
+   * held by another process. Optional so older server payloads stay valid.
+   */
+  fixedPortStatus?: H5FixedPortStatus
   tunnel?: H5TunnelDiagnostics
 }
+
+export type H5FixedPortStatus = 'none' | 'applied' | 'pending-restart' | 'in-use'
 
 export type DesktopTerminalStartupShell =
   | 'system'

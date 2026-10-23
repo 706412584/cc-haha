@@ -2884,6 +2884,7 @@ export const jp: Record<TranslationKey, string> = {
   'settings.general.h5AccessFixedPortInvalid': 'ポートは 1024〜65535 のブラウザーで使用可能な整数で指定してください。',
   'settings.general.h5AccessFixedPortHint': '固定ポート未設定の場合は前回のポートを自動的に再利用します。リバースプロキシなど安定したポートが必要な場合は固定を推奨します。変更はアプリ再起動後に反映されます。',
   'settings.general.h5AccessFixedPortRestartNote': '固定ポート {fixedPort} はアプリ再起動後に有効になります。現在は {activePort} で稼働中です。',
+  'settings.general.h5AccessFixedPortBlockedNote': '固定ポート {fixedPort} は他のプロセスが使用中のため、再起動しても適用されません。現在は {activePort} で稼働中です。先に {fixedPort} を解放してください。',
   'settings.general.h5AccessDisconnectGrace': '切断後の保持（秒）',
   'settings.general.h5AccessDisconnectGracePlaceholder': '30',
   'settings.general.h5AccessDisconnectGraceInvalid': '5〜86400 の整数（秒）で指定してください。',

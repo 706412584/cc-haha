@@ -2884,6 +2884,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.general.h5AccessFixedPortInvalid': '端口需为 1024-65535 之间且浏览器允许访问的整数。',
   'settings.general.h5AccessFixedPortHint': '不设固定端口时会自动复用上次的端口；反向代理等需要稳定端口的场景建议固定。修改端口后重启应用生效。',
   'settings.general.h5AccessFixedPortRestartNote': '固定端口 {fixedPort} 将在重启应用后生效，当前仍运行在 {activePort}。',
+  'settings.general.h5AccessFixedPortBlockedNote': '固定端口 {fixedPort} 已被其他进程占用，重启应用也不会生效。当前运行在 {activePort}；请先释放 {fixedPort} 再重启。',
   'settings.general.h5AccessDisconnectGrace': '断连保活（秒）',
   'settings.general.h5AccessDisconnectGracePlaceholder': '30',
   'settings.general.h5AccessDisconnectGraceInvalid': '需为 5-86400 之间的整数秒。',
