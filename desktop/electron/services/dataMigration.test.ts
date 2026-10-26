@@ -37,6 +37,20 @@ async function fixture() {
   return { root, home, source, target, userData, app, hooks, put, migration: new DataMigration(app, hooks, {}) }
 }
 
+// A drive letter Windows currently has no volume for. Used to reproduce the
+// detached-disk startup failure without touching any real volume.
+async function findDetachedDriveRoot(): Promise<string | null> {
+  for (let code = 'Z'.charCodeAt(0); code >= 'E'.charCodeAt(0); code -= 1) {
+    const root = `${String.fromCharCode(code)}:\\`
+    try {
+      await fs.stat(root)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return root
+    }
+  }
+  return null
+}
+
 afterEach(async () => {
   vi.restoreAllMocks()
   syncBuiltinESMExports()
@@ -578,6 +592,54 @@ describe('data directory migration', () => {
     expect(await fs.readFile(path.join(f.target, 'unrelated'), 'utf8')).toBe('must survive')
     expect(await fs.readFile(path.join(f.userData, 'app-mode.json'), 'utf8')).toContain('"unknown":42')
     await expect(fs.stat(stagingDir)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it.each(['failed', 'cancelled'] as const)('drops a terminal %s receipt instead of resolving its directories', async stage => {
+    const f = await fixture()
+    await fs.mkdir(f.userData, { recursive: true })
+    await fs.mkdir(f.target)
+    const id = 'terminal-id'
+    await fs.writeFile(path.join(f.userData, MIGRATION_JOURNAL_FILE), JSON.stringify({
+      version: 1,
+      status: { id, sourceDir: f.source, targetDir: f.target, stage, cancellable: false },
+      stagingDir: path.join(f.target, `.cc-haha-migration-${id}`),
+      oldMode: null,
+      manifest: [],
+      createdCredentials: [],
+      credentials: [],
+    }))
+    expect(await f.migration.recover()).toBe('normal')
+    // The receipt is a record of a finished attempt, not current state: it must
+    // not survive to be re-reported on the next startup or in the settings panel.
+    await expect(fs.stat(path.join(f.userData, MIGRATION_JOURNAL_FILE))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(f.migration.status).toBeNull()
+    // Recovery must not roll the startup pointer back for a receipt that was
+    // already rolled back when it was written.
+    await expect(fs.stat(path.join(f.userData, 'app-mode.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.readFile(path.join(f.source, 'settings.json'), 'utf8')).toContain('preserve')
+  })
+
+  it.skipIf(process.platform !== 'win32')('starts normally when a terminal receipt names a detached drive', async ctx => {
+    const detached = await findDetachedDriveRoot()
+    if (!detached) ctx.skip()
+    const f = await fixture()
+    await fs.mkdir(f.userData, { recursive: true })
+    const id = 'detached-id'
+    const targetDir = path.join(detached!, '系统', 'cchh')
+    await fs.writeFile(path.join(f.userData, MIGRATION_JOURNAL_FILE), JSON.stringify({
+      version: 1,
+      status: { id, sourceDir: f.source, targetDir, stage: 'cancelled', cancellable: false, error: 'Migration cancelled' },
+      stagingDir: path.join(targetDir, `.cc-haha-migration-${id}`),
+      oldMode: '{"mode":"default","portable_dir":null}',
+      manifest: [],
+      createdCredentials: [],
+      credentials: [],
+    }))
+    // Resolving the receipt's directories used to throw ENOENT for the missing
+    // drive and abort every launch with "Data directory unavailable".
+    await expect(f.migration.recover()).resolves.toBe('normal')
+    await expect(fs.stat(path.join(f.userData, MIGRATION_JOURNAL_FILE))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(f.migration.status).toBeNull()
   })
 
   it('fails closed when startup rollback would recreate a missing original directory', async () => {

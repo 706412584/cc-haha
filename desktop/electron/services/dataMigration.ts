@@ -387,10 +387,22 @@ export class DataMigration {
   async recover(): Promise<'validate' | 'normal'> {
     if (!await exists(this.journalPath)) return 'normal'
     const parsed = parseJournal(JSON.parse(await fs.readFile(this.journalPath, 'utf8')))
+    // A terminal receipt records a migration that already rolled back or was
+    // abandoned; nothing is published or restored for it. Its directories must
+    // therefore not be resolved: a cancelled receipt naming a drive that has
+    // since been detached used to abort every startup with "Data directory
+    // unavailable" even though app-mode.json had long pointed elsewhere.
+    // Delete the receipt so neither startup nor the settings panel keeps
+    // reporting a finished attempt as current state. A failed delete must not
+    // block startup; the next launch simply retries it.
+    if (parsed.status.stage === 'failed' || parsed.status.stage === 'cancelled') {
+      await fs.rm(this.journalPath, { force: true }).catch(() => {})
+      return 'normal'
+    }
+    this.journal = parsed
     const sourceReal = await canonicalPath(parsed.status.sourceDir)
     const targetReal = await canonicalPath(parsed.status.targetDir)
     if (isWithin(sourceReal, targetReal) || isWithin(targetReal, sourceReal)) throw new Error('Migration recovery directories overlap')
-    this.journal = parsed
     if (parsed.status.stage === 'restarting') {
       try {
         if (parsed.directories) await assertMigrationDirectory(parsed.status.targetDir, parsed.directories.target)
@@ -424,13 +436,13 @@ export class DataMigration {
       }
       return 'normal'
     }
-    if (!['failed', 'cancelled'].includes(parsed.status.stage)) {
-      await this.restoreMode()
-      await this.removeStaging()
-      if ((this.hooks.platform ?? process.platform) === 'darwin') await removeMigrationCredentials(parsed.createdCredentials, this.credentialStore())
-      this.journal.status.error = 'Migration was interrupted; original data directory restored'
-      await this.stage('failed')
-    }
+    // Any other stage means the transaction stopped between quiescing and
+    // commit: roll the startup pointer back and drop our private staging dir.
+    await this.restoreMode()
+    await this.removeStaging()
+    if ((this.hooks.platform ?? process.platform) === 'darwin') await removeMigrationCredentials(parsed.createdCredentials, this.credentialStore())
+    this.journal.status.error = 'Migration was interrupted; original data directory restored'
+    await this.stage('failed')
     return 'normal'
   }
 
