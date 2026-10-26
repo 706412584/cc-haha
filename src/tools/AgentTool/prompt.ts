@@ -69,7 +69,8 @@ const BACKGROUND_ORCHESTRATION_RULE = [
   '',
   'When a completion notification shows `no file edits` / `file_edits=0` but the task was expected to modify files, do not mark the TaskCreate item completed — return it to pending and re-delegate or verify. Treat `status=completed` as lifecycle completion only, not proof of workspace mutation.',
   '',
-  'After an agent completes, fails, stops, is killed, or is cancelled, keep it terminal by default. Synthesize its result and launch a fresh agent for follow-up work when delegation is still warranted. Only use SendMessage to resume a terminal agent when the current user message explicitly asks to resume that specific agent.',
+  'Distinguish why an agent went terminal. Natural completion (completed) or a deterministic failure (failed with a non-retryable error) stays terminal by default: synthesize its result and launch a fresh agent for follow-up work when delegation is still warranted. But a user interruption (stopped/killed/cancelled) is a pause, not a discard — the agent\'s transcript is preserved on disk. When the user asks to continue, retry, or recover that interrupted work, prefer resuming it with SendMessage (its saved conversation becomes the next prompt) over spawning a fresh agent that would redo the work from scratch. Likewise, when an agent failed on a transient API error (rate limits, 5xx, channel-allocation failures, network timeouts), prefer resuming it with SendMessage so it continues from its saved transcript instead of repeating completed work. Launch a fresh agent for an interrupted or API-failed agent only when its transcript is missing (resume reports no transcript) or its work is clearly obsolete.',
+  'Only use SendMessage to resume a naturally completed agent when the current user message explicitly asks to resume that specific agent. Resuming a user-interrupted or API-failed agent needs no extra authorization when the user asks to continue that work — resuming IS the continuation they are asking for.',
 ].join('\n')
 
 const BACKGROUND_USAGE_NOTES = [
@@ -319,7 +320,7 @@ Usage notes:
       ? `\n${BACKGROUND_USAGE_NOTES}`
       : ''
   }
-- Use ${SEND_MESSAGE_TOOL_NAME} to message a running agent by ID or name. For a terminal agent, use it only when the current user message explicitly asks to resume that specific agent. ${forkEnabled ? 'Each fresh Agent invocation with a subagent_type starts without context — provide a complete task description.' : 'Each Agent invocation starts fresh — provide a complete task description.'}
+- Use ${SEND_MESSAGE_TOOL_NAME} to message a running agent by ID or name. For an agent stopped, killed, or cancelled by the user — or one that failed on a transient API error — messaging it RESUMES it from its saved transcript, so prefer that over a fresh Agent invocation when the user wants that work continued. For a naturally completed agent, use it only when the current user message explicitly asks to resume that specific agent. ${forkEnabled ? 'Each fresh Agent invocation with a subagent_type starts without context — provide a complete task description.' : 'Each Agent invocation starts fresh — provide a complete task description.'}
 - The agent's outputs should generally be trusted
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.)${forkEnabled ? '' : ", since it is not aware of the user's intent"}
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.

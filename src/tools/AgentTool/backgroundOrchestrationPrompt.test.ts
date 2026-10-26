@@ -99,10 +99,19 @@ describe('background agent orchestration guidance', () => {
       'Treat `status=completed` as lifecycle completion only, not proof of workspace mutation',
     )
     expect(prompt).toContain(
-      'After an agent completes, fails, stops, is killed, or is cancelled, keep it terminal by default',
+      'Natural completion (completed) or a deterministic failure (failed with a non-retryable error) stays terminal by default',
     )
     expect(prompt).toContain(
-      'Only use SendMessage to resume a terminal agent when the current user message explicitly asks to resume that specific agent',
+      'a user interruption (stopped/killed/cancelled) is a pause, not a discard',
+    )
+    expect(prompt).toContain(
+      'prefer resuming it with SendMessage (its saved conversation becomes the next prompt) over spawning a fresh agent',
+    )
+    expect(prompt).toContain(
+      'when an agent failed on a transient API error (rate limits, 5xx, channel-allocation failures, network timeouts), prefer resuming it with SendMessage',
+    )
+    expect(prompt).toContain(
+      'Only use SendMessage to resume a naturally completed agent when the current user message explicitly asks to resume that specific agent',
     )
     expect(prompt).not.toContain(
       'To continue a previously spawned agent, use SendMessage',

@@ -584,7 +584,7 @@ export function enqueueAgentNotification({
   outputPath,
   epoch
 }: AgentNotificationInput): boolean {
-  const summary = status === 'completed' ? formatCompletedSummary(description, usage, outcome) : status === 'failed' ? `Agent "${description}" failed: ${error || 'Unknown error'}` : `Agent "${description}" was stopped`;
+  const summary = status === 'completed' ? formatCompletedSummary(description, usage, outcome) : status === 'failed' ? `Agent "${description}" failed: ${error || 'Unknown error'}` : `Agent "${description}" was stopped; its saved conversation can be resumed with SendMessage`;
   const notificationOutputPath = outputPath ?? getTaskOutputPath(taskId);
   const toolUseIdLine = toolUseId ? `\n<${TOOL_USE_ID_TAG}>${toolUseId}</${TOOL_USE_ID_TAG}>` : '';
   const resultSection = finalMessage ? `\n<result>${finalMessage}</result>` : '';

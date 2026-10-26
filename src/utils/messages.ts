@@ -4307,12 +4307,14 @@ You have exited auto mode. The user may now want to interact more directly. You 
         attachment.status === 'killed' ? 'stopped' : attachment.status
 
       // For stopped tasks, keep it brief — the work was interrupted and
-      // the raw transcript delta isn't useful context.
+      // the raw transcript delta isn't useful context. The resume hint is
+      // load-bearing: the agent's transcript is preserved on disk, so
+      // SendMessage is a true continuation, not a restart.
       if (attachment.status === 'killed') {
         return [
           createUserMessage({
             content: wrapInSystemReminder(
-              `Task "${attachment.description}" (${attachment.taskId}) was stopped by the user.`,
+              `Task "${attachment.description}" (${attachment.taskId}) was stopped by the user. Its conversation is preserved — when the user wants this work continued, resume it with ${SEND_MESSAGE_TOOL_NAME} (to: '${attachment.taskId}') rather than starting a fresh agent.`,
             ),
             isMeta: true,
           }),

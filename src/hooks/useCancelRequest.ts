@@ -187,8 +187,8 @@ export function CancelRequestHandler(props: CancelRequestHandlerProps): null {
     }
     const summary =
       descriptions.length === 1
-        ? `Background agent "${descriptions[0]}" was stopped by the user.`
-        : `${descriptions.length} background agents were stopped by the user: ${descriptions.map(d => `"${d}"`).join(', ')}.`
+        ? `Background agent "${descriptions[0]}" was stopped by the user. Its saved conversation can be resumed with SendMessage when the user asks to continue.`
+        : `${descriptions.length} background agents were stopped by the user: ${descriptions.map(d => `"${d}"`).join(', ')}. Each has a saved conversation that can be resumed with SendMessage when the user asks to continue.`
     enqueuePendingNotification({ value: summary, mode: 'task-notification' })
     onAgentsKilled()
     return true
