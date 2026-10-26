@@ -2,7 +2,7 @@
 
 ## Upstream Merge Policy
 
-When merging upstream Claude Code releases:
+When merging upstream Claude Code releases, **check every item in [docs/FORK_CUSTOMIZATIONS.md](docs/FORK_CUSTOMIZATIONS.md)** — it is the authoritative inventory of fork customizations with file anchors and per-item verification. The rules below are its hard pins; the doc also carries items that are easy to lose (stream-retry budget, 12MiB history cap, image annotation flow, keep-deleted upstream features, and more).
 
 - **Never overwrite README.md or README.zh-CN.md.** These files contain Code Council branding, the customizations section, and fork-specific links. Always keep the local version intact. If upstream changes conflict, discard the upstream side.
 - Preserve all local provider preset customizations (`deprecated` tombstones for TeamoRouter, 玄枢API, FennoAI, 七牛云AI; 接口AI as optional without ads).
