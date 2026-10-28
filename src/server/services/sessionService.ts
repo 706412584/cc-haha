@@ -916,6 +916,9 @@ export function hasMalformedFileHistoryBefore(snapshot: FileHistorySnapshot): bo
 }
 
 export class SessionService {
+  private readonly uiFileHistoryReads = new Map<string, Promise<RawEntry[]>>()
+  private readonly inspectionSnapshots = new Map<string, Promise<SessionInspectionTranscriptSnapshot | null>>()
+
   private providerService = new ProviderService()
   // Keep launch state available when retention disables or removes transcripts.
   // Scope keys by config directory so test/embedded server instances cannot mix state.
