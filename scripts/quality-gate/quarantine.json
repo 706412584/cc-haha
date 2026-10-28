@@ -59,9 +59,9 @@
     {
       "id": "in-process-runner-claim-flaky-ci",
       "path": "src/utils/swarm/inProcessRunner.test.ts",
-      "reason": "CI-only flake: \"claims follow-up work\" observes status completed where a local run (same bun flags, 5/5 repeats) is green. File content is identical to upstream v0.6.0. Suspected runner-timing interaction; quarantine unblocks the gate while it is investigated.",
+      "reason": "CI-only flake: \"claims follow-up work\" observes status completed where a local run (same bun flags, 5/5 repeats) is green. File content is identical to upstream v0.6.0. Suspected runner-timing interaction; quarantine unblocks the gate while it is investigated. Renewed 2026-10-29: still not reproducible locally (23/23), v0.7.5 merge did not touch this file, upstream CI runs it green on their runner spec.",
       "owner": "706412584",
-      "reviewAfter": "2026-10-15",
+      "reviewAfter": "2026-11-29",
       "exitCriteria": "Reproduce on a CI runner or fix the timing interaction, then remove this entry."
     }
   ]
