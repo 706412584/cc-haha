@@ -1270,6 +1270,11 @@ const SILENT_GAP_ENV = {
   CLAUDE_STREAM_IDLE_TIMEOUT_MS: '300',
   CLAUDE_STREAM_MAX_DURATION_MS: '10000',
   CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS: '3000',
+  // This fork retries a watchdog stall 4 times by default (upstream: 2), so a
+  // scenario that deliberately stalls would burn ~3x the wall clock here and
+  // blow the 10s test budget. Pin the retry count for these budget tests: they
+  // assert which budget fired, not how many times recovery was attempted.
+  CLAUDE_STREAM_TRANSIENT_RETRY_MAX: '0',
 }
 const SILENT_GAP_MS = 600
 
