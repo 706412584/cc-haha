@@ -68,6 +68,9 @@ test('lean prompt assembly skips MCP instructions and restores standard behavior
 // Pinned before the lean compaction landed: lean work must not move a byte of the
 // standard prompt. The environment section (cwd, OS, shell, model lineup) and the
 // auto-memory path are host-specific, so they are factored out of the hash.
+// The hash pins the fork's standard prompt, not upstream's: this fork adds the
+// coding-discipline block, the background-task reconciliation rule, and the
+// active-skills section. Re-pin whenever any of those change on purpose.
 test.skipIf(process.platform === 'win32')('standard system prompt is byte-identical to the pinned baseline', async () => {
   setAgentProfile('standard')
   const sections = await getSystemPrompt(getTools(getEmptyToolPermissionContext()), 'fixture-model', ['/fixture/extra'], [])
@@ -78,7 +81,7 @@ test.skipIf(process.platform === 'win32')('standard system prompt is byte-identi
   expect(text).toContain('## Types of memory')
   expect(text).not.toContain(sandboxHome)
   expect(text).not.toContain(getCwd())
-  expect(sha256(text)).toBe('47cefa517760ede60b94136d5433a3fa37365516cd76d06a55ec121f139af3c3')
+  expect(sha256(text)).toBe('6c0efc34ede264c969dfbf84b928892fa920a0f0cfc785cf626534e866342631')
 })
 
 test('lean system prompt carries compact memory guidance within budget and names no unavailable tool', async () => {
