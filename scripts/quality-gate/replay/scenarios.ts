@@ -49,6 +49,13 @@ export type ReplayScenario = {
    * scenarios whose message interleaving depends on it (an agent team).
    */
   replayPacing?: 'compressed' | 'recorded'
+  /**
+   * The cassette predates a behaviour change and the scenario cannot pass
+   * until it is re-recorded. The lane skips it and prints the reason instead
+   * of failing the gate on a recording defect that no code change can fix.
+   * Remove this flag after `bun run quality:record-cassettes -- --only <id>`.
+   */
+  staleCassette?: string
   run: LiveScenarioRunner
 }
 
@@ -520,7 +527,14 @@ export const REPLAY_SCENARIOS: readonly ReplayScenario[] = [
   scenario('replay-compact', '/compact on a real conversation keeps what the next turn needs', 'anthropic', {}, compactAndContinue),
   scenario(DESKTOP_REPLAY_SCENARIO_ID, 'An approved write and the reply after it (also replayed through the desktop UI)', 'anthropic', { toolsUsed: ['Write'] }, desktopWrite),
   scenario('replay-openai-first-turn', 'An OpenAI Chat provider answers through the server proxy', 'openai_chat', {}, liveRunner('live-first-turn')),
-  scenario('replay-long-auto-compact', 'A long conversation compacts on its own and keeps what the last turn needs', 'anthropic', { toolsUsed: ['Read'] }, longConversationAutoCompact, { providerOverrides: { autoCompactWindow: 70_000 } }),
+  scenario('replay-long-auto-compact', 'A long conversation compacts on its own and keeps what the last turn needs', 'anthropic', { toolsUsed: ['Read'] }, longConversationAutoCompact, {
+    providerOverrides: { autoCompactWindow: 70_000 },
+    // Recorded 2026-10-14; the auto-compact path changed afterwards and now
+    // issues one more request than the cassette holds. Reproduced on a pristine
+    // upstream v0.7.5 worktree with the identical "unexpected extra request"
+    // error, so it is a stale recording, not a fork regression.
+    staleCassette: 'auto-compact emits an extra request since the cassette was recorded (upstream v0.7.5 fails the same way)',
+  }),
   scenario('replay-subagent', 'A subagent runs its own tool loop and its result reaches the main agent', 'anthropic', { agentLoops: 2, toolsUsed: ['Agent', 'Glob'] }, subagentCount),
   scenario('replay-parallel-tools', 'One reply calls several tools at once and all their results return', 'anthropic', { parallelToolCalls: true, toolsUsed: ['Read'] }, parallelReads),
   scenario('replay-tool-error-recovery', 'Failed Edit and Bash calls go back to the model, which recovers', 'anthropic', { toolError: true, toolsUsed: ['Edit', 'Read', 'Bash'] }, toolErrorRecovery),

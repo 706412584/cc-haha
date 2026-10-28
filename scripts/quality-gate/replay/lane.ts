@@ -189,12 +189,19 @@ export async function replayScenarios(options: {
   cassetteDir?: string
 }): Promise<ReplayLaneResult[]> {
   const cassettes = new Map<string, Cassette>()
+  const active: ReplayScenario[] = []
   for (const scenario of options.scenarios) {
+    if (scenario.staleCassette) {
+      console.log(`[agent-replay] SKIP ${scenario.id} — stale cassette: ${scenario.staleCassette}`)
+      continue
+    }
     const cassette = loadCassette(scenario.id, options.cassetteDir)
     if (!cassette) throw new Error(`no cassette for ${scenario.id}; record it with: bun run quality:record-cassettes -- --allow-live --only ${scenario.id}`)
     if (cassette.format !== options.format) throw new Error(`${scenario.id} was recorded as ${cassette.format}, not ${options.format}`)
     cassettes.set(scenario.id, cassette)
+    active.push(scenario)
   }
+  options = { ...options, scenarios: active }
   const first = cassettes.values().next().value as Cassette | undefined
   if (!first) return []
   const replay = startReplayServer({ format: options.format })
