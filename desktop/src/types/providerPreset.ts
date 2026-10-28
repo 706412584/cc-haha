@@ -1,4 +1,4 @@
-import type { ApiFormat, ProviderAuthStrategy } from './provider'
+import type { ApiFormat, ImageGenerationConfig, ModelApiFormat, ProviderAuthStrategy } from './provider'
 import type { ModelReasoningProviderKind } from '../../../src/shared/modelReasoning'
 import type { ModelApiFormatRule } from '../../../src/shared/modelApiFormats'
 
@@ -23,7 +23,7 @@ export type ProviderPreset = {
   apiFormat: ApiFormat
   reasoningProviderKind?: ModelReasoningProviderKind
   defaultModels: ModelMapping
-  defaultImageGeneration?: { model: string }
+  defaultImageGeneration?: Pick<ImageGenerationConfig, 'model' | 'protocol'>
   needsApiKey: boolean
   websiteUrl: string
   apiKeyUrl?: string
@@ -41,7 +41,7 @@ export type ProviderPreset = {
    * no rule uses the preset's own `apiFormat`. Display-only on this side — the
    * server resolves the authoritative rules from its own preset bundle.
    */
-  modelApiFormats?: ModelApiFormatRule<ApiFormat>[]
+  modelApiFormats?: ModelApiFormatRule<ModelApiFormat>[]
   /** Upstream headers the proxy sends, with `$SESSION_ID` / `$VERSION` placeholders. */
   upstreamHeaders?: Record<string, string>
 }

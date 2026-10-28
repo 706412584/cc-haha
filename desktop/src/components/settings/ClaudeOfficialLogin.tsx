@@ -4,15 +4,17 @@
 // 点击 Login 调 desktop host shell.open 打开浏览器走 OAuth flow;浏览器回 callback
 // 到 haha server 后,store 的 polling 自动刷新 UI 展示"已登录"。
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { CircleCheck } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { useHahaOAuthStore } from '../../stores/hahaOAuthStore'
 import { useTranslation } from '../../i18n'
 import { getDesktopHost } from '../../lib/desktopHost'
+import { OfficialLoginRiskDialog } from './OfficialLoginRiskDialog'
 
 export function ClaudeOfficialLogin() {
   const t = useTranslation()
+  const [riskDialogOpen, setRiskDialogOpen] = useState(false)
   const {
     status,
     isLoading,
@@ -85,7 +87,12 @@ export function ClaudeOfficialLogin() {
       <div className="text-[13px] leading-5 text-[var(--color-text-secondary)]">
         {t('settings.claudeOfficialLogin.intro')}
       </div>
-      <Button size="base" onClick={handleLogin} disabled={isLoading} className="self-start">
+      <Button
+        size="base"
+        onClick={() => setRiskDialogOpen(true)}
+        disabled={isLoading}
+        className="self-start"
+      >
         {isLoading
           ? t('settings.claudeOfficialLogin.loginStarting')
           : t('settings.claudeOfficialLogin.loginButton')}
@@ -95,6 +102,15 @@ export function ClaudeOfficialLogin() {
           {t('settings.claudeOfficialLogin.errorPrefix')}{error}
         </div>
       )}
+      <OfficialLoginRiskDialog
+        open={riskDialogOpen}
+        provider="claude"
+        onClose={() => setRiskDialogOpen(false)}
+        onConfirm={() => {
+          setRiskDialogOpen(false)
+          void handleLogin()
+        }}
+      />
     </div>
   )
 }

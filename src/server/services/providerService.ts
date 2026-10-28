@@ -17,6 +17,8 @@ import { writeJsonFileAtomic } from '../storage/atomicWrite.js'
 import { ManagedSettingsService } from './managedSettingsService.js'
 import { anthropicToOpenaiChat } from '../proxy/transform/anthropicToOpenaiChat.js'
 import { anthropicToOpenaiResponses } from '../proxy/transform/anthropicToOpenaiResponses.js'
+import { anthropicToGemini, type GeminiRequest } from '../proxy/transform/anthropicToGemini.js'
+import { geminiResponseToAnthropic } from '../proxy/streaming/geminiStreamToAnthropic.js'
 import { resolveRequestCompatibility } from '../proxy/transform/requestCompatibility.js'
 import { hoistToolResultMediaForCompatibility, shouldHoistNestedToolResultMedia } from '../proxy/transform/anthropicMediaHoist.js'
 import { openaiChatToAnthropic } from '../proxy/transform/openaiChatToAnthropic.js'
@@ -32,6 +34,11 @@ import {
   GROK_OFFICIAL_PROVIDER,
   isGrokOfficialProviderId,
 } from './grokOfficialProvider.js'
+import {
+  DEEPSEEK_ACCOUNT_PROVIDER,
+  isDeepSeekAccountProviderId,
+} from './deepseekAccountProvider.js'
+import { hahaDeepSeekOAuthService } from './hahaDeepSeekOAuthService.js'
 import {
   CLAUDE_OFFICIAL_DEFAULT_MODELS,
 } from './claudeOfficialRuntime.js'
@@ -54,10 +61,9 @@ import {
   normalizeProvidersIndex,
   providerNeedsProxy,
   resolveProviderApiFormat,
-  resolveProviderModelApiFormat,
   resolveProviderApiKey,
 } from './providerRuntimeEnv.js'
-import { resolveModelApiFormat, type ModelApiFormatRule } from '../../shared/modelApiFormats.js'
+import { resolveModelApiBaseUrl, resolveModelApiRule, type ModelApiFormatRule } from '../../shared/modelApiFormats.js'
 import { applyUpstreamHeaders, resolveUpstreamHeaders } from '../proxy/upstreamHeaders.js'
 import {
   getNetworkProxyFetchOptions,
@@ -75,6 +81,7 @@ import type {
   ProviderTestResult,
   ProviderTestStepResult,
   ApiFormat,
+  ModelApiFormat,
   ModelMapping,
   ProviderAuthStrategy,
   RequestCompatibility,
@@ -82,10 +89,17 @@ import type {
 import {
   BUILT_IN_PROVIDER_IDS,
   CLAUDE_OFFICIAL_PROVIDER_ID,
+  DEEPSEEK_ACCOUNT_PROVIDER_ID,
   GROK_OFFICIAL_PROVIDER_ID,
   OPENAI_OFFICIAL_PROVIDER_ID,
   isBuiltInProviderId,
 } from '../types/provider.js'
+
+type ProviderAuthStatus = {
+  hasAuth: boolean
+  source: 'cc-haha-provider' | 'claude-oauth' | 'openai-oauth' | 'grok-oauth' | 'deepseek-oauth' | 'original-settings' | 'env' | 'none'
+  activeProvider?: string
+}
 
 const DEFAULT_INDEX: ProvidersIndex = {
   schemaVersion: CURRENT_PROVIDER_INDEX_SCHEMA_VERSION,
@@ -265,6 +279,12 @@ export class ProviderService {
         models: this.resolveOfficialProviderModels(index, GROK_OFFICIAL_PROVIDER_ID),
       }
     }
+    if (isDeepSeekAccountProviderId(id)) {
+      return {
+        ...DEEPSEEK_ACCOUNT_PROVIDER,
+        models: this.resolveOfficialProviderModels(index, DEEPSEEK_ACCOUNT_PROVIDER_ID),
+      }
+    }
 
     const provider = index.providers.find((p) => p.id === id)
     if (!provider) throw ApiError.notFound(`Provider not found: ${id}`)
@@ -279,6 +299,7 @@ export class ProviderService {
     if (configured) return normalizeModelMapping(configured)
     if (id === OPENAI_OFFICIAL_PROVIDER_ID) return OPENAI_OFFICIAL_PROVIDER.models
     if (id === GROK_OFFICIAL_PROVIDER_ID) return GROK_OFFICIAL_PROVIDER.models
+    if (id === DEEPSEEK_ACCOUNT_PROVIDER_ID) return DEEPSEEK_ACCOUNT_PROVIDER.models
     return CLAUDE_OFFICIAL_DEFAULT_MODELS
   }
 
@@ -316,7 +337,9 @@ export class ProviderService {
     if (index.activeId === id) {
       const provider = id === OPENAI_OFFICIAL_PROVIDER_ID
         ? { ...OPENAI_OFFICIAL_PROVIDER, models: normalized }
-        : { ...GROK_OFFICIAL_PROVIDER, models: normalized }
+        : id === DEEPSEEK_ACCOUNT_PROVIDER_ID
+          ? { ...DEEPSEEK_ACCOUNT_PROVIDER, models: normalized }
+          : { ...GROK_OFFICIAL_PROVIDER, models: normalized }
       await this.syncToSettings(provider)
       await this.updateManagedSettings({ model: normalized.main, modelContext: undefined })
     }
@@ -366,7 +389,12 @@ export class ProviderService {
 
     const existing = index.providers[idx]
     const imageGeneration = input.imageGeneration
-      ? normalizeImageGeneration(input.imageGeneration)
+      ? normalizeImageGeneration({
+        ...existing.imageGeneration,
+        ...input.imageGeneration,
+        baseUrl: input.imageGeneration.baseUrl,
+        apiKey: input.imageGeneration.apiKey,
+      })
       : input.imageGeneration
     const updated: SavedProvider = {
       ...existing,
@@ -540,13 +568,22 @@ export class ProviderService {
             ...GROK_OFFICIAL_PROVIDER,
             models: this.resolveOfficialProviderModels(index, GROK_OFFICIAL_PROVIDER_ID),
           }
-        : index.providers.find((p) => p.id === id)
+        : isDeepSeekAccountProviderId(id)
+          ? {
+              ...DEEPSEEK_ACCOUNT_PROVIDER,
+              models: this.resolveOfficialProviderModels(index, DEEPSEEK_ACCOUNT_PROVIDER_ID),
+            }
+          : index.providers.find((p) => p.id === id)
     if (!provider) throw ApiError.notFound(`Provider not found: ${id}`)
 
     index.activeId = id
     await this.writeIndex(index)
 
-    if (provider.runtimeKind === 'openai_oauth' || provider.runtimeKind === 'grok_oauth') {
+    if (
+      provider.runtimeKind === 'openai_oauth' ||
+      provider.runtimeKind === 'grok_oauth' ||
+      provider.runtimeKind === 'deepseek_oauth'
+    ) {
       await this.syncToSettings(provider)
       await this.updateManagedSettings({ model: provider.models.main, modelContext: undefined })
     } else if (provider.presetId === 'official') {
@@ -635,65 +672,38 @@ export class ProviderService {
   // --- Auth status ---
 
   /**
-   * Check whether any usable auth exists:
-   *  1. The active cc-haha provider or built-in OAuth provider has auth
-   *  2. Claude Official has a desktop-managed OAuth token
-   *  3. process.env already has ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN
-   *  4. Original ~/.claude/settings.json contains one of those auth variables
-   *  5. None of the above → needs setup
+   * Check whether a provider can authenticate.
+   *
+   * Without `providerId` this evaluates the global default (`activeId`, where
+   * null is Claude Official) and keeps its historical fallbacks: a default
+   * without a credential of its own still counts ANTHROPIC_API_KEY /
+   * ANTHROPIC_AUTH_TOKEN from process.env or the original
+   * ~/.claude/settings.json. (Desktop sessions on that default also start the
+   * CLI without the inherited variables; the env fallback is left as it was.)
+   *
+   * With `providerId` (a saved provider id or a built-in id) only a
+   * credential the CLI started for that provider receives counts, so a saved
+   * provider or built-in account never borrows ambient credentials. For
+   * Claude Official that is its desktop OAuth, then the original
+   * ~/.claude/settings.json, whose env the CLI applies itself. process.env
+   * does not count: conversationService strips the inherited ANTHROPIC_*
+   * variables from every CLI started with an explicit runtime provider
+   * (Claude Official's is null), so a credential found only there leaves
+   * that CLI at "Not logged in". An unknown id has no auth.
    */
-  async checkAuthStatus(): Promise<{
-    hasAuth: boolean
-    source: 'cc-haha-provider' | 'claude-oauth' | 'openai-oauth' | 'grok-oauth' | 'original-settings' | 'env' | 'none'
-    activeProvider?: string
-  }> {
-    // 1–2. Check the selected provider, including Claude Official (activeId=null).
+  async checkAuthStatus(providerId?: string): Promise<ProviderAuthStatus> {
     const index = await this.readIndex()
-    if (index.activeId) {
-      if (isOpenAIOfficialProviderId(index.activeId)) {
-        const tokens = await hahaOpenAIOAuthService.ensureFreshTokens()
-        if (tokens?.accessToken && tokens.refreshToken) {
-          return {
-            hasAuth: true,
-            source: 'openai-oauth',
-            activeProvider: OPENAI_OFFICIAL_PROVIDER.name,
-          }
-        }
-        return {
-          hasAuth: false,
-          source: 'none',
-          activeProvider: OPENAI_OFFICIAL_PROVIDER.name,
-        }
-      }
-      if (isGrokOfficialProviderId(index.activeId)) {
-        const tokens = await hahaGrokOAuthService.ensureFreshTokens()
-        if (tokens?.accessToken && tokens.refreshToken) {
-          return {
-            hasAuth: true,
-            source: 'grok-oauth',
-            activeProvider: GROK_OFFICIAL_PROVIDER.name,
-          }
-        }
-        return {
-          hasAuth: false,
-          source: 'none',
-          activeProvider: GROK_OFFICIAL_PROVIDER.name,
-        }
-      }
+    return providerId === undefined
+      ? this.evaluateProviderAuth(index, index.activeId ?? CLAUDE_OFFICIAL_PROVIDER_ID, true)
+      : this.evaluateProviderAuth(index, providerId, false)
+  }
 
-      const provider = index.providers.find(p => p.id === index.activeId)
-      if (provider) {
-        const presetDefaultEnv = getPresetDefaultEnv(provider.presetId)
-        const needsProxy = providerNeedsProxy(
-          provider.apiFormat ?? 'anthropic',
-          provider.supportsNestedToolResultMedia,
-        )
-        const authEnv = buildProviderAuthEnv(provider, presetDefaultEnv, needsProxy)
-        if (Object.values(authEnv).some(value => value.length > 0)) {
-          return { hasAuth: true, source: 'cc-haha-provider', activeProvider: provider.name }
-        }
-      }
-    } else {
+  private async evaluateProviderAuth(
+    index: ProvidersIndex,
+    id: string,
+    globalDefault: boolean,
+  ): Promise<ProviderAuthStatus> {
+    if (id === CLAUDE_OFFICIAL_PROVIDER_ID) {
       const tokens = await hahaOAuthService.ensureFreshTokens()
       if (tokens?.accessToken) {
         return {
@@ -702,14 +712,65 @@ export class ProviderService {
           activeProvider: 'Claude Official',
         }
       }
+      return globalDefault ? this.checkAmbientAuth() : this.checkOriginalSettingsAuth()
+    }
+    if (isOpenAIOfficialProviderId(id)) {
+      const tokens = await hahaOpenAIOAuthService.ensureFreshTokens()
+      const hasAuth = !!(tokens?.accessToken && tokens.refreshToken)
+      return {
+        hasAuth,
+        source: hasAuth ? 'openai-oauth' : 'none',
+        activeProvider: OPENAI_OFFICIAL_PROVIDER.name,
+      }
+    }
+    if (isGrokOfficialProviderId(id)) {
+      const tokens = await hahaGrokOAuthService.ensureFreshTokens()
+      const hasAuth = !!(tokens?.accessToken && tokens.refreshToken)
+      return {
+        hasAuth,
+        source: hasAuth ? 'grok-oauth' : 'none',
+        activeProvider: GROK_OFFICIAL_PROVIDER.name,
+      }
+    }
+    if (isDeepSeekAccountProviderId(id)) {
+      const tokens = await hahaDeepSeekOAuthService.loadTokens()
+      return {
+        hasAuth: !!tokens,
+        source: tokens ? 'deepseek-oauth' : 'none',
+        activeProvider: DEEPSEEK_ACCOUNT_PROVIDER.name,
+      }
     }
 
-    // 3. Check process.env (covers .env file + inherited env)
+    const provider = index.providers.find(p => p.id === id)
+    if (provider) {
+      const presetDefaultEnv = getPresetDefaultEnv(provider.presetId)
+      const needsProxy = providerNeedsProxy(
+        provider.apiFormat ?? 'anthropic',
+        provider.supportsNestedToolResultMedia,
+      )
+      const authEnv = buildProviderAuthEnv(provider, presetDefaultEnv, needsProxy)
+      if (Object.values(authEnv).some(value => value.length > 0)) {
+        return { hasAuth: true, source: 'cc-haha-provider', activeProvider: provider.name }
+      }
+    }
+    if (globalDefault) return this.checkAmbientAuth()
+    return provider
+      ? { hasAuth: false, source: 'none', activeProvider: provider.name }
+      : { hasAuth: false, source: 'none' }
+  }
+
+  /** The global default's fallbacks: process.env, then the original settings file. */
+  private async checkAmbientAuth(): Promise<ProviderAuthStatus> {
+    // process.env covers .env files and the inherited environment.
     if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) {
       return { hasAuth: true, source: 'env' }
     }
 
-    // 4. Check original ~/.claude/settings.json
+    return this.checkOriginalSettingsAuth()
+  }
+
+  /** The original ~/.claude/settings.json, whose env the CLI applies at startup. */
+  private async checkOriginalSettingsAuth(): Promise<ProviderAuthStatus> {
     try {
       const originalPath = path.join(this.getConfigDir(), 'settings.json')
       const raw = await fs.readFile(originalPath, 'utf-8')
@@ -735,7 +796,7 @@ export class ProviderService {
     apiFormat: ApiFormat
     supportsNestedToolResultMedia: boolean
     authStrategy: ProviderAuthStrategy
-    modelApiFormats: ModelApiFormatRule<ApiFormat>[]
+    modelApiFormats: ModelApiFormatRule<ModelApiFormat>[]
     upstreamHeaders: Record<string, string>
     requestCompatibility?: RequestCompatibility
   } | null> {
@@ -755,7 +816,11 @@ export class ProviderService {
       }
     }
     if (providerId) {
-      if (isOpenAIOfficialProviderId(providerId) || isGrokOfficialProviderId(providerId)) {
+      if (
+        isOpenAIOfficialProviderId(providerId) ||
+        isGrokOfficialProviderId(providerId) ||
+        isDeepSeekAccountProviderId(providerId)
+      ) {
         return null
       }
       return toProxyConfig(await this.getProvider(providerId))
@@ -763,7 +828,11 @@ export class ProviderService {
 
     const index = await this.readIndex()
     if (!index.activeId) return null
-    if (isOpenAIOfficialProviderId(index.activeId) || isGrokOfficialProviderId(index.activeId)) {
+    if (
+      isOpenAIOfficialProviderId(index.activeId) ||
+      isGrokOfficialProviderId(index.activeId) ||
+      isDeepSeekAccountProviderId(index.activeId)
+    ) {
       return null
     }
     const provider = await this.getProvider(index.activeId).catch(() => null)
@@ -776,7 +845,7 @@ export class ProviderService {
     apiFormat: ApiFormat
     supportsNestedToolResultMedia: boolean
     authStrategy: ProviderAuthStrategy
-    modelApiFormats: ModelApiFormatRule<ApiFormat>[]
+    modelApiFormats: ModelApiFormatRule<ModelApiFormat>[]
     upstreamHeaders: Record<string, string>
     requestCompatibility?: RequestCompatibility
   } | null> {
@@ -792,7 +861,8 @@ export class ProviderService {
     const provider = await this.getProvider(id)
     const baseUrl = provider.baseUrl
     const modelId = overrides?.modelId || provider.models.main
-    const apiFormat = resolveProviderModelApiFormat(provider, modelId)
+    // The per-model rule is resolved by testProviderConfig, same as the proxy.
+    const apiFormat = resolveProviderApiFormat(provider)
     const authStrategy = provider.authStrategy ?? getPresetAuthStrategy(provider.presetId)
     const presetDefaultEnv = getPresetDefaultEnv(provider.presetId)
     const apiKey = resolveProviderApiKey(provider, presetDefaultEnv)
@@ -832,11 +902,13 @@ export class ProviderService {
     // would. Whether the *provider* needs local request handling is independent of
     // the protocol this particular model routes to.
     const providerFormat = resolveProviderApiFormat({ presetId, apiFormat: input.apiFormat })
-    const format: ApiFormat = resolveModelApiFormat(modelApiFormats, modelId) ?? providerFormat
+    const modelApiRule = resolveModelApiRule(modelApiFormats, modelId)
+    const format: ModelApiFormat = modelApiRule?.apiFormat ?? providerFormat
+    const routeBase = resolveModelApiBaseUrl(base, modelApiRule)
 
     // ── Step 1: Basic connectivity ───────────────────────────
     // Directly call the upstream API to verify URL, key, and model.
-    const step1 = await this.testConnectivity(base, input.apiKey, modelId, format, authStrategy, networkSettings, input.requestCompatibility, upstreamHeaders)
+    const step1 = await this.testConnectivity(routeBase, input.apiKey, modelId, format, authStrategy, networkSettings, input.requestCompatibility, upstreamHeaders)
 
     // If connectivity failed, no point running step 2
     if (!step1.success) {
@@ -850,7 +922,7 @@ export class ProviderService {
     // ── Step 2: Full proxy pipeline ──────────────────────────
     // Anthropic request → transform → upstream → transform back → validate
     const step2 = await this.testProxyPipeline(
-      base,
+      routeBase,
       input.apiKey,
       modelId,
       format,
@@ -959,7 +1031,7 @@ export class ProviderService {
     base: string,
     apiKey: string,
     modelId: string,
-    format: ApiFormat,
+    format: ModelApiFormat,
     authStrategy: ProviderAuthStrategy,
     networkSettings: NetworkSettings,
     requestCompatibility?: RequestCompatibility,
@@ -1009,7 +1081,7 @@ export class ProviderService {
     base: string,
     apiKey: string,
     modelId: string,
-    format: ApiFormat,
+    format: ModelApiFormat,
     authStrategy: ProviderAuthStrategy,
     networkSettings: NetworkSettings,
     requestCompatibility?: RequestCompatibility,
@@ -1042,6 +1114,13 @@ export class ProviderService {
         applyUpstreamHeaders(headers, upstreamHeaders)
         headers['Content-Type'] = 'application/json'
         headers.Authorization = `Bearer ${apiKey}`
+      } else if (format === 'gemini') {
+        transformedBody = anthropicToGemini(anthropicReq, { requestCompatibility, budgetSource: 'explicit' })
+        upstreamUrl = buildGeminiEndpoint(base, modelId)
+        headers = {}
+        applyUpstreamHeaders(headers, upstreamHeaders)
+        headers['Content-Type'] = 'application/json'
+        headers['x-goog-api-key'] = apiKey
       } else {
         transformedBody = hoistNestedMedia ? hoistToolResultMediaForCompatibility(anthropicReq) : anthropicReq
         upstreamUrl = `${normalizeAnthropicBaseUrl(base)}/v1/messages`
@@ -1055,13 +1134,14 @@ export class ProviderService {
       const proxyOptions = getNetworkProxyFetchOptions(networkSettings, upstreamUrl)
 
       // Call upstream with transformed request
-      const response = await fetch(upstreamUrl, {
+      const post = (payload: unknown) => fetch(upstreamUrl, {
         method: 'POST',
         headers,
-        body: JSON.stringify(transformedBody),
+        body: JSON.stringify(payload),
         signal: AbortSignal.timeout(networkSettings.aiRequestTimeoutMs),
         ...proxyOptions,
       })
+      const response = await post(transformedBody)
 
       if (!response.ok) {
         const latencyMs = Date.now() - start
@@ -1076,7 +1156,13 @@ export class ProviderService {
         ? openaiChatToAnthropic(responseBody, modelId)
         : format === 'openai_responses'
           ? openaiResponsesToAnthropic(responseBody, modelId)
-          : responseBody
+          : format === 'gemini'
+            ? await geminiResponseToAnthropic(responseBody, modelId, async (continuationToken) => {
+                const continued = await post({ ...(transformedBody as GeminiRequest), continuationToken })
+                if (!continued.ok) throw new Error(`Upstream HTTP ${continued.status} on continuation`)
+                return continued.json()
+              })
+            : responseBody
 
       const latencyMs = Date.now() - start
 
@@ -1113,7 +1199,7 @@ function buildDirectTestRequest(
   base: string,
   apiKey: string,
   modelId: string,
-  format: ApiFormat,
+  format: ModelApiFormat,
   authStrategy: ProviderAuthStrategy,
   requestCompatibility?: RequestCompatibility,
   upstreamHeaders: Record<string, string> = {},
@@ -1121,7 +1207,8 @@ function buildDirectTestRequest(
   const prompt = 'Say "ok" and nothing else.'
   const outputBudget = format !== 'anthropic'
     ? resolveRequestCompatibility({ model: modelId, max_tokens: 16, messages: [] }, {
-        protocol: format,
+        // Gemini has one budget field and the same policy as OpenAI Chat.
+        protocol: format === 'gemini' ? 'openai_chat' : format,
         requestCompatibility,
         budgetSource: 'explicit',
       }).outputBudget
@@ -1147,6 +1234,18 @@ function buildDirectTestRequest(
       url: buildOpenaiEndpoint(base, 'responses'),
       headers: { ...baseHeaders, Authorization: `Bearer ${apiKey}` },
       body: { model: modelId, ...budgetParams, input: [{ type: 'message', role: 'user', content: prompt }] },
+    }
+  }
+  if (format === 'gemini') {
+    return {
+      url: buildGeminiEndpoint(base, modelId),
+      headers: { ...baseHeaders, 'x-goog-api-key': apiKey },
+      body: {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        ...(outputBudget?.effective !== undefined && outputBudget.field !== 'omit'
+          ? { generationConfig: { maxOutputTokens: outputBudget.effective } }
+          : {}),
+      },
     }
   }
   // anthropic
@@ -1175,9 +1274,14 @@ function buildAnthropicAuthHeaders(apiKey: string, authStrategy: ProviderAuthStr
   }
 }
 
+/** Non-stream `generateContent` for a Gemini route's base URL. */
+function buildGeminiEndpoint(base: string, modelId: string): string {
+  return `${base.replace(/\/+$/, '')}/models/${encodeURIComponent(modelId)}:generateContent`
+}
+
 function validateResponseBody(
   body: Record<string, unknown> | null,
-  format: ApiFormat,
+  format: ModelApiFormat,
 ): { ok: true; model?: string } | { ok: false; error: string } {
   if (!body) return { ok: false, error: 'Empty response — not a valid API endpoint' }
   if (body.error && typeof body.error === 'object') {
@@ -1195,6 +1299,12 @@ function validateResponseBody(
       return { ok: false, error: 'Response missing output — not a valid Responses API endpoint' }
     }
     return { ok: true, model: (body.model as string) || undefined }
+  }
+  if (format === 'gemini') {
+    if (!Array.isArray(body.candidates)) {
+      return { ok: false, error: 'Response missing candidates — not a valid Gemini generateContent endpoint' }
+    }
+    return { ok: true, model: (body.modelVersion as string) || undefined }
   }
   // anthropic
   if (body.type !== 'message' || !Array.isArray(body.content)) {

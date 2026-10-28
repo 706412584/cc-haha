@@ -1,3 +1,4 @@
+import { getAgentProfile } from './utils/agentProfile.js'
 import { isPendingSessionMessage } from './utils/sessionMessageInbox.js'
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import { OpenAICodexTurnState } from './services/openaiAuth/turnState.js'
@@ -8,6 +9,7 @@ import type {
 import type { CanUseToolFn } from './hooks/useCanUseTool.js'
 import { FallbackTriggeredError } from './services/api/withRetry.js'
 import {
+  AUTOCOMPACT_THRASHING_MESSAGE,
   calculateTokenWarningState,
   isAutoCompactEnabled,
   type AutoCompactTrackingState,
@@ -376,7 +378,7 @@ async function* queryLoop(
     // nothing in prod). Turn-0 user-input discovery still blocks in
     // userInputAttachments — that's the one signal where there's no prior
     // work to hide under.
-    const pendingSkillPrefetch = skillPrefetch?.startSkillDiscoveryPrefetch(
+    const pendingSkillPrefetch = getAgentProfile() === 'lean' ? undefined : skillPrefetch?.startSkillDiscoveryPrefetch(
       null,
       messages,
       toolUseContext,
@@ -499,7 +501,12 @@ async function* queryLoop(
     )
 
     queryCheckpoint('query_autocompact_start')
-    const { compactionResult, consecutiveFailures } = await deps.autocompact(
+    const {
+      compactionResult,
+      consecutiveFailures,
+      consecutiveRapidRefills,
+      rapidRefillBreakerTripped,
+    } = await deps.autocompact(
       messagesForQuery,
       toolUseContext,
       {
@@ -574,6 +581,7 @@ async function* queryLoop(
         turnId: deps.uuid(),
         turnCounter: 0,
         consecutiveFailures: consecutiveFailures ?? 0,
+        consecutiveRapidRefills: consecutiveRapidRefills ?? 0,
       }
 
       const postCompactMessages = buildPostCompactMessages(compactionResult)
@@ -584,6 +592,17 @@ async function* queryLoop(
 
       // Continue on with the current query call using the post compact messages
       messagesForQuery = postCompactMessages
+    } else if (rapidRefillBreakerTripped) {
+      // Compaction keeps succeeding without freeing usable room (#1544).
+      // End the turn with an explanation instead of compacting every turn
+      // until the provider rejects the request; the next user turn starts a
+      // fresh tracking chain, so auto-compact is not disabled for the session.
+      yield createAssistantAPIErrorMessage({
+        content: AUTOCOMPACT_THRASHING_MESSAGE,
+        error: 'invalid_request',
+        businessErrorCode: BUSINESS_ERROR_CODES.AUTOCOMPACT_THRASHING,
+      })
+      return { reason: 'rapid_refill_breaker' }
     } else if (consecutiveFailures !== undefined) {
       // Autocompact failed — propagate failure count so the circuit breaker
       // can stop retrying on the next iteration.

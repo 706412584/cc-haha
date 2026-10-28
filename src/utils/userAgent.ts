@@ -5,8 +5,10 @@
  * import without pulling in auth.ts and its transitive dependency tree.
  */
 
+import { CLAUDE_CODE_COMPAT_VERSION } from '../constants/claudeCodeCompatibility.js'
+
 export function getClaudeCodeUserAgent(): string {
-  return `claude-code/${MACRO.VERSION}`
+  return `claude-code/${CLAUDE_CODE_COMPAT_VERSION}`
 }
 
 /**

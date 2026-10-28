@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { NormalizedSkill } from '@/types/market'
+import { AGENT_TEAMS_NOTICE_STORAGE_KEY, dismissAgentTeamsNotice, isAgentTeamsNoticeDismissed } from '@/lib/agentTeamsNotice'
 import { useMarketStore } from '@/stores/marketStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { MARKET_TAB_ID, useTabStore } from '@/stores/tabStore'
@@ -57,6 +58,7 @@ function skillChildKeys(result: { current: ReturnType<typeof useCapabilityMenu> 
 }
 
 beforeEach(() => {
+  localStorage.removeItem(AGENT_TEAMS_NOTICE_STORAGE_KEY)
   resetPopularSkillsCache()
   mocks.marketList.mockReset().mockResolvedValue({ items: [marketSkill('excalidraw'), marketSkill('pptx')], nextCursor: null, sources: {} })
   mocks.marketInstall.mockReset()
@@ -137,7 +139,44 @@ describe('useCapabilityMenu', () => {
     expect(skillChildKeys(result)).toContain('market-skill:excalidraw')
   })
 
+  it('asks before arming Agent Team, and arms only after the user confirms', () => {
+    const { result, composer } = renderMenu()
+    act(() => result.current.onAction({ type: 'toggleAgentTeam' }))
+    expect(result.current.agentTeamArmed).toBe(false)
+    expect(result.current.agentTeamsNotice.open).toBe(true)
+    expect(composer.onClose).toHaveBeenCalled()
+
+    act(() => result.current.agentTeamsNotice.onClose())
+    expect(result.current.agentTeamsNotice.open).toBe(false)
+    expect(result.current.agentTeamArmed).toBe(false)
+
+    act(() => result.current.onAction({ type: 'toggleAgentTeam' }))
+    act(() => result.current.agentTeamsNotice.onConfirm({ dontRemind: false }))
+    expect(result.current.agentTeamsNotice.open).toBe(false)
+    expect(result.current.agentTeamArmed).toBe(true)
+    expect(isAgentTeamsNoticeDismissed()).toBe(false)
+
+    // Turning it off never asks.
+    act(() => result.current.onAction({ type: 'toggleAgentTeam' }))
+    expect(result.current.agentTeamArmed).toBe(false)
+    expect(result.current.agentTeamsNotice.open).toBe(false)
+  })
+
+  it('stops asking once the user chose not to be reminded', () => {
+    const first = renderMenu()
+    act(() => first.result.current.onAction({ type: 'toggleAgentTeam' }))
+    act(() => first.result.current.agentTeamsNotice.onConfirm({ dontRemind: true }))
+    expect(first.result.current.agentTeamArmed).toBe(true)
+    first.unmount()
+
+    const second = renderMenu()
+    act(() => second.result.current.onAction({ type: 'toggleAgentTeam' }))
+    expect(second.result.current.agentTeamsNotice.open).toBe(false)
+    expect(second.result.current.agentTeamArmed).toBe(true)
+  })
+
   it('arms Agent Team until disarmed, and never while Settings turns it off', () => {
+    dismissAgentTeamsNotice()
     const { result, rerender } = renderMenu()
     act(() => result.current.onAction({ type: 'toggleAgentTeam' }))
     expect(result.current.agentTeamArmed).toBe(true)
@@ -150,4 +189,32 @@ describe('useCapabilityMenu', () => {
     expect(result.current.agentTeamArmed).toBe(false)
     expect(result.current.sections[1]!.items[0]!.action).toEqual({ type: 'settings', tab: 'general' })
   })
+})
+
+it('lean exposes only file attachment and local commands, including after a standard menu', async () => {
+  const composer = handlers()
+  const { result, rerender } = renderHook(({ lean }) => useCapabilityMenu({ open: true, lean, cwd: '/repo', references: [], handlers: composer }), { initialProps: { lean: false } })
+  await waitFor(() => expect(mocks.marketList).toHaveBeenCalled())
+  rerender({ lean: true })
+  const actions = result.current.sections.flatMap(section => section.items.map(item => item.action?.type))
+  expect(actions).toEqual(['attachment', 'slashTrigger'])
+  expect(result.current.sections.flatMap(section => section.searchOnly ?? [])).toEqual([])
+  act(() => result.current.onAction({ type: 'toggleAgentTeam' }))
+  expect(result.current.agentTeamArmed).toBe(false)
+  act(() => result.current.onAction({ type: 'insertSlashText', command: 'agent forbidden' }))
+  expect(composer.onInsertSlashText).not.toHaveBeenCalled()
+})
+
+it('keeps explicit installed skills in lean while blocking plugin mentions', () => {
+  const composer = handlers()
+  const skill = { id: 'review', name: 'review', displayName: 'Review', source: 'user', modelText: '/review', description: 'Review code', kind: 'skill' as const }
+  const plugin = { id: 'browser', name: 'browser', displayName: 'Browser', source: 'plugin', modelText: '/browser', description: 'Browser', kind: 'plugin' as const }
+  const { result } = renderHook(() => useCapabilityMenu({ open: true, lean: true, cwd: '/repo', references: [skill, plugin], handlers: composer }))
+  expect(result.current.sections.flatMap(section => section.items).find(item => item.key === 'skills')?.children?.find(item => item.key === 'skills:all')?.children).toEqual([
+    expect.objectContaining({ action: { type: 'insertMention', reference: skill } }),
+  ])
+  act(() => result.current.onAction({ type: 'insertMention', reference: skill }))
+  expect(composer.onInsertMention).toHaveBeenCalledWith(skill)
+  act(() => result.current.onAction({ type: 'insertMention', reference: plugin }))
+  expect(composer.onInsertMention).toHaveBeenCalledTimes(1)
 })

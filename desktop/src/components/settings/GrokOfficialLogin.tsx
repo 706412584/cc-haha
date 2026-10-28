@@ -6,10 +6,12 @@ import { useTranslation } from '../../i18n'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import { getDesktopHost } from '../../lib/desktopHost'
 import { hahaGrokOAuthApi } from '../../api/hahaGrokOAuth'
+import { OfficialLoginRiskDialog } from './OfficialLoginRiskDialog'
 
 export function GrokOfficialLogin() {
   const t = useTranslation()
   const [manualAuthorizeUrl, setManualAuthorizeUrl] = useState<string | null>(null)
+  const [riskDialogOpen, setRiskDialogOpen] = useState(false)
   const [isAwaitingAuthorization, setIsAwaitingAuthorization] = useState(false)
   const { status, isLoading, error, fetchStatus, login, logout, startPolling, stopPolling } =
     useHahaGrokOAuthStore()
@@ -116,7 +118,7 @@ export function GrokOfficialLogin() {
       <div className="text-[13px] leading-5 text-[var(--color-text-secondary)]">{t('settings.grokOfficialLogin.intro')}</div>
       <Button
         size="base"
-        onClick={handleLogin}
+        onClick={() => setRiskDialogOpen(true)}
         disabled={isLoading}
         icon={<LogIn size={14} strokeWidth={1.75} aria-hidden="true" />}
         className="self-start"
@@ -125,6 +127,15 @@ export function GrokOfficialLogin() {
       </Button>
       {error && <div className="text-xs text-[var(--color-error)]">{t('settings.grokOfficialLogin.errorPrefix')}{error}</div>}
       {manualAuthorizeButton}
+      <OfficialLoginRiskDialog
+        open={riskDialogOpen}
+        provider="grok"
+        onClose={() => setRiskDialogOpen(false)}
+        onConfirm={() => {
+          setRiskDialogOpen(false)
+          void handleLogin()
+        }}
+      />
     </div>
   )
 }

@@ -293,6 +293,11 @@ jobs:
           bun run build
           bun run build:electron
 
+      - name: Rebuild node-pty for the Linux glibc floor
+        if: matrix.smoke_platform == 'linux'
+        working-directory: desktop
+        run: bash ./scripts/rebuild-node-pty-linux.sh
+
       - name: Build signed macOS Electron release artifacts
         if: matrix.smoke_platform == 'macos' && needs.signing-preflight.outputs.macos_signed == 'true'
         working-directory: desktop
@@ -657,7 +662,7 @@ jobs:
         # Unsigned macOS builds omit the native cu-helper (build.sh refuses to
         # ad-hoc sign), so the bundle-structure smoke must not require it.
         if: matrix.smoke_platform != 'macos' || needs.signing-preflight.outputs.macos_signed == 'true'
-        run: bun run test:package-smoke --platform ${{ matrix.smoke_platform }} --arch ${{ matrix.arch }} --package-kind release --artifacts-dir desktop/build-artifacts/electron
+        run: bun run test:package-smoke --platform ${{ matrix.smoke_platform }} --arch ${{ matrix.arch }} --package-kind release --artifacts-dir desktop/build-artifacts/electron ${{ matrix.smoke_platform == 'linux' && '--max-linux-glibc 2.28' || '' }}
 
       - name: Verify packaged app structure (unsigned macOS)
         if: matrix.smoke_platform == 'macos' && needs.signing-preflight.outputs.macos_signed != 'true'

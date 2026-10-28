@@ -133,6 +133,8 @@ import { useSettingsStore } from '../stores/settingsStore'
 import { useTabStore } from '../stores/tabStore'
 import { useTeamStore } from '../stores/teamStore'
 import { useActivityPanelStore } from '../stores/activityPanelStore'
+import { useSessionDelegationStore } from '../stores/sessionDelegationStore'
+import { sessionCollaborationApi, type SessionDelegationSnapshot } from '../api/sessionCollaboration'
 import { useTrajectoryViewStore } from '../stores/trajectoryViewStore'
 import {
   WORKSPACE_BOTTOM_DEFAULT_HEIGHT,
@@ -195,12 +197,29 @@ describe('ActiveSession trajectory view', () => {
     useChatStore.setState({ sessions: { [id]: { ...createDefaultSessionState(), connectionState: 'connected', historyStatus: 'ready', historyHydrated: true, messages: [{ id: 'm', type: 'assistant_text', content: 'main', timestamp: 1 }] } } })
   }
 
+  it('retains the known tab title when summary metadata is unavailable', async () => {
+    const id = 'history-with-unavailable-summary'
+    seedSession(id)
+    useTabStore.setState({ tabs: [{ sessionId: id, title: 'Known search result title', type: 'session', status: 'idle' }] })
+    useSessionStore.setState({ sessions: [] })
+    await act(async () => { render(<ActiveSession sessionId={id} />) })
+    expect(screen.getByRole('heading', { name: 'Known search result title' })).toBeInTheDocument()
+    act(() => useSessionStore.setState({ sessions: [{
+      id, title: 'Authoritative loaded title', messageCount: 1, createdAt: '', modifiedAt: '',
+      projectPath: '/repo', workDir: '/repo', workDirExists: true,
+    }] }))
+    expect(screen.getByRole('heading', { name: 'Authoritative loaded title' })).toBeInTheDocument()
+  })
+
   it('swaps the chat body for the trajectory while keeping the chat and composer mounted', async () => {
     const id = 'trajectory-session'
     seedSession(id)
     render(<ActiveSession sessionId={id} />)
     const list = screen.getByTestId('message-list')
     const input = screen.getByTestId('chat-input')
+    const decisions = screen.getByTestId('session-decision-dock')
+    expect(decisions).toHaveClass('px-6')
+    expect(decisions.firstElementChild).toHaveClass('max-w-[var(--chat-content-max-width)]')
     // Never mounted (so never fetched) until the user opens it.
     expect(screen.queryByTestId('trajectory-view')).not.toBeInTheDocument()
 
@@ -215,6 +234,8 @@ describe('ActiveSession trajectory view', () => {
     expect(screen.getByTestId('chat-input')).toBe(input)
     expect(input).toHaveAttribute('data-visible', 'false')
     expect(screen.getByTestId('session-composer-slot')).toHaveClass('hidden')
+    expect(screen.getByTestId('session-decision-dock')).toBe(decisions)
+    expect(decisions).toHaveClass('hidden')
 
     fireEvent.click(screen.getByRole('tab', { name: 'Chat' }))
     expect(screen.getByTestId('trajectory-view')).toBe(trajectory)
@@ -224,6 +245,7 @@ describe('ActiveSession trajectory view', () => {
     expect(screen.getByTestId('chat-input')).toBe(input)
     expect(input).toHaveAttribute('data-visible', 'true')
     expect(screen.getByTestId('session-composer-slot')).not.toHaveClass('hidden')
+    expect(decisions).not.toHaveClass('hidden')
   })
 
   it('marks 对话 while a card waits there and the trajectory hides it', async () => {
@@ -330,6 +352,15 @@ describe('ActiveSession task polling', () => {
     expect(headerEntry).toHaveLength(1)
     fireEvent.click(headerEntry[0]!)
     expect(openSideChat).toHaveBeenCalledWith(id)
+  })
+
+  it('does not offer side chats for restored lean sessions', () => {
+    const id = 'lean-parent'
+    useTabStore.setState({ activeTabId: id, tabs: [{ sessionId: id, title: 'Main', type: 'session', status: 'idle' }] })
+    useSessionStore.setState({ sessions: [{ id, agentProfile: 'lean', title: 'Main', messageCount: 1, createdAt: '', modifiedAt: '', projectPath: '/repo', workDir: '/repo', workDirExists: true }] })
+    useChatStore.setState({ sessions: { [id]: { ...createDefaultSessionState(), connectionState: 'connected', historyStatus: 'ready', historyHydrated: true } } })
+    render(<ActiveSession sessionId={id} />)
+    expect(screen.queryByRole('button', { name: 'Side chat' })).not.toBeInTheDocument()
   })
 
   it('can hide a mobile side chat without destroying its temporary tab', () => {
@@ -3170,4 +3201,44 @@ describe('ActiveSession activity panel auto-close grace', () => {
     expect(useTeamStore.getState().isTeamStripHidden(sessionId, 'inc-1')).toBe(false)
   })
 
+})
+
+describe('ActiveSession delegated sessions', () => {
+  const sessionId = 'delegating-session'
+  const delegation: SessionDelegationSnapshot = {
+    batches: [{ id: 'batch', requestId: 'r', callerSessionId: sessionId, revision: 1, state: 'launched', sessions: [
+      { id: 'sec', title: 'Security review', prompt: 'Review security', runtime: { providerId: 'p', modelId: 'm' }, sessionId: 'child-sec', launched: true },
+    ] }],
+    models: [{ providerId: 'p', providerName: 'Provider', modelId: 'm', modelName: 'Model', supportedEfforts: [], isDefault: true }],
+    sessions: [{ sessionId: 'child-sec', runtime: { providerId: 'p', modelId: 'm' }, state: 'running', paused: false }],
+    changes: [],
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    useSessionDelegationStore.setState({ bySession: {} })
+  })
+
+  // On a phone the activity sheet is stacked above dialogs, so the model
+  // dialog opened from it rendered underneath, behind the sheet's scrim.
+  it.each([
+    { phone: true, panelStaysOpen: false },
+    { phone: false, panelStaysOpen: true },
+  ])('opens the model dialog from the activity panel above it (phone: $phone)', async ({ phone, panelStaysOpen }) => {
+    viewportMocks.isMobile = phone
+    vi.spyOn(sessionCollaborationApi, 'get').mockResolvedValue(delegation)
+    useSettingsStore.setState({ locale: 'en' })
+    useTabStore.setState({ activeTabId: sessionId, tabs: [{ sessionId, title: 'Main', type: 'session', status: 'idle' }] })
+    useSessionStore.setState({ sessions: [{ id: sessionId, title: 'Main', messageCount: 1, createdAt: '', modifiedAt: '', projectPath: '/repo', workDir: '/repo', workDirExists: true }] })
+    useChatStore.setState({ sessions: { [sessionId]: { ...createDefaultSessionState(), connectionState: 'connected', historyStatus: 'ready', historyHydrated: true, messages: [{ id: 'm', type: 'assistant_text', content: 'delegated', timestamp: 1 }] } } })
+
+    render(<ActiveSession />)
+    await waitFor(() => expect(useSessionDelegationStore.getState().bySession[sessionId]?.rows).toHaveLength(1))
+    act(() => useActivityPanelStore.getState().open(sessionId))
+    const panel = await screen.findByTestId(phone ? 'session-activity-sheet' : 'session-activity-panel')
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Change models' }))
+    expect(await screen.findByRole('dialog', { name: 'Session assignments' })).toBeInTheDocument()
+    expect(useActivityPanelStore.getState().isOpen(sessionId)).toBe(panelStaysOpen)
+  })
 })

@@ -141,16 +141,19 @@ describe('HahaOAuthService — session management', () => {
   test('routes the Claude token exchange through the dynamic system proxy bridge', async () => {
     const bridgeUrl = 'http://127.0.0.1:17890'
     process.env[SYSTEM_PROXY_URL_ENV] = bridgeUrl
-    let requestProxy: string | undefined
-    globalThis.fetch = (async (_input, init) => {
-      requestProxy = (init as RequestInit & { proxy?: string } | undefined)?.proxy
-      return Response.json({
+    let seen:
+      | { args: unknown[]; proxyUrl: string | null | undefined }
+      | undefined
+    service.setExchangeFn(async (...args) => {
+      const opts = args[6] as { proxyUrl?: string | null } | undefined
+      seen = { args: args.slice(0, 4), proxyUrl: opts?.proxyUrl }
+      return {
         access_token: 'access',
         refresh_token: 'refresh',
         expires_in: 3600,
         scope: 'user:inference',
-      })
-    }) as typeof fetch
+      }
+    })
 
     await (service as any).exchangeWithCustomCallback(
       'authorization-code',
@@ -159,7 +162,107 @@ describe('HahaOAuthService — session management', () => {
       54321,
     )
 
-    expect(requestProxy).toBe(bridgeUrl)
+    expect(seen?.args).toEqual(['authorization-code', 'state', 'verifier', 54321])
+    expect(seen?.proxyUrl).toBe(bridgeUrl)
+  })
+
+  test('keeps the token endpoint error body when the exchange is rejected', async () => {
+    service.setExchangeFn(async () => {
+      throw Object.assign(new Error('Request failed with status code 400'), {
+        isAxiosError: true,
+        response: { status: 400, data: { error: 'invalid_grant' } },
+      })
+    })
+
+    await expect(
+      (service as any).exchangeWithCustomCallback('code', 'state', 'verifier', 54321),
+    ).rejects.toThrow('Token exchange failed (400): {"error":"invalid_grant"}')
+  })
+})
+
+describe('HahaOAuthService — account uuid', () => {
+  beforeEach(setup)
+  afterEach(teardown)
+
+  test('looks the uuid up once per login and caches it', async () => {
+    process.env[SYSTEM_PROXY_URL_ENV] = 'http://127.0.0.1:17890'
+    let calls = 0
+    let proxyUrl: string | null | undefined
+    service.setFetchAccountUuidFn(async (_token, opts) => {
+      calls++
+      proxyUrl = opts?.proxyUrl
+      return 'account-uuid'
+    })
+
+    expect(await service.getAccountUuid('token-1')).toBe('account-uuid')
+    expect(await service.getAccountUuid('token-2')).toBe('account-uuid')
+
+    expect(calls).toBe(1)
+    expect(proxyUrl).toBe('http://127.0.0.1:17890')
+  })
+
+  test('forgets the uuid on logout so another account is looked up afresh', async () => {
+    const answers = ['first-account', 'second-account']
+    service.setFetchAccountUuidFn(async () => answers.shift() ?? null)
+
+    expect(await service.getAccountUuid('token-a')).toBe('first-account')
+    await service.deleteTokens()
+    expect(await service.getAccountUuid('token-b')).toBe('second-account')
+  })
+
+  test('returns null instead of throwing when the profile lookup fails', async () => {
+    service.setFetchAccountUuidFn(async () => {
+      throw new Error('profile endpoint unreachable')
+    })
+
+    expect(await service.getAccountUuid('token')).toBeNull()
+  })
+
+  test('does not ask the profile endpoint with a token that lacks user:profile', async () => {
+    let calls = 0
+    service.setFetchAccountUuidFn(async () => {
+      calls++
+      return 'account-uuid'
+    })
+    await service.saveTokens({
+      accessToken: 'inference-only',
+      refreshToken: null,
+      expiresAt: null,
+      scopes: ['user:inference'],
+      subscriptionType: 'pro',
+    })
+
+    expect(await service.getAccountUuid('inference-only')).toBeNull()
+    expect(calls).toBe(0)
+  })
+
+  test('backs off after a failed lookup instead of retrying on every session', async () => {
+    let calls = 0
+    service.setFetchAccountUuidFn(async () => {
+      calls++
+      return null
+    })
+
+    expect(await service.getAccountUuid('token')).toBeNull()
+    expect(await service.getAccountUuid('token')).toBeNull()
+    expect(calls).toBe(1)
+
+    // A new login is a fresh start: the previous failure says nothing about it.
+    await service.deleteTokens()
+    expect(await service.getAccountUuid('token')).toBeNull()
+    expect(calls).toBe(2)
+  })
+
+  test('does not hold up the caller for a slow profile endpoint', async () => {
+    service.setFetchAccountUuidFn(
+      () => new Promise<string | null>((resolve) => setTimeout(() => resolve('late'), 5_000)),
+    )
+
+    const startedAt = Date.now()
+    const uuid = await service.getAccountUuid('token')
+
+    expect(uuid).toBeNull()
+    expect(Date.now() - startedAt).toBeLessThan(4_000)
   })
 })
 

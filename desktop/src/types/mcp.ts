@@ -129,7 +129,7 @@ export type MarketplaceCatalog = {
 
 export type McpSessionSync = {
   applied: boolean
-  reason?: 'not_running' | 'different_project' | 'failed' | 'no_session'
+  reason?: 'not_running' | 'different_project' | 'failed' | 'no_session' | 'lean_profile'
   error?: string
 }
 

@@ -71,8 +71,6 @@ export function getAttributionHeader(fingerprint: string): string {
     return ''
   }
 
-  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT ?? 'unknown'
-
   // cc_workload: turn-scoped hint so the API can route e.g. cron-initiated
   // requests to a lower QoS pool. Absent = interactive default. Safe re:
   // fingerprint (computed from msg chars + version only) and cch signature
@@ -81,7 +79,6 @@ export function getAttributionHeader(fingerprint: string): string {
   // deploys silently ignore this.
   const header = formatClaudeCodeBillingHeader({
     fingerprint,
-    entrypoint,
     workload: getWorkload(),
   })
 

@@ -166,6 +166,7 @@ export function* normalizeMessage(message: Message): Generator<SDKMessage> {
           session_id: getSessionId(),
           uuid: _.uuid,
           error: _.error,
+          ...(_.businessErrorCode ? { businessErrorCode: _.businessErrorCode } : {}),
         }
       }
       return

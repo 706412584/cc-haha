@@ -128,7 +128,66 @@ describe('bundled provider presets', () => {
       expect(preset?.promoText).toBeUndefined()
       expect(preset?.featured).toBeUndefined()
     }
+  })
 
+  it('bundles Modelflare selectable without sponsor badges and with Claude 5.5 context windows', () => {
+    const preset = BUNDLED_PROVIDER_PRESETS.find((candidate) => candidate.id === 'modelflare')
+
+    // Fork de-advertising policy strips the featured/isNew promotion bits the
+    // upstream preset carries; the working fields stay.
+    expect(preset).toMatchObject({
+      name: 'Modelflare',
+      baseUrl: 'https://modelflare.dev',
+      apiFormat: 'anthropic',
+      authStrategy: 'auth_token',
+      apiKeyUrl: 'https://modelflare.dev/sign-up?utm_source=github&utm_campaign=cchaha',
+      needsApiKey: true,
+      defaultModels: {
+        main: 'claude-opus-5-5',
+        haiku: 'claude-haiku-5-5',
+        sonnet: 'claude-sonnet-5-5',
+        opus: 'claude-opus-5-5',
+      },
+      modelContextWindows: {
+        'claude-opus-5-5': 1000000,
+        'claude-sonnet-5-5': 1000000,
+        'claude-haiku-5-5': 1000000,
+      },
+    })
+    expect(preset?.featured).toBeUndefined()
+    expect(preset?.isNew).toBeUndefined()
+    expect(preset && presetMatchesBaseUrl(preset, ' HTTPS://MODELFLARE.DEV/ ')).toBe(true)
+    expect(selectableProviderPresets(BUNDLED_PROVIDER_PRESETS).map((candidate) => candidate.id))
+      .toContain('modelflare')
+  })
+
+  it('updates AruHub to its published Claude 5.5 IDs while keeping the Haiku fallback', () => {
+    const preset = BUNDLED_PROVIDER_PRESETS.find((candidate) => candidate.id === 'aruhub')
+
+    expect(preset?.defaultModels).toEqual({
+      main: 'claude-opus-5-5',
+      haiku: 'claude-sonnet-5-5',
+      sonnet: 'claude-sonnet-5-5',
+      opus: 'claude-opus-5-5',
+    })
+  })
+
+  it('keeps ApiSmart resolvable without retiring it', () => {
+    // Fork keeps this working relay selectable (no upstream tombstone); only
+    // the sponsor badge is stripped.
+    const preset = BUNDLED_PROVIDER_PRESETS.find((candidate) => candidate.id === 'apismart')
+
+    expect(preset?.deprecated).toBeUndefined()
+    expect(preset?.featured).toBeUndefined()
+    expect(preset?.baseUrl).toBe('https://gw.apismart.ai/v1')
+    expect(preset?.apiFormat).toBe('openai_chat')
+    expect(preset?.defaultImageGeneration).toEqual({ model: 'doubao-seedream-5-0' })
+    expect(preset?.modelContextWindows).toBeDefined()
+    expect(selectableProviderPresets(BUNDLED_PROVIDER_PRESETS).map((candidate) => candidate.id))
+      .toContain('apismart')
+  })
+
+  it('keeps the retired 接口AI preset resolvable and selectable without promo', () => {
     const jiekouai = BUNDLED_PROVIDER_PRESETS.find((preset) => preset.id === 'jiekouai')
     expect(jiekouai?.deprecated).toBeUndefined()
     expect(jiekouai?.apiKeyUrl).toBeUndefined()
@@ -143,4 +202,33 @@ describe('bundled provider presets', () => {
     expect(selectableIds).not.toContain('qiniuai')
   })
 
+  // Fork keeps the TeamoRouter preset bundled as a deprecated tombstone so
+  // saved providers still resolve their presetId; only selectability is gone.
+  it('keeps the TeamoRouter tombstone unselectable', () => {
+    const preset = BUNDLED_PROVIDER_PRESETS.find((candidate) => candidate.id === 'teamorouter')
+    expect(preset?.deprecated).toBe(true)
+    expect(selectableProviderPresets(BUNDLED_PROVIDER_PRESETS).map((candidate) => candidate.id))
+      .not.toContain('teamorouter')
+  })
+
+  // The bundle ships the same JSON the server parses, so a field the desktop type
+  // forgot to mirror would be invisible in the form while still steering requests.
+  it('bundles the OpenCode Go rules the server resolves from', () => {
+    const preset = BUNDLED_PROVIDER_PRESETS.find((candidate) => candidate.id === 'opencode-go')
+
+    expect(preset?.baseUrl).toBe('https://opencode.ai/zen/go/v1')
+    expect(preset?.apiFormat).toBe('openai_chat')
+    expect(preset?.authStrategy).toBe('api_key')
+    expect(preset?.modelApiFormats).toEqual([
+      { prefixes: ['grok-', 'gpt-', 'muse-spark-'], apiFormat: 'openai_responses' },
+      { prefixes: ['minimax-', 'qwen', 'union-alpha'], apiFormat: 'anthropic' },
+      { prefixes: ['gemini-'], apiFormat: 'gemini', baseUrl: '/inference/go/google/v1beta' },
+    ])
+    expect(preset?.upstreamHeaders).toEqual({
+      'User-Agent': 'cc-haha/$VERSION',
+      'x-opencode-session': '$SESSION_ID',
+    })
+    expect(selectableProviderPresets(BUNDLED_PROVIDER_PRESETS).map((candidate) => candidate.id))
+      .toContain('opencode-go')
+  })
 })

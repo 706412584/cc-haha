@@ -25,6 +25,7 @@ import {
   __setDisconnectGraceMsForTests,
 } from '../ws/disconnectGraceConfig.js'
 import { conversationService } from '../services/conversationService.js'
+import { ApiError } from '../middleware/errorHandler.js'
 import { computerUseApprovalService } from '../services/computerUseApprovalService.js'
 import { sessionActivityCoordinator } from '../services/sessionActivityCoordinator.js'
 import { sessionService } from '../services/sessionService.js'
@@ -750,6 +751,22 @@ describe('WebSocket handler session isolation', () => {
       computerUseRequestIds: [],
       turnActive: false,
     })
+  })
+
+  it('rejects plan mode for lean sessions before inactive persistence or active transition', async () => {
+    const sessionId = `lean-plan-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(sessionService, 'getSessionLaunchInfo').mockResolvedValue({ agentProfile: 'lean' } as any)
+    const persist = spyOn(sessionService, 'appendSessionMetadata').mockResolvedValue(undefined)
+    const setMode = spyOn(conversationService, 'setPermissionMode').mockResolvedValue(true)
+    for (const active of [false, true]) {
+      spyOn(conversationService, 'hasSession').mockReturnValue(active)
+      await handleWebSocket.message(ws, JSON.stringify({ type: 'set_permission_mode', mode: 'plan' }))
+      await new Promise(resolve => setTimeout(resolve, 0))
+    }
+    expect(ws.sent.map(payload => JSON.parse(payload)).filter(message => message.code === 'LEAN_CAPABILITY_UNAVAILABLE')).toHaveLength(2)
+    expect(persist).not.toHaveBeenCalled()
+    expect(setMode).not.toHaveBeenCalled()
   })
 
   it('gives pet clients only sanitized state and denies privileged client messages', () => {
@@ -6029,6 +6046,73 @@ describe('WebSocket handler session isolation', () => {
       turnState: 'idle',
       activeBackgroundTaskIds: [],
     })
+  })
+
+  it('delivers the first message and its title when the title lookup races a transcript rewrite', async () => {
+    const sessionId = `title-history-changed-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'onOutput').mockImplementation(() => {})
+    spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+    const sendMessage = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
+    const reconnectTitle = spyOn(sessionService, 'getCustomTitle').mockResolvedValue(null)
+    handleWebSocket.open(ws)
+    await flushMicrotasks()
+    reconnectTitle.mockRestore()
+
+    // The first metadata read is overtaken by the startup placeholder rewrite.
+    let rejectRacingRead!: (error: Error) => void
+    const getCustomTitle = spyOn(sessionService, 'getCustomTitle')
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRacingRead = reject }))
+      .mockResolvedValue(null)
+    spyOn(sessionService, 'getSessionLaunchInfo').mockResolvedValue({
+      filePath: '/tmp/fresh-session.jsonl', projectDir: '/tmp', workDir: '/tmp',
+      transcriptMessageCount: 0, customTitle: null,
+    })
+    const appendAiTitle = spyOn(sessionService, 'appendAiTitle').mockResolvedValue(undefined)
+    ws.sent.length = 0
+    handleWebSocket.message(ws, JSON.stringify({ type: 'user_message', content: 'Summarize the release notes' }))
+    for (let i = 0; i < 100 && !rejectRacingRead; i++) await flushMicrotasks()
+    rejectRacingRead(new ApiError(409, 'Session changed during recovery; retry', 'HISTORY_CHANGED'))
+    for (let i = 0; i < 200 && sendMessage.mock.calls.length === 0; i++) {
+      await new Promise(resolve => setTimeout(resolve, 1))
+    }
+    await flushMicrotasks(30)
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(sendMessage.mock.calls[0]?.[1]).toBe('Summarize the release notes')
+    const messages = ws.sent.map(payload => JSON.parse(payload))
+    expect(messages.filter(message => message.type === 'error')).toEqual([])
+    expect(appendAiTitle).toHaveBeenCalledWith(sessionId, 'Summarize the release notes')
+    expect(messages).toContainEqual({ type: 'session_title_updated', sessionId, title: 'Summarize the release notes' })
+    expect(getCustomTitle.mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('still delivers the turn when the optional title lookup keeps reporting a rewrite', async () => {
+    const sessionId = `title-history-churn-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'onOutput').mockImplementation(() => {})
+    spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+    const sendMessage = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
+    const reconnectTitle = spyOn(sessionService, 'getCustomTitle').mockResolvedValue(null)
+    handleWebSocket.open(ws)
+    await flushMicrotasks()
+    reconnectTitle.mockRestore()
+    spyOn(sessionService, 'getCustomTitle').mockRejectedValue(
+      new ApiError(409, 'Session changed during recovery; retry', 'HISTORY_CHANGED'),
+    )
+    ws.sent.length = 0
+    handleWebSocket.message(ws, JSON.stringify({ type: 'user_message', content: 'keep going' }))
+    for (let i = 0; i < 500 && sendMessage.mock.calls.length === 0; i++) {
+      await new Promise(resolve => setTimeout(resolve, 1))
+    }
+    await flushMicrotasks(30)
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(ws.sent.map(payload => JSON.parse(payload)).filter(message => message.type === 'error')).toEqual([])
   })
 
   it('rejects a second user message without releasing the active turn', async () => {

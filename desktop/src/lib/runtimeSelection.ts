@@ -13,6 +13,10 @@ import {
   GROK_OFFICIAL_PROVIDER_ID,
 } from '../constants/grokOfficialProvider'
 import {
+  DEEPSEEK_ACCOUNT_DEFAULT_MODEL_ID,
+  DEEPSEEK_ACCOUNT_PROVIDER_ID,
+} from '../constants/deepseekAccountProvider'
+import {
   isModelReasoningEffort,
   normalizeModelReasoningEffort,
   resolveModelReasoningProfile,
@@ -78,7 +82,9 @@ export function resolveActiveProviderRuntimeSelection(
       ? OPENAI_OFFICIAL_DEFAULT_MODEL_ID
       : inferredProviderId === GROK_OFFICIAL_PROVIDER_ID
         ? GROK_OFFICIAL_DEFAULT_MODEL_ID
-        : OFFICIAL_DEFAULT_MODEL_ID
+        : inferredProviderId === DEEPSEEK_ACCOUNT_PROVIDER_ID
+          ? DEEPSEEK_ACCOUNT_DEFAULT_MODEL_ID
+          : OFFICIAL_DEFAULT_MODEL_ID
   )
   const model = typeof currentModel === 'string' ? null : currentModel?.id === modelId ? currentModel : null
   const selectedEffort = resolveModelEffort(model, effortLevel)
@@ -138,7 +144,8 @@ export function reconcileRuntimeSelection(
   const provider = context.providers.find((entry) => entry.id === selection.providerId)
   const isOfficial = selection.providerId === null ||
     selection.providerId === OPENAI_OFFICIAL_PROVIDER_ID ||
-    selection.providerId === GROK_OFFICIAL_PROVIDER_ID
+    selection.providerId === GROK_OFFICIAL_PROVIDER_ID ||
+    selection.providerId === DEEPSEEK_ACCOUNT_PROVIDER_ID
   if (!provider && !isOfficial && context.hasLoadedProviders) {
     // Deleted/recreated providers must not carry their old model or effort into
     // the default provider. Use the same choice for rendering and transport.

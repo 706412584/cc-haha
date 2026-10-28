@@ -4,6 +4,7 @@ import { isAgentCompletionCommand, isCurrentAgentCompletionCommand } from '../ta
 import { flushAndDrainAgentCompletionInbox } from '../utils/queueProcessor.js'
 import type { QueuedCommand } from '../types/textInputTypes.js'
 import { removeByFilter } from '../utils/messageQueueManager.js'
+import { isAgentProfileCommandSupported } from '../utils/agentProfile.js'
 import type { Command } from '../types/command.js'
 
 export function supportsHeadlessSlashCommand(command: Command): boolean {
@@ -13,7 +14,12 @@ export function supportsHeadlessSlashCommand(command: Command): boolean {
 }
 
 export function filterCommandsForHeadlessMode(commands: Command[]): Command[] {
-  return commands.filter(supportsHeadlessSlashCommand)
+  return commands.filter(command => supportsHeadlessSlashCommand(command) && isAgentProfileCommandSupported(command))
+}
+
+/** True when only the agent profile keeps a command out of the headless command list. */
+export function isHeadlessCommandHiddenByAgentProfile(command: Command): boolean {
+  return supportsHeadlessSlashCommand(command) && !isAgentProfileCommandSupported(command)
 }
 
 export function removeStaleHeadlessAgentCompletions(state: AppState): QueuedCommand[] {

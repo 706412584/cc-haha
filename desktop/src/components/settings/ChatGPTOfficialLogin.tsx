@@ -7,10 +7,12 @@ import { useHahaOpenAIOAuthStore } from '../../stores/hahaOpenAIOAuthStore'
 import { useTranslation } from '../../i18n'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import { getDesktopHost } from '../../lib/desktopHost'
+import { OfficialLoginRiskDialog } from './OfficialLoginRiskDialog'
 
 export function ChatGPTOfficialLogin() {
   const t = useTranslation()
   const [manualAuthorizeUrl, setManualAuthorizeUrl] = useState<string | null>(null)
+  const [riskDialogOpen, setRiskDialogOpen] = useState(false)
   const {
     status,
     isLoading,
@@ -127,7 +129,7 @@ export function ChatGPTOfficialLogin() {
       </div>
       <Button
         size="base"
-        onClick={handleLogin}
+        onClick={() => setRiskDialogOpen(true)}
         disabled={isLoading}
         icon={<LogIn size={14} strokeWidth={1.75} aria-hidden="true" />}
         className="self-start"
@@ -142,6 +144,15 @@ export function ChatGPTOfficialLogin() {
         </div>
       )}
       {manualAuthorizeButton}
+      <OfficialLoginRiskDialog
+        open={riskDialogOpen}
+        provider="chatgpt"
+        onClose={() => setRiskDialogOpen(false)}
+        onConfirm={() => {
+          setRiskDialogOpen(false)
+          void handleLogin()
+        }}
+      />
     </div>
   )
 }

@@ -4,6 +4,8 @@ import * as os from 'os'
 import * as path from 'path'
 import { ProviderService } from '../services/providerService.js'
 import { SettingsService } from '../services/settingsService.js'
+import { readActiveProviderManagedEnv } from '../services/providerRuntimeEnv.js'
+import { getImageGenerationRuntimeConfig } from '../../services/imageGeneration/config.js'
 import {
   CURRENT_PROVIDER_INDEX_SCHEMA_VERSION,
   ensurePersistentStorageUpgraded,
@@ -33,6 +35,51 @@ describe('persistent storage upgrade migrations', () => {
     await fs.rm(tempDir, { recursive: true, force: true })
   })
 
+  test('upgrades v6 image settings to an explicit protocol and preserves unknown fields on later edits', async () => {
+    const dir = path.join(tempDir, 'cc-haha')
+    const file = path.join(dir, 'providers.json')
+    await fs.mkdir(dir, { recursive: true })
+    const fixture = {
+      presetId: 'custom', name: 'Fixture', apiKey: 'fixture-key',
+      baseUrl: 'https://images.example.test', apiFormat: 'anthropic',
+      runtimeKind: 'anthropic_compatible', toolSearchEnabled: false,
+      models: { main: 'chat-model', haiku: 'chat-model', sonnet: 'chat-model', opus: 'chat-model' },
+    }
+    const legacy = {
+      schemaVersion: 6, activeId: 'legacy', futureRoot: { keep: true },
+      officialProviderModels: {},
+      providerOrder: ['legacy', 'native', 'future', 'claude-official', 'openai-official', 'grok-official'],
+      providers: [
+        { ...fixture, id: 'legacy', futureProvider: 'keep', imageGeneration: { model: 'image-model', futureImage: { keep: true } } },
+        { ...fixture, id: 'native', imageGeneration: { model: 'gemini-image', protocol: 'gemini_native' } },
+        { ...fixture, id: 'future', imageGeneration: { model: 'future-image', protocol: 'future_protocol' } },
+      ],
+    }
+    await fs.writeFile(file, JSON.stringify(legacy))
+    expect((await ensurePersistentStorageUpgraded()).failures).toEqual([])
+    const migrated = JSON.parse(await fs.readFile(file, 'utf8'))
+    expect(migrated.schemaVersion).toBeGreaterThan(6)
+    expect(migrated.schemaVersion).toBe(CURRENT_PROVIDER_INDEX_SCHEMA_VERSION)
+    expect(migrated.providers[0].imageGeneration).toEqual({ ...legacy.providers[0]!.imageGeneration, protocol: 'openai_images' })
+    expect(migrated.providers[1].imageGeneration.protocol).toBe('gemini_native')
+    expect(migrated.providers[2].imageGeneration.protocol).toBe('future_protocol')
+    const backups = (await listFiles(dir)).filter(name => name.startsWith('providers.json.bak-before-migration-'))
+    expect(backups).toHaveLength(1)
+    expect(JSON.parse(await fs.readFile(path.join(dir, backups[0]!), 'utf8'))).toEqual(legacy)
+    resetPersistentStorageMigrationsForTests()
+    expect((await ensurePersistentStorageUpgraded()).migratedEntries).toEqual([])
+    const service = new ProviderService()
+    await service.updateProvider('legacy', { name: 'Renamed' })
+    const rewritten = JSON.parse(await fs.readFile(file, 'utf8'))
+    expect(rewritten.futureRoot).toEqual({ keep: true })
+    expect(rewritten.providers[0].futureProvider).toBe('keep')
+    expect(rewritten.providers[0].imageGeneration.futureImage).toEqual({ keep: true })
+    await service.activateProvider('future')
+    const env = readActiveProviderManagedEnv(tempDir)
+    expect(env.CC_HAHA_IMAGE_PROTOCOL).toBe('future_protocol')
+    expect(getImageGenerationRuntimeConfig(env)).toBeNull()
+  })
+
   test('upgrades legacy team preferences on read and preserves the original settings on save', async () => {
     const userPath = path.join(tempDir, 'settings.json')
     const managedDir = path.join(tempDir, 'cc-haha')
@@ -54,6 +101,36 @@ describe('persistent storage upgrade migrations', () => {
     expect(JSON.parse(await fs.readFile(userPath, 'utf-8'))).toEqual({ ...legacy, agentTeamsEnabled: true })
     await service.updateUserSettings({ agentTeamsEnabled: false })
     expect(await new SettingsService().getAgentTeamsEnabled()).toBe(false)
+  })
+
+  test('upgrades the legacy lean mode preference on read without rewriting shared user settings', async () => {
+    const userPath = path.join(tempDir, 'settings.json')
+    const legacy = {
+      env: { UNKNOWN_ENV: 'preserved' },
+      updateProxy: { mode: 'manual', url: 'http://127.0.0.1:7890' },
+      unknownFuturePreference: { keep: true },
+    }
+    const original = JSON.stringify(legacy)
+    await fs.writeFile(userPath, original)
+    const service = new SettingsService()
+
+    expect(await service.getLeanModeEnabled()).toBe(false)
+    expect(await fs.readFile(userPath, 'utf-8')).toBe(original)
+    await service.updateUserSettings({ leanModeEnabled: false })
+
+    expect(await new SettingsService().getLeanModeEnabled()).toBe(false)
+    expect(JSON.parse(await fs.readFile(userPath, 'utf-8'))).toEqual({ ...legacy, leanModeEnabled: false })
+    await service.updateUserSettings({ leanModeEnabled: true })
+    expect(await new SettingsService().getLeanModeEnabled()).toBe(true)
+  })
+
+  test('rejects a non-boolean lean mode choice without changing the settings file', async () => {
+    const userPath = path.join(tempDir, 'settings.json')
+    const original = JSON.stringify({ leanModeEnabled: false, unknownFuturePreference: 'keep' })
+    await fs.writeFile(userPath, original)
+
+    await expect(new SettingsService().updateUserSettings({ leanModeEnabled: 'false' })).rejects.toThrow('leanModeEnabled must be a boolean')
+    expect(await fs.readFile(userPath, 'utf-8')).toBe(original)
   })
 
   test('upgrades the legacy automatic update preference on read without rewriting shared user settings', async () => {
@@ -152,7 +229,7 @@ describe('persistent storage upgrade migrations', () => {
     }
     expect(migrated.schemaVersion).toBe(CURRENT_PROVIDER_INDEX_SCHEMA_VERSION)
     expect(migrated.activeId).toBe('provider-1')
-    expect(migrated.providerOrder).toEqual(['provider-1', 'claude-official', 'openai-official', 'grok-official'])
+    expect(migrated.providerOrder).toEqual(['provider-1', 'claude-official', 'openai-official', 'grok-official', 'deepseek-account'])
     expect(migrated.activeProviderId).toBeUndefined()
     expect(migrated.rootFutureField).toEqual({ keep: true })
     expect(migrated.providers?.[0]?.extraFutureField).toBe('keep-me')
@@ -172,6 +249,124 @@ describe('persistent storage upgrade migrations', () => {
     }
     expect(rewritten.rootFutureField).toEqual({ keep: true })
     expect(rewritten.providers?.[0]?.extraFutureField).toBe('keep-me')
+  })
+
+  test('keeps DeepSeek Account active and its model mapping across a provider index upgrade', async () => {
+    const ccHahaDir = path.join(tempDir, 'cc-haha')
+    await fs.mkdir(ccHahaDir, { recursive: true })
+    await fs.writeFile(
+      path.join(ccHahaDir, 'providers.json'),
+      JSON.stringify({
+        schemaVersion: 4,
+        activeId: 'deepseek-account',
+        providers: [],
+        providerOrder: ['claude-official', 'openai-official', 'grok-official', 'deepseek-account'],
+        officialProviderModels: {
+          'deepseek-account': {
+            main: 'deepseek-v4-flash',
+            haiku: 'deepseek-v4-flash',
+            sonnet: 'deepseek-v4-flash',
+            opus: 'deepseek-v4-flash',
+          },
+        },
+      }, null, 2),
+      'utf-8',
+    )
+
+    const report = await ensurePersistentStorageUpgraded()
+
+    expect(report.failures).toEqual([])
+    const migrated = JSON.parse(
+      await fs.readFile(path.join(ccHahaDir, 'providers.json'), 'utf-8'),
+    ) as {
+      activeId: string | null
+      officialProviderModels: Record<string, { main: string }>
+    }
+    // Falling back to null here silently switched the user to Claude Official
+    // on the next start while the managed env still pointed at DeepSeek.
+    expect(migrated.activeId).toBe('deepseek-account')
+    expect(migrated.officialProviderModels['deepseek-account']?.main).toBe('deepseek-flash')
+  })
+
+  test('points a saved DeepSeek Account mapping at the flash model the account lists', async () => {
+    const ccHahaDir = path.join(tempDir, 'cc-haha')
+    await fs.mkdir(ccHahaDir, { recursive: true })
+    const savedMapping = {
+      main: 'deepseek-v4-pro[1m]',
+      haiku: 'deepseek-v4-flash',
+      sonnet: ' deepseek-v4-flash ',
+      opus: 'deepseek-v4-pro[1m]',
+      futureSlot: 'keep-me',
+    }
+    await fs.writeFile(
+      path.join(ccHahaDir, 'providers.json'),
+      JSON.stringify({
+        schemaVersion: 7,
+        activeId: 'deepseek-account',
+        providers: [],
+        officialProviderModels: {
+          'deepseek-account': savedMapping,
+          // Only the account mapping moves to the account's listed flash model.
+          'openai-official': {
+            main: 'deepseek-v4-flash',
+            haiku: 'deepseek-v4-flash',
+            sonnet: 'deepseek-v4-flash',
+            opus: 'deepseek-v4-flash',
+          },
+        },
+      }, null, 2),
+      'utf-8',
+    )
+
+    const report = await ensurePersistentStorageUpgraded()
+
+    expect(report.failures).toEqual([])
+    expect(report.migratedEntries).toContain('cc-haha/providers.json')
+    const migrated = JSON.parse(
+      await fs.readFile(path.join(ccHahaDir, 'providers.json'), 'utf-8'),
+    ) as {
+      schemaVersion: number
+      officialProviderModels: Record<string, Record<string, string>>
+    }
+    expect(migrated.schemaVersion).toBe(CURRENT_PROVIDER_INDEX_SCHEMA_VERSION)
+    expect(migrated.officialProviderModels['deepseek-account']).toEqual({
+      main: 'deepseek-v4-pro[1m]',
+      haiku: 'deepseek-flash',
+      sonnet: 'deepseek-flash',
+      opus: 'deepseek-v4-pro[1m]',
+      futureSlot: 'keep-me',
+    })
+    expect(migrated.officialProviderModels['openai-official']?.haiku).toBe('deepseek-v4-flash')
+    const backups = (await fs.readdir(ccHahaDir)).filter((name) =>
+      name.startsWith('providers.json.bak-before-migration-'))
+    expect(backups).toHaveLength(1)
+    expect(JSON.parse(await fs.readFile(path.join(ccHahaDir, backups[0]!), 'utf-8'))
+      .officialProviderModels['deepseek-account']).toEqual(savedMapping)
+  })
+
+  test('leaves a DeepSeek Account mapping saved under the current schema as the user chose it', async () => {
+    const ccHahaDir = path.join(tempDir, 'cc-haha')
+    await fs.mkdir(ccHahaDir, { recursive: true })
+    const current = {
+      schemaVersion: CURRENT_PROVIDER_INDEX_SCHEMA_VERSION,
+      activeId: 'deepseek-account',
+      providers: [],
+      providerOrder: ['claude-official', 'openai-official', 'grok-official', 'deepseek-account'],
+      officialProviderModels: {
+        'deepseek-account': {
+          main: 'deepseek-v4-flash',
+          haiku: 'deepseek-v4-flash',
+          sonnet: 'deepseek-v4-flash',
+          opus: 'deepseek-v4-flash',
+        },
+      },
+    }
+    await fs.writeFile(path.join(ccHahaDir, 'providers.json'), JSON.stringify(current, null, 2), 'utf-8')
+
+    const report = await ensurePersistentStorageUpgraded()
+
+    expect(report.migratedEntries).not.toContain('cc-haha/providers.json')
+    expect(JSON.parse(await fs.readFile(path.join(ccHahaDir, 'providers.json'), 'utf-8'))).toEqual(current)
   })
 
   test('upgrades a version 2 provider fixture without inventing image credentials', async () => {
@@ -277,7 +472,7 @@ describe('persistent storage upgrade migrations', () => {
             opus: 'chat-model',
           },
         }],
-        providerOrder: ['provider-current', 'claude-official', 'openai-official', 'grok-official'],
+        providerOrder: ['provider-current', 'claude-official', 'openai-official', 'grok-official', 'deepseek-account'],
         officialProviderModels: {},
       }, null, 2),
       'utf-8',
@@ -339,7 +534,7 @@ describe('persistent storage upgrade migrations', () => {
       }>
     }
     expect(migrated.activeId).toBe('legacy-provider')
-    expect(migrated.providerOrder).toEqual(['legacy-provider', 'claude-official', 'openai-official', 'grok-official'])
+    expect(migrated.providerOrder).toEqual(['legacy-provider', 'claude-official', 'openai-official', 'grok-official', 'deepseek-account'])
     expect(migrated.providers?.[0]).toMatchObject({
       id: 'legacy-provider',
       presetId: 'custom',
@@ -407,7 +602,7 @@ describe('persistent storage upgrade migrations', () => {
       providers?: unknown[]
     }
     expect(current.activeId).toBeNull()
-    expect(current.providerOrder).toEqual(['claude-official', 'openai-official', 'grok-official'])
+    expect(current.providerOrder).toEqual(['claude-official', 'openai-official', 'grok-official', 'deepseek-account'])
     expect(current.providers).toEqual([])
   })
 

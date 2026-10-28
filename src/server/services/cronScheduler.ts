@@ -936,6 +936,7 @@ export class CronScheduler {
   ): Promise<Record<string, string | undefined>> {
     const cleanEnv = await getProcessEnvWithTerminalShellEnvironment()
     delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN
+    delete cleanEnv.CLAUDE_CODE_ACCOUNT_UUID
     delete cleanEnv.CC_HAHA_AGENT_TEAMS_ENABLED
 
     if (this.shouldStripInheritedProviderEnv(task.providerId)) {
@@ -1054,6 +1055,8 @@ export class CronScheduler {
       const token = await hahaOAuthService.ensureFreshAccessToken()
       if (token) {
         env.CLAUDE_CODE_OAUTH_TOKEN = token
+        const accountUuid = await hahaOAuthService.getAccountUuid(token)
+        if (accountUuid) env.CLAUDE_CODE_ACCOUNT_UUID = accountUuid
       }
     } catch (err) {
       console.error(

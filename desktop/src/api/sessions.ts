@@ -1,7 +1,7 @@
 import { api, apiGetBlob, type ApiRequestOptions } from './client'
 import type { SlashCommandOption } from '../types/slashCommand'
 import type { AgentTaskNotification } from '../types/chat'
-import type { LocalIndexStatus, SessionListItem, MessageEntry } from '../types/session'
+import type { AgentProfile, LocalIndexStatus, SessionListItem, MessageEntry } from '../types/session'
 import type { PermissionMode } from '../types/settings'
 import type { TraceCallRecord, TraceSession } from '../types/trace'
 import type { WorkspaceLspDiagnostic, WorkspaceLspState } from '../types/lsp'
@@ -90,6 +90,7 @@ export type CreateSessionRepositoryOptions = {
   worktree?: boolean
 }
 export type CreateSessionRequest = {
+  agentProfile?: AgentProfile
   workDir?: string
   repository?: CreateSessionRepositoryOptions
   permissionMode?: PermissionMode

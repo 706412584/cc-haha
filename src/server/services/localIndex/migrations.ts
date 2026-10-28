@@ -1,6 +1,6 @@
 import type { Database } from 'bun:sqlite'
 
-export const LOCAL_INDEX_SCHEMA_VERSION = 8
+export const LOCAL_INDEX_SCHEMA_VERSION = 9
 export const LOCAL_INDEX_SCHEMA_UNSUPPORTED =
   'LOCAL_INDEX_SCHEMA_UNSUPPORTED' as const
 
@@ -215,6 +215,16 @@ const SCHEMA_V8 = `
 ALTER TABLE sessions ADD COLUMN openai_fast_mode INTEGER CHECK (openai_fast_mode IN (0, 1));
 `
 
+// The per-session agent profile (lean/standard). Version 9, not 8: both
+// lineages independently spent v8 on different columns (fork:
+// openai_fast_mode; upstream: agent_profile), so a cache from either lineage
+// can report v8 while lacking the other's column. Version 9 is the first
+// number free on both, and the per-column guard below makes applying it
+// idempotent on either lineage.
+const SCHEMA_V9 = `
+ALTER TABLE sessions ADD COLUMN agent_profile TEXT NOT NULL DEFAULT 'standard' CHECK (agent_profile IN ('standard', 'lean'));
+`
+
 const MIGRATIONS = [
   { version: 1, sql: SCHEMA_V1 },
   { version: 2, sql: SCHEMA_V2 },
@@ -224,6 +234,7 @@ const MIGRATIONS = [
   { version: 6, sql: SCHEMA_V6 },
   { version: 7, sql: SCHEMA_V7 },
   { version: 8, sql: SCHEMA_V8 },
+  { version: 9, sql: SCHEMA_V9 },
 ] as const
 
 export class UnsupportedLocalIndexSchemaError extends Error {
@@ -303,6 +314,10 @@ export function migrateLocalIndexDatabase(database: Database): void {
         }
       } else if (migration.version === 8) {
         if (!hasColumn(database, 'sessions', 'openai_fast_mode')) {
+          database.exec(migration.sql)
+        }
+      } else if (migration.version === 9) {
+        if (!hasColumn(database, 'sessions', 'agent_profile')) {
           database.exec(migration.sql)
         }
       } else {

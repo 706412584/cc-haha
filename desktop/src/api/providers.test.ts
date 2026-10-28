@@ -84,3 +84,36 @@ describe('providersApi.fetchModels', () => {
     ).rejects.toThrow(/invalid_api_key/)
   })
 })
+
+const apiGetMock = vi.hoisted(() => vi.fn())
+
+// Partial mock: keep the real module so the fetchModels tests above can use
+// setBaseUrl/getDefaultBaseUrl, and only intercept api.get for authStatus.
+vi.mock('./client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./client')>()
+  return {
+    ...actual,
+    api: { ...actual.api, get: apiGetMock },
+  }
+})
+
+describe('providersApi.authStatus', () => {
+  afterEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('asks about the global default when no provider is named', () => {
+    providersApi.authStatus()
+    expect(apiGetMock).toHaveBeenCalledWith('/api/providers/auth-status')
+  })
+
+  it('asks about one provider when the composer chose it', () => {
+    providersApi.authStatus('claude-official')
+    expect(apiGetMock).toHaveBeenCalledWith('/api/providers/auth-status?providerId=claude-official')
+  })
+
+  it('encodes a saved provider id into the query', () => {
+    providersApi.authStatus('team a/b&c')
+    expect(apiGetMock).toHaveBeenCalledWith('/api/providers/auth-status?providerId=team%20a%2Fb%26c')
+  })
+})

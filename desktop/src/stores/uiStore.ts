@@ -262,6 +262,19 @@ export type SettingsTab =
 
 type ActiveView = 'code' | 'scheduled' | 'terminal' | 'history' | 'settings'
 
+/** The desktop's retained new-session composer. Memory only, never persisted. */
+export type NewSessionDraft = {
+  workDir: string
+  /** Identifies one composer mount; a new draft gets a new one. */
+  revision: number
+  /**
+   * Unsent text or attachments, as reported by the composer. Only an empty
+   * draft may be moved to the project a "New session" entry asks for; picking
+   * a project, model or mode alone is not content.
+   */
+  hasContent: boolean
+}
+
 type UIStore = {
   /** The theme currently on `<html>` — resolved, not necessarily the manual pick. */
   theme: ThemeMode
@@ -280,6 +293,13 @@ type UIStore = {
   pendingMemoryPath: string | null
   /** Where the extension market should open next (set by the composer + menu). */
   pendingMarketTarget: MarketTarget | null
+  /**
+   * Bumped by Cmd+N. The sidebar's "New session" item answers it, so the
+   * shortcut it advertises does exactly what clicking it does.
+   */
+  newSessionRequest: number
+  /** Ephemeral composer seed. No server session exists until the first send. */
+  newSessionDraft: NewSessionDraft | null
   activeModal: string | null
   toasts: Toast[]
 
@@ -294,6 +314,14 @@ type UIStore = {
   setPendingSettingsTab: (tab: SettingsTab | null) => void
   setPendingMemoryPath: (path: string | null) => void
   setPendingMarketTarget: (target: MarketTarget | null) => void
+  requestNewSession: () => void
+  /**
+   * Opens the retained draft for `workDir`. An empty draft moves there; one
+   * with unsent content keeps its project. No `workDir` keeps the draft as is.
+   */
+  startNewSessionDraft: (workDir?: string) => void
+  /** The composer of draft `revision` reports whether it holds unsent content. */
+  setNewSessionDraftContent: (revision: number, hasContent: boolean) => void
   openModal: (id: string) => void
   closeModal: () => void
   addToast: (toast: Omit<Toast, 'id'>) => void
@@ -301,6 +329,7 @@ type UIStore = {
 }
 
 let toastCounter = 0
+let newSessionDraftRevision = 0
 
 export const useUIStore = create<UIStore>((set) => ({
   theme: getInitialAppliedTheme(),
@@ -314,6 +343,8 @@ export const useUIStore = create<UIStore>((set) => ({
   pendingSettingsTab: null,
   pendingMemoryPath: null,
   pendingMarketTarget: null,
+  newSessionRequest: 0,
+  newSessionDraft: null,
   activeModal: null,
   toasts: [],
 
@@ -386,6 +417,27 @@ export const useUIStore = create<UIStore>((set) => ({
   setPendingSettingsTab: (tab) => set({ pendingSettingsTab: tab }),
   setPendingMemoryPath: (path) => set({ pendingMemoryPath: path }),
   setPendingMarketTarget: (target) => set({ pendingMarketTarget: target }),
+  startNewSessionDraft: (workDir) => set(state => {
+    const draft = state.newSessionDraft
+    if (!draft) {
+      return {
+        activeView: 'code',
+        newSessionDraft: { workDir: workDir ?? '', revision: ++newSessionDraftRevision, hasContent: false },
+      }
+    }
+    // New-chat navigation returns to the retained composer and never replaces
+    // its revision: that would unmount it and silently discard unsent input,
+    // attachments and the mode picked in it. An empty one is moved in place;
+    // unsent content keeps the project it was written for.
+    if (workDir === undefined || draft.hasContent || draft.workDir === workDir) return { activeView: 'code' }
+    return { activeView: 'code', newSessionDraft: { ...draft, workDir } }
+  }),
+  setNewSessionDraftContent: (revision, hasContent) => set(state => (
+    state.newSessionDraft?.revision === revision && state.newSessionDraft.hasContent !== hasContent
+      ? { newSessionDraft: { ...state.newSessionDraft, hasContent } }
+      : state
+  )),
+  requestNewSession: () => set((state) => ({ newSessionRequest: state.newSessionRequest + 1 })),
   openModal: (id) => set({ activeModal: id }),
   closeModal: () => set({ activeModal: null }),
 

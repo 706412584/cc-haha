@@ -1000,9 +1000,11 @@ export function McpSettings() {
         ? t('settings.mcp.toast.syncNotRunning')
         : sessionSync?.reason === 'different_project'
           ? t('settings.mcp.toast.syncDifferentProject')
-          : sessionSync?.reason === 'no_session' || !activeSessionId
-            ? t('settings.mcp.toast.syncNoSession')
-            : t('settings.mcp.toast.syncUnconfirmed')
+          : sessionSync?.reason === 'lean_profile'
+            ? t('settings.mcp.toast.syncLeanProfile')
+            : sessionSync?.reason === 'no_session' || !activeSessionId
+              ? t('settings.mcp.toast.syncNoSession')
+              : t('settings.mcp.toast.syncUnconfirmed')
   }
 
   const handleToggle = async (server: McpServerRecord) => {

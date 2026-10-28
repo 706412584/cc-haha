@@ -14,6 +14,7 @@ import * as path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { ProviderService } from './providerService.js'
 import { SettingsService } from './settingsService.js'
+import type { SessionRuntimeSelection } from '../../shared/sessionDelegation.js'
 import {
   applyProviderRuntimeModel,
   isManagedProviderEnvKey,
@@ -25,6 +26,9 @@ import {
 import {
   GROK_OAUTH_PROVIDER_ENV_KEY,
 } from './grokOfficialProvider.js'
+import {
+  DEEPSEEK_OAUTH_PROVIDER_ENV_KEY,
+} from './deepseekAccountProvider.js'
 import {
   OPENAI_CODEX_REASONING_EFFORT_ENV_KEY,
   isOpenAIReasoningEffort,
@@ -69,6 +73,7 @@ import {
   DEFAULT_STREAM_MAX_THINKING_DURATION_MS,
   loadNetworkSettings,
   resolveStreamMaxDurationMs,
+  resolveStreamToolInputDurationMs,
   SYSTEM_PROXY_URL_ENV,
   type NetworkSettings,
 } from './networkSettings.js'
@@ -329,6 +334,7 @@ type SessionProcess = {
   // restarts (e.g. provider/model switches), so callers that captured a stop
   // intent for one process must not act on a later restart's process.
   instanceId: string
+  runtimeSelection?: SessionRuntimeSelection
   proc: ReturnType<typeof Bun.spawn>
   outputCallbacks: SessionOutputCallback[]
   workDir: string
@@ -339,6 +345,7 @@ type SessionProcess = {
   networkRoutingFingerprint: string
   networkDerivedFirstTokenTimeout: boolean
   networkDerivedStreamMaxDuration: boolean
+  networkDerivedToolInputDuration: boolean
   sdkToken: string
   sdkSocket: { send(data: string): void } | null
   sdkAttached: Promise<void>
@@ -799,6 +806,7 @@ export class ConversationService {
     shouldResume: boolean,
     options?: SessionStartOptions,
     repository?: PreparedSessionWorkspace['repository'],
+    agentProfile: 'standard' | 'lean' = 'standard',
   ): string[] {
     const side = getSideChat(sessionId)
     const dangerousMode = process.env.CLAUDE_DANGEROUS_MODE === '1'
@@ -814,6 +822,7 @@ export class ConversationService {
 
     return this.resolveCliArgs([
       '--print',
+      '--agent-profile', agentProfile,
       '--verbose',
       '--sdk-url',
       sdkUrl,
@@ -869,7 +878,13 @@ export class ConversationService {
     if (isSideChatId(sessionId) && (!side || side.closed || side.started)) {
       throw new ConversationStartupError('This temporary side chat has expired. Open a new side chat.', 'SESSION_DELETED')
     }
+    if (options?.teamWorker && (await sessionService.getSessionLaunchInfo(options.teamWorker.parentSessionId))?.agentProfile === 'lean') {
+      throw new ConversationStartupError('Agent teams are unavailable in lean sessions', 'LEAN_CAPABILITY_UNAVAILABLE')
+    }
     const launchInfo = options?.teamWorker ? null : await sessionService.getSessionLaunchInfo(sessionId)
+    if (launchInfo?.agentProfile === 'lean' && (options?.permissionMode ?? launchInfo.permissionMode) === 'plan') {
+      throw new ConversationStartupError('Plan mode is unavailable in lean sessions. Choose another permission mode before continuing.', 'LEAN_CAPABILITY_UNAVAILABLE')
+    }
     const shouldResume = options?.teamWorker
       ? options.teamWorker.resume === true && !!await sessionService.findSessionFile(sessionId)
       : !!launchInfo && launchInfo.transcriptMessageCount > 0
@@ -963,6 +978,7 @@ export class ConversationService {
       shouldResume,
       resolvedOptions,
       launchRepository,
+      launchInfo?.agentProfile ?? 'standard',
     )
 
     console.log(
@@ -983,6 +999,7 @@ export class ConversationService {
     const networkRuntimeMetadata = {
       firstTokenTimeoutDerived: false,
       streamMaxDurationDerived: false,
+      toolInputDurationDerived: false,
     }
     const providerCapture: { fingerprint?: string } = {}
     const childEnv = await this.buildChildEnv(
@@ -1070,10 +1087,16 @@ export class ConversationService {
       workDir: launchWorkDir,
       permissionMode: options?.permissionMode || 'default',
       providerId: options?.providerId,
+      runtimeSelection: options?.model ? {
+        providerId: options.providerId ?? null, modelId: options.model,
+        ...(options.effort ? { effortLevel: options.effort } : {}),
+        ...(options.openAIFastMode !== undefined ? { openAIFastMode: options.openAIFastMode } : {}),
+      } : undefined,
       providerConfigFingerprint: providerCapture.fingerprint,
       networkRoutingFingerprint: networkRoutingFingerprint(networkSettings, childEnv),
       networkDerivedFirstTokenTimeout: networkRuntimeMetadata.firstTokenTimeoutDerived,
       networkDerivedStreamMaxDuration: networkRuntimeMetadata.streamMaxDurationDerived,
+      networkDerivedToolInputDuration: networkRuntimeMetadata.toolInputDurationDerived,
       sdkToken: this.getSdkTokenFromUrl(sdkUrl),
       sdkSocket: null,
       seenSdkMessageUuids: new Set<string>(),
@@ -1301,6 +1324,12 @@ export class ConversationService {
       )
     }
 
+    if (session.networkDerivedToolInputDuration) {
+      variables.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS = String(
+        resolveStreamToolInputDurationMs(networkEnv.API_TIMEOUT_MS),
+      )
+    }
+
     const sent = this.sendSdkMessage(sessionId, {
       type: 'update_environment_variables',
       variables,
@@ -1375,6 +1404,7 @@ export class ConversationService {
   }
 
   async setPermissionMode(sessionId: string, mode: string, timeoutMs = 10_000): Promise<boolean> {
+    if (mode === 'plan' && (await sessionService.getSessionLaunchInfo(sessionId))?.agentProfile === 'lean') throw new Error('Plan mode is unavailable in lean sessions. Choose another permission mode.')
     if (!this.sessions.has(sessionId)) return false
     this.trackPendingPermissionModeChange(sessionId, mode, 1)
 
@@ -1457,12 +1487,24 @@ export class ConversationService {
    * race-free (unlike sending it after the allow response).
    */
   async setModel(sessionId: string, model: string, timeoutMs = 10_000): Promise<boolean> {
-    if (!this.sessions.has(sessionId)) return false
+    const session = this.sessions.get(sessionId)
+    if (!session) return false
     await this.requestControl(sessionId, {
       subtype: 'set_model',
       model,
     }, timeoutMs)
-    return this.sessions.has(sessionId)
+    if (this.sessions.get(sessionId) !== session) return false
+    session.runtimeSelection = { ...session.runtimeSelection, providerId: session.providerId ?? null, modelId: model }
+    return true
+  }
+
+  /** The process's acknowledged runtime, unaffected by a queued next-turn selection. */
+  getSessionRuntimeSelection(sessionId: string): SessionRuntimeSelection | undefined {
+    const session = this.sessions.get(sessionId)
+    if (!session) return undefined
+    const modelId = session.runtimeSelection?.modelId ?? session.initMessage?.model
+    if (typeof modelId !== 'string' || !modelId) return undefined
+    return { ...session.runtimeSelection, providerId: session.providerId ?? null, modelId }
   }
 
   setMaxThinkingTokens(sessionId: string, maxThinkingTokens: number | null): boolean {
@@ -2043,11 +2085,11 @@ export class ConversationService {
   async stopSessionAndWait(
     sessionId: string,
     timeoutMs = DESKTOP_CLI_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
-    options?: { keepTeamWorkers?: boolean },
+    options?: { keepTeamWorkers?: boolean; requireExit?: boolean },
   ): Promise<void> {
     if (!options?.keepTeamWorkers) {
       for (const [childId, child] of this.sessions) {
-        if (child.teamWorker?.parentSessionId === sessionId) await this.stopSessionAndWait(childId, timeoutMs)
+        if (child.teamWorker?.parentSessionId === sessionId) await this.stopSessionAndWait(childId, timeoutMs, options)
       }
     }
     const session = this.sessions.get(sessionId)
@@ -2055,8 +2097,9 @@ export class ConversationService {
 
     this.cancelPendingControlRequests(session)
     this.clearSessionAutoAnswerWaits(session)
-    this.sessions.delete(sessionId)
-    await this.stopProcessAndWait(sessionId, session, timeoutMs)
+    if (!options?.requireExit) this.sessions.delete(sessionId)
+    await this.stopProcessAndWait(sessionId, session, timeoutMs, options?.requireExit)
+    if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId)
   }
 
   stopAllSessions(): void {
@@ -2086,19 +2129,21 @@ export class ConversationService {
     sessionId: string,
     session: SessionProcess,
     timeoutMs: number,
+    requireExit = false,
   ): Promise<void> {
     this.killProcess(sessionId, session, 'SIGTERM', true)
 
     const exited = await Promise.race([
-      session.proc.exited.then(() => true, () => true),
+      session.proc.exited.then(() => true, () => !requireExit),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
     ])
     if (!exited) {
       this.killProcess(sessionId, session, 'SIGKILL', true)
-      await Promise.race([
-        session.proc.exited.catch(() => undefined),
-        new Promise<void>((resolve) => setTimeout(resolve, 500)),
+      const killed = await Promise.race([
+        session.proc.exited.then(() => true, () => !requireExit),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 500)),
       ])
+      if (requireExit && !killed) throw new Error(`CLI process did not confirm exit for session: ${sessionId}`)
     }
     await this.waitForProcessOutputDrain(session, timeoutMs)
   }
@@ -2429,6 +2474,7 @@ export class ConversationService {
     networkRuntimeMetadata?: {
       firstTokenTimeoutDerived: boolean
       streamMaxDurationDerived: boolean
+      toolInputDurationDerived: boolean
     },
     providerCapture?: { fingerprint?: string },
   ): Promise<Record<string, string>> {
@@ -2445,10 +2491,13 @@ export class ConversationService {
         !cleanEnv.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS
       networkRuntimeMetadata.streamMaxDurationDerived =
         !cleanEnv.CLAUDE_STREAM_MAX_DURATION_MS
+      networkRuntimeMetadata.toolInputDurationDerived =
+        !cleanEnv.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS
     }
     delete cleanEnv.CC_HAHA_SESSION_COLLABORATION_TOKEN
     delete cleanEnv.CC_HAHA_SESSION_ID
     delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN
+    delete cleanEnv.CLAUDE_CODE_ACCOUNT_UUID
     delete cleanEnv.CC_HAHA_OPENAI_FAST_MODE
     if (options?.resumeInterruptedTurn === false) {
       delete cleanEnv.CLAUDE_CODE_RESUME_INTERRUPTED_TURN
@@ -2550,9 +2599,13 @@ export class ConversationService {
         cleanEnv.CLAUDE_STREAM_MAX_DURATION_MS || String(streamMaxDurationMs),
       // Abort a local tool call when its JSON arguments stop making progress.
       // Healthy input_json_delta events reset this budget; the independent full
-      // response cap above still bounds a stream that trickles forever.
+      // response cap above still bounds a stream that trickles forever. The
+      // upstream emits tool JSON one complete key/value at a time, so writing a
+      // long `content` string is silent until that value is finished: the
+      // budget follows the user's "请求超时" instead of a fixed 120s (#1536).
       CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS:
-        cleanEnv.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS || '120000',
+        cleanEnv.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS ||
+        String(resolveStreamToolInputDurationMs(networkEnv.API_TIMEOUT_MS)),
       // Fast-fail a stalled reasoning loop: a relay that streams thinking deltas
       // forever and never reaches text, a tool call, or message_stop. The idle
       // watchdog cannot catch this (every delta resets it) and the overall cap
@@ -2690,6 +2743,8 @@ export class ConversationService {
       const token = await hahaOAuthService.ensureFreshAccessToken()
       if (token) {
         env.CLAUDE_CODE_OAUTH_TOKEN = token
+        const accountUuid = await hahaOAuthService.getAccountUuid(token)
+        if (accountUuid) env.CLAUDE_CODE_ACCOUNT_UUID = accountUuid
       }
     } catch (err) {
       console.error(
@@ -2829,6 +2884,9 @@ export class ConversationService {
         return false
       }
       if (env[GROK_OAUTH_PROVIDER_ENV_KEY] === '1') {
+        return false
+      }
+      if (env[DEEPSEEK_OAUTH_PROVIDER_ENV_KEY] === '1') {
         return false
       }
       const hasProviderEnv = [

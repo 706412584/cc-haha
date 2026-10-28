@@ -18,10 +18,12 @@ import { join, resolve } from 'node:path'
 
 import { executeAgentFlowAgainstProvider, LIVE_SCENARIO_RUNNERS } from '../agent-flow/live'
 import { startMockLlmServer } from './server'
+import { runLeanNotificationProvenanceScenario, runLeanProfileScenario } from './leanProfile'
 import { createMockOnlyRunners, describeRequests, MOCK_AGENT_SCENARIOS } from './scenarios'
 
 const MOCK_MODEL = 'mock-model'
 const STEP_TIMEOUT_MS = 60_000
+const LEAN_SCENARIO = 'mock-lean-profile'
 
 function listArg(argv: string[], name: string) {
   const index = argv.indexOf(name)
@@ -33,6 +35,7 @@ function listArg(argv: string[], name: string) {
 async function main() {
   const argv = process.argv.slice(2)
   if (argv.includes('--list')) {
+    console.log(`  ${LEAN_SCENARIO.padEnd(32)} Lean CLI tools, recovery, project instructions and request comparison`)
     for (const scenario of MOCK_AGENT_SCENARIOS) console.log(`  ${scenario.id.padEnd(32)} ${scenario.title}`)
     return
   }
@@ -41,11 +44,18 @@ async function main() {
   const scenarios = only.length > 0
     ? MOCK_AGENT_SCENARIOS.filter((scenario) => only.includes(scenario.id))
     : MOCK_AGENT_SCENARIOS
-  if (scenarios.length === 0) throw new Error(`--only ${only.join(',')} matches no scenario. Use --list.`)
+  const runLean = only.length === 0 || only.includes(LEAN_SCENARIO)
+  if (scenarios.length === 0 && !runLean) throw new Error(`--only ${only.join(',')} matches no scenario. Use --list.`)
 
   const rootDir = resolve(import.meta.dir, '../../..')
   const artifactDir = join(rootDir, 'artifacts', 'agent-e2e')
   mkdirSync(artifactDir, { recursive: true })
+  if (runLean) {
+    await runLeanProfileScenario(rootDir, artifactDir)
+    await runLeanNotificationProvenanceScenario(rootDir, artifactDir)
+    console.log(`[agent-e2e] PASS ${LEAN_SCENARIO}`)
+  }
+  if (scenarios.length === 0) return
 
   const upstream = startMockLlmServer()
   console.log('[agent-e2e] real server + real CLI + scripted model — no provider, no credentials, no network')
@@ -61,7 +71,7 @@ async function main() {
       seedProviders: false,
       stepTimeoutMs: STEP_TIMEOUT_MS,
       scenarios,
-      runners: { ...LIVE_SCENARIO_RUNNERS, ...createMockOnlyRunners(upstream.requests) },
+      runners: { ...LIVE_SCENARIO_RUNNERS, ...createMockOnlyRunners(upstream.requests, upstream.imageRequests) },
       // Registered through the same endpoint the desktop "add provider" form uses,
       // so the provider → CLI env wiring is part of what this lane exercises.
       async resolveTarget({ baseUrl }) {

@@ -4,7 +4,6 @@ import {
   Compass,
   Layers,
   MonitorSmartphone,
-  Ellipsis,
   List,
   Paperclip,
   Plug,
@@ -35,8 +34,9 @@ import type { WorkflowDefinition } from '@/types/workflow'
  *
  * The root has two titled groups: things the user hands to this task (skills,
  * connectors, files — picking one inserts it into the composer) and how the
- * task runs (Agent Team, Computer Use — switches that stay on). Everything
- * else sits under More.
+ * task runs (Agent Team, Computer Use — switches that stay on). The other
+ * tools (agents, workflows, slash commands) follow as an untitled third group,
+ * so running an agent or a workflow is one hover away rather than two.
  */
 
 export type CapabilityAction =
@@ -95,7 +95,7 @@ export type CapabilityMenuItem = {
 export type CapabilityMenuSection = {
   id: 'use' | 'run' | 'more'
   title: string
-  /** Show the title above the rows (the More group is a single row). */
+  /** Show the title above the rows (the trailing tools group stands on its hairline). */
   showTitle: boolean
   items: CapabilityMenuItem[]
   /** Rows reachable only through search (plugins that no sub-list shows). */
@@ -500,35 +500,30 @@ export function buildCapabilitySections(input: CapabilityMenuInput): CapabilityM
       id: 'more',
       title: t('chat.capabilities.moreTools'),
       showTitle: false,
-      items: [{
-        key: 'more',
-        label: t('chat.capabilities.moreTools'),
-        icon: { kind: 'lucide', icon: Ellipsis },
-        children: [
-          {
-            key: 'agents',
-            label: t('chat.capabilities.agents'),
-            description: t('chat.capabilities.agentsDescription'),
-            icon: { kind: 'lucide', icon: Bot },
-            count: agentChildren.length - 1,
-            children: agentChildren,
-          },
-          {
-            key: 'workflows',
-            label: t('chat.capabilities.workflows'),
-            description: t('chat.capabilities.workflowsDescription'),
-            icon: { kind: 'lucide', icon: Workflow },
-            count: input.workflows.length,
-            children: workflowChildren,
-          },
-          {
-            key: 'slash-commands',
-            label: t('chat.slashCommands'),
-            icon: { kind: 'slash' },
-            action: { type: 'slashTrigger' },
-          },
-        ],
-      }],
+      items: [
+        {
+          key: 'agents',
+          label: t('chat.capabilities.agents'),
+          description: t('chat.capabilities.agentsDescription'),
+          icon: { kind: 'lucide', icon: Bot },
+          count: agentChildren.length - 1,
+          children: agentChildren,
+        },
+        {
+          key: 'workflows',
+          label: t('chat.capabilities.workflows'),
+          description: t('chat.capabilities.workflowsDescription'),
+          icon: { kind: 'lucide', icon: Workflow },
+          count: input.workflows.length,
+          children: workflowChildren,
+        },
+        {
+          key: 'slash-commands',
+          label: t('chat.slashCommands'),
+          icon: { kind: 'slash' },
+          action: { type: 'slashTrigger' },
+        },
+      ],
       searchOnly,
     },
   ]

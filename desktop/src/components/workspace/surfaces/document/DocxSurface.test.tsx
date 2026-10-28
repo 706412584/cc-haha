@@ -65,6 +65,7 @@ const docxBlob = blobWithBytes([80, 75, 3, 4], 'application/vnd.openxmlformats-o
 
 type SurfaceProps = {
   engine: DocxEngine
+  onAnnotate?: (selection: { text: string; location: string }) => void
   blob?: Blob
   zoom?: number
   onZoomChange?: (zoom: number | undefined) => void
@@ -73,11 +74,12 @@ type SurfaceProps = {
 }
 
 /** Holds the zoom the way the workspace store does: chosen here, handed back down. */
-function Surface({ engine, blob = docxBlob, zoom: initialZoom, onZoomChange, initialView, absolutePath = '/work/docs/thesis.docx' }: SurfaceProps) {
+function Surface({ onAnnotate, engine, blob = docxBlob, zoom: initialZoom, onZoomChange, initialView, absolutePath = '/work/docs/thesis.docx' }: SurfaceProps) {
   const [zoom, setZoom] = useState(initialZoom)
   return (
     <DocxSurface
       engine={engine}
+      onAnnotate={onAnnotate}
       blob={blob}
       path="docs/thesis.docx"
       absolutePath={absolutePath}
@@ -109,6 +111,9 @@ async function shown(props: Partial<Omit<SurfaceProps, 'engine'>> & { engine?: D
   const { engine = createFakeDocxEngine({ autoFinish: true }).engine, ...surfaceProps } = props
   const view = render(<Surface {...surfaceProps} engine={engine} />)
   await screen.findByRole('button', { name: 'Zoom in' })
+  // The toolbar commit can be observed before the iframe's passive annotation
+  // listeners attach. Flush that work before dispatching keyboard/pointer input.
+  await act(async () => {})
   return { ...view, engine }
 }
 
@@ -119,6 +124,26 @@ function scrollTo(top: number, left = 0) {
 }
 
 describe('DocxSurface', () => {
+  it('offers a page annotation for keyboard selections and clears it on Escape', async () => {
+    const onAnnotate = vi.fn()
+    await shown({ onAnnotate })
+    const root = visibleFrames()[0]!.contentDocument!.body
+    const page = root.querySelector('section.docx')!
+    const range = root.ownerDocument.createRange()
+    range.selectNodeContents(page)
+    const selection = root.ownerDocument.getSelection()!
+    selection.removeAllRanges()
+    selection.addRange(range)
+    fireEvent.keyUp(page, { key: 'ArrowRight', shiftKey: true })
+    fireEvent.click(screen.getByRole('button', { name: 'Add to chat' }))
+    expect(onAnnotate).toHaveBeenCalledWith({ text: page.textContent!.trim(), location: 'Page 1' })
+    selection.addRange(range)
+    fireEvent.keyUp(page, { key: 'ArrowRight', shiftKey: true })
+    fireEvent.keyDown(page, { key: 'Escape' })
+    fireEvent.keyUp(page, { key: 'Escape' })
+    expect(screen.queryByRole('button', { name: 'Add to chat' })).not.toBeInTheDocument()
+  })
+
   it('reserves room for the scrollbar always, so fitting to the width does not depend on whether the page overflows', async () => {
     // A classic scrollbar that comes and goes narrows the panel, which changes the fit,
     // which changes whether the page overflows: measured in Chromium, a one-page document

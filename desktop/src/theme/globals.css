@@ -46,6 +46,17 @@
   unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 
+/* Geist (SIL OFL) – weight 500, latin, 14KB. Only the Token usage page's display
+   numerals and the share image use it; everything else stays on Inter. */
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../../public/fonts/geist-latin-500.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 /* Manrope – variable weight 400-800, latin */
 @font-face {
   font-family: 'Manrope';
@@ -815,6 +826,14 @@
   --cc-heat-2: #D1ADA2;
   --cc-heat-3: #B8806F;
   --cc-heat-4: #9C4F38;
+  /* Model series: four hues for the four biggest models, then a neutral gray every other model shares.
+     Validated per theme surface (lightness band, chroma, color-blind and normal-vision separation of
+     neighbours, contrast); the gray is the one slot below 3:1, so the legend and day card name it. */
+  --cc-series-1: #058D85;
+  --cc-series-2: #86412C;
+  --cc-series-3: #5066A3;
+  --cc-series-4: #99732B;
+  --cc-series-5: #A8A49C;
 
   --cc-shadow-card: 0 1px 2px rgba(28, 25, 23, 0.05), 0 6px 20px rgba(28, 25, 23, 0.06);
   --cc-shadow-composer: 0 1px 2px rgba(28, 25, 23, 0.04), 0 8px 28px rgba(28, 25, 23, 0.07);
@@ -891,6 +910,14 @@
   --cc-heat-2: #CFA99C;
   --cc-heat-3: #B67E6B;
   --cc-heat-4: #9C4F37;
+  /* Model series: four hues for the four biggest models, then a neutral gray every other model shares.
+     Validated per theme surface (lightness band, chroma, color-blind and normal-vision separation of
+     neighbours, contrast); the gray is the one slot below 3:1, so the legend and day card name it. */
+  --cc-series-1: #058D85;
+  --cc-series-2: #86412C;
+  --cc-series-3: #5066A3;
+  --cc-series-4: #99732B;
+  --cc-series-5: #A8A49C;
 
   --cc-shadow-card: 0 1px 3px rgba(64, 49, 26, 0.05), 0 6px 24px rgba(64, 49, 26, 0.07);
   --cc-shadow-composer: 0 1px 2px rgba(64, 49, 26, 0.06), 0 14px 44px rgba(64, 49, 26, 0.10);
@@ -967,6 +994,14 @@
   --cc-heat-2: #CCA491;
   --cc-heat-3: #B57B65;
   --cc-heat-4: #9C4E36;
+  /* Model series: four hues for the four biggest models, then a neutral gray every other model shares.
+     Validated per theme surface (lightness band, chroma, color-blind and normal-vision separation of
+     neighbours, contrast); the gray is the one slot below 3:1, so the legend and day card name it. */
+  --cc-series-1: #058D85;
+  --cc-series-2: #86412C;
+  --cc-series-3: #5066A3;
+  --cc-series-4: #99732B;
+  --cc-series-5: #A8A49C;
 
   --cc-shadow-card: 0 1px 3px rgba(64, 49, 26, 0.05), 0 6px 24px rgba(64, 49, 26, 0.07);
   --cc-shadow-composer: 0 1px 2px rgba(64, 49, 26, 0.06), 0 14px 44px rgba(64, 49, 26, 0.10);
@@ -1043,6 +1078,14 @@
   --cc-heat-2: #CBA99C;
   --cc-heat-3: #B47E6C;
   --cc-heat-4: #9C4F37;
+  /* Model series: four hues for the four biggest models, then a neutral gray every other model shares.
+     Validated per theme surface (lightness band, chroma, color-blind and normal-vision separation of
+     neighbours, contrast); the gray is the one slot below 3:1, so the legend and day card name it. */
+  --cc-series-1: #058D85;
+  --cc-series-2: #86412C;
+  --cc-series-3: #5066A3;
+  --cc-series-4: #99732B;
+  --cc-series-5: #A8A49C;
 
   --cc-shadow-card: 0 1px 3px rgba(28, 42, 32, 0.05), 0 6px 24px rgba(28, 42, 32, 0.06);
   --cc-shadow-composer: 0 1px 2px rgba(28, 42, 32, 0.05), 0 14px 44px rgba(28, 42, 32, 0.08);
@@ -1121,6 +1164,14 @@
   --cc-heat-2: #6D4631;
   --cc-heat-3: #985D3F;
   --cc-heat-4: #C5754E;
+  /* Model series: four hues for the four biggest models, then a neutral gray every other model shares.
+     Validated per theme surface (lightness band, chroma, color-blind and normal-vision separation of
+     neighbours, contrast); the gray is the one slot below 3:1, so the legend and day card name it. */
+  --cc-series-1: #35A69D;
+  --cc-series-2: #AD644E;
+  --cc-series-3: #6177B6;
+  --cc-series-4: #99732B;
+  --cc-series-5: #B4B0A6;
 
   --cc-shadow-card: 0 1px 3px rgba(0, 0, 0, 0.35), 0 6px 24px rgba(0, 0, 0, 0.35);
   --cc-shadow-composer: 0 1px 2px rgba(0, 0, 0, 0.45), 0 14px 44px rgba(0, 0, 0, 0.50);
@@ -1199,6 +1250,14 @@
   --cc-heat-2: #6A4638;
   --cc-heat-3: #965D43;
   --cc-heat-4: #C5754F;
+  /* Model series: four hues for the four biggest models, then a neutral gray every other model shares.
+     Validated per theme surface (lightness band, chroma, color-blind and normal-vision separation of
+     neighbours, contrast); the gray is the one slot below 3:1, so the legend and day card name it. */
+  --cc-series-1: #35A69D;
+  --cc-series-2: #AD644E;
+  --cc-series-3: #6177B6;
+  --cc-series-4: #99732B;
+  --cc-series-5: #B4B0A6;
 
   --cc-shadow-card: 0 1px 3px rgba(0, 0, 0, 0.35), 0 6px 24px rgba(0, 0, 0, 0.35);
   --cc-shadow-composer: 0 1px 2px rgba(0, 0, 0, 0.45), 0 14px 44px rgba(0, 0, 0, 0.50);
@@ -1399,6 +1458,11 @@
   --color-activity-heat-2: var(--cc-heat-2);
   --color-activity-heat-3: var(--cc-heat-3);
   --color-activity-heat-4: var(--cc-heat-4);
+  --color-series-1: var(--cc-series-1);
+  --color-series-2: var(--cc-series-2);
+  --color-series-3: var(--cc-series-3);
+  --color-series-4: var(--cc-series-4);
+  --color-series-5: var(--cc-series-5);
   --color-activity-cell-border: rgba(var(--cc-bd2-rgb), 0.42);
   --color-activity-cell-border-hover: rgba(var(--cc-ac-rgb), 0.58);
   --color-activity-cell-border-active: var(--cc-t1);
@@ -1867,7 +1931,8 @@ button, input, textarea, select, a, [role="button"] {
 }
 
 .composer-mention--skill,
-.composer-mention--plugin {
+.composer-mention--plugin,
+.composer-mention--command {
   display: inline-flex;
   align-items: center;
   gap: 3px;
@@ -1882,6 +1947,11 @@ button, input, textarea, select, a, [role="button"] {
 .composer-mention--skill {
   color: var(--color-on-info-container);
   background: var(--color-info-container);
+}
+
+/* A pill in a sent message is a record, not an action. */
+.composer-mention--static {
+  cursor: default;
 }
 
 .composer-mention-brand-icon {
@@ -2198,6 +2268,23 @@ body.sidebar-resizing * {
 .markdown-prose.chat-reading-markdown :is(h2, h3):not(:first-child) {
   margin-top: 22px;
 }
+/* An ordered list's number hangs outside the item, in the list's own padding.
+   Prose's fixed 20px holds "1." in a proportional face but not in a monospace
+   one, where "1. " is three full cells and "10. " four — the number then
+   overshoots the reply column, and in wide / full width the column reaches the
+   scroll area's padding edge, so the digit is clipped. Size the gutter in `ch`
+   (the width of "0" in the chosen face): marker = digits + "." + space, each at
+   most one cell. Lists of 10+ / 100+ items grow it a cell at a time. */
+.markdown-prose.chat-reading-markdown ol {
+  padding-inline-start: max(1.25rem, 3ch);
+}
+.markdown-prose.chat-reading-markdown ol:has(> li:nth-child(10)) {
+  padding-inline-start: max(1.25rem, 4ch);
+}
+.markdown-prose.chat-reading-markdown ol:has(> li:nth-child(100)) {
+  padding-inline-start: max(1.25rem, 5ch);
+}
+
 .markdown-prose.chat-reading-markdown code {
   font-family: var(--font-mono);
   font-size: var(--code-viewer-font-size);
@@ -2284,39 +2371,31 @@ body.sidebar-resizing * {
   background: var(--color-outline-a92);
 }
 
-.activity-summary-panel {
+/* Token usage page. The page is one container so its display numerals scale
+   with the pane the user actually has, not the window. The numerals are the
+   only text outside the 11–26px type scale: they are a figure, not copy. */
+.token-usage-root {
   container-type: inline-size;
 }
 
-.activity-summary-grid {
-  grid-template-columns: minmax(0, 1fr);
+.token-hero-number {
+  font-family: 'Geist', var(--font-body);
+  font-weight: 500;
+  font-synthesis: none;
+  /* Safari 15 WebViews (the Tauri build on macOS 12) have no container units and would drop the
+     clamp(), leaving the numeral at body size; the plain value is what they get. */
+  font-size: 120px;
+  font-size: clamp(88px, 18cqw, 168px);
+  line-height: 0.82;
+  letter-spacing: -0.06em;
+  font-variant-numeric: tabular-nums;
 }
 
-.activity-summary-metric-primary {
-  grid-column: auto;
-}
-
-.activity-summary-value {
-  overflow-wrap: normal;
-  word-break: keep-all;
-}
-
-/* Five tiles on a 700px page: the headline total takes two columns so the rows
-   read 2+1 / 1+1+1 instead of leaving a hole at the end of the second row. */
-@container (min-width: 360px) {
-  .activity-summary-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .activity-summary-metric-primary {
-    grid-column: span 2;
-  }
-}
-
-@container (min-width: 520px) {
-  .activity-summary-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
+.token-hero-unit {
+  font-weight: 500;
+  font-size: 40px;
+  font-size: clamp(32px, 6cqw, 56px);
+  line-height: 1;
 }
 
 .activity-heat-swatch {
@@ -2326,7 +2405,8 @@ body.sidebar-resizing * {
 .activity-heat-cell {
   position: relative;
   border-radius: calc(var(--radius-xs) / 2);
-  transform: translateZ(0);
+  /* --dot-scale is set per cell: a quiet day is a small dot, a busy one fills the cell. */
+  transform: translateZ(0) scale(var(--dot-scale, 1));
   transform-origin: center;
   transition:
     border-color 150ms ease,
@@ -2339,7 +2419,7 @@ body.sidebar-resizing * {
 .activity-heat-cell:focus-visible,
 .activity-heat-cell.is-active {
   z-index: var(--z-raised);
-  transform: translateZ(0) scale(1.16);
+  transform: translateZ(0) scale(calc(var(--dot-scale, 1) * 1.2));
   box-shadow: var(--shadow-activity-cell-hover);
   filter: saturate(1.08);
 }
@@ -2352,7 +2432,7 @@ body.sidebar-resizing * {
   .activity-heat-cell:hover,
   .activity-heat-cell:focus-visible,
   .activity-heat-cell.is-active {
-    transform: translateZ(0);
+    transform: translateZ(0) scale(var(--dot-scale, 1));
   }
 }
 
@@ -2518,8 +2598,9 @@ body.sidebar-resizing * {
    see, so its offsets would run short by one gap per turn. */
 .chat-turn-rail--none {
   padding-top: 24px;
-  /* The prompt's hover actions hang below the bubble (absolutely positioned,
-     24px tall) and must land inside this box: `--cv` rows paint-contain, so
+  /* The prompt's hover actions hang below the bubble (a zero-height row whose
+     24px of buttons overflow downward) and must land inside this box: `--cv`
+     rows paint-contain, so
      anything past the padding edge is clipped. The bar does not add height;
      it borrows the gap that separates the prompt from its reply. */
   padding-bottom: 24px;
@@ -2797,6 +2878,20 @@ html[data-window-kind='pet'] #root {
 .pet-task-badge:focus-visible {
   outline: 2px solid var(--color-border-focus);
   outline-offset: 2px;
+}
+
+.pet-permission-badge {
+  top: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  background: #f1ad3b;
+  color: #352408;
+}
+
+.pet-permission-badge:hover {
+  background: #f6bd5d;
 }
 
 .pet-mascot-button[data-dragging='true'] {

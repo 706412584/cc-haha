@@ -11,7 +11,7 @@ import { ApiError } from '../api/client'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 import { useSettingsStore } from './settingsStore'
 import { useTabStore } from './tabStore'
-import type { LocalIndexStatus, SessionListItem } from '../types/session'
+import type { AgentProfile, LocalIndexStatus, SessionListItem } from '../types/session'
 import type { PermissionMode } from '../types/settings'
 import type { RuntimeSelection } from '../types/runtime'
 import { isPlaceholderSessionTitle } from '../lib/sessionTitle'
@@ -34,6 +34,7 @@ export type ProjectHistoryState = {
 type RecentProjectBoundary = { beforeModifiedAt: string; beforeId: string }
 
 type CreateSessionOptions = {
+  agentProfile?: AgentProfile
   repository?: CreateSessionRepositoryOptions
   permissionMode?: PermissionMode
 }
@@ -60,7 +61,7 @@ type SessionStore = {
   loadMoreProjectSessions: (projectRoot: string) => Promise<void>
   releaseProjectHistory: (projectRoot: string) => void
   hydrateHistoricalSessions: (sessions: SessionListItem[], runtimeSelections?: Record<string, RuntimeSelection>) => SessionListItem[]
-  openHistoricalSession: (session: SessionListItem) => void
+  openHistoricalSession: (session: SessionListItem, runtimeSelections?: Record<string, RuntimeSelection>) => void
   createSession: (workDir?: string, options?: CreateSessionOptions) => Promise<string>
   branchSession: (
     sourceSessionId: string,
@@ -306,8 +307,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     return selected
   },
 
-  openHistoricalSession: (session) => {
-    const [selected] = get().hydrateHistoricalSessions([session])
+  openHistoricalSession: (session, runtimeSelections) => {
+    const [selected] = get().hydrateHistoricalSessions([session], runtimeSelections)
     if (!selected) return
     set({ activeSessionId: selected.id })
     useTabStore.getState().openTab(selected.id, selected.title)
@@ -317,6 +318,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     const requestedPermissionMode = options?.permissionMode ?? getDefaultSessionPermissionMode()
     const { sessionId: id, workDir: resolvedWorkDir } = await sessionsApi.create({
       ...(workDir ? { workDir } : {}),
+      ...(options?.agentProfile ? { agentProfile: options.agentProfile } : {}),
       ...(options?.repository ? { repository: options.repository } : {}),
       ...(requestedPermissionMode ? { permissionMode: requestedPermissionMode } : {}),
     })
@@ -333,6 +335,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       projectRoot: resolvedWorkDir ?? workDir ?? null,
       workDirExists: true,
       permissionMode: requestedPermissionMode,
+      agentProfile: options?.agentProfile ?? 'standard',
     }
 
     pendingCreatedSessionIds.add(id)
@@ -389,6 +392,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   deleteSession: async (id: string) => {
     await sessionsApi.delete(id)
     releaseWorkspaceSession(id)
+    useTabStore.getState().markSessionsDeleted([id])
     pendingCreatedSessionIds.delete(id)
     pendingSessionTitles.delete(id)
     invalidateRecentProjectsCache()
@@ -419,6 +423,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       useSessionRuntimeStore.getState().clearSelection(id)
     }
     excludeDeletedProjectSessions(result.successes)
+    useTabStore.getState().markSessionsDeleted(result.successes)
     set((s) => ({
       sessions: s.sessions.filter((session) => !result.successes.includes(session.id)),
       historicalSessionIds: removeIdsFromSet(s.historicalSessionIds, result.successes),

@@ -2,7 +2,7 @@
 
 > **用途**：上游合并时对照的唯一权威清单。每项含文件锚点与验证方法。
 > **维护规则**：新增 fork 定制时同步登记；合并报告（`release-notes/merge-upstream-vX-report.md`）的「保护清单」节按本清单生成；发现合并丢失后必须把该项的锚点回填本清单。
-> **最后核对**：2026-10-26（对照 fork v0.8.7 / 上游 v0.7.1 合并后 HEAD）
+> **最后核对**：2026-10-28（对照 fork v0.8.7 / 上游 v0.7.5 合并后工作树）
 
 ## 使用方法（每轮上游合并）
 
@@ -18,7 +18,7 @@
 | 定制 | 锚点 | 验证 |
 | --- | --- | --- |
 | ★ README.md / README.zh-CN.md 永不被上游覆盖（Code Council 品牌、定制节、fork 链接） | `README.md`、`README.zh-CN.md`、`README.en.md` | `git diff <merge-base> main -- README.md README.zh-CN.md` 预期仅 fork 侧有改动；冲突一律取 fork |
-| ★ Code Council wordmark | `desktop/src/components/layout/Sidebar.tsx:1123`（`Code <span>Council</span>`）、`desktop/src/components/layout/AppShell.tsx` | grep `Council` 两文件 |
+| ★ Code Council wordmark | `desktop/src/components/layout/Sidebar.tsx:1146`（`Code <span>Council</span>`；AppShell.tsx 无 Council 字样，2026-10-28 核实） | grep `Council` Sidebar.tsx |
 | ★ 全库 GitHub 链接指向 `706412584/cc-haha` | 全库 | `grep -rn "NanmiCoder/cc-haha\|anthropics/claude-code" --include="*.md" --include="*.ts"`（排除 node_modules/release-notes 历史报告）应为 0 |
 
 ## B. Provider 体系
@@ -39,7 +39,7 @@
 
 | 定制 | 锚点 | 验证 |
 | --- | --- | --- |
-| localIndex schema：fork 列（`thinking_enabled` 等）与上游列分叉时落在双方都空出的版本号；`is_team_worker` = v7，当前 v8 | `src/server/services/localIndex/migrations.ts:3,179,207` | `LOCAL_INDEX_SCHEMA_VERSION` 与列守卫（`hasColumn` 幂等） |
+| localIndex schema：fork 列（`thinking_enabled` 等）与上游列分叉时落在双方都空出的版本号；`is_team_worker` = v7，`openai_fast_mode` = v8（fork），`agent_profile` = v9（2026-10-28 v0.7.5 合并落号，双方 v8 均被占用） | `src/server/services/localIndex/migrations.ts:3,179,207` | `LOCAL_INDEX_SCHEMA_VERSION` 与列守卫（`hasColumn` 幂等） |
 | boundedSessionHistory 12MiB 上限 + slimOversizedEntry | `src/server/services/boundedSessionHistory.ts:23,188` | grep `HISTORY_RETAINED_RECORD_BYTES` |
 | sessionService.appendJsonlEntry：保留 fork `invalidateReadCache`，不做双写 | `src/server/services/sessionService.ts` | grep `invalidateReadCache`；确认无重复 appendFile |
 | 会话右键菜单 Export JSONL / Copy path / Show in folder + 批量导出 | `desktop/src/components/layout/Sidebar.tsx:892-932` | grep `exportSession` |

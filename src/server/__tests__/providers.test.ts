@@ -11,6 +11,7 @@ import { readActiveProviderManagedEnv } from '../services/providerRuntimeEnv.js'
 import { handleProvidersApi } from '../api/providers.js'
 import { handleProxyRequest } from '../proxy/handler.js'
 import { resetOpenAIChatImageSupportForTests } from '../proxy/openaiChatImageSupport.js'
+import { resetOpenAIChatReasoningFieldSupportForTests } from '../proxy/openaiChatReasoningFieldSupport.js'
 import { diagnosticsService } from '../services/diagnosticsService.js'
 import {
   clearTraceCaptureStateForTests,
@@ -35,6 +36,7 @@ async function setup() {
   process.env.HOME = tmpDir
   await clearTraceCaptureStateForTests()
   resetOpenAIChatImageSupportForTests()
+  resetOpenAIChatReasoningFieldSupportForTests()
 }
 
 async function teardown() {
@@ -237,7 +239,7 @@ describe('ProviderService', () => {
       expect(result).toEqual({
         providers: [],
         activeId: null,
-        providerOrder: ['claude-official', 'openai-official', 'grok-official'],
+        providerOrder: ['claude-official', 'openai-official', 'grok-official', 'deepseek-account'],
       })
     })
 
@@ -252,7 +254,7 @@ describe('ProviderService', () => {
       expect(result).toEqual({
         providers: [],
         activeId: null,
-        providerOrder: ['claude-official', 'openai-official', 'grok-official'],
+        providerOrder: ['claude-official', 'openai-official', 'grok-official', 'deepseek-account'],
       })
       expect(files.some((name) => name.startsWith('providers.json.invalid-'))).toBe(true)
     })
@@ -545,6 +547,7 @@ describe('ProviderService', () => {
       }))
 
       expect(provider.imageGeneration).toEqual({
+        protocol: 'openai_images',
         model: 'image-model',
         baseUrl: 'https://images.example.test/v1',
         apiKey: 'image-secret',
@@ -552,6 +555,30 @@ describe('ProviderService', () => {
       const config = await readProvidersConfig()
       expect((config.providers as Array<{ imageGeneration?: unknown }>)[0]?.imageGeneration)
         .toEqual(provider.imageGeneration)
+    })
+
+    test('persists and updates the image protocol without losing future image settings', async () => {
+      const svc = new ProviderService()
+      const provider = await svc.addProvider(sampleInput({
+        imageGeneration: {
+          protocol: 'gemini_native', model: 'gemini-image-model', futureSetting: { keep: true },
+          baseUrl: 'https://images.example.test', apiKey: 'old-image-secret',
+        },
+      }))
+      expect(provider.imageGeneration?.protocol).toBe('gemini_native')
+      const updated = await svc.updateProvider(provider.id, {
+        imageGeneration: { protocol: 'xai_images', model: 'grok-image-model' },
+      })
+      expect(updated.imageGeneration).toEqual({
+        protocol: 'xai_images', model: 'grok-image-model', futureSetting: { keep: true },
+      })
+      expect((await svc.getProvider(provider.id)).imageGeneration).toEqual(updated.imageGeneration)
+      const modelOnlyUpdate = await svc.updateProvider(provider.id, {
+        imageGeneration: { model: 'another-image-model' },
+      })
+      expect(modelOnlyUpdate.imageGeneration).toEqual({
+        protocol: 'xai_images', model: 'another-image-model', futureSetting: { keep: true },
+      })
     })
   })
 
@@ -824,6 +851,7 @@ describe('ProviderService', () => {
           'claude-official',
           'openai-official',
           'grok-official',
+          'deepseek-account',
         ])
       })
 
@@ -897,6 +925,120 @@ describe('ProviderService', () => {
           source: 'none',
           activeProvider: 'Grok Official',
         })
+      })
+    })
+
+    describe('DeepSeek Account provider', () => {
+      test('is a built-in Anthropic-compatible provider on the deepseek preset models', async () => {
+        const svc = new ProviderService()
+        const provider = await svc.getProvider('deepseek-account')
+
+        expect(provider).toMatchObject({
+          id: 'deepseek-account',
+          presetId: 'deepseek',
+          name: 'DeepSeek Account',
+          apiKey: '',
+          apiFormat: 'anthropic',
+          baseUrl: 'https://api.deepseek.com/anthropic',
+          runtimeKind: 'deepseek_oauth',
+        })
+        expect(provider.models.main).toBe('deepseek-v4-pro[1m]')
+        // The account listing names V4.1 Flash `deepseek-flash`; it does not
+        // list the API-key route's `deepseek-v4-flash`.
+        expect(provider.models.haiku).toBe('deepseek-flash')
+        expect(provider.modelContextWindows?.['deepseek-flash']).toBe(1_000_000)
+      })
+
+      test('a CLI reading an index the startup migration has not rewritten yet gets account model ids', async () => {
+        await fs.mkdir(path.join(tmpDir, 'cc-haha'), { recursive: true })
+        await fs.writeFile(
+          path.join(tmpDir, 'cc-haha', 'providers.json'),
+          JSON.stringify({
+            schemaVersion: 7,
+            activeId: 'deepseek-account',
+            providers: [],
+            officialProviderModels: {
+              'deepseek-account': {
+                main: 'deepseek-v4-pro[1m]',
+                haiku: 'deepseek-v4-flash',
+                sonnet: 'deepseek-v4-pro[1m]',
+                opus: 'deepseek-v4-pro[1m]',
+              },
+            },
+          }),
+          'utf-8',
+        )
+
+        const env = readActiveProviderManagedEnv(tmpDir)
+        expect(env?.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('deepseek-flash')
+        expect(env?.ANTHROPIC_MODEL).toBe('deepseek-v4-pro[1m]')
+        expect(env?.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES).toBe(
+          'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+        )
+      })
+
+      test('activation writes account markers and never an API key or bearer token', async () => {
+        const svc = new ProviderService()
+        await svc.activateProvider('grok-official')
+        await svc.activateProvider('deepseek-account')
+
+        const config = await readProvidersConfig()
+        const env = (await readSettings()).env as Record<string, string>
+        expect(config.activeId).toBe('deepseek-account')
+        expect(env.CC_HAHA_DEEPSEEK_OAUTH_PROVIDER).toBe('1')
+        expect(env.DEEPSEEK_OAUTH_FILE).toBe(
+          path.join(tmpDir, 'cc-haha', 'deepseek-oauth.json'),
+        )
+        expect(env.ANTHROPIC_BASE_URL).toBe('https://api.deepseek.com/anthropic')
+        expect(env.ANTHROPIC_MODEL).toBe('deepseek-v4-pro[1m]')
+        expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+        expect(env.ANTHROPIC_API_KEY).toBe('deepseek-oauth-dummy-key')
+        // The previously active OAuth provider's markers are cleared.
+        expect(env.CC_HAHA_GROK_OAUTH_PROVIDER).toBeUndefined()
+        expect(env.GROK_OAUTH_FILE).toBeUndefined()
+      })
+
+      test('does not leak into proxy routing and reports auth from its own grant file', async () => {
+        const svc = new ProviderService()
+        await svc.activateProvider('deepseek-account')
+        await expect(svc.getProviderForProxy()).resolves.toBeNull()
+        await expect(svc.getProviderForProxy('deepseek-account')).resolves.toBeNull()
+
+        await expect(svc.checkAuthStatus()).resolves.toMatchObject({
+          hasAuth: false,
+          source: 'none',
+          activeProvider: 'DeepSeek Account',
+        })
+
+        await fs.writeFile(
+          path.join(tmpDir, 'cc-haha', 'deepseek-oauth.json'),
+          JSON.stringify({
+            token: 'dsh_test_account_token',
+            issuer: 'https://platform.deepseek.com',
+            deviceId: 'device-1',
+          }),
+          'utf-8',
+        )
+        await expect(svc.checkAuthStatus()).resolves.toMatchObject({
+          hasAuth: true,
+          source: 'deepseek-oauth',
+          activeProvider: 'DeepSeek Account',
+        })
+      })
+
+      test('keeps the model mapping a user saved for the built-in provider', async () => {
+        const svc = new ProviderService()
+        await svc.updateOfficialProviderModels('deepseek-account', {
+          main: 'deepseek-v4-flash',
+          haiku: 'deepseek-v4-flash',
+          sonnet: 'deepseek-v4-flash',
+          opus: 'deepseek-v4-flash',
+        })
+        await svc.activateProvider('deepseek-account')
+
+        const env = (await readSettings()).env as Record<string, string>
+        expect(env.ANTHROPIC_MODEL).toBe('deepseek-v4-flash')
+        expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('deepseek-v4-flash')
       })
     })
 
@@ -1259,6 +1401,7 @@ describe('ProviderService', () => {
         'claude-official',
         a.id,
         'grok-official',
+        'deepseek-account',
       ])
 
       expect(result.providerOrder).toEqual([
@@ -1267,6 +1410,7 @@ describe('ProviderService', () => {
         'claude-official',
         a.id,
         'grok-official',
+        'deepseek-account',
       ])
       expect(result.providers.map((p) => p.id)).toEqual([b.id, a.id])
 
@@ -1277,6 +1421,7 @@ describe('ProviderService', () => {
         'claude-official',
         a.id,
         'grok-official',
+        'deepseek-account',
       ])
 
       const config = await readProvidersConfig()
@@ -1286,6 +1431,7 @@ describe('ProviderService', () => {
         'claude-official',
         a.id,
         'grok-official',
+        'deepseek-account',
       ])
     })
 
@@ -1730,6 +1876,179 @@ describe('ProviderService', () => {
 
       const config = await readProvidersConfig()
       expect(config.activeId).toBe(provider.id)
+    })
+  })
+
+  // ─── checkAuthStatus(providerId) ─────────────────────────────────────────
+
+  describe('checkAuthStatus for an explicitly selected provider', () => {
+    let originalApiKey: string | undefined
+    let originalAuthToken: string | undefined
+
+    beforeEach(() => {
+      originalApiKey = process.env.ANTHROPIC_API_KEY
+      originalAuthToken = process.env.ANTHROPIC_AUTH_TOKEN
+      delete process.env.ANTHROPIC_API_KEY
+      delete process.env.ANTHROPIC_AUTH_TOKEN
+    })
+
+    afterEach(() => {
+      if (originalApiKey === undefined) delete process.env.ANTHROPIC_API_KEY
+      else process.env.ANTHROPIC_API_KEY = originalApiKey
+      if (originalAuthToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN
+      else process.env.ANTHROPIC_AUTH_TOKEN = originalAuthToken
+    })
+
+    async function writeGrant(file: string, value: Record<string, unknown>) {
+      await fs.mkdir(path.join(tmpDir, 'cc-haha'), { recursive: true })
+      await fs.writeFile(path.join(tmpDir, 'cc-haha', file), JSON.stringify(value), 'utf-8')
+    }
+
+    async function writeOriginalSettingsAuth() {
+      await fs.writeFile(
+        path.join(tmpDir, 'settings.json'),
+        JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 'fake-original-settings-token' } }),
+        'utf-8',
+      )
+    }
+
+    test('a saved provider with its own key has auth while the global default has none', async () => {
+      const svc = new ProviderService()
+      const provider = await svc.addProvider(sampleInput())
+
+      // Global default: Claude Official without OAuth or ambient credentials.
+      await expect(svc.checkAuthStatus()).resolves.toEqual({ hasAuth: false, source: 'none' })
+      await expect(svc.checkAuthStatus(provider.id)).resolves.toEqual({
+        hasAuth: true,
+        source: 'cc-haha-provider',
+        activeProvider: 'Test Provider',
+      })
+    })
+
+    test('a saved provider without its own key ignores ambient credentials', async () => {
+      const svc = new ProviderService()
+      const keyless = await svc.addProvider(sampleInput({ name: 'Keyless', apiKey: '' }))
+      process.env.ANTHROPIC_API_KEY = 'fake-ambient-env-key'
+      await writeOriginalSettingsAuth()
+
+      // The global check keeps its historical fallback to ambient credentials.
+      await expect(svc.checkAuthStatus()).resolves.toEqual({ hasAuth: true, source: 'env' })
+      // A session pinned to this provider runs on the provider's own env.
+      await expect(svc.checkAuthStatus(keyless.id)).resolves.toEqual({
+        hasAuth: false,
+        source: 'none',
+        activeProvider: 'Keyless',
+      })
+
+      await svc.activateProvider(keyless.id)
+      await expect(svc.checkAuthStatus()).resolves.toEqual({ hasAuth: true, source: 'env' })
+      delete process.env.ANTHROPIC_API_KEY
+      await expect(svc.checkAuthStatus()).resolves.toEqual({ hasAuth: true, source: 'original-settings' })
+      await expect(svc.checkAuthStatus(keyless.id)).resolves.toEqual({
+        hasAuth: false,
+        source: 'none',
+        activeProvider: 'Keyless',
+      })
+    })
+
+    test('claude-official counts its desktop OAuth, then the settings file its CLI reads, never inherited env or the active provider key', async () => {
+      const svc = new ProviderService()
+      const provider = await svc.addProvider(sampleInput())
+      await svc.activateProvider(provider.id)
+      await expect(svc.checkAuthStatus()).resolves.toMatchObject({ hasAuth: true, source: 'cc-haha-provider' })
+
+      await expect(svc.checkAuthStatus('claude-official')).resolves.toEqual({ hasAuth: false, source: 'none' })
+      // An expired grant that cannot be refreshed is not a credential.
+      await writeGrant('oauth.json', {
+        accessToken: 'fake-expired-access',
+        refreshToken: '',
+        expiresAt: Date.now() - 60 * 60_000,
+        scopes: [],
+      })
+      await expect(svc.checkAuthStatus('claude-official')).resolves.toEqual({ hasAuth: false, source: 'none' })
+
+      // The CLI started for this pick runs without the server's inherited
+      // ANTHROPIC_* variables, so they would only end in "Not logged in".
+      for (const name of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const) {
+        process.env[name] = 'fake-ambient-env-credential'
+        await expect(svc.checkAuthStatus('claude-official')).resolves.toEqual({ hasAuth: false, source: 'none' })
+        delete process.env[name]
+      }
+      // The original settings file is applied by that CLI itself, so it counts.
+      await writeOriginalSettingsAuth()
+      await expect(svc.checkAuthStatus('claude-official')).resolves.toEqual({ hasAuth: true, source: 'original-settings' })
+
+      await writeGrant('oauth.json', {
+        accessToken: 'fake-claude-access',
+        refreshToken: 'fake-claude-refresh',
+        expiresAt: Date.now() + 60 * 60_000,
+        scopes: [],
+        subscriptionType: 'pro',
+      })
+      await expect(svc.checkAuthStatus('claude-official')).resolves.toEqual({
+        hasAuth: true,
+        source: 'claude-oauth',
+        activeProvider: 'Claude Official',
+      })
+    })
+
+    test('an explicit claude-official pick drops the env fallback the Claude Official global default keeps', async () => {
+      const svc = new ProviderService()
+      for (const name of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const) {
+        process.env[name] = 'fake-ambient-env-credential'
+        // The global default (activeId null) keeps its historical answer.
+        await expect(svc.checkAuthStatus()).resolves.toEqual({ hasAuth: true, source: 'env' })
+        await expect(svc.checkAuthStatus('claude-official')).resolves.toEqual({ hasAuth: false, source: 'none' })
+        delete process.env[name]
+      }
+
+      await writeOriginalSettingsAuth()
+      await expect(svc.checkAuthStatus()).resolves.toEqual({ hasAuth: true, source: 'original-settings' })
+      await expect(svc.checkAuthStatus('claude-official')).resolves.toEqual({ hasAuth: true, source: 'original-settings' })
+    })
+
+    test('built-in account providers count only their own grant files', async () => {
+      const svc = new ProviderService()
+      const provider = await svc.addProvider(sampleInput())
+      await svc.activateProvider(provider.id)
+      process.env.ANTHROPIC_API_KEY = 'fake-ambient-env-key'
+      await writeOriginalSettingsAuth()
+
+      const builtIns = [
+        ['openai-official', 'ChatGPT Official', 'openai-oauth'],
+        ['grok-official', 'Grok Official', 'grok-oauth'],
+        ['deepseek-account', 'DeepSeek Account', 'deepseek-oauth'],
+      ] as const
+      for (const [id, name] of builtIns) {
+        await expect(svc.checkAuthStatus(id)).resolves.toEqual({ hasAuth: false, source: 'none', activeProvider: name })
+      }
+
+      const expiresAt = Date.now() + 60 * 60_000
+      await writeGrant('openai-oauth.json', {
+        accessToken: 'fake-openai-access', refreshToken: 'fake-openai-refresh', expiresAt,
+        email: 'user@example.com', accountId: 'acct_fixture',
+      })
+      await writeGrant('grok-oauth.json', {
+        accessToken: 'fake-grok-access', refreshToken: 'fake-grok-refresh', expiresAt,
+        email: 'grok@example.com', clientId: 'grok-client',
+      })
+      await writeGrant('deepseek-oauth.json', {
+        token: 'dsh_fake_account_token', issuer: 'https://platform.deepseek.com', deviceId: 'device-fixture',
+      })
+      for (const [id, name, source] of builtIns) {
+        await expect(svc.checkAuthStatus(id)).resolves.toEqual({ hasAuth: true, source, activeProvider: name })
+      }
+    })
+
+    test('an unknown provider id has no auth and is not echoed back', async () => {
+      const svc = new ProviderService()
+      const provider = await svc.addProvider(sampleInput())
+      await svc.activateProvider(provider.id)
+      process.env.ANTHROPIC_API_KEY = 'fake-ambient-env-key'
+
+      for (const id of ['missing-provider', '../providers.json', 'x'.repeat(4096)]) {
+        await expect(svc.checkAuthStatus(id)).resolves.toEqual({ hasAuth: false, source: 'none' })
+      }
     })
   })
 
@@ -2506,6 +2825,157 @@ describe('ProviderService', () => {
       } finally {
         globalThis.fetch = originalFetch
       }
+    })
+
+    describe('reasoning fields the upstream refuses', () => {
+      const thinkingRefusal = {
+        error: {
+          param: 'thinking',
+          type: 'invalid_request_error',
+          message: 'Upstream request failed: [unsupported_parameter] Unrecognized request argument supplied: thinking.',
+        },
+      }
+      const effortRefusal = {
+        error: {
+          param: 'reasoning_effort',
+          type: 'invalid_request_error',
+          message: 'Upstream request failed: [unsupported_parameter] Unrecognized request argument supplied: reasoning_effort.',
+        },
+      }
+      const completion = (model: unknown) => Response.json({
+        id: 'chatcmpl-reasoning',
+        object: 'chat.completion',
+        created: 0,
+        model,
+        choices: [{ index: 0, message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      })
+
+      async function setupOpenCodeGo(model: string, sibling: string) {
+        const svc = new ProviderService()
+        const provider = await svc.addProvider(sampleInput({
+          apiFormat: 'openai_chat',
+          baseUrl: 'https://opencode.ai/zen/go/v1',
+          models: { main: model, haiku: sibling, sonnet: model, opus: model },
+        }))
+        await svc.activateProvider(provider.id)
+        // What Claude Code sends with thinking on: a budget plus an effort level.
+        return (requestModel: string) => {
+          const req = new Request('http://localhost:3456/proxy/v1/messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: requestModel,
+              max_tokens: 32000,
+              thinking: { type: 'enabled', budget_tokens: 31999 },
+              output_config: { effort: 'medium' },
+              messages: [{ role: 'user', content: 'hello' }],
+            }),
+          })
+          return handleProxyRequest(req, new URL(req.url))
+        }
+      }
+
+      test('retries without the thinking toggle for a model that rejects it, then stays that way for that model', async () => {
+        const originalFetch = globalThis.fetch
+        const calls: Array<Record<string, unknown>> = []
+        globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+          calls.push(body)
+          if (body.model === 'cat-jam-free' && body.thinking !== undefined) {
+            return Response.json(thinkingRefusal, { status: 400 })
+          }
+          return completion(body.model)
+        }) as typeof fetch
+
+        try {
+          const send = await setupOpenCodeGo('cat-jam-free', 'deepseek-flash')
+
+          const first = await send('cat-jam-free')
+          expect(first.status).toBe(200)
+          expect(await first.json()).toMatchObject({ content: [{ type: 'text', text: 'hi' }] })
+          expect(calls).toHaveLength(2)
+          expect(calls[0]!.thinking).toEqual({ type: 'enabled' })
+          expect(calls[1]!.thinking).toBeUndefined()
+          // Only the refused field is dropped; the effort the user chose survives.
+          expect(calls[1]!.reasoning_effort).toBe('medium')
+
+          await diagnosticsService.drainForMigration()
+          const [learned] = (await diagnosticsService.readRecentEvents(20))
+            .filter(event => event.type === 'openai_chat_reasoning_field_disabled')
+          expect(learned).toMatchObject({ severity: 'info', details: { model: 'cat-jam-free', field: 'thinking', httpStatus: 400 } })
+          expect(JSON.stringify(learned)).not.toContain('sk-test-key-123')
+
+          // Remembered: the next turn skips the failing attempt.
+          expect((await send('cat-jam-free')).status).toBe(200)
+          expect(calls).toHaveLength(3)
+          expect(calls[2]!.thinking).toBeUndefined()
+
+          // The limit belongs to that model; DeepSeek on the same gateway keeps the toggle.
+          expect((await send('deepseek-flash')).status).toBe(200)
+          expect(calls).toHaveLength(4)
+          expect(calls[3]!.model).toBe('deepseek-flash')
+          expect(calls[3]!.thinking).toEqual({ type: 'enabled' })
+        } finally {
+          globalThis.fetch = originalFetch
+        }
+      })
+
+      test('drops each refused field in turn until the request is accepted', async () => {
+        const originalFetch = globalThis.fetch
+        const calls: Array<Record<string, unknown>> = []
+        globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+          calls.push(body)
+          if (body.thinking !== undefined) return Response.json(thinkingRefusal, { status: 400 })
+          if (body.reasoning_effort !== undefined) return Response.json(effortRefusal, { status: 400 })
+          return completion(body.model)
+        }) as typeof fetch
+
+        try {
+          const send = await setupOpenCodeGo('cat-jam-free', 'deepseek-flash')
+
+          expect((await send('cat-jam-free')).status).toBe(200)
+          expect(calls).toHaveLength(3)
+          expect(calls[2]!.thinking).toBeUndefined()
+          expect(calls[2]!.reasoning_effort).toBeUndefined()
+
+          expect((await send('cat-jam-free')).status).toBe(200)
+          expect(calls).toHaveLength(4)
+          expect(calls[3]!.thinking).toBeUndefined()
+          expect(calls[3]!.reasoning_effort).toBeUndefined()
+        } finally {
+          globalThis.fetch = originalFetch
+        }
+      })
+
+      test('surfaces the error when the resend without the field fails too, and does not remember the field', async () => {
+        const originalFetch = globalThis.fetch
+        const calls: Array<Record<string, unknown>> = []
+        globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+          calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+          return Response.json({
+            error: { param: 'thinking', type: 'invalid_request_error', message: 'thinking budget_tokens must be smaller than max_tokens' },
+          }, { status: 400 })
+        }) as typeof fetch
+
+        try {
+          const send = await setupOpenCodeGo('cat-jam-free', 'deepseek-flash')
+
+          const first = await send('cat-jam-free')
+          expect(first.status).toBe(400)
+          expect(JSON.stringify(await first.json())).toContain('budget_tokens must be smaller')
+          expect(calls).toHaveLength(2)
+          expect(calls[1]!.thinking).toBeUndefined()
+
+          // Nothing was learned from a resend that also failed.
+          await send('cat-jam-free')
+          expect(calls).toHaveLength(4)
+          expect(calls[2]!.thinking).toEqual({ type: 'enabled' })
+        } finally {
+          globalThis.fetch = originalFetch
+        }
+      })
     })
 
     test.each([
@@ -3665,6 +4135,86 @@ describe('Providers API', () => {
     expect(body.providers[0].apiKey).toBe('sk-test-key-123')
   })
 
+  test('GET /api/providers carries the DeepSeek account mapping the user saved', async () => {
+    const list = async () => {
+      const { req, url, segments } = makeRequest('GET', '/api/providers')
+      return (await (await handleProvidersApi(req, url, segments)).json()) as {
+        deepSeekAccountModels: Record<string, string>
+      }
+    }
+    expect((await list()).deepSeekAccountModels).toMatchObject({
+      main: 'deepseek-v4-pro[1m]',
+      haiku: 'deepseek-flash',
+    })
+
+    const saved = {
+      main: 'deepseek-flash',
+      haiku: 'deepseek-flash',
+      sonnet: 'deepseek-v4-pro',
+      opus: 'deepseek-v4-pro',
+    }
+    await new ProviderService().updateOfficialProviderModels('deepseek-account', saved)
+    expect((await list()).deepSeekAccountModels).toEqual(saved)
+  })
+
+  // ─── GET /api/providers/auth-status ──────────────────────────────────────
+
+  test('GET /api/providers/auth-status scopes the check to providerId and never returns keys', async () => {
+    const originalApiKey = process.env.ANTHROPIC_API_KEY
+    const originalAuthToken = process.env.ANTHROPIC_AUTH_TOKEN
+    delete process.env.ANTHROPIC_API_KEY
+    delete process.env.ANTHROPIC_AUTH_TOKEN
+    try {
+      const svc = new ProviderService()
+      const keyed = await svc.addProvider(sampleInput({ name: 'Keyed', apiKey: 'sk-fixture-secret-123' }))
+      const keyless = await svc.addProvider(sampleInput({ name: 'Keyless', apiKey: '' }))
+      await svc.activateProvider(keyed.id)
+      // Every explicit pick below is judged beside an inherited server credential,
+      // which no CLI started for an explicit provider receives.
+      process.env.ANTHROPIC_API_KEY = 'fake-server-env-key'
+      const authStatus = async (query: string) => {
+        const { req, url, segments } = makeRequest('GET', `/api/providers/auth-status${query}`)
+        const res = await handleProvidersApi(req, url, segments)
+        expect(res.status).toBe(200)
+        const text = await res.text()
+        for (const secret of ['sk-fixture-secret-123', 'fake-server-env-key', 'fake-settings-token']) {
+          expect(text).not.toContain(secret)
+        }
+        return JSON.parse(text) as Record<string, unknown>
+      }
+      const globalDefault = { hasAuth: true, source: 'cc-haha-provider', activeProvider: 'Keyed' }
+
+      // Without (or with a blank) providerId the global default is evaluated as before.
+      expect(await authStatus('')).toEqual(globalDefault)
+      expect(await authStatus('?providerId=')).toEqual(globalDefault)
+      expect(await authStatus('?providerId=%20%20')).toEqual(globalDefault)
+
+      const keylessStatus = { hasAuth: false, source: 'none', activeProvider: 'Keyless' }
+      expect(await authStatus(`?providerId=${encodeURIComponent(keyless.id)}`)).toEqual(keylessStatus)
+      expect(await authStatus(`?providerId=${encodeURIComponent(` ${keyless.id} `)}`)).toEqual(keylessStatus)
+      expect(await authStatus(`?providerId=${encodeURIComponent(keyed.id)}`)).toEqual(globalDefault)
+      expect(await authStatus('?providerId=claude-official')).toEqual({ hasAuth: false, source: 'none' })
+      expect(await authStatus('?providerId=openai-official')).toEqual({
+        hasAuth: false, source: 'none', activeProvider: 'ChatGPT Official',
+      })
+      expect(await authStatus('?providerId=not-a-provider')).toEqual({ hasAuth: false, source: 'none' })
+
+      // The original settings file is read by the Claude Official CLI itself.
+      await fs.writeFile(
+        path.join(tmpDir, 'settings.json'),
+        JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 'fake-settings-token' } }),
+        'utf-8',
+      )
+      expect(await authStatus('?providerId=claude-official')).toEqual({ hasAuth: true, source: 'original-settings' })
+      expect(await authStatus(`?providerId=${encodeURIComponent(keyless.id)}`)).toEqual(keylessStatus)
+    } finally {
+      if (originalApiKey === undefined) delete process.env.ANTHROPIC_API_KEY
+      else process.env.ANTHROPIC_API_KEY = originalApiKey
+      if (originalAuthToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN
+      else process.env.ANTHROPIC_AUTH_TOKEN = originalAuthToken
+    }
+  })
+
   // ─── POST /api/providers ─────────────────────────────────────────────────
 
   test('POST /api/providers should create a provider', async () => {
@@ -3723,6 +4273,7 @@ describe('Providers API', () => {
       'claude-official',
       'openai-official',
       'grok-official',
+      'deepseek-account',
     ])
   })
 
@@ -4198,6 +4749,16 @@ describe('OpenCode Go preset request contract', () => {
           usage: { input_tokens: 3, output_tokens: 1 },
         })
       }
+      const geminiResponse = {
+        candidates: [{ content: { role: 'model', parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 1, totalTokenCount: 4 },
+      }
+      if (url.endsWith(':generateContent')) return Response.json(geminiResponse)
+      if (url.endsWith(':streamGenerateContent?alt=sse')) {
+        return new Response(`data: ${JSON.stringify(geminiResponse)}\r\n\r\n`, {
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }
       return Response.json({ error: 'Wrong request endpoint' }, { status: 404 })
     }) as typeof fetch
     return () => { globalThis.fetch = originalFetch }
@@ -4261,7 +4822,7 @@ describe('OpenCode Go preset request contract', () => {
     const calls: UpstreamCall[] = []
     const restore = stubUpstream(calls)
     try {
-      for (const model of ['glm-5.3', 'minimax-m3', 'grok-4.6']) {
+      for (const model of ['glm-5.3', 'minimax-m3', 'grok-4.6', 'gemini-4-argon-contributor']) {
         calls.length = 0
         const response = await proxy(provider.id, {
           model, max_tokens: 32, messages: [{ role: 'user', content: 'hello' }],
@@ -4275,6 +4836,151 @@ describe('OpenCode Go preset request contract', () => {
       }
     } finally {
       restore()
+    }
+  })
+
+  // The gateway rejects Gemini on every OpenAI and Anthropic path with
+  // `ModelProtocolUnsupported`; it serves it only over Google generateContent,
+  // which lives outside /zen/go/v1.
+  test('serves Gemini over Google generateContent with the Gemini credential header', async () => {
+    const { provider } = await createProvider()
+    const calls: UpstreamCall[] = []
+    const restore = stubUpstream(calls)
+    try {
+      // The id as the CLI sends it for a 1M-context slot.
+      const response = await proxy(provider.id, {
+        model: 'gemini-4-argon-contributor[1m]', max_tokens: 32, messages: [{ role: 'user', content: 'hello' }],
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({
+        type: 'message', model: 'gemini-4-argon-contributor', stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'ok' }],
+      })
+      expect(calls).toHaveLength(1)
+      expect(calls[0].url).toBe('https://opencode.ai/inference/go/google/v1beta/models/gemini-4-argon-contributor:generateContent')
+      expect(calls[0].headers.get('x-goog-api-key')).toBe(apiKey)
+      expect(calls[0].headers.get('authorization')).toBeNull()
+      expect(calls[0].headers.get('x-opencode-session')).toBe(SESSION_ID)
+      expect(calls[0].headers.get('user-agent')).toMatch(/^cc-haha\//)
+      expect(calls[0].body).toEqual({
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+        generationConfig: { maxOutputTokens: 32 },
+      })
+    } finally {
+      restore()
+    }
+  })
+
+  test('streams Gemini and follows a response split across requests', async () => {
+    const { provider } = await createProvider()
+    const calls: UpstreamCall[] = []
+    const originalFetch = globalThis.fetch
+    const frames = [
+      { candidates: [{ content: { role: 'model', parts: [{ text: 'Hello' }] }, finishReason: 'CONTINUATION', continuationToken: 'token-1' }] },
+      { candidates: [{ content: { role: 'model', parts: [{ text: ' there' }] }, finishReason: 'STOP' }] },
+    ]
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(input), headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) })
+      return new Response(`data: ${JSON.stringify(frames[calls.length - 1])}\r\n\r\n`, {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    }) as typeof fetch
+    try {
+      const response = await proxy(provider.id, {
+        model: 'gemini-4-argon-contributor', max_tokens: 32, stream: true,
+        thinking: { type: 'adaptive' }, output_config: { effort: 'xhigh' },
+        messages: [{ role: 'user', content: 'hello' }],
+      })
+      expect(response.status).toBe(200)
+      const text = await response.text()
+      expect(text).toContain('"text":"Hello"')
+      expect(text).toContain('"text":" there"')
+      expect(text).toContain('"stop_reason":"end_turn"')
+      expect(text).toContain('event: message_stop')
+
+      expect(calls).toHaveLength(2)
+      expect(calls[0].url).toBe('https://opencode.ai/inference/go/google/v1beta/models/gemini-4-argon-contributor:streamGenerateContent?alt=sse')
+      expect(calls[0].body.generationConfig.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: 'high' })
+      // The continuation is the same request plus the token, on the same session.
+      expect(calls[1].url).toBe(calls[0].url)
+      expect(calls[1].body).toEqual({ ...calls[0].body, continuationToken: 'token-1' })
+      expect(calls[1].headers.get('x-opencode-session')).toBe(SESSION_ID)
+      expect(calls[1].headers.get('x-goog-api-key')).toBe(apiKey)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test('reports every Gemini failure to the CLI as an error, never as a reply', async () => {
+    const { provider } = await createProvider()
+    const originalFetch = globalThis.fetch
+    const sse = (chunk: unknown) => new Response(`data: ${JSON.stringify(chunk)}\r\n\r\n`, {
+      headers: { 'Content-Type': 'text/event-stream' },
+    })
+    const cases: Array<{
+      name: string
+      stream: boolean
+      upstream: Array<() => Response>
+      status: number
+      message: string
+    }> = [
+      {
+        name: 'quota exhausted',
+        stream: false,
+        upstream: [() => Response.json({ error: { code: 429, message: 'Resource exhausted', status: 'RESOURCE_EXHAUSTED' } }, { status: 429 })],
+        // The upstream status reaches the CLI so its rate-limit retry applies.
+        status: 429,
+        message: 'Upstream returned HTTP 429: {"error":{"code":429,"message":"Resource exhausted"',
+      },
+      {
+        name: 'connection failure',
+        stream: true,
+        upstream: [() => { throw new TypeError('fetch failed') }],
+        status: 502,
+        message: 'fetch failed',
+      },
+      {
+        name: 'stream without a body',
+        stream: true,
+        upstream: [() => new Response(null, { status: 200 })],
+        status: 502,
+        message: 'Upstream returned no body for stream',
+      },
+      {
+        name: 'safety stop with no output',
+        stream: false,
+        upstream: [() => Response.json({ candidates: [{ finishReason: 'SAFETY' }] })],
+        status: 502,
+        message: 'Gemini stopped with SAFETY',
+      },
+      {
+        name: 'refused continuation',
+        stream: true,
+        upstream: [
+          () => sse({ candidates: [{ content: { role: 'model', parts: [{ text: 'Partial' }] }, finishReason: 'CONTINUATION', continuationToken: 'token-1' }] }),
+          () => Response.json({ error: { code: 500, message: 'backend unavailable', status: 'INTERNAL' } }, { status: 500 }),
+        ],
+        // Headers were already sent; the failure arrives as the stream's error event.
+        status: 200,
+        message: 'Gemini continuation returned HTTP 500: backend unavailable',
+      },
+    ]
+    try {
+      for (const { name, stream, upstream, status, message } of cases) {
+        let call = 0
+        globalThis.fetch = (async () => upstream[call++]!()) as unknown as typeof fetch
+        const response = await proxy(provider.id, {
+          model: 'gemini-4-argon-contributor', max_tokens: 32, stream, messages: [{ role: 'user', content: 'hello' }],
+        })
+        expect(response.status, name).toBe(status)
+        const text = await response.text()
+        const reported = response.headers.get('content-type')?.includes('json') ? JSON.parse(text).error.message : text
+        expect(reported, name).toContain(message)
+        expect(text, name).not.toContain('message_stop')
+        expect(call, name).toBe(upstream.length)
+      }
+    } finally {
+      globalThis.fetch = originalFetch
     }
   })
 
@@ -4373,6 +5079,7 @@ describe('OpenCode Go preset request contract', () => {
         ['glm-5.3', '/chat/completions'],
         ['minimax-m3', '/messages'],
         ['grok-4.6', '/responses'],
+        ['gemini-4-argon-contributor', '/inference/go/google/v1beta/models/gemini-4-argon-contributor:generateContent'],
       ] as const) {
         calls.length = 0
         const result = await service.testProviderConfig({

@@ -5,6 +5,7 @@ import { getAnthropicApiKey } from 'src/utils/auth.js'
 import { getGlobalConfig } from 'src/utils/config.js'
 import { logError } from 'src/utils/log.js'
 import { getAxiosProxyOptions } from 'src/utils/proxy.js'
+import { getClaudeCodeUserAgent } from 'src/utils/userAgent.js'
 
 export type OAuthProfileFetchOptions = {
   proxyUrl?: string | null
@@ -48,8 +49,10 @@ export async function getOauthProfileFromOauthToken(
   try {
     const response = await axios.get<OAuthProfileResponse>(endpoint, {
       headers: {
+        'User-Agent': getClaudeCodeUserAgent(),
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
       },
       timeout: 10000,
       ...getAxiosProxyOptions(options.proxyUrl),

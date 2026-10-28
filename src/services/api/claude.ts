@@ -59,7 +59,7 @@ import {
   splitSysPromptPrefix,
   toolToAPISchema,
 } from "../../utils/api.js";
-import { getOauthAccountInfo } from "../../utils/auth.js";
+import { getOauthAccountUuid } from "../../utils/auth.js";
 import {
   getBedrockExtraBodyParamsBetas,
   getMergedBetas,
@@ -162,6 +162,7 @@ import {
   modelSupportsAdvisor,
 } from "src/utils/advisor.js";
 import { getAgentContext } from "src/utils/agentContext.js";
+import { getAgentProfile } from "src/utils/agentProfile.js";
 import { isClaudeAISubscriber } from "src/utils/auth.js";
 import {
   getToolSearchBetaHeader,
@@ -198,6 +199,7 @@ import { endQueryProfile, queryCheckpoint } from "src/utils/queryProfiler.js";
 import {
   modelSupportsAdaptiveThinking,
   modelUsesBoundThinking,
+  modelRejectsManualThinking,
   modelRequiresThinking,
   modelSupportsThinking,
   resolveModelThinkingEnabled,
@@ -299,6 +301,7 @@ import {
   getStreamRetryKind,
   is529Error,
   isRetryableStreamTransportError,
+  isStreamRequestRejection,
   RetriableStreamError,
   type RetryContext,
   withRetry,
@@ -617,7 +620,7 @@ export function getAPIMetadata() {
       ...extra,
       device_id: getOrCreateUserID(),
       // Only include OAuth account UUID when actively using OAuth authentication
-      account_uuid: getOauthAccountInfo()?.accountUuid ?? "",
+      account_uuid: getOauthAccountUuid(),
       session_id: getSessionId(),
     }),
   };
@@ -1407,7 +1410,7 @@ async function* queryModel(
   }
 
   let advisorModel: string | undefined;
-  if (isAgenticQuery && isAdvisorEnabled()) {
+  if (getAgentProfile() !== "lean" && isAgenticQuery && isAdvisorEnabled()) {
     let advisorOption = options.advisorModel;
 
     const advisorExperiment = getExperimentAdvisorModels();
@@ -1924,8 +1927,11 @@ async function* queryModel(
       retryContext?.maxTokensOverride ||
       options.maxOutputTokensOverride ||
       getMaxOutputTokensForModel(options.model)
+    // CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING only selects a manual budget, so it
+    // cannot apply to models that reject budget_tokens.
     const usesAdaptiveThinking =
       (modelRequiresThinking(options.model) ||
+        modelRejectsManualThinking(options.model) ||
         !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING)) &&
       modelSupportsAdaptiveThinking(options.model)
     // Manual thinking needs at least 1024 tokens and room for the answer.
@@ -1961,11 +1967,12 @@ async function* queryModel(
     // The installed SDK's effort type predates xhigh, which configureEffortParams supports.
     const configuredEffort = outputConfig.effort as string | null | undefined
 
-    // Opus 5 rejects disabled thinking above high effort. Preserve the user's
-    // explicit thinking choice and use the highest compatible effort instead.
+    // Opus 5 and Haiku 5.5 reject disabled thinking above high effort. Preserve
+    // the user's explicit thinking choice and use the highest compatible effort.
+    const modelId = options.model.toLowerCase()
     if (
       sendsExplicitDisabledThinking &&
-      options.model.toLowerCase().includes('claude-opus-5') &&
+      (modelId.includes('claude-opus-5') || modelId.includes('claude-haiku-5-5')) &&
       (configuredEffort === 'xhigh' || configuredEffort === 'max')
     ) {
       outputConfig.effort = 'high'
@@ -2448,7 +2455,13 @@ async function* queryModel(
       }
       // Snapshot the active budget so a fire reports the value it was armed
       // with, even if the phase (first-token → idle) flips between arm and fire.
-      const idleMs = currentStreamIdleTimeoutMs;
+      // While a tool_use input is open, the upstream emits its JSON one complete
+      // key/value at a time and only pings in between (the SDK drops pings), so
+      // a long `content` value is legitimately silent. The tool-input guard owns
+      // that gap; the idle budget must not cut it shorter (#1536).
+      const idleMs = toolInputDurationGuard.hasActiveInput()
+        ? Math.max(currentStreamIdleTimeoutMs, STREAM_TOOL_INPUT_MAX_DURATION_MS)
+        : currentStreamIdleTimeoutMs;
       const warningMs = idleMs / 2;
       streamIdleWarningTimer = setTimeout(
         (warnMs) => {
@@ -2672,6 +2685,7 @@ async function* queryModel(
                   input: "",
                 };
                 toolInputDurationGuard.start(part.index);
+                resetStreamIdleTimer();
                 break;
               case "server_tool_use":
                 contentBlocks[part.index] = {
@@ -2850,6 +2864,7 @@ async function* queryModel(
             stopReasonIsTerminal = false;
             completedBlockIndexes.add(part.index);
             toolInputDurationGuard.stop(part.index);
+            resetStreamIdleTimer();
             const contentBlock = contentBlocks[part.index];
             if (!contentBlock) {
               logEvent("tengu_streaming_error", {
@@ -3254,11 +3269,14 @@ async function* queryModel(
       // Keep displayable blocks, but discard uncommitted local tools. Partial
       // text from a clean EOF that cannot be re-streamed is also surfaced with
       // an error, rather than silently accepted or replaced by a second response.
+      // A request the upstream rejected inside the stream is surfaced as well:
+      // the non-streaming copy would get the same answer.
       if (
         retryKind === null &&
         (!canReplay ||
           streamEndedIncomplete ||
-          assistantCommitBuffer.hasCrossedSideEffectBoundary())
+          assistantCommitBuffer.hasCrossedSideEffectBoundary() ||
+          isStreamRequestRejection(streamingError))
       ) {
         for (const committedMessage of assistantCommitBuffer.flushWithoutToolUse()) {
           yield committedMessage;

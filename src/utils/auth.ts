@@ -666,6 +666,7 @@ export function refreshAwsAuth(awsAuthRefresh: string): Promise<boolean> {
   return new Promise(resolve => {
     const refreshProc = exec(awsAuthRefresh, {
       timeout: AWS_AUTH_REFRESH_TIMEOUT_MS,
+      windowsHide: true,
     })
     refreshProc.stdout!.on('data', data => {
       const output = data.toString().trim()
@@ -934,6 +935,7 @@ export function refreshGcpAuth(gcpAuthRefresh: string): Promise<boolean> {
   return new Promise(resolve => {
     const refreshProc = exec(gcpAuthRefresh, {
       timeout: GCP_AUTH_REFRESH_TIMEOUT_MS,
+      windowsHide: true,
     })
     refreshProc.stdout!.on('data', data => {
       const output = data.toString().trim()
@@ -1657,6 +1659,24 @@ export function is1PApiCustomer(): boolean {
  */
 export function getOauthAccountInfo(): AccountInfo | undefined {
   return isAnthropicAuthEnabled() ? getGlobalConfig().oauthAccount : undefined
+}
+
+/**
+ * Account UUID reported in request metadata (`metadata.user_id`).
+ *
+ * A host that owns the OAuth token (the desktop server) injects it as
+ * CLAUDE_CODE_ACCOUNT_UUID. That takes precedence over `oauthAccount`: a token
+ * delivered through CLAUDE_CODE_OAUTH_TOKEN has no profile scope, so the CLI
+ * never populates `oauthAccount` itself, and the config file may describe a
+ * different account (for example the one a terminal CLI is logged in to).
+ */
+export function getOauthAccountUuid(): string {
+  if (!isAnthropicAuthEnabled()) return ''
+  return (
+    process.env.CLAUDE_CODE_ACCOUNT_UUID?.trim() ||
+    getGlobalConfig().oauthAccount?.accountUuid ||
+    ''
+  )
 }
 
 /**

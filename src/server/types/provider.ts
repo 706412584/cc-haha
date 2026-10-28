@@ -10,13 +10,17 @@ import { z } from 'zod'
 export const CLAUDE_OFFICIAL_PROVIDER_ID = 'claude-official'
 export const OPENAI_OFFICIAL_PROVIDER_ID = 'openai-official'
 export const GROK_OFFICIAL_PROVIDER_ID = 'grok-official'
+export const DEEPSEEK_ACCOUNT_PROVIDER_ID = 'deepseek-account'
 export const PROVIDER_TOOL_SEARCH_OPT_IN_SCHEMA_VERSION = 4
 export const PROVIDER_REQUEST_COMPATIBILITY_SCHEMA_VERSION = 5
 export const PROVIDER_OFFICIAL_MODEL_SETTINGS_SCHEMA_VERSION = 6
+export const PROVIDER_IMAGE_PROTOCOL_SCHEMA_VERSION = 7
+export const PROVIDER_DEEPSEEK_ACCOUNT_MODEL_IDS_SCHEMA_VERSION = 8
 export const BUILT_IN_PROVIDER_IDS = [
   CLAUDE_OFFICIAL_PROVIDER_ID,
   OPENAI_OFFICIAL_PROVIDER_ID,
   GROK_OFFICIAL_PROVIDER_ID,
+  DEEPSEEK_ACCOUNT_PROVIDER_ID,
 ] as const
 
 export function isBuiltInProviderId(id: string | null | undefined): boolean {
@@ -29,6 +33,14 @@ export const ApiFormatSchema = z.enum([
   'openai_responses',  // OpenAI Responses API /v1/responses
 ])
 export type ApiFormat = z.infer<typeof ApiFormatSchema>
+
+/**
+ * Protocols a preset can route one model family to. Wider than ApiFormat: a
+ * gateway may serve a family only over a protocol no provider record is saved
+ * with (OpenCode Go serves Gemini only over Google `generateContent`).
+ */
+export const ModelApiFormatSchema = z.enum([...ApiFormatSchema.options, 'gemini'])
+export type ModelApiFormat = z.infer<typeof ModelApiFormatSchema>
 
 export const ProviderAuthStrategySchema = z.enum([
   'api_key',
@@ -43,6 +55,7 @@ export const ProviderRuntimeKindSchema = z.enum([
   'anthropic_compatible',
   'openai_oauth',
   'grok_oauth',
+  'deepseek_oauth',
 ])
 export type ProviderRuntimeKind = z.infer<typeof ProviderRuntimeKindSchema>
 
@@ -58,6 +71,7 @@ export const OfficialProviderModelsSchema = z.object({
   [CLAUDE_OFFICIAL_PROVIDER_ID]: ModelMappingSchema.optional(),
   [OPENAI_OFFICIAL_PROVIDER_ID]: ModelMappingSchema.optional(),
   [GROK_OFFICIAL_PROVIDER_ID]: ModelMappingSchema.optional(),
+  [DEEPSEEK_ACCOUNT_PROVIDER_ID]: ModelMappingSchema.optional(),
 }).passthrough()
 
 export const Model1mSupportSchema = z.object({
@@ -97,10 +111,11 @@ export const RequestCompatibilitySchema = z.object({
 export type RequestCompatibility = z.infer<typeof RequestCompatibilitySchema>
 
 export const ImageGenerationConfigSchema = z.object({
+  protocol: z.enum(['openai_images', 'gemini_native', 'xai_images']).optional(),
   model: z.string().trim().min(1),
   baseUrl: z.string().trim().optional(),
   apiKey: z.string().trim().optional(),
-})
+}).passthrough()
 
 export const SavedProviderSchema = z.object({
   id: z.string(),

@@ -18,10 +18,11 @@ import {
   parseOrchestrationMetadata,
   type OrchestrationMetadata,
 } from '../../../../src/tasks/orchestrationMetadata'
+import type { DelegatedSessionRow } from '../sessionDelegation/sessionDelegationModel'
 
 export type ActivityStatus = TaskStatus | BackgroundAgentTask['status'] | TeamMember['status']
 
-export type ActivitySectionId = 'output' | 'tasks' | 'queue' | 'team' | 'workflow' | 'backgroundTasks' | 'subagents' | 'sources'
+export type ActivitySectionId = 'output' | 'tasks' | 'queue' | 'team' | 'workflow' | 'backgroundTasks' | 'subagents' | 'sessions' | 'sources'
 
 export type ActivityRow = {
   id: string
@@ -61,6 +62,8 @@ export type ActivityRow = {
     timestamp: number
   }>
   member?: TeamMember
+  /** A session this run delegated through CreateSessions. */
+  delegatedSession?: DelegatedSessionRow
   taskHistory?: {
     completed: number
     total: number
@@ -127,6 +130,8 @@ export type BuildSessionActivityModelInput = {
   includeTeamActivity?: boolean
   /** Live workflow runs for this session, newest first. */
   workflowRuns?: WorkflowRun[]
+  /** Sessions this run delegated, from the collaboration snapshot. */
+  delegatedSessions?: DelegatedSessionRow[]
 }
 
 export type BuildMainSessionActivityModelInput = Omit<
@@ -147,6 +152,9 @@ export const VISIBLE_ACTIVITY_SECTION_ORDER = [
   'workflow',
   'backgroundTasks',
   'subagents',
+  // Delegated sessions are agents this turn handed work to, like SubAgents,
+  // but each runs as its own session with its own model.
+  'sessions',
   'team',
   'sources',
 ] as const satisfies readonly ActivitySectionId[]
@@ -161,6 +169,7 @@ const SECTION_META: Record<ActivitySectionId, Pick<ActivitySection, 'title' | 'e
   workflow: { title: 'Workflow', emptyLabel: 'No workflow running' },
   backgroundTasks: { title: 'Background Tasks', emptyLabel: 'No background tasks' },
   subagents: { title: 'SubAgents', emptyLabel: 'No SubAgents' },
+  sessions: { title: 'Delegated sessions', emptyLabel: 'No delegated sessions' },
   sources: { title: 'Sources', emptyLabel: 'No sources' },
 }
 
@@ -173,6 +182,7 @@ function createEmptySections(): Record<ActivitySectionId, ActivitySection> {
     workflow: createSection('workflow'),
     backgroundTasks: createSection('backgroundTasks'),
     subagents: createSection('subagents'),
+    sessions: createSection('sessions'),
     sources: createSection('sources'),
   }
 }
@@ -1258,6 +1268,37 @@ function buildQueueRow(message: QueuedMessage, tasksById: Map<string, CLITask>):
   }
 }
 
+function delegatedSessionActivityStatus(row: DelegatedSessionRow): ActivityStatus {
+  switch (row.status) {
+    case 'running':
+      return 'running'
+    case 'idle':
+      return 'idle'
+    case 'completed':
+      return 'completed'
+    case 'failed':
+      return 'failed'
+    // Not started, queued, waiting on input or paused: each waits on something.
+    case 'review':
+    case 'launching':
+    case 'queued':
+    case 'blocked':
+    case 'paused':
+      return 'pending'
+  }
+}
+
+function buildDelegatedSessionRow(session: DelegatedSessionRow): ActivityRow {
+  return {
+    id: `session:${session.key}`,
+    section: 'sessions',
+    label: session.title,
+    status: delegatedSessionActivityStatus(session),
+    delegatedSession: session,
+    openable: Boolean(session.sessionId),
+  }
+}
+
 export function buildSessionActivityModel(input: BuildSessionActivityModelInput): SessionActivityModel {
   const sections = createEmptySections()
   let badgeCount = 0
@@ -1443,6 +1484,13 @@ export function buildSessionActivityModel(input: BuildSessionActivityModelInput)
     }
   }
 
+  sections.sessions.rows = (input.delegatedSessions ?? []).map(buildDelegatedSessionRow)
+  for (const row of sections.sessions.rows) {
+    if (isBadgeStatus(row.status)) {
+      badgeCount += 1
+    }
+  }
+
   return {
     sessionId: input.sessionId,
     badgeCount,
@@ -1504,6 +1552,7 @@ const COMPARED_MAIN_SESSION_ACTIVITY_INPUTS = {
   dismissedBackgroundTaskKeys: true,
   teamTaskWindows: true,
   queuedMessages: true,
+  delegatedSessions: true,
 } as const satisfies Record<keyof BuildMainSessionActivityModelInput, true>
 void COMPARED_MAIN_SESSION_ACTIVITY_INPUTS
 
@@ -1521,7 +1570,8 @@ function sameMainSessionActivityInput(
     sameItems(a.workflowRuns, b.workflowRuns) &&
     sameKeys(a.dismissedBackgroundTaskKeys, b.dismissedBackgroundTaskKeys) &&
     sameWindows(a.teamTaskWindows, b.teamTaskWindows) &&
-    sameItems(a.queuedMessages, b.queuedMessages)
+    sameItems(a.queuedMessages, b.queuedMessages) &&
+    sameItems(a.delegatedSessions, b.delegatedSessions)
 }
 
 let lastMainSessionActivity: {

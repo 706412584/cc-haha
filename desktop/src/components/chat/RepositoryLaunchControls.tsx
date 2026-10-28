@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
@@ -23,6 +23,7 @@ import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { setProjectDisplayName, useProjectDisplayName } from '../../stores/projectDisplayNameStore'
 import { RecentProjectsPanel } from '@/components/composite/DirectoryPicker'
+import { resolveVerticalPlacement } from '@/lib/verticalPlacement'
 import {
   ProjectEditorModal,
   type ProjectEditorSubmission,
@@ -50,10 +51,60 @@ type Props = {
    * touch. Both render the same single pill — only the metrics differ.
    */
   placement?: 'toolbar' | 'outside'
+  /**
+   * Whether the page holding these controls is on screen. Coming back re-reads
+   * the repository: a retained draft may have been hidden while the checkout
+   * moved on.
+   */
+  visible?: boolean
+  /**
+   * Whether `branch` is one these controls chose on their own, for a parent that
+   * keeps the launch target outside them and mounts them again later (the
+   * composer of an empty chat). Without it a branch handed back after a remount
+   * would read as the user's pick and be launched as it was.
+   */
+  branchAutomatic?: boolean
+  /** Reports whether the branch now held is one chosen on its own, so a parent can keep `branchAutomatic`. */
+  onBranchAutomaticChange?: (automatic: boolean) => void
+}
+
+export type RepositoryLaunchControlsHandle = {
+  /**
+   * The branch to launch on, decided now. A branch the user picked or created
+   * (or one the parent handed in) is their intent and is returned as is. One
+   * these controls chose on their own is read again: the server switches the
+   * checkout to a launch branch that is not the current one, so a stale choice
+   * would quietly put the repository back where it was. `null` launches in
+   * the folder as it is.
+   */
+  resolveLaunchBranch: () => Promise<string | null>
+}
+
+/**
+ * A detached HEAD has no branch to follow, and launching "on" the default one
+ * would switch the user off the commit they are standing on (or be refused when
+ * that branch is checked out in another worktree). Nothing is chosen for it:
+ * the session launches in the folder as it is. An isolated worktree needs a
+ * base though, and takes the default branch.
+ */
+function launchesDetachedInPlace(context: RepositoryContextResult, useWorktree: boolean): boolean {
+  return !context.currentBranch && context.headCommit !== null && !useWorktree
+}
+
+/** The branch chosen for the user: the checkout, else the default, else any. */
+function automaticLaunchBranch(context: RepositoryContextResult, useWorktree: boolean): string | null {
+  if (launchesDetachedInPlace(context, useWorktree)) return null
+  return [
+    context.currentBranch,
+    context.defaultBranch,
+    context.branches[0]?.name,
+  ].find((name) => name && context.branches.some((candidate) => candidate.name === name)) || null
 }
 
 const MENU_WIDTH = 400
 const VIEWPORT_GUTTER = 12
+/** Shortest the menu is squeezed to; below this a window is too small to use it in anyway. */
+const MENU_MIN_HEIGHT = 160
 
 /**
  * `root` lists directory, branch and the worktree modes; `directory` and
@@ -120,7 +171,7 @@ function stateMessage(context: RepositoryContextResult | null, error: string | n
   return null
 }
 
-export function RepositoryLaunchControls({
+export const RepositoryLaunchControls = forwardRef<RepositoryLaunchControlsHandle, Props>(function RepositoryLaunchControls({
   workDir,
   onWorkDirChange,
   branch,
@@ -130,7 +181,10 @@ export function RepositoryLaunchControls({
   onLaunchReadyChange,
   disabled = false,
   placement = 'outside',
-}: Props) {
+  visible = true,
+  branchAutomatic = false,
+  onBranchAutomaticChange,
+}, ref) {
   const t = useTranslation()
   const addToast = useUIStore((state) => state.addToast)
   const isMobileBrowser = useMobileViewport() && !isDesktopRuntime()
@@ -154,7 +208,7 @@ export function RepositoryLaunchControls({
   const [createBranchError, setCreateBranchError] = useState<string | null>(null)
   const [projectCreateOpen, setProjectCreateOpen] = useState(false)
   const [projectCreateFolder, setProjectCreateFolder] = useState('')
-  const [menuPos, setMenuPos] = useState<{ top: number; left: number; direction: 'up' | 'down' } | null>(null)
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number; direction: 'up' | 'down'; maxHeight: number } | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const pillRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -163,6 +217,22 @@ export function RepositoryLaunchControls({
   /** Read after an await to tell whether the directory moved on under us. */
   const latestWorkDirRef = useRef(workDir)
   latestWorkDirRef.current = workDir
+  const latestBranchRef = useRef(branch)
+  latestBranchRef.current = branch
+  const latestUseWorktreeRef = useRef(useWorktree)
+  latestUseWorktreeRef.current = useWorktree
+  /**
+   * The branch these controls last chose on their own. Only that one follows
+   * the repository when it is read again; a branch the user picked or
+   * created, or one the parent handed in, is the launch intent and stays.
+   */
+  const automaticBranchRef = useRef<string | null>(null)
+  /**
+   * Orders every write to `context`. Opening the branch list re-reads the
+   * repository in the background; a slower read must not land on top of a
+   * newer one, a directory change, or a branch the user just created.
+   */
+  const contextRequestRef = useRef(0)
   /**
    * Creating a branch updates this component's context and the parent-owned
    * launch target together. An external store can publish the target first,
@@ -186,15 +256,19 @@ export function RepositoryLaunchControls({
   const updateMenuPos = useCallback((forView: MenuView) => {
     if (!pillRef.current) return
     const rect = pillRef.current.getBoundingClientRect()
-    const height = VIEW_HEIGHTS[forView]
-    const spaceAbove = rect.top
-    const spaceBelow = window.innerHeight - rect.bottom
-    const direction = spaceBelow >= height || spaceBelow >= spaceAbove ? 'down' : 'up'
+    const { direction, edge, maxHeight } = resolveVerticalPlacement(rect, {
+      viewportHeight: window.innerHeight,
+      preferredHeight: VIEW_HEIGHTS[forView],
+      gap: 6,
+      margin: VIEWPORT_GUTTER,
+      minHeight: MENU_MIN_HEIGHT,
+    })
     const maxLeft = Math.max(VIEWPORT_GUTTER, window.innerWidth - MENU_WIDTH - VIEWPORT_GUTTER)
     setMenuPos({
-      top: direction === 'down' ? rect.bottom + 6 : rect.top - 6,
+      top: edge,
       left: Math.min(Math.max(rect.left, VIEWPORT_GUTTER), maxLeft),
       direction,
+      maxHeight,
     })
   }, [])
 
@@ -210,6 +284,7 @@ export function RepositoryLaunchControls({
 
     const requestedWorkDir = workDir
     let cancelled = false
+    contextRequestRef.current += 1
     setContextSourceWorkDir(null)
     setLoading(true)
     setError(null)
@@ -234,8 +309,103 @@ export function RepositoryLaunchControls({
     }
   }, [workDir, onBranchChange])
 
+  /**
+   * Re-reads the repository so branches created outside the app show up (#1533).
+   * Unlike the load above this is silent: the list already on screen stays put
+   * while it runs and if it fails, so a flaky read cannot blank a working
+   * picker or hold up sending.
+   */
+  const refreshContext = useCallback(() => {
+    if (!workDir) return
+    const requestedWorkDir = workDir
+    const request = ++contextRequestRef.current
+    sessionsApi.getRepositoryContext(requestedWorkDir)
+      .then((result) => {
+        if (request !== contextRequestRef.current) return
+        if (latestWorkDirRef.current !== requestedWorkDir) return
+        // A failed read reports itself as `state: 'error'` and would clear the
+        // selected branch; the list we already have is the better answer.
+        if (result.state === 'error') return
+        setContext(result)
+        setContextSourceWorkDir(requestedWorkDir)
+        setError(null)
+      })
+      .catch(() => {})
+  }, [workDir])
+
+  // Back on screen after a while: the checkout may have moved in the meantime.
+  const wasVisibleRef = useRef(visible)
+  useEffect(() => {
+    const cameBack = visible && !wasVisibleRef.current
+    wasVisibleRef.current = visible
+    if (cameBack) refreshContext()
+  }, [visible, refreshContext])
+
+  // The same when the window comes back to the front (switching to a terminal
+  // and running `git switch` is the usual way the checkout moves under a draft
+  // that never left the screen). Focus and visibility fire together on some
+  // platforms, so a second one right behind the first is dropped.
+  const lastReturnRefreshRef = useRef(0)
+  useEffect(() => {
+    if (!visible || !workDir) return
+    const refreshOnReturn = () => {
+      if (document.visibilityState === 'hidden') return
+      const now = Date.now()
+      if (now - lastReturnRefreshRef.current < 1000) return
+      lastReturnRefreshRef.current = now
+      refreshContext()
+    }
+    window.addEventListener('focus', refreshOnReturn)
+    document.addEventListener('visibilitychange', refreshOnReturn)
+    return () => {
+      window.removeEventListener('focus', refreshOnReturn)
+      document.removeEventListener('visibilitychange', refreshOnReturn)
+    }
+  }, [visible, workDir, refreshContext])
+
+  /** Remembers which branch these controls chose on their own, and tells a parent that keeps it. */
+  const setAutomaticBranch = useCallback((next: string | null) => {
+    automaticBranchRef.current = next
+    onBranchAutomaticChange?.(next !== null)
+  }, [onBranchAutomaticChange])
+
+  useImperativeHandle(ref, () => ({
+    resolveLaunchBranch: async () => {
+      const requestedWorkDir = latestWorkDirRef.current
+      const chosen = latestBranchRef.current
+      if (!requestedWorkDir || chosen === null || chosen !== automaticBranchRef.current) return chosen
+      const request = ++contextRequestRef.current
+      // Unreadable now: launch in the folder as it is. Only an isolated
+      // worktree keeps the branch — it never moves this checkout, and dropping
+      // the branch would drop the worktree the user asked for.
+      const unreadable = latestUseWorktreeRef.current ? chosen : null
+      let result: RepositoryContextResult
+      try {
+        result = await sessionsApi.getRepositoryContext(requestedWorkDir)
+      } catch {
+        return unreadable
+      }
+      if (result.state !== 'ok') return unreadable
+      const next = automaticLaunchBranch(result, latestUseWorktreeRef.current)
+      if (request === contextRequestRef.current && latestWorkDirRef.current === requestedWorkDir) {
+        setContext(result)
+        setContextSourceWorkDir(requestedWorkDir)
+        setError(null)
+        setAutomaticBranch(next)
+        if (next !== latestBranchRef.current) onBranchChange(next)
+      }
+      return next
+    },
+  }), [onBranchChange, setAutomaticBranch])
+
+  // A new directory starts over. A parent that keeps the launch target and
+  // mounts these controls again later says which branch was chosen for the
+  // user (see `branchAutomatic`); that choice is still followed, not kept.
   useEffect(() => {
     createdBranchTransitionRef.current = null
+    automaticBranchRef.current = branchAutomatic ? latestBranchRef.current : null
+    // Only the directory: the flag is read when it changes, not followed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workDir])
 
   useEffect(() => {
@@ -257,16 +427,15 @@ export function RepositoryLaunchControls({
     }
 
     const branchExists = branch && context.branches.some((candidate) => candidate.name === branch)
-    if (branchExists) return
+    // A picked (or handed-in) branch stays while it exists. One chosen here
+    // follows the repository as it reads now, so a draft that waited while
+    // the checkout moved does not launch on the branch it used to be on.
+    if (branchExists && branch !== automaticBranchRef.current) return
 
-    const fallbackBranch = [
-      context.currentBranch,
-      context.defaultBranch,
-      context.branches[0]?.name,
-    ].find((name) => name && context.branches.some((candidate) => candidate.name === name))
-
-    onBranchChange(fallbackBranch || null)
-  }, [branch, context, onBranchChange, workDir])
+    const fallbackBranch = automaticLaunchBranch(context, useWorktree)
+    setAutomaticBranch(fallbackBranch)
+    if (fallbackBranch !== branch) onBranchChange(fallbackBranch)
+  }, [branch, context, onBranchChange, setAutomaticBranch, useWorktree, workDir])
 
   const closeMenu = useCallback(() => {
     setMenuOpen(false)
@@ -308,7 +477,7 @@ export function RepositoryLaunchControls({
 
   useEffect(() => {
     const activeItem = menuOpen && view === 'branch' ? itemRefs.current[selectedIndex] : null
-    activeItem?.scrollIntoView({ block: 'nearest' })
+    activeItem?.scrollIntoView?.({ block: 'nearest' })
   }, [menuOpen, view, selectedIndex])
 
   const selectedBranch = useMemo(() => {
@@ -351,6 +520,8 @@ export function RepositoryLaunchControls({
   }, [context, selectedBranch, t, useWorktree])
 
   const selectBranch = (candidate: RepositoryBranchInfo) => {
+    // Picked by the user, even when it is the branch chosen for them before.
+    setAutomaticBranch(null)
     onBranchChange(candidate.name)
     setView('root')
     setBranchFilter('')
@@ -391,6 +562,9 @@ export function RepositoryLaunchControls({
       // repo's branch list and selection under another repo's path — the same
       // reason the `workDir` effect carries a `cancelled` flag.
       if (latestWorkDirRef.current !== requestWorkDir) return
+      // Drop any background refresh still in flight: it read the repository
+      // before this branch existed and would take it out of the list again.
+      contextRequestRef.current += 1
       // The response carries the context the branch was created against, so the
       // list is correct without a second round trip.
       createdBranchTransitionRef.current = {
@@ -400,6 +574,7 @@ export function RepositoryLaunchControls({
       }
       setContext(result.context)
       setError(null)
+      setAutomaticBranch(null)
       onBranchChange(result.branch)
       addToast({
         type: 'success',
@@ -439,14 +614,16 @@ export function RepositoryLaunchControls({
   }
 
   const handleWorkDirChange = (path: string) => {
-    onWorkDirChange(path)
     if (path === workDir) {
-      // Re-picking the current directory fires no context request, so there is
-      // nothing to wait for.
+      // Re-picking the current directory changes nothing and fires no context
+      // request, so there is nothing to wait for. The parent is not told either:
+      // one that resets its launch state on every pick would then wait for a
+      // readiness report these controls have no reason to send again.
       if (isGitReady) setView('root')
       else closeMenu()
       return
     }
+    onWorkDirChange(path)
     // Hold the menu open on the root view. If the new directory turns out to
     // be a repo, its branch and worktree rows appear right where the eye
     // already is; if it does not, `revealAfterPick` closes the menu instead.
@@ -467,7 +644,8 @@ export function RepositoryLaunchControls({
     await setProjectDisplayName(submission.sourceFolder, submission.name)
     invalidateRecentProjectsCache()
     setProjectCreateOpen(false)
-    onWorkDirChange(submission.sourceFolder)
+    // Naming the folder already in use only renames it.
+    if (submission.sourceFolder !== workDir) onWorkDirChange(submission.sourceFolder)
   }
 
   const handleBranchKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -501,7 +679,9 @@ export function RepositoryLaunchControls({
     (
       context?.state !== 'ok' ||
       context.branches.length === 0 ||
-      !!selectedBranch
+      !!selectedBranch ||
+      // Nothing to wait for: no branch is chosen for a detached HEAD.
+      launchesDetachedInPlace(context, useWorktree)
     )
   )
 
@@ -528,13 +708,24 @@ export function RepositoryLaunchControls({
   const displayName = useProjectDisplayName(projectKey)
   const repoLabel = displayName || context?.repoName || basename(context?.repoRoot) || basename(workDir)
   const selectedBranchName = isGitReady ? (selectedBranch?.name ?? null) : null
-  // The worktree cards name the branch their changes would land on.
-  const branchLabel = selectedBranch?.name ?? context?.currentBranch ?? t('repoLaunch.noBranch')
+  // A detached HEAD has no branch to name and none is chosen for it (that would
+  // switch the user off their commit); the commit says where the checkout is.
+  const detachedCommit = context?.state === 'ok' && !selectedBranch && !context.currentBranch && context.headCommit
+    ? context.headCommit.slice(0, 7)
+    : null
+  const branchPillName = selectedBranchName ?? (detachedCommit ? `HEAD ${detachedCommit}` : null)
+  // The worktree cards name where their changes would land. Working in place on
+  // a detached HEAD lands on that commit; an isolated worktree is based on the
+  // default branch when none is chosen.
+  const branchLabel = selectedBranch?.name ?? context?.currentBranch ?? (detachedCommit ? `HEAD ${detachedCommit}` : t('repoLaunch.noBranch'))
+  const isolatedBaseLabel = selectedBranch?.name ?? (context?.state === 'ok' ? automaticLaunchBranch(context, true) : null) ?? t('repoLaunch.noBranch')
   const worktreeLabel = useWorktree ? t('repoLaunch.worktreeIsolated') : t('repoLaunch.worktreeCurrent')
-  const summary = [repoLabel, selectedBranchName].filter(Boolean).join(' / ')
+  const summary = [repoLabel, branchPillName].filter(Boolean).join(' / ')
   const pillTitle = [
     workDir,
-    selectedBranchName ? `${t('repoLaunch.branch')}: ${selectedBranchName}` : null,
+    selectedBranchName
+      ? `${t('repoLaunch.branch')}: ${selectedBranchName}`
+      : detachedCommit ? `${t('repoLaunch.detachedHead')}: ${detachedCommit}` : null,
     useWorktree ? worktreeLabel : null,
   ].filter(Boolean).join('\n')
 
@@ -766,7 +957,10 @@ export function RepositoryLaunchControls({
         <button
           type="button"
           role="menuitem"
-          onClick={() => setView('branch')}
+          onClick={() => {
+            refreshContext()
+            setView('branch')
+          }}
           className={rowClassName}
         >
           <GitBranch size={16} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]" />
@@ -775,7 +969,9 @@ export function RepositoryLaunchControls({
               {t('repoLaunch.branch')}
             </span>
             <span className="block truncate text-xs text-[var(--color-text-tertiary)]">
-              {selectedBranchName ? `${selectedBranchName} · ${branchSubtitle}` : t('repoLaunch.noBranch')}
+              {selectedBranchName
+                ? `${selectedBranchName} · ${branchSubtitle}`
+                : detachedCommit ? `${detachedCommit} · ${t('repoLaunch.detachedHead')}` : t('repoLaunch.noBranch')}
             </span>
           </span>
           <ChevronRight size={14} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]" />
@@ -818,7 +1014,7 @@ export function RepositoryLaunchControls({
                 {t('repoLaunch.worktreeIsolated')}
               </span>
               <span className="mt-0.5 block text-xs leading-[1.55] text-[var(--color-text-tertiary)]">
-                {t('repoLaunch.worktreeIsolatedDesc', { branch: branchLabel })}
+                {t('repoLaunch.worktreeIsolatedDesc', { branch: isolatedBaseLabel })}
               </span>
             </span>
           </button>
@@ -872,7 +1068,7 @@ export function RepositoryLaunchControls({
         {repoLabel || t('dirPicker.selectProject')}
       </span>
 
-      {selectedBranchName && (
+      {branchPillName && (
         <>
           <span aria-hidden="true" className="shrink-0 text-[var(--color-outline)]">/</span>
           <GitBranch size={14} strokeWidth={1.75} aria-hidden="true" className="shrink-0" />
@@ -884,7 +1080,7 @@ export function RepositoryLaunchControls({
             container cannot reorder its own neutral characters (the slashes).
           */}
           <span dir="rtl" className="min-w-0 shrink truncate text-left">
-            <bdi>{selectedBranchName}</bdi>
+            <bdi>{branchPillName}</bdi>
           </span>
         </>
       )}
@@ -902,10 +1098,11 @@ export function RepositoryLaunchControls({
     </button>
   )
 
-  const menuClassName = 'w-[400px] overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-1 shadow-[var(--shadow-dropdown)]'
+  const menuClassName = 'flex w-[400px] flex-col overflow-y-auto rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-1 shadow-[var(--shadow-dropdown)]'
   const menuStyle = {
     position: 'fixed' as const,
     left: menuPos?.left,
+    maxHeight: menuPos?.maxHeight,
     ...(menuPos?.direction === 'down'
       ? { top: menuPos.top }
       : { bottom: window.innerHeight - (menuPos?.top ?? 0) }),
@@ -1083,4 +1280,4 @@ export function RepositoryLaunchControls({
       />
     </div>
   )
-}
+})

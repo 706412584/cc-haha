@@ -21,6 +21,7 @@ import type { AccountInfo } from '../../utils/config.js'
 import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { getAxiosProxyOptions } from '../../utils/proxy.js'
+import { getClaudeCodeUserAgent } from '../../utils/userAgent.js'
 import { getOauthProfileFromOauthToken } from './getOauthProfile.js'
 import type {
   BillingType,
@@ -112,6 +113,7 @@ export async function exchangeCodeForTokens(
   port: number,
   useManualRedirect: boolean = false,
   expiresIn?: number,
+  { proxyUrl }: { proxyUrl?: string | null } = {},
 ): Promise<OAuthTokenExchangeResponse> {
   const requestBody: Record<string, string | number> = {
     grant_type: 'authorization_code',
@@ -131,6 +133,7 @@ export async function exchangeCodeForTokens(
   const response = await axios.post(getOauthConfig().TOKEN_URL, requestBody, {
     headers: { 'Content-Type': 'application/json' },
     timeout: 15000,
+    ...getAxiosProxyOptions(proxyUrl),
   })
 
   if (response.status !== 200) {
@@ -282,7 +285,10 @@ export async function fetchAndStoreUserRoles(
   accessToken: string,
 ): Promise<void> {
   const response = await axios.get(getOauthConfig().ROLES_URL, {
-    headers: { Authorization: `Bearer ${accessToken}` },
+    headers: {
+      'User-Agent': getClaudeCodeUserAgent(),
+      Authorization: `Bearer ${accessToken}`,
+    },
   })
 
   if (response.status !== 200) {
@@ -318,7 +324,10 @@ export async function createAndStoreApiKey(
 ): Promise<string | null> {
   try {
     const response = await axios.post(getOauthConfig().API_KEY_URL, null, {
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: {
+        'User-Agent': getClaudeCodeUserAgent(),
+        Authorization: `Bearer ${accessToken}`,
+      },
     })
 
     const apiKey = response.data?.raw_key

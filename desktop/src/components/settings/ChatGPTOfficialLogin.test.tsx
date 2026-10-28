@@ -95,6 +95,9 @@ describe('ChatGPTOfficialLogin', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }))
     })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'I understand, continue' }))
+    })
 
     expect(hostOpen).toHaveBeenCalledWith(authorizeUrl)
     expect(shellOpenMock).not.toHaveBeenCalled()
@@ -139,6 +142,9 @@ describe('ChatGPTOfficialLogin', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }))
     })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'I understand, continue' }))
+    })
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Copy authorization link' }))
@@ -148,5 +154,39 @@ describe('ChatGPTOfficialLogin', () => {
     expect(useHahaOpenAIOAuthStore.getState().isPolling).toBe(false)
     expect(screen.getByText(/Unable to copy authorization link/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Copy authorization link' })).toBeInTheDocument()
+  })
+
+  it('asks for risk confirmation before starting login and skips it on cancel', async () => {
+    const hostOpen = vi.fn().mockResolvedValue(undefined)
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      capabilities: { ...browserHost.capabilities, shell: true },
+      shell: { ...browserHost.shell, open: hostOpen },
+    }
+    statusMock.mockResolvedValue({ loggedIn: false })
+    startMock.mockResolvedValue({
+      authorizeUrl: 'https://chatgpt.com/oauth/authorize?state=openai-state',
+      state: 'openai-state',
+    })
+
+    render(<ChatGPTOfficialLogin />)
+    await screen.findByRole('button', { name: 'Sign in with ChatGPT' })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }))
+    })
+
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByText('Relatively low')).toBeInTheDocument()
+    expect(startMock).not.toHaveBeenCalled()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    })
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(startMock).not.toHaveBeenCalled()
+    expect(hostOpen).not.toHaveBeenCalled()
   })
 })

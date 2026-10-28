@@ -67,6 +67,7 @@ describe('GrokOfficialLogin', () => {
     render(<GrokOfficialLogin />)
     await screen.findByRole('button', { name: 'Sign in with Grok' })
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Sign in with Grok' })))
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'I understand, continue' })))
 
     expect(open).toHaveBeenCalled()
     expect(screen.getByText(/Unable to open browser/)).toBeInTheDocument()
@@ -86,6 +87,7 @@ describe('GrokOfficialLogin', () => {
     render(<GrokOfficialLogin />)
     await screen.findByRole('button', { name: 'Sign in with Grok' })
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Sign in with Grok' })))
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'I understand, continue' })))
     expect(open).toHaveBeenCalledWith(expect.stringContaining('accounts.x.ai'))
 
     act(() => {
@@ -97,5 +99,30 @@ describe('GrokOfficialLogin', () => {
     await waitFor(() => {
       expect(open).toHaveBeenCalledWith('http://127.0.0.1:3456/api/haha-grok-oauth/success')
     })
+  })
+
+  it('asks for risk confirmation before starting login and skips it on cancel', async () => {
+    const open = vi.fn().mockResolvedValue(undefined)
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      capabilities: { ...browserHost.capabilities, shell: true },
+      shell: { ...browserHost.shell, open },
+    }
+
+    render(<GrokOfficialLogin />)
+    await screen.findByRole('button', { name: 'Sign in with Grok' })
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Sign in with Grok' })))
+
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByText('Medium')).toBeInTheDocument()
+    expect(startMock).not.toHaveBeenCalled()
+
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Cancel' })))
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(startMock).not.toHaveBeenCalled()
+    expect(open).not.toHaveBeenCalled()
   })
 })

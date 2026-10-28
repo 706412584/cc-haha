@@ -18,8 +18,10 @@ import {
   generateCodeChallenge,
   generateState,
 } from '../../services/oauth/crypto.js'
+import axios from 'axios'
 import {
   buildAuthUrl,
+  exchangeCodeForTokens,
   fetchProfileInfo,
   refreshOAuthToken,
   isOAuthTokenExpired,
@@ -30,12 +32,9 @@ import type {
   OAuthTokenExchangeResponse,
   SubscriptionType,
 } from '../../services/oauth/types.js'
-import { getOauthConfig } from '../../constants/oauth.js'
-import {
-  getNetworkProxyFetchOptions,
-  getNetworkProxyUrl,
-  loadNetworkSettings,
-} from './networkSettings.js'
+import { CLAUDE_AI_PROFILE_SCOPE } from '../../constants/oauth.js'
+import { getOauthProfileFromOauthToken } from '../../services/oauth/getOauthProfile.js'
+import { getNetworkProxyUrl, loadNetworkSettings } from './networkSettings.js'
 
 export type StoredOAuthTokens = {
   accessToken: string
@@ -57,22 +56,63 @@ type RefreshFn = (
   refreshToken: string,
   opts?: { scopes?: string[]; proxyUrl?: string | null },
 ) => Promise<OAuthTokens>
+type ExchangeFn = (
+  authorizationCode: string,
+  state: string,
+  codeVerifier: string,
+  port: number,
+  useManualRedirect?: boolean,
+  expiresIn?: number,
+  opts?: { proxyUrl?: string | null },
+) => Promise<OAuthTokenExchangeResponse>
 type FetchProfileFn = (
   accessToken: string,
   opts?: { proxyUrl?: string | null },
 ) => Promise<{ subscriptionType: SubscriptionType | null }>
 
+type FetchAccountUuidFn = (
+  accessToken: string,
+  opts?: { proxyUrl?: string | null },
+) => Promise<string | null>
+
 const SESSION_TTL_MS = 5 * 60 * 1000
-const OAUTH_CALLBACK_PATH = '/callback'
+const ACCOUNT_UUID_LOOKUP_TIMEOUT_MS = 3_000
+const ACCOUNT_UUID_RETRY_BACKOFF_MS = 60_000
+
+async function fetchAccountUuid(
+  accessToken: string,
+  opts: { proxyUrl?: string | null } = {},
+): Promise<string | null> {
+  const profile = await getOauthProfileFromOauthToken(accessToken, opts)
+  return profile?.account?.uuid ?? null
+}
 
 export class HahaOAuthService {
   private sessions = new Map<string, OAuthSession>()
   private tokenRefreshes = new Map<string, Promise<StoredOAuthTokens | null>>()
+  private accountUuid: string | null = null
+  private accountUuidRetryAt = 0
   private refreshFn: RefreshFn = refreshOAuthToken
+  private exchangeFn: ExchangeFn = exchangeCodeForTokens
   private fetchProfileFn: FetchProfileFn = fetchProfileInfo
+  private fetchAccountUuidFn: FetchAccountUuidFn = fetchAccountUuid
+
+  setFetchAccountUuidFn(fn: FetchAccountUuidFn = fetchAccountUuid): void {
+    this.fetchAccountUuidFn = fn
+    this.forgetAccountUuid()
+  }
+
+  private forgetAccountUuid(): void {
+    this.accountUuid = null
+    this.accountUuidRetryAt = 0
+  }
 
   setRefreshFn(fn: RefreshFn): void {
     this.refreshFn = fn
+  }
+
+  setExchangeFn(fn: ExchangeFn): void {
+    this.exchangeFn = fn
   }
 
   setFetchProfileFn(fn: FetchProfileFn): void {
@@ -106,6 +146,7 @@ export class HahaOAuthService {
   }
 
   async deleteTokens(): Promise<void> {
+    this.forgetAccountUuid()
     try {
       await fs.unlink(this.getOAuthFilePath())
     } catch (err) {
@@ -189,47 +230,38 @@ export class HahaOAuthService {
       scopes: parseScopes(response.scope),
       subscriptionType: profile.subscriptionType,
     }
+    // A new login may be a different account.
+    this.forgetAccountUuid()
     await this.saveTokens(tokens)
     return tokens
   }
 
+  /**
+   * The same axios request the CLI makes (`exchangeCodeForTokens`), so the wire
+   * identity — User-Agent, Accept, body — is the CLI's. Only the proxy comes
+   * from the desktop network settings.
+   */
   private async exchangeWithCustomCallback(
     code: string,
     state: string,
     verifier: string,
     port: number,
   ): Promise<OAuthTokenExchangeResponse> {
-    const requestBody = {
-      grant_type: 'authorization_code',
-      code,
-      redirect_uri: `http://localhost:${port}${OAUTH_CALLBACK_PATH}`,
-      client_id: getOauthConfig().CLIENT_ID,
-      code_verifier: verifier,
-      state,
-    }
-
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 15_000)
-    let res: Response
+    const networkSettings = await loadNetworkSettings()
     try {
-      const tokenUrl = getOauthConfig().TOKEN_URL
-      const networkSettings = await loadNetworkSettings()
-      res = await fetch(tokenUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal,
-        ...getNetworkProxyFetchOptions(networkSettings, tokenUrl),
+      return await this.exchangeFn(code, state, verifier, port, false, undefined, {
+        proxyUrl: getNetworkProxyUrl(networkSettings),
       })
-    } finally {
-      clearTimeout(timeoutId)
+    } catch (err) {
+      // axios only reports "Request failed with status code N"; the token
+      // endpoint's own error body is what makes a failed login diagnosable.
+      if (axios.isAxiosError(err) && err.response) {
+        const { status, data } = err.response
+        const body = typeof data === 'string' ? data : JSON.stringify(data)
+        throw new Error(`Token exchange failed (${status}): ${body}`)
+      }
+      throw err
     }
-    if (!res.ok) {
-      throw new Error(
-        `Token exchange failed (${res.status}): ${await res.text()}`,
-      )
-    }
-    return (await res.json()) as OAuthTokenExchangeResponse
   }
 
   async ensureFreshTokens(): Promise<StoredOAuthTokens | null> {
@@ -311,6 +343,44 @@ export class HahaOAuthService {
     }
     await this.saveTokens(updated)
     return updated
+  }
+
+  /**
+   * UUID of the account the stored token belongs to, for the CLI child's
+   * `metadata.user_id`. A token injected through CLAUDE_CODE_OAUTH_TOKEN has no
+   * profile scope on the CLI side, so the CLI cannot look this up itself.
+   *
+   * Best effort: the answer is cached for the life of the process (it only
+   * changes on login or logout), a slow profile endpoint is not allowed to hold
+   * up a session start, and any failure just leaves the UUID unset. A failed
+   * lookup is not repeated for a while, so an unreachable or refusing endpoint
+   * costs one wait rather than one per session.
+   */
+  async getAccountUuid(accessToken: string): Promise<string | null> {
+    if (this.accountUuid) return this.accountUuid
+    if (Date.now() < this.accountUuidRetryAt) return null
+
+    // A token issued before `user:profile` was requested is refused by the
+    // profile endpoint; do not ask.
+    const stored = await this.loadTokens().catch(() => null)
+    if (stored && !stored.scopes.includes(CLAUDE_AI_PROFILE_SCOPE)) return null
+
+    const lookup = (async () => {
+      const networkSettings = await loadNetworkSettings()
+      const uuid = await this.fetchAccountUuidFn(accessToken, {
+        proxyUrl: getNetworkProxyUrl(networkSettings),
+      })
+      // A late answer still warms the cache for the next session.
+      if (uuid) this.accountUuid = uuid
+      return uuid
+    })().catch(() => null)
+
+    const timeout = new Promise<null>((resolve) => {
+      setTimeout(() => resolve(null), ACCOUNT_UUID_LOOKUP_TIMEOUT_MS).unref?.()
+    })
+    const uuid = await Promise.race([lookup, timeout])
+    if (!uuid) this.accountUuidRetryAt = Date.now() + ACCOUNT_UUID_RETRY_BACKOFF_MS
+    return uuid
   }
 
   async ensureFreshAccessToken(): Promise<string | null> {

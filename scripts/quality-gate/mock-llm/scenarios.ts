@@ -6,17 +6,22 @@
  * the failure paths a real provider cannot be made to produce on demand.
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { LiveScenarioRunner } from '../agent-flow/live'
 import { LIVE_AGENT_FLOW_SCENARIOS } from '../agent-flow/liveScenarios'
-import type { RecordedRequest } from './server'
+import { MOCK_IMAGE_PNG_BASE64, type MockLlmServer, type RecordedRequest } from './server'
 import { UPSTREAM_ERROR_TRIGGER } from './scriptedModel'
 
 export type MockAgentScenario = { id: string; title: string }
 
 export const MOCK_ONLY_SCENARIOS: readonly MockAgentScenario[] = [
+  { id: 'mock-session-delegation-review', title: 'Real CLI yields for model allocation and starts a child only after UI confirmation' },
+  {
+    id: 'mock-image-provider-protocols',
+    title: 'Configured image protocols generate and edit real files through the CLI and return their paths to the model',
+  },
   {
     id: 'mock-tool-result-roundtrip',
     title: 'A shell tool runs for real and its output goes back to the model',
@@ -73,8 +78,136 @@ function streamedText(messages: ReadonlyArray<{ type: string; text?: unknown }>)
   return messages.filter((message) => message.type === 'content_delta').map((message) => String(message.text ?? '')).join('')
 }
 
-export function createMockOnlyRunners(requests: readonly RecordedRequest[]): Record<string, LiveScenarioRunner> {
+export function createMockOnlyRunners(
+  requests: readonly RecordedRequest[],
+  imageRequests: MockLlmServer['imageRequests'] = [],
+): Record<string, LiveScenarioRunner> {
   return {
+    async 'mock-session-delegation-review'(ctx) {
+      const sessionId = await ctx.createSession()
+      const socket = await ctx.openSocket(sessionId)
+      const base = `${ctx.baseUrl}/api/session-collaboration/${sessionId}`
+      const read = async () => {
+        const response = await fetch(`${base}/delegation`)
+        if (!response.ok) throw new Error(`delegation snapshot failed: ${response.status}`)
+        return await response.json() as any
+      }
+      try {
+        ctx.pinRuntime(socket)
+        const start = socket.messages.length
+        socket.send({ type: 'user_message', content: 'MOCK_SESSION_DELEGATION' })
+        await socket.waitFor(message => message.type === 'message_complete', ctx.stepTimeoutMs, 'delegation review yield', start)
+        const snapshot = await read()
+        const batch = snapshot.batches.find((item: any) => item.requestId === 'mock-delegation')
+        if (!batch || batch.state !== 'review' || batch.sessions.some((item: any) => item.sessionId)) throw new Error('The CLI must yield with a review card before any child exists')
+        const response = await fetch(`${base}/batches/${encodeURIComponent(batch.id)}/confirm`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision: batch.revision }),
+        })
+        const accepted = await response.json() as any
+        if (!response.ok || !['launching', 'launched'].includes(accepted.state)) throw new Error(`confirm was not accepted: ${JSON.stringify(accepted)}`)
+        // The UI request answers once the batch is launching; the child starts after it.
+        const deadline = Date.now() + ctx.stepTimeoutMs
+        let launched = accepted
+        while (launched.state !== 'launched' && launched.state !== 'failed' && Date.now() < deadline) {
+          await Bun.sleep(100)
+          launched = (await read()).batches.find((item: any) => item.id === batch.id) ?? launched
+        }
+        if (launched.state !== 'launched' || !launched.sessions[0]?.sessionId) throw new Error(`confirm did not launch the child: ${JSON.stringify(launched)}`)
+        const runtime = launched.sessions[0].runtime
+        if (runtime.providerId !== ctx.target.providerId || runtime.modelId !== ctx.target.modelId) throw new Error('Child runtime did not preserve the selected provider and model')
+        await fetch(`${base}/stop`, { method: 'POST' })
+        const explicitId = await ctx.createSession()
+        const explicitSocket = await ctx.openSocket(explicitId)
+        try {
+          ctx.pinRuntime(explicitSocket)
+          explicitSocket.send({ type: 'user_message', content: `MOCK_SESSION_EXPLICIT ${JSON.stringify({ providerId: ctx.target.providerId, modelId: ctx.target.modelId })}` })
+          await explicitSocket.waitFor(message => message.type === 'message_complete', ctx.stepTimeoutMs, 'explicit delegation completion')
+          const explicitResponse = await fetch(`${ctx.baseUrl}/api/session-collaboration/${explicitId}/delegation`)
+          const explicitSnapshot = await explicitResponse.json() as any
+          const explicitBatch = explicitSnapshot.batches.find((item: any) => item.requestId === 'mock-explicit')
+          if (explicitBatch?.state !== 'launched' || !explicitBatch.sessions[0]?.sessionId) throw new Error(`An exact human assignment should launch automatically: ${JSON.stringify(explicitSnapshot.batches)}`)
+          await fetch(`${ctx.baseUrl}/api/session-collaboration/${explicitId}/stop`, { method: 'POST' })
+        } finally { explicitSocket.close() }
+      } finally { socket.close() }
+    },
+    async 'mock-image-provider-protocols'(ctx) {
+      const providerUrl = `${ctx.baseUrl}/api/providers/${ctx.target.providerId}`
+      const originalResponse = await fetch(providerUrl)
+      if (!originalResponse.ok) throw new Error(`reading the original image provider failed: ${originalResponse.status}`)
+      const { provider: original } = await originalResponse.json() as {
+        provider: { baseUrl: string; imageGeneration?: Record<string, unknown> }
+      }
+      const updateProvider = async (body: Record<string, unknown>) => {
+        const response = await fetch(providerUrl, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+        if (!response.ok) throw new Error(`updating the image provider failed: ${response.status}`)
+      }
+      try {
+        for (const { protocol, model, resolution } of [
+          { protocol: 'openai_images', model: 'mock-image', resolution: '2k' },
+          { protocol: 'gemini_native', model: 'mock-image', resolution: '2k' },
+          { protocol: 'gemini_native', model: 'gemini-3.1-flash-lite-image', resolution: '1k' },
+          { protocol: 'xai_images', model: 'mock-image', resolution: '2k' },
+        ]) {
+          await updateProvider({
+            baseUrl: protocol === 'gemini_native'
+              ? `${ctx.target.host.replace(/\/+$/, '')}/v1beta/openai/`
+              : original.baseUrl,
+            imageGeneration: { protocol, model, baseUrl: '', apiKey: 'mock-image-key' },
+          })
+          const socket = await ctx.openSocket(await ctx.createSession())
+          try {
+            ctx.pinRuntime(socket)
+            let source: string | undefined
+            for (const edit of [false, true]) {
+              const start = socket.messages.length
+              const upstreamStart = requests.length
+              const imageStart = imageRequests.length
+              socket.send({ type: 'user_message', content: edit ? `MOCK_IMAGE_EDIT ${JSON.stringify(source)}` : 'MOCK_IMAGE_GENERATE' })
+              await socket.waitFor(m => m.type === 'message_complete', ctx.stepTimeoutMs, 'image turn completion', start)
+              const results = toolResultsSentUpstream(requests, upstreamStart)
+              const result = results.map(block => {
+                try { return JSON.parse(contentText(block.content)) } catch { return null }
+              }).find(value => value?.type === 'image_generation_result')
+              if (!result) throw new Error(`${protocol} ${edit ? 'edit' : 'generate'} returned no image artifact to the model: ${JSON.stringify(results)}`)
+              if (result.model !== model) throw new Error('the configured image model was not preserved')
+              const image = result.images?.[0]
+              if (!image?.path || image.mimeType !== 'image/png' || !existsSync(image.path)) throw new Error('image artifact is missing or has the wrong MIME')
+              if (!readFileSync(image.path).equals(Buffer.from(MOCK_IMAGE_PNG_BASE64, 'base64'))) throw new Error('saved image bytes differ from the fixture')
+              if (result.operation !== (edit ? 'edit' : 'generate') || result.inputImageCount !== (edit ? 1 : 0)) throw new Error('image edit inputs were not preserved')
+              if (imageRequests.length !== imageStart + 1) throw new Error('image generation was retried or never reached the configured endpoint')
+              const imageRequest = imageRequests[imageStart]!
+              const expectedPath = protocol === 'gemini_native'
+                ? `/v1beta/models/${model}:generateContent`
+                : `/v1/images/${edit ? 'edits' : 'generations'}`
+              if (imageRequest.path !== expectedPath) throw new Error(`image request used the wrong protocol endpoint: ${imageRequest.path}`)
+              if (protocol === 'gemini_native') {
+                if (!requests.slice(upstreamStart).some(request => request.path === '/v1beta/openai/v1/messages')) throw new Error('the Gemini image provider did not inherit the configured chat base URL')
+                const body = imageRequest.body as {
+                  generationConfig?: { imageConfig?: { aspectRatio?: string; imageSize?: string } }
+                  contents?: Array<{ parts?: Array<{ inlineData?: { data?: string } }> }>
+                }
+                if (body.generationConfig?.imageConfig?.aspectRatio !== '4:5') throw new Error('the Gemini-only ratio did not reach the native image request')
+                if (body.generationConfig?.imageConfig?.imageSize !== resolution.toUpperCase()) throw new Error('the supported Gemini resolution did not reach the native image request')
+                if (edit && body.contents?.[0]?.parts?.[1]?.inlineData?.data !== MOCK_IMAGE_PNG_BASE64) throw new Error('the generated image bytes did not reach the native edit request')
+              } else {
+                const ratioOrSize = protocol === 'xai_images' ? imageRequest.body.aspect_ratio : imageRequest.body.size
+                if (ratioOrSize !== (protocol === 'xai_images' ? '16:9' : '1536x1024')) throw new Error('the ordinary image protocol did not preserve its 16:9 ratio')
+                if (protocol === 'xai_images' && imageRequest.body.resolution !== resolution) throw new Error('the xAI image protocol did not preserve its resolution')
+              }
+              if (!streamedText(socket.messages.slice(start)).includes(image.path)) throw new Error('image path never reached the client')
+              source = image.path
+            }
+          } finally {
+            socket.close()
+          }
+        }
+      } finally {
+        await updateProvider({ baseUrl: original.baseUrl, imageGeneration: original.imageGeneration ?? null })
+      }
+    },
     async 'mock-tool-result-roundtrip'(ctx) {
       const nonce = `nonce-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
       const socket = await ctx.openSocket(await ctx.createSession())

@@ -13,7 +13,8 @@ import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
 import { teamTaskWindowsForSnapshot, useTeamStore } from '../../stores/teamStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useChatAppearanceStore } from '../../stores/chatAppearanceStore'
-import { useTranslation } from '../../i18n'
+import { t as translateNow, useTranslation } from '../../i18n'
+import { prefersSelectionMenuAbove } from '../../stores/selectionMenuPlacementStore'
 import type { TranslationKey } from '../../i18n/locales/en'
 import { UserMessage } from './UserMessage'
 import { AssistantMessage } from './AssistantMessage'
@@ -181,6 +182,9 @@ function getChatSelectionPosition(
     offset: CHAT_SELECTION_MENU_OFFSET,
     fallbackPointer: pointer,
     selectionFocus: { node: selection.focusNode, offset: selection.focusOffset },
+    // Read from the store: the settled-selection listener that calls this is not
+    // a render, so there is no hook to subscribe with.
+    preferAbove: prefersSelectionMenuAbove(),
   })
 }
 
@@ -231,7 +235,7 @@ function ChatSelectionMenu({
 }: {
   selection: ChatSelectionState | null
   onAdd: () => void
-  onSideChat: () => void
+  onSideChat?: () => void
   popoverRef: { current: HTMLDivElement | null }
 }) {
   const t = useTranslation()
@@ -242,7 +246,7 @@ function ChatSelectionMenu({
       className="fixed z-[var(--z-popover)] inline-flex max-w-[calc(100vw-24px)] items-center rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-1 shadow-[var(--shadow-overlay)]"
       style={{ left: selection.x, top: selection.y }}>
       <Button variant="ghost" onClick={onAdd}>{t('chat.addSelectionToChat')}</Button>
-      <Button variant="ghost" onClick={onSideChat}>{t('chat.askSelectionInSideChat')}</Button>
+      {onSideChat && <Button variant="ghost" onClick={onSideChat}>{t('chat.askSelectionInSideChat')}</Button>}
     </div>, document.body,
   )
 }
@@ -545,6 +549,7 @@ function SelectableChatMessage({
   content: string
   children: ReactNode
 }) {
+  const isLean = useSessionStore(state => state.sessions.some(session => session.id === sessionId && session.agentProfile === 'lean'))
   const rootRef = useRef<HTMLDivElement>(null)
   const selectionMenuRef = useRef<HTMLDivElement>(null)
   const lastSelectionPointerRef = useRef<SelectionPointer | null>(null)
@@ -553,7 +558,8 @@ function SelectableChatMessage({
   const selectionUpdateAuthorizedRef = useRef(false)
   const selectionUpdateFrameRef = useRef<number | null>(null)
   const addReference = useWorkspaceChatContextStore((state) => state.addReference)
-  const [selectionMenu, setSelectionMenu] = useState<ChatSelectionState | null>(null)
+  const [selectionMenu, setSelectionMenu] = useState<(ChatSelectionState & { sessionId: string }) | null>(null)
+  const currentSelectionMenu = selectionMenu?.sessionId === sessionId ? selectionMenu : null
   const t = useTranslation()
   const sourceName = role === 'assistant'
     ? t('chat.assistantMessageReference')
@@ -567,13 +573,15 @@ function SelectableChatMessage({
     }
   }, [])
 
-  useEffect(() => {
+  // A transcript entry can have the same id and content in multiple sessions.
+  // Invalidate its gesture before another frame can commit into the new session.
+  useLayoutEffect(() => {
     cancelPendingSelectionMenuUpdate()
     setSelectionMenu(null)
     lastSelectionPointerRef.current = null
     selectionStartedInsideRef.current = false
     selectionUpdateAuthorizedRef.current = false
-  }, [cancelPendingSelectionMenuUpdate, content, messageId])
+  }, [cancelPendingSelectionMenuUpdate, content, messageId, sessionId])
 
   const dismissSelectionMenu = useCallback(() => {
     setSelectionMenu(null)
@@ -602,10 +610,11 @@ function SelectableChatMessage({
           clientX: (rootRect?.left ?? 0) + 24,
           clientY: (rootRect?.top ?? 0) + 24,
         }
-        setSelectionMenu(getChatSelectionFromContainer(root, fallbackPointer))
+        const selection = getChatSelectionFromContainer(root, fallbackPointer)
+        setSelectionMenu(selection && sessionId ? { ...selection, sessionId } : null)
       })
     })
-  }, [])
+  }, [sessionId])
 
   useEffect(() => {
     return () => {
@@ -671,34 +680,34 @@ function SelectableChatMessage({
   }, [cancelPendingSelectionMenuUpdate, queueSelectionMenuUpdate])
 
   useSelectionPopoverDismiss({
-    active: Boolean(selectionMenu),
+    active: Boolean(currentSelectionMenu),
     popoverRef: selectionMenuRef,
     onDismiss: dismissSelectionMenu,
   })
 
   const addCurrentSelectionToChat = useCallback(() => {
-    if (!sessionId || !selectionMenu) return
+    if (!sessionId || !currentSelectionMenu) return
     addReference(sessionId, {
       kind: 'chat-selection',
       path: `chat://${role}/${messageId}`,
       name: sourceName,
-      quote: selectionMenu.text,
+      quote: currentSelectionMenu.text,
       sourceRole: role,
       messageId,
     })
     setSelectionMenu(null)
     clearWindowSelection()
-  }, [addReference, messageId, role, selectionMenu, sessionId, sourceName])
+  }, [addReference, messageId, role, currentSelectionMenu, sessionId, sourceName])
 
   const askSelectionInSideChat = useCallback(() => {
-    if (!sessionId || !selectionMenu) return
+    if (!sessionId || !currentSelectionMenu) return
     void openSideChat(sessionId, { reference: {
       kind: 'chat-selection', path: `chat://${role}/${messageId}`,
-      name: sourceName, quote: selectionMenu.text, sourceRole: role, messageId,
+      name: sourceName, quote: currentSelectionMenu.text, sourceRole: role, messageId,
     } })
     setSelectionMenu(null)
     clearWindowSelection()
-  }, [messageId, role, selectionMenu, sessionId, sourceName])
+  }, [messageId, role, currentSelectionMenu, sessionId, sourceName])
 
   return (
     <div
@@ -709,7 +718,7 @@ function SelectableChatMessage({
       }}
     >
       {children}
-      <ChatSelectionMenu selection={selectionMenu} onAdd={addCurrentSelectionToChat} onSideChat={askSelectionInSideChat} popoverRef={selectionMenuRef} />
+      <ChatSelectionMenu selection={currentSelectionMenu} onAdd={addCurrentSelectionToChat} onSideChat={isLean ? undefined : askSelectionInSideChat} popoverRef={selectionMenuRef} />
     </div>
   )
 }
@@ -834,7 +843,7 @@ function teamNameFromCreate(toolCall: ToolCall, result: ToolResult | undefined):
   for (const value of [nestedStringField(result?.content, 'team_name'), input?.team_name]) {
     if (typeof value === 'string' && value.trim()) return value.trim()
   }
-  return 'Agent Teams'
+  return translateNow('agentTeams.name')
 }
 
 function isExplicitTeamAgent(
@@ -2511,7 +2520,8 @@ export function MessageList({
     Boolean(activeThinkingId) ||
     Boolean(sessionState?.activeToolUseId) ||
     Boolean(sessionState?.activeToolName)
-  const branchActionsDisabled = isDirectAgentSession || turnInProgress || hasRunningBackgroundTasks
+  const isLean = useSessionStore(state => state.sessions.some(session => session.id === resolvedSessionId && session.agentProfile === 'lean'))
+  const branchActionsDisabled = isLean || isDirectAgentSession || turnInProgress || hasRunningBackgroundTasks
   const hasCompactingDivider = messages.some((message) =>
     message.type === 'compact_summary' && message.phase === 'compacting')
 
@@ -3120,21 +3130,25 @@ export function MessageList({
     !mobileLayout &&
     !isTouchH5Document() &&
     conversationNavigationItems.length >= CONVERSATION_NAVIGATION_MIN_ITEMS
-  const chatScrollPaddingClass = compact
-    ? showConversationNavigator && conversationNavigationMode === 'full'
-      ? 'pb-5 px-20 py-3'
-      : showConversationNavigator && conversationNavigationMode === 'compact'
-        ? 'pb-5 px-12 py-3'
-        : showConversationNavigator && conversationNavigationMode === 'edge'
-          ? 'pb-5 px-7 py-3'
-          : 'px-3 py-3 pb-5'
-    : showConversationNavigator && conversationNavigationMode === 'full'
-      ? 'px-20 py-4'
-      : showConversationNavigator && conversationNavigationMode === 'compact'
-        ? 'px-12 py-4'
-        : showConversationNavigator && conversationNavigationMode === 'edge'
-          ? 'px-7 py-4'
-          : 'px-4 py-4'
+  // Match the composer/header gutters when no navigation rail is present.
+  // The navigator deliberately reserves extra room outside the reading column.
+  const chatScrollPaddingClass = mobileLayout
+    ? 'px-3 py-4'
+    : compact
+      ? showConversationNavigator && conversationNavigationMode === 'full'
+        ? 'pb-5 px-20 py-3'
+        : showConversationNavigator && conversationNavigationMode === 'compact'
+          ? 'pb-5 px-12 py-3'
+          : showConversationNavigator && conversationNavigationMode === 'edge'
+            ? 'pb-5 px-7 py-3'
+            : 'px-4 py-3 pb-5'
+      : showConversationNavigator && conversationNavigationMode === 'full'
+        ? 'px-20 py-4'
+        : showConversationNavigator && conversationNavigationMode === 'compact'
+          ? 'px-12 py-4'
+          : showConversationNavigator && conversationNavigationMode === 'edge'
+            ? 'px-7 py-4'
+            : 'px-6 py-4'
   const confirmTurnCard = useMemo(
     () => visibleTurnChangeCards.find((card) => card.target.messageId === turnUndoConfirmTargetId) ?? null,
     [turnUndoConfirmTargetId, visibleTurnChangeCards],
@@ -4114,6 +4128,7 @@ export const MessageBlock = memo(function MessageBlock({
         >
           <UserMessage
             content={message.content}
+            modelContent={message.modelContent}
             attachments={message.attachments}
             sessionReferences={message.sessionReferences}
             collaboration={message.collaboration}

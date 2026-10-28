@@ -12,6 +12,19 @@ import { resolveUpstreamHeaders } from '../proxy/upstreamHeaders.js'
 let tmpDir: string
 let originalConfigDir: string | undefined
 
+test.each(['gemini_native', 'xai_images'] as const)('keeps a preset image protocol %s through runtime configuration', protocol => {
+  const preset = ProviderPresetSchema.parse({
+    ...PROVIDER_PRESETS.find(p => p.id === 'apismart')!,
+    id: 'native-image-fixture', defaultImageGeneration: { model: 'fixture-image-alias', protocol },
+  })
+  const env = buildProviderManagedEnv({
+    id: 'fixture', name: 'Fixture', presetId: preset.id, apiKey: 'fake-key',
+    baseUrl: preset.baseUrl, apiFormat: preset.apiFormat, models: preset.defaultModels,
+    imageGeneration: preset.defaultImageGeneration,
+  })
+  expect(env.CC_HAHA_IMAGE_PROTOCOL).toBe(protocol)
+})
+
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'provider-presets-test-'))
   originalConfigDir = process.env.CLAUDE_CONFIG_DIR
@@ -58,7 +71,7 @@ describe('provider presets API', () => {
       apiFormat: 'anthropic',
       authStrategy: 'api_key',
       needsApiKey: true,
-      defaultModels: { main: 'claude-opus-5', haiku: 'claude-sonnet-5', sonnet: 'claude-sonnet-5', opus: 'claude-opus-5' },
+      defaultModels: { main: 'claude-opus-5-5', haiku: 'claude-sonnet-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
     })
     expect(aruhub.featured).toBeUndefined()
     expect(aruhub.isNew).toBeUndefined()
@@ -71,17 +84,75 @@ describe('provider presets API', () => {
       authStrategy: preset.authStrategy, apiKey: 'fake-aruhub-key',
       models: preset.defaultModels,
     })).toMatchObject({
-      ANTHROPIC_MODEL: 'claude-opus-5',
-      ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-5',
-      ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-5',
-      // This gateway has no Haiku; use its supported Sonnet for background work.
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-sonnet-5',
+      ANTHROPIC_MODEL: 'claude-opus-5-5',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-5-5',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-5-5',
+      // AruHub's public catalog lists no Haiku; keep Sonnet for background work.
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-sonnet-5-5',
+    })
+  })
+
+  // Fork de-advertising policy: Modelflare joins as a working preset without
+  // the sponsor badge (no featured/isNew), matching the desktop bundle test.
+  test('exposes Modelflare as a selectable preset with no sponsor metadata and Claude 5.5 defaults', async () => {
+    const { req, url, segments } = makeRequest('GET', '/api/providers/presets')
+    const response = await handleProvidersApi(req, url, segments)
+    expect(response.status).toBe(200)
+    const { presets } = await response.json()
+    const modelflare = presets.find((preset: { id: string }) => preset.id === 'modelflare')
+    expect(modelflare).toMatchObject({
+      id: 'modelflare',
+      name: 'Modelflare',
+      baseUrl: 'https://modelflare.dev',
+      apiFormat: 'anthropic',
+      authStrategy: 'auth_token',
+      apiKeyUrl: 'https://modelflare.dev/sign-up?utm_source=github&utm_campaign=cchaha',
+      needsApiKey: true,
+      defaultModels: {
+        main: 'claude-opus-5-5',
+        haiku: 'claude-haiku-5-5',
+        sonnet: 'claude-sonnet-5-5',
+        opus: 'claude-opus-5-5',
+      },
+      modelContextWindows: {
+        'claude-opus-5-5': 1000000,
+        'claude-sonnet-5-5': 1000000,
+        'claude-haiku-5-5': 1000000,
+      },
+    })
+    expect(modelflare.featured).toBeUndefined()
+    expect(modelflare.isNew).toBeUndefined()
+    expect(presets.filter((preset: { featured?: boolean }) => preset.featured)).toEqual([])
+
+    const preset = PROVIDER_PRESETS.find((candidate) => candidate.id === 'modelflare')!
+    const env = buildProviderManagedEnv({
+      id: 'modelflare-test', presetId: preset.id, name: preset.name,
+      baseUrl: preset.baseUrl, apiFormat: preset.apiFormat,
+      authStrategy: preset.authStrategy, apiKey: 'fake-modelflare-key',
+      models: preset.defaultModels,
+    })
+    expect(env).toMatchObject({
+      ANTHROPIC_BASE_URL: 'https://modelflare.dev',
+      ANTHROPIC_AUTH_TOKEN: 'fake-modelflare-key',
+      ANTHROPIC_MODEL: 'claude-opus-5-5',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-5-5',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-5-5',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-5-5',
+    })
+    // Token-only providers clear an inherited x-api-key credential explicitly.
+    expect(env.ANTHROPIC_API_KEY).toBe('')
+    expect(JSON.parse(env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS!)).toMatchObject({
+      'claude-opus-5-5': 1000000,
+      'claude-sonnet-5-5': 1000000,
+      'claude-haiku-5-5': 1000000,
     })
   })
 
   // ApiSmart /v1/models and live calls verified these exact IDs on 2026-09-09.
   // The unsuffixed names in its docs return 503 provider_not_available.
-  test('exposes ApiSmart with its live-verified Chat Completions defaults and sponsor link', async () => {
+  // Fork policy: this working relay stays selectable (no upstream tombstone);
+  // only its sponsor badge is stripped.
+  test('keeps ApiSmart selectable with its live-verified Chat Completions defaults and no sponsor metadata', async () => {
     const { req, url, segments } = makeRequest('GET', '/api/providers/presets')
     const response = await handleProvidersApi(req, url, segments)
     const { presets } = await response.json()
@@ -98,9 +169,12 @@ describe('provider presets API', () => {
         sonnet: 'deepseek-v4-pro-0813',
         opus: 'deepseek-v4-pro-0813',
       },
-      apiKeyUrl: 'https://www.apismart.ai',
       websiteUrl: 'https://www.apismart.ai',
     })
+    const apismart = presets.find((preset: { id: string }) => preset.id === 'apismart')
+    expect(apismart.featured).toBeUndefined()
+    expect(apismart.promoText).toBeUndefined()
+    expect(presets.filter((preset: { featured?: boolean }) => preset.featured)).toEqual([])
   })
 
   test('GET /api/providers/presets returns the configured presets', async () => {
@@ -429,6 +503,8 @@ describe('provider presets API', () => {
       expect(opencodeGo.modelApiFormats).toEqual([
         { prefixes: ['grok-', 'gpt-', 'muse-spark-'], apiFormat: 'openai_responses' },
         { prefixes: ['minimax-', 'qwen', 'union-alpha'], apiFormat: 'anthropic' },
+        // OpenCode Go serves Gemini only over Google generateContent, outside /zen/go/v1.
+        { prefixes: ['gemini-'], apiFormat: 'gemini', baseUrl: '/inference/go/google/v1beta' },
       ])
       // Everything else must fall through to the provider format rather than being
       // pinned by a rule, so the default only advertises what was verified.

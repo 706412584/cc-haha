@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  createAssistantAPIErrorMessage,
   createAssistantMessage,
   createUserInterruptionMessage,
   createUserMessage,
@@ -8,6 +9,7 @@ import {
 import {
   isEmptyThinkingOnlyAssistantMessage,
   isResultSuccessful,
+  normalizeMessage,
 } from './queryHelpers.js'
 
 describe('query result classification', () => {
@@ -92,5 +94,32 @@ describe('isEmptyThinkingOnlyAssistantMessage', () => {
 
     expect(isEmptyThinkingOnlyAssistantMessage(withText)).toBe(false)
     expect(isEmptyThinkingOnlyAssistantMessage(withTool)).toBe(false)
+  })
+})
+
+describe('normalizeMessage', () => {
+  // The desktop server localizes synthetic errors by the code on the SDK
+  // assistant frame; dropping it here left them in English (#1544).
+  test('keeps the business error code on synthetic API errors', () => {
+    const [frame] = [...normalizeMessage(createAssistantAPIErrorMessage({
+      content: 'Auto-compact is thrashing',
+      error: 'invalid_request',
+      businessErrorCode: 'autocompact_thrashing',
+    }))]
+
+    expect(frame).toMatchObject({
+      type: 'assistant',
+      error: 'invalid_request',
+      businessErrorCode: 'autocompact_thrashing',
+    })
+  })
+
+  test('does not add a code to ordinary API errors', () => {
+    const [frame] = [...normalizeMessage(createAssistantAPIErrorMessage({
+      content: 'upstream failed',
+      error: 'unknown',
+    }))]
+
+    expect(frame).not.toHaveProperty('businessErrorCode')
   })
 })

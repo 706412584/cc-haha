@@ -1,9 +1,11 @@
+import { isLeanCompatibleSkill } from '../../utils/agentProfile.js'
 import type { Command } from '../../types/command.js'
 import type { LoadedPlugin } from '../../types/plugin.js'
 import type { CapabilityMentionCandidate, CapabilityMentionResponse } from '../../types/composerMention.js'
 
 type Brand = { pluginId: string, id: string, displayName?: string, description?: string }
 export type CapabilityMentionSnapshot = {
+  agentProfile?: 'lean'
   commands: Command[]
   enabledPlugins: LoadedPlugin[]
   failedPluginIds?: string[]
@@ -30,6 +32,9 @@ export function buildCapabilityMentions(snapshot: CapabilityMentionSnapshot): Ca
     if (command.source === 'plugin' && (!pluginId || !enabled.has(pluginId))) continue
     // Match SkillTool discovery, including described plugin prompt commands.
     if (!['bundled', 'skills', 'commands_DEPRECATED'].includes(command.loadedFrom ?? '') && !command.hasUserSpecifiedDescription && !command.whenToUse) continue
+    // Lean SkillTool drops incompatible commands before resolving a name, so
+    // one must not claim the name of a compatible command listed after it.
+    if (snapshot.agentProfile === 'lean' && !isLeanCompatibleSkill(command)) continue
     if (!command.name || names.has(command.name)) continue
     names.add(command.name)
     const source = pluginId ?? command.source
@@ -43,7 +48,7 @@ export function buildCapabilityMentions(snapshot: CapabilityMentionSnapshot): Ca
       modelText: `Use the Skill tool with skill: ${JSON.stringify(command.name)} for this request.` })
   }
   const plugins: CapabilityMentionCandidate[] = []
-  for (const plugin of enabled.values()) {
+  for (const plugin of snapshot.agentProfile === 'lean' ? [] : enabled.values()) {
     const skillNames = skills.filter(skill => skill.source === plugin.source).map(skill => skill.name)
     const mcpServerNames = Object.keys(plugin.mcpServers ?? {}).map(name => `plugin:${plugin.name}:${name}`)
     // Hooks, LSP settings and marketplace availability alone are not a callable capability.
@@ -81,7 +86,7 @@ export async function resolveMentionRuntimeEnv(providerId?: string): Promise<Rec
 }
 
 /** Cache-only local discovery: never installs packages, connects MCP, or logs in. */
-export async function listCapabilityMentions(cwd: string, options: { providerId?: string } = {}): Promise<CapabilityMentionResponse> {
+export async function listCapabilityMentions(cwd: string, options: { providerId?: string; agentProfile?: 'lean' } = {}): Promise<CapabilityMentionResponse> {
   const [local, plugins, { loadInstalledPluginsForProject }, { loadPluginMcpServers }, { ALL_CONNECTORS }, { resetSettingsCache }, { clearInstalledPluginsCache }, { getInitializedBundledSkills }, { IMAGEGEN_SKILL_NAME, isImagegenAvailable }, runtimeEnv] = await Promise.all([
     import('../../skills/loadSkillsDir.js'), import('../../utils/plugins/loadPluginCommands.js'),
     import('../../utils/plugins/pluginLoader.js'), import('../../utils/plugins/mcpPluginIntegration.js'), import('../../services/connectors/catalog.js'),
@@ -113,5 +118,5 @@ export async function listCapabilityMentions(cwd: string, options: { providerId?
   const isEnabled = (command: Command) => command.source === 'bundled' && command.name === IMAGEGEN_SKILL_NAME
     ? isImagegenAvailable(runtimeEnv)
     : command.isEnabled?.() !== false
-  return buildCapabilityMentions({ commands, enabledPlugins, failedPluginIds: state.errors.map(error => error.source), brands: ALL_CONNECTORS, isEnabled })
+  return buildCapabilityMentions({ agentProfile: options.agentProfile, commands, enabledPlugins, failedPluginIds: state.errors.map(error => error.source), brands: ALL_CONNECTORS, isEnabled })
 }

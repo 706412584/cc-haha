@@ -3,6 +3,12 @@ import * as fs from 'node:fs/promises'
 import { createServer } from 'node:net'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import {
+  getCwdState,
+  getOriginalCwd,
+  setCwdState,
+  setOriginalCwd,
+} from '../../bootstrap/state.js'
 import { startServer, stopServerRuntimeForShutdown } from '../index.js'
 import {
   clearFilesystemAccessRootsForTests,
@@ -33,6 +39,8 @@ let lanReachable = false
 let originalTrustedRendererOrigin: string | undefined
 let originalPetAccessToken: string | undefined
 let originalServerPort = 3456
+let originalCwdState = ''
+let originalOriginalCwd = ''
 const PHONE_ORIGIN = 'https://phone.example'
 const TUNNEL_ORIGIN = 'https://abcd-1234.ngrok-free.app'
 const SERVER_STOP_WAIT_MS = 500
@@ -256,8 +264,12 @@ const settingsSurfaceEndpoints = [
 
 beforeEach(async () => {
   clearFilesystemAccessRootsForTests()
-  registerFilesystemAccessRoot(process.cwd())
+  originalCwdState = getCwdState()
+  originalOriginalCwd = getOriginalCwd()
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'h5-access-auth-test-'))
+  setOriginalCwd(tmpDir)
+  setCwdState(tmpDir)
+  registerFilesystemAccessRoot(process.cwd())
   originalConfigDir = process.env.CLAUDE_CONFIG_DIR
   originalAnthropicApiKey = process.env.ANTHROPIC_API_KEY
   originalH5DistDir = process.env.CLAUDE_H5_DIST_DIR
@@ -292,6 +304,8 @@ afterEach(async () => {
   clearFilesystemAccessRootsForTests()
   resetRuntimeTunnelState()
   ProviderService.setServerPort(originalServerPort)
+  setOriginalCwd(originalOriginalCwd)
+  setCwdState(originalCwdState)
 
   if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
   else process.env.CLAUDE_CONFIG_DIR = originalConfigDir

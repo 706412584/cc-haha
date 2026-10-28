@@ -131,6 +131,7 @@ async function runCommand(
       stdout: 'pipe',
       stderr: 'pipe',
       env: getPythonCommandEnv(),
+      windowsHide: true,
     })
     const [stdout, stderr] = await Promise.all([
       new Response(proc.stdout).text(),

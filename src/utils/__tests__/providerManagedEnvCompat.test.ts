@@ -54,4 +54,9 @@ describe('provider managed env compatibility', () => {
   test('treats the thinking compatibility override as provider-managed env', () => {
     expect(isProviderManagedEnvVar('CLAUDE_CODE_DISABLE_THINKING')).toBe(true)
   })
+
+  test('treats image protocol routing as provider-managed env', () => {
+    expect(isProviderManagedEnvVar('CC_HAHA_IMAGE_PROTOCOL')).toBe(true)
+    expect(isProviderManagedEnvVar('cc_haha_image_protocol')).toBe(true)
+  })
 })

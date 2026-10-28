@@ -1,3 +1,4 @@
+import { useUIStore } from '@/stores/uiStore'
 import { getComposerViewForTesting } from './MentionComposer'
 import { useTeamPlanStore } from '@/stores/teamPlanStore'
 import { useTeamStore } from '@/stores/teamStore'
@@ -9,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom'
 import { withAgentTeamRequest } from '@/lib/agentTeamRequest'
 import { COMPUTER_USE_ENABLE_REQUEST } from '@/lib/computerUseEnable'
+import { AGENT_TEAMS_NOTICE_STORAGE_KEY, dismissAgentTeamsNotice } from '@/lib/agentTeamsNotice'
 import { readRecentSkills, RECENT_SKILLS_STORAGE_KEY } from '@/lib/recentSkills'
 import { act, StrictMode } from 'react'
 
@@ -161,7 +163,7 @@ vi.mock('../controls/ModelSelector', async () => {
 import { ChatInput } from './ChatInput'
 import { getComposerElement, getComposerText, getComposerView, setComposerSelection, setComposerText } from './composerTestUtils'
 import { useVoiceInputStore } from '../../stores/voiceInputStore'
-import { useChatStore } from '../../stores/chatStore'
+import { useChatStore, type RepositoryLaunchDraftState } from '../../stores/chatStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -172,6 +174,8 @@ import { workflowsApi } from '../../api/workflows'
 import { computerUseApi } from '../../api/computerUse'
 import { browserHost } from '../../lib/desktopHost/browserHost'
 import { settingsApi } from '../../api/settings'
+import { useCapabilityCatalogStore } from '../../stores/capabilityCatalogStore'
+import type { SlashCommandOption } from '../../types/slashCommand'
 import {
   captureProjectDisplayNameHydrationRevision,
   hydrateProjectDisplayNames,
@@ -260,6 +264,7 @@ describe('ChatInput file mentions', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     localStorage.removeItem(RECENT_SKILLS_STORAGE_KEY)
+    localStorage.removeItem(AGENT_TEAMS_NOTICE_STORAGE_KEY)
     useSideChatStore.setState({ entries: {} })
     useTeamPlanStore.setState({ bySession: {} })
     useTeamStore.setState({ workbenchesBySession: {} })
@@ -601,7 +606,7 @@ describe('ChatInput file mentions', () => {
     expect(getComposerText()).toBe('keep this draft')
   })
 
-  it('keeps the unsent draft when switching project on an empty active session', async () => {
+  it.each(['standard', 'lean'] as const)('keeps the unsent draft and %s profile when switching project on an empty active session', async (agentProfile) => {
     installElectronFileHost()
     mocks.dialogOpen.mockResolvedValueOnce('/other')
     mocks.create.mockResolvedValueOnce({ sessionId: 'session-project-switch', workDir: '/other' })
@@ -614,6 +619,7 @@ describe('ChatInput file mentions', () => {
     useSessionStore.setState({
       sessions: [{
         id: sessionId,
+        agentProfile,
         title: 'Project',
         createdAt: '2026-05-01T00:00:00.000Z',
         modifiedAt: '2026-05-01T00:00:00.000Z',
@@ -659,7 +665,7 @@ describe('ChatInput file mentions', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Choose a different folder/ }))
 
     await waitFor(() => {
-      expect(mocks.create).toHaveBeenCalledWith({ workDir: '/other' })
+      expect(mocks.create).toHaveBeenCalledWith({ workDir: '/other', ...(agentProfile === 'lean' ? { agentProfile } : {}) })
     })
     await waitFor(() => {
       expect(useTabStore.getState().activeTabId).toBe('session-project-switch')
@@ -808,7 +814,7 @@ describe('ChatInput file mentions', () => {
     expect(parentEditor.textContent).toBe('parent draft')
     expect(mocks.wsSend).not.toHaveBeenCalledWith(sessionId, expect.objectContaining({ type: 'user_message' }))
     expect(container.querySelector('[data-session-id="side-scoped"]')).toBeInTheDocument()
-    expect(mocks.listReferences).toHaveBeenCalledWith('/child', undefined)
+    expect(mocks.listReferences).toHaveBeenCalledWith('/child', undefined, undefined)
   })
 
   it('accepts asynchronous image paste in an explicit child while the global tab stays on its parent', async () => {
@@ -821,6 +827,209 @@ describe('ChatInput file mentions', () => {
     fireEvent.paste(editor, { clipboardData: { files: [], getData: () => '', items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] } })
     await waitFor(() => expect(within(shells[1] as HTMLElement).getByRole('img')).toBeInTheDocument())
     expect(within(shells[0] as HTMLElement).queryByRole('img')).not.toBeInTheDocument()
+  })
+
+  it('requires a permission change before sending a restored lean plan session', () => {
+    useSessionStore.setState(state => ({ sessions: state.sessions.map(session => ({ ...session, agentProfile: 'lean' as const, permissionMode: 'plan' })) }))
+    render(<ChatInput compact />)
+    setComposerText('Fix the calculation', 19)
+    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+    expect(mocks.wsSend).not.toHaveBeenCalledWith(sessionId, expect.objectContaining({ type: 'user_message' }))
+    expect(getComposerText()).toBe('Fix the calculation')
+    expect(useUIStore.getState().toasts.at(-1)?.message).toContain('Choose another permission mode')
+    expect(useSessionStore.getState().sessions[0]?.permissionMode).toBe('plan')
+  })
+
+  it('sends an absolute file path as ordinary input in lean mode', async () => {
+    useSessionStore.setState(state => ({ sessions: state.sessions.map(session => ({ ...session, agentProfile: 'lean' as const })) }))
+    render(<ChatInput compact />)
+    setComposerText('/tmp/cart.js fix the total', 26)
+    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+    await waitFor(() => expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, expect.objectContaining({ type: 'user_message' })))
+  })
+
+  it('restores the immutable lean badge with lean creation disabled and rejects the typed side-chat shortcut', () => {
+    useSettingsStore.setState({ leanModeEnabled: false })
+    useSessionStore.setState(state => ({ sessions: state.sessions.map(session => ({ ...session, agentProfile: 'lean' as const })) }))
+    render(<ChatInput compact />)
+    expect(screen.getByText('Lean')).toHaveAttribute('title', 'Mode is fixed for this conversation. Start a new chat to change it.')
+    expect(mocks.listReferences).toHaveBeenCalledWith('/repo', undefined, 'lean')
+    expect(screen.queryByRole('button', { name: /^Agent mode:/ })).not.toBeInTheDocument()
+    setComposerText('/btw Why this change?', 21)
+    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+    expect(mocks.sideOpen).not.toHaveBeenCalled()
+    expect(mocks.wsSend).not.toHaveBeenCalledWith(sessionId, expect.objectContaining({ type: 'user_message' }))
+    expect(getComposerText()).toBe('/btw Why this change?')
+    expect(useUIStore.getState().toasts.some(toast => toast.message === 'This command is unavailable in lean mode. Start a standard chat to use it.')).toBe(true)
+  })
+
+  // The badge used to read "Lean · experimental" next to its info button. On a
+  // phone that pair squeezed the model beside it down to a single letter
+  // ("e  Low"), so the toolbar now carries the short name on desktop and the
+  // phone moves the mode into the + sheet.
+  it('names the locked lean mode briefly on the toolbar and fully in its explanation', () => {
+    useSessionStore.setState(state => ({ sessions: state.sessions.map(session => ({ ...session, agentProfile: 'lean' as const })) }))
+    render(<ChatInput compact />)
+    expect(screen.queryByText('Lean · experimental')).not.toBeInTheDocument()
+    fireEvent.focus(screen.getByRole('button', { name: 'About lean mode' }))
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Lean · experimental')
+  })
+
+  it('moves the locked lean badge off the phone toolbar into the + sheet, leaving the model its room', async () => {
+    viewportMocks.isMobile = true
+    useSessionStore.setState(state => ({ sessions: state.sessions.map(session => ({ ...session, agentProfile: 'lean' as const })) }))
+    render(<ChatInput />)
+    await waitFor(() => {
+      expect(mocks.getGitInfo).toHaveBeenCalledWith(sessionId)
+    })
+    expect(screen.queryByText('Lean')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'About lean mode' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('agent-profile-control')).not.toBeInTheDocument()
+    expect(screen.getByTestId('model-selector-shell')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open composer tools' }))
+    const row = within(screen.getByTestId('mobile-composer-sheet')).getByRole('button', { name: /^Agent mode/ })
+    expect(row).toHaveTextContent('Lean · experimental')
+    fireEvent.click(row)
+
+    // One sheet at a time, and a locked mode has nothing to choose, only to read.
+    const modeSheet = await screen.findByTestId('agent-profile-sheet')
+    expect(screen.queryByTestId('mobile-composer-sheet')).not.toBeInTheDocument()
+    expect(within(modeSheet).queryByRole('radio')).not.toBeInTheDocument()
+    expect(modeSheet).toHaveTextContent('Mode is fixed for this conversation')
+    expect(modeSheet).toHaveTextContent('Unavailable')
+  })
+
+  // On desktop the badge and info button share the row with the project, branch
+  // and model, and the model's name was the one thing that gave way: a letter or
+  // nothing at the narrowest windows. Real widths are measured in a browser; this
+  // pins the pieces that keep it from coming back.
+  it('lets a lean session toolbar wrap on desktop, the model keeping a floor', () => {
+    stubComposerColumnWidth(640)
+    useSessionStore.setState(state => ({ sessions: state.sessions.map(session => ({ ...session, agentProfile: 'lean' as const })) }))
+    render(<ChatInput compact />)
+    const toolbar = screen.getByTestId('chat-input-toolbar')
+    const trailing = screen.getByTestId('chat-input-toolbar-trailing')
+    const modelSlot = screen.getByTestId('model-selector-shell').parentElement!
+
+    expect(toolbar).toHaveClass('flex-wrap')
+    expect(trailing).toHaveClass('min-w-max', 'flex-1')
+    expect(trailing).not.toHaveClass('min-w-0')
+    expect(modelSlot).toHaveClass('min-w-[128px]', 'max-w-max', 'grow')
+    expect(trailing).toContainElement(modelSlot)
+    expect(trailing).toContainElement(screen.getByTestId('agent-profile-control'))
+  })
+
+  // Everyone else keeps the row they always had: wrapping is for the lean badge.
+  it.each([
+    { label: 'a standard session on desktop', phone: false, lean: false },
+    { label: 'a standard session on a phone', phone: true, lean: false },
+    { label: 'a lean session on a phone, whose badge moved to the + sheet', phone: true, lean: true },
+  ])('leaves the toolbar as it always was for $label', async ({ phone, lean }) => {
+    viewportMocks.isMobile = phone
+    if (!phone) stubComposerColumnWidth(640)
+    if (lean) useSessionStore.setState(state => ({ sessions: state.sessions.map(session => ({ ...session, agentProfile: 'lean' as const })) }))
+    render(<ChatInput compact={!phone} />)
+    await waitFor(() => {
+      expect(mocks.getGitInfo).toHaveBeenCalledWith(sessionId)
+    })
+    const toolbar = screen.getByTestId('chat-input-toolbar')
+    const trailing = screen.getByTestId('chat-input-toolbar-trailing')
+    const model = screen.getByTestId('model-selector-shell')
+
+    expect(toolbar).not.toHaveClass('flex-wrap')
+    expect(toolbar).toHaveClass(phone ? 'gap-1' : 'gap-2')
+    expect(trailing).toHaveClass('min-w-0', 'flex-1')
+    expect(trailing).not.toHaveClass('min-w-max')
+    // No slot around the picker: it is a direct child of the trailing group.
+    expect(model.parentElement).toBe(trailing)
+  })
+
+  it('offers no mode row on a standard phone session', async () => {
+    viewportMocks.isMobile = true
+    render(<ChatInput />)
+    await waitFor(() => {
+      expect(mocks.getGitInfo).toHaveBeenCalledWith(sessionId)
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Open composer tools' }))
+    const sheet = screen.getByTestId('mobile-composer-sheet')
+    expect(within(sheet).getByRole('button', { name: /Execution Permissions/ })).toBeInTheDocument()
+    expect(within(sheet).queryByRole('button', { name: /^Agent mode/ })).not.toBeInTheDocument()
+  })
+
+  describe('lean slash commands', () => {
+    const leanUnavailable = 'This command is unavailable in lean mode. Start a standard chat to use it.'
+    // `.claude/commands/foo.md` as the server lists it for a lean session: a
+    // sourceless command that already passed the lean runtime rule.
+    const legacyCommand = { name: 'foo', description: 'Project legacy command', argumentHint: '<topic>', kind: 'command' as const }
+    const openLeanSession = (slashCommands: SlashCommandOption[]) => {
+      useUIStore.setState({ toasts: [] })
+      useSessionStore.setState(state => ({ sessions: state.sessions.map(session => ({ ...session, agentProfile: 'lean' as const })) }))
+      useChatStore.setState({ sessions: { [sessionId]: { ...useChatStore.getState().sessions[sessionId]!, slashCommands } } })
+    }
+
+    it('offers and sends a legacy custom command the lean session list includes', async () => {
+      openLeanSession([legacyCommand])
+      // The lean mention list carries the same file as a skill identity.
+      mocks.listReferences.mockResolvedValue({ plugins: [], skills: [{ kind: 'skill', id: 'foo', name: 'foo', displayName: 'foo', description: 'Project legacy command', source: 'projectSettings', modelText: 'Use the Skill tool with skill: "foo" for this request.' }] })
+      render(<ChatInput compact />)
+      setComposerText('/fo', 3)
+      expect(await screen.findByRole('option', { name: '/foo' })).toBeInTheDocument()
+      setComposerText('/foo bar', 8)
+      act(() => fireEvent.keyDown(getComposerElement(), { key: 'Enter' }))
+      expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, { type: 'user_message', content: '/foo bar', attachments: [] })
+      expect(useUIStore.getState().toasts.map(toast => toast.message)).not.toContain(leanUnavailable)
+    })
+
+    it.each(['/agent debug this', '/plan', '/team build it', '/workflow run', '/btw why'])('keeps rejecting %s next to a listed custom command', (text) => {
+      openLeanSession([legacyCommand])
+      render(<ChatInput compact />)
+      setComposerText(text, text.length)
+      act(() => fireEvent.keyDown(getComposerElement(), { key: 'Enter' }))
+      expect(mocks.wsSend).not.toHaveBeenCalledWith(sessionId, expect.objectContaining({ type: 'user_message' }))
+      expect(mocks.sideOpen).not.toHaveBeenCalled()
+      expect(getComposerText()).toBe(text)
+      expect(useUIStore.getState().toasts.at(-1)?.message).toBe(leanUnavailable)
+    })
+
+    it.each([
+      ['a listed command of that name', '/btw why', [legacyCommand, { name: 'btw', description: 'Project note command', kind: 'command' as const }]],
+      ['uppercase input', '/BTW why', [legacyCommand]],
+    ])('keeps /btw unavailable with %s', (_case, text, slashCommands) => {
+      // The desktop turns /btw into a side chat before any runtime sees it, and
+      // lean offers no side chat — so no list entry can make it available.
+      openLeanSession(slashCommands)
+      render(<ChatInput compact />)
+      setComposerText(text, text.length)
+      act(() => fireEvent.keyDown(getComposerElement(), { key: 'Enter' }))
+      expect(mocks.sideOpen).not.toHaveBeenCalled()
+      expect(mocks.wsSend).not.toHaveBeenCalledWith(sessionId, expect.objectContaining({ type: 'user_message' }))
+      expect(useUIStore.getState().toasts.at(-1)?.message).toBe(leanUnavailable)
+    })
+
+    it('runs a listed command that shares a desktop built-in name, as the runtime would', () => {
+      // A project `review.md` shadows the built-in /review in the CLI loader, and
+      // the server listed it for this lean session.
+      openLeanSession([{ name: 'review', description: 'Project review command', kind: 'command' }])
+      render(<ChatInput compact />)
+      setComposerText('/review src', 11)
+      act(() => fireEvent.keyDown(getComposerElement(), { key: 'Enter' }))
+      expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, { type: 'user_message', content: '/review src', attachments: [] })
+    })
+
+    it('keeps lean built-ins and leaves unlisted names to the runtime while the session list is unavailable', async () => {
+      // Empty while the request is in flight, and after it failed.
+      openLeanSession([])
+      render(<ChatInput compact />)
+      setComposerText('/co', 3)
+      expect(await screen.findByRole('option', { name: '/compact' })).toBeInTheDocument()
+      expect(screen.getByRole('option', { name: '/context' })).toBeInTheDocument()
+      expect(screen.queryByRole('option', { name: '/config' })).not.toBeInTheDocument()
+      setComposerText('/foo bar', 8)
+      act(() => fireEvent.keyDown(getComposerElement(), { key: 'Enter' }))
+      expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, { type: 'user_message', content: '/foo bar', attachments: [] })
+      expect(useUIStore.getState().toasts.map(toast => toast.message)).not.toContain(leanUnavailable)
+    })
   })
 
   it.each(['idle', 'streaming'] as const)('routes /btw immediately while %s without main send or queue', async (chatState) => {
@@ -1797,6 +2006,222 @@ describe('ChatInput file mentions', () => {
     })
   })
 
+  // An empty chat can wait for its first message while the checkout moves (a
+  // `git switch` in a terminal), and the server switches the checkout to any
+  // launch branch that is not the current one. A branch the controls chose on
+  // their own has to follow the repository, not be launched as it was.
+  describe('a launch branch chosen for the user while the chat waited', () => {
+    function seedEmptySession(repositoryLaunchDraft?: RepositoryLaunchDraftState) {
+      useSessionStore.setState({
+        sessions: [{
+          id: sessionId,
+          title: 'Project',
+          createdAt: '2026-05-01T00:00:00.000Z',
+          modifiedAt: '2026-05-01T00:00:00.000Z',
+          messageCount: 0,
+          projectPath: '/repo',
+          workDir: '/repo',
+          workDirExists: true,
+        }],
+        activeSessionId: sessionId,
+      })
+      useChatStore.setState({
+        sessions: {
+          [sessionId]: {
+            messages: [],
+            chatState: 'idle',
+            connectionState: 'connected',
+            streamingText: '',
+            streamingToolInput: '',
+            activeToolUseId: null,
+            activeToolName: null,
+            activeThinkingId: null,
+            pendingPermission: null,
+            pendingComputerUsePermission: null,
+            tokenUsage: { input_tokens: 0, output_tokens: 0 },
+            streamingResponseChars: 0,
+            elapsedSeconds: 0,
+            statusVerb: '',
+            slashCommands: [],
+            agentTaskNotifications: {},
+            elapsedTimer: null,
+            ...(repositoryLaunchDraft ? { repositoryLaunchDraft } : {}),
+          },
+        },
+      })
+    }
+
+    /** The repository after `git switch feature/a` in a terminal. */
+    function movedToFeatureA() {
+      const context = okRepositoryContext()
+      return {
+        ...context,
+        currentBranch: 'feature/a',
+        branches: context.branches.map((branch) => ({
+          ...branch,
+          current: branch.name === 'feature/a',
+          checkedOut: branch.name === 'feature/a',
+        })),
+      }
+    }
+
+    it('launches on the checkout as it is at send time', async () => {
+      mocks.create.mockResolvedValueOnce({ sessionId: 'created-fresh-branch', workDir: '/repo' })
+      seedEmptySession()
+      render(<ChatInput variant="hero" />)
+      expect(await screen.findByRole('button', { name: 'Location: repo / main' })).toBeInTheDocument()
+
+      mocks.getRepositoryContext.mockResolvedValue(movedToFeatureA())
+      setComposerText('continue here', 13)
+      fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+
+      await waitFor(() => {
+        expect(mocks.create).toHaveBeenCalledWith({
+          workDir: '/repo',
+          repository: { branch: 'feature/a', worktree: false },
+        })
+      })
+    })
+
+    it('says in the store which branch the controls chose, and that a pick is the user\'s', async () => {
+      seedEmptySession()
+      render(<ChatInput variant="hero" />)
+      expect(await screen.findByRole('button', { name: 'Location: repo / main' })).toBeInTheDocument()
+      await waitFor(() => {
+        expect(useChatStore.getState().sessions[sessionId]?.repositoryLaunchDraft?.branchAutomatic).toBe(true)
+      })
+
+      await openBranchList()
+      fireEvent.click(await screen.findByRole('option', { name: /feature\/a/ }))
+      await waitFor(() => {
+        expect(useChatStore.getState().sessions[sessionId]?.repositoryLaunchDraft).toMatchObject({
+          branch: 'feature/a',
+          branchAutomatic: false,
+        })
+      })
+    })
+
+    // The controls sit on the toolbar when the column is wide enough and below the
+    // composer when it is not: two instances in ChatInput, both of which carry
+    // the same wiring.
+    const PLACEMENTS = [
+      { width: 640, where: 'on the toolbar' },
+      { width: 320, where: 'below the composer' },
+    ]
+
+    /** A second empty chat in the same project, next to the one `seedEmptySession` made. */
+    function addEmptySession(
+      id: string,
+      repositoryLaunchDraft: RepositoryLaunchDraftState,
+      composerDraft?: { input: string; attachments: never[]; mentions: never[] },
+    ) {
+      useSessionStore.setState(state => ({
+        sessions: [...state.sessions, {
+          id,
+          title: 'Project',
+          createdAt: '2026-05-01T00:00:00.000Z',
+          modifiedAt: '2026-05-01T00:00:00.000Z',
+          messageCount: 0,
+          projectPath: '/repo',
+          workDir: '/repo',
+          workDirExists: true,
+        }],
+      }))
+      useChatStore.setState(state => ({
+        sessions: {
+          ...state.sessions,
+          [id]: {
+            ...state.sessions[sessionId]!,
+            repositoryLaunchDraft,
+            ...(composerDraft ? { composerDraft } : {}),
+          },
+        },
+      }))
+    }
+
+    // ChatInput is reused as the user moves between empty chats, so what the
+    // controls hold about *which* branch they chose themselves must follow the
+    // chat, not stay with the one shown before.
+    it.each(PLACEMENTS)('judges each empty chat by its own record of who chose its branch, with the controls $where', async ({ width }) => {
+      stubComposerColumnWidth(width)
+      mocks.getRepositoryContext.mockResolvedValue(movedToFeatureA())
+      seedEmptySession({ workDir: '/repo', branch: 'main', useWorktree: false, branchAutomatic: false })
+      addEmptySession('session-second', { workDir: '/repo', branch: 'main', useWorktree: false, branchAutomatic: true })
+      render(<ChatInput variant="hero" />)
+      // The first chat's `main` was picked by the user, so it stays.
+      expect(await screen.findByRole('button', { name: 'Location: repo / main' })).toBeInTheDocument()
+
+      act(() => { useTabStore.setState({ activeTabId: 'session-second' }) })
+
+      // The second chat's `main` was chosen for the user, so it follows the checkout.
+      expect(await screen.findByRole('button', { name: 'Location: repo / feature/a' })).toBeInTheDocument()
+      await waitFor(() => {
+        expect(useChatStore.getState().sessions['session-second']?.repositoryLaunchDraft?.branch).toBe('feature/a')
+      })
+      expect(useChatStore.getState().sessions[sessionId]?.repositoryLaunchDraft).toMatchObject({ branch: 'main', branchAutomatic: false })
+    })
+
+    // The send waits for the launch branch to be read again. A user who moves to
+    // another chat in that moment must not lose that chat's draft to the clear
+    // that follows the send.
+    it('leaves another chat\'s draft alone when the user moves to it while the send waits', async () => {
+      seedEmptySession({ workDir: '/repo', branch: 'main', useWorktree: false, branchAutomatic: true })
+      addEmptySession(
+        'session-second',
+        { workDir: '/repo', branch: 'main', useWorktree: false, branchAutomatic: true },
+        { input: 'half-written reply in the second chat', attachments: [], mentions: [] },
+      )
+      render(<ChatInput variant="hero" />)
+      expect(await screen.findByRole('button', { name: 'Location: repo / main' })).toBeInTheDocument()
+
+      let finishRead!: (context: ReturnType<typeof okRepositoryContext>) => void
+      mocks.getRepositoryContext.mockImplementationOnce(() => new Promise((resolve) => { finishRead = resolve as typeof finishRead }))
+      setComposerText('send me from the first chat', 27)
+      fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+      await waitFor(() => expect(finishRead).toBeTypeOf('function'))
+
+      act(() => { useTabStore.setState({ activeTabId: 'session-second' }) })
+      await waitFor(() => expect(getComposerText()).toBe('half-written reply in the second chat'))
+
+      await act(async () => { finishRead(okRepositoryContext()) })
+
+      await waitFor(() => {
+        expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, expect.objectContaining({ type: 'user_message', content: 'send me from the first chat' }))
+      })
+      // The first chat's saved draft went with the send; the second chat's did not.
+      expect(getComposerText()).toBe('half-written reply in the second chat')
+      expect(useChatStore.getState().sessions[sessionId]?.composerDraft).toBeFalsy()
+    })
+
+    it.each(PLACEMENTS)('does not read the repository on a window focus while the chat is hidden, with the controls $where', async ({ width }) => {
+      stubComposerColumnWidth(width)
+      seedEmptySession()
+      const { rerender } = render(<ChatInput variant="hero" />)
+      expect(await screen.findByRole('button', { name: 'Location: repo / main' })).toBeInTheDocument()
+      rerender(<ChatInput variant="hero" visible={false} />)
+      const reads = mocks.getRepositoryContext.mock.calls.length
+
+      act(() => { window.dispatchEvent(new Event('focus')) })
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)) })
+
+      expect(mocks.getRepositoryContext).toHaveBeenCalledTimes(reads)
+    })
+
+    it.each([
+      { branchAutomatic: true, expected: 'feature/a' },
+      { branchAutomatic: false, expected: 'main' },
+    ])('after the controls are mounted again, a stored branch follows the checkout only when it was chosen for the user (%j)', async ({ branchAutomatic, expected }) => {
+      mocks.getRepositoryContext.mockResolvedValue(movedToFeatureA())
+      seedEmptySession({ workDir: '/repo', branch: 'main', useWorktree: false, branchAutomatic })
+      render(<ChatInput variant="hero" />)
+
+      expect(await screen.findByRole('button', { name: `Location: repo / ${expected}` })).toBeInTheDocument()
+      await waitFor(() => {
+        expect(useChatStore.getState().sessions[sessionId]?.repositoryLaunchDraft?.branch).toBe(expected)
+      })
+    })
+  })
+
   it('seeds the launch draft from the project root when the empty session sits in a stale worktree', async () => {
     useSessionStore.setState({
       sessions: [{
@@ -2140,9 +2565,9 @@ describe('ChatInput file mentions', () => {
     act(() => useSessionRuntimeStore.getState().setSelection(sessionId, { providerId: null, modelId: 'opus' }))
     try {
       render(<ChatInput compact />)
-      await waitFor(() => expect(mocks.listReferences).toHaveBeenLastCalledWith(expect.anything(), 'claude-official'))
+      await waitFor(() => expect(mocks.listReferences).toHaveBeenLastCalledWith(expect.anything(), 'claude-official', undefined))
       act(() => useSessionRuntimeStore.getState().setSelection(sessionId, { providerId: 'grok-official', modelId: 'grok-4.7' }))
-      await waitFor(() => expect(mocks.listReferences).toHaveBeenLastCalledWith(expect.anything(), 'grok-official'))
+      await waitFor(() => expect(mocks.listReferences).toHaveBeenLastCalledWith(expect.anything(), 'grok-official', undefined))
       setComposerText('@imagegen', 9)
       fireEvent.click(await screen.findByRole('option', { name: /imagegen/i }))
       await waitFor(() => expect(document.querySelector('[data-mention-kind="skill"]')).toBeInTheDocument())
@@ -2166,6 +2591,8 @@ describe('ChatInput file mentions', () => {
     expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
       type: 'user_message', content: 'Use the Skill tool with skill: "team:review" for this request.', attachments: [],
     })
+    // The sent bubble names the pill from what this composer listed.
+    expect(useCapabilityCatalogStore.getState().entries['skill:skill:team:review']).toEqual({ label: 'Review' })
   })
 
   it.each(['@', '/', '/empty', '+'] as const)('hides withdrawn bundled capabilities in %s while keeping personal skills and other plugins', async (entry) => {
@@ -2286,7 +2713,8 @@ describe('ChatInput file mentions', () => {
     render(<ChatInput compact />)
 
     fireEvent.click(screen.getByLabelText('Open composer tools'))
-    fireEvent.click(screen.getByRole('option', { name: 'More tools' }))
+    // Agents sit on the menu's first level; there is no More row to open first.
+    expect(screen.queryByRole('option', { name: 'More tools' })).not.toBeInTheDocument()
     fireEvent.click(await screen.findByRole('option', { name: /^Agents/ }))
     fireEvent.click(await screen.findByRole('option', { name: /debugger/ }))
 
@@ -2359,6 +2787,17 @@ describe('ChatInput file mentions', () => {
 
     fireEvent.click(screen.getByLabelText('Open composer tools'))
     fireEvent.click((await screen.findByRole('option', { name: /Agent Teams/ })).querySelector('input[type="checkbox"]')!)
+
+    // Arming costs tokens and time, so the first attempt explains that. Cancel
+    // leaves the composer plain; confirming arms it.
+    const notice = await screen.findByRole('dialog')
+    expect(notice).toHaveTextContent('Uses a lot of tokens')
+    fireEvent.click(within(notice).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByTestId('agent-team-chip')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByLabelText('Open composer tools'))
+    fireEvent.click((await screen.findByRole('option', { name: /Agent Teams/ })).querySelector('input[type="checkbox"]')!)
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Turn on anyway' }))
     const chip = await screen.findByTestId('agent-team-chip')
     expect(chip).toHaveTextContent('Agent Teams')
 
@@ -2383,6 +2822,7 @@ describe('ChatInput file mentions', () => {
   })
 
   it('disarms Agent Team from the chip before sending', async () => {
+    dismissAgentTeamsNotice()
     render(<ChatInput compact />)
     fireEvent.click(screen.getByLabelText('Open composer tools'))
     fireEvent.click((await screen.findByRole('option', { name: /Agent Teams/ })).querySelector('input[type="checkbox"]')!)

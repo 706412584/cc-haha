@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
+import { useUIStore } from '@/stores/uiStore'
 import { useTabStore } from '../../stores/tabStore'
 import { EmptySession } from '../../pages/EmptySession'
 import { ActiveSession } from '../../pages/ActiveSession'
@@ -20,6 +21,7 @@ type ContentRouterProps = {
 }
 
 export function ContentRouter({ homePage }: ContentRouterProps = {}) {
+  const newSessionDraft = useUIStore(s => s.newSessionDraft)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const tabs = useTabStore((s) => s.tabs)
   const activeTabType = tabs.find((t) => t.sessionId === activeTabId)?.type
@@ -48,9 +50,22 @@ export function ContentRouter({ homePage }: ContentRouterProps = {}) {
     store.closeTab(legacy.sessionId)
   }, [activeTabId, activeTabType, tabs])
 
+  const draftVisible = !activeTabId || !activeTabType
+  // The retained draft is the desktop's new-session page. A shell with a home
+  // of its own (the phone's session list, the tablet's new-task page) starts
+  // tasks its own way, and a desktop draft left over from a wider window must
+  // not cover that home.
+  const retainsDraft = !homePage
+  const draft = retainsDraft ? newSessionDraft : null
+  useEffect(() => {
+    // The initial desktop composer needs the same retained draft as Cmd+N.
+    if (draftVisible && retainsDraft && !newSessionDraft) {
+      useUIStore.getState().startNewSessionDraft()
+    }
+  }, [draftVisible, retainsDraft, newSessionDraft])
   let page: ReactNode = null
   if (!activeTabId || !activeTabType) {
-    page = homePage ?? <EmptySession />
+    page = draft ? null : homePage ?? <EmptySession />
   } else if (activeTabType === 'settings') {
     page = <Settings />
   } else if (activeTabType === 'scheduled') {
@@ -119,6 +134,15 @@ export function ContentRouter({ homePage }: ContentRouterProps = {}) {
         ) : null}
         <WorkspaceBrowserGuestLayer />
       </div>
+      {draft && (
+        <div hidden={!draftVisible} aria-hidden={!draftVisible} {...(draftVisible ? {} : { inert: '' })}
+          data-testid="new-session-draft-panel"
+          className={draftVisible ? 'absolute inset-0 z-10 flex min-h-0 flex-col overflow-hidden' : 'hidden'}>
+          {/* Keyed by revision only: moving an empty draft to another project
+              changes `initialWorkDir` and the composer follows it in place. */}
+          <EmptySession key={draft.revision} draftRevision={draft.revision} initialWorkDir={draft.workDir} visible={draftVisible} />
+        </div>
+      )}
       {page && (
         <div className="absolute inset-0 z-10 flex min-h-0 flex-col overflow-hidden">
           {page}

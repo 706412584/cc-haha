@@ -11,7 +11,7 @@ Click **Settings** at the bottom of the sidebar. For your first session, connect
 
 ## Providers
 
-Model access. Sign in to Claude, ChatGPT, or Grok with an account (no API key required), or add any Anthropic- or OpenAI-compatible service with an API key.
+Model access. Sign in to Claude, ChatGPT, Grok, or DeepSeek with an account (no API key required), or add any Anthropic- or OpenAI-compatible service with an API key.
 
 You'll come here once during setup and rarely again. Full steps in [Connecting a model](../start/models.md).
 
@@ -45,7 +45,7 @@ General covers four areas: appearance and replies, how the agent works, network 
 | Setting | When to use it |
 |---|---|
 | Ultracode | On by default. A standalone keyword triggers dynamic Workflow orchestration; the same text in code blocks, quotes, or paths keeps its literal meaning. |
-| Agent Teams | On by default. Use it when a larger task needs several agents working together. New sessions pick it up; existing sessions do after an app restart. See [Subagents](./agents.md) first. |
+| Agent Teams | On by default. Turning it on warns that it uses a lot of tokens, runs slower, and does not suit every task. Use it when a larger task needs several agents working together. New sessions pick it up; existing sessions do after an app restart. See [Subagents](./agents.md) first. |
 | Auto-answer questions | Off by default. After 1, 5, 10, or 30 minutes without an answer to an agent's multiple-choice question, it can choose a recommended option. If it cannot choose reliably, it keeps waiting. Use only when you want unattended work to continue. |
 | Auto-dream | Off by default. After enough sessions have accumulated, it can organize auto-memory in the background, using additional model calls and tokens. |
 | Agent Trace | On by default. New sessions write raw request, response, and status events to a local traces directory. To investigate a failure, open an assistant line in the session's **Trajectory** and switch to its **Raw request** tab; turning it off stops new records, while old ones remain readable. |
@@ -123,9 +123,11 @@ Let Claude read the screen, click, and type. Enable it, confirm the global conse
 
 A usage dashboard computed from the Claude Code session records on this machine. Everything is calculated locally and nothing is uploaded.
 
-- Across the top: total tokens, peak tokens, longest task, current and longest streak.
-- In the middle: a heatmap with daily, weekly, and cumulative views. Click a day for that day's sessions, tokens, messages, and tool calls.
-- Below: activity insights — active rate, most-used model, skills used, fresh versus cache-hit token split, and estimated cost. Estimated cost excludes models with no known price, and the UI says how many were skipped.
+- At the top: your avatar, name and project link, with the lifetime token total beside them. English counts in k / M / B, Chinese in 万 and 亿; hover a number for the exact value and the other notation (24.1B = 241 亿).
+- Below: the last 90 days as one column per day, stacked by model on a zero baseline, so height is that day's tokens. A color belongs to a model (the four biggest models get one each; the rest share a gray "Other models"), and the peak day is labelled. Point at a day for its total and what each model spent (models in the gray are named one by one, with any past three summed into one row); click it to open a card with how it compares to the peak and the average day, its rank, the model mix, and its sessions, messages and tool calls. Click the day again, the × or press Esc to close it. Then the longest task, current and longest streak, and cache hit rate.
+- A heatmap with daily, weekly, and cumulative views. Hover a day for its sessions and tokens.
+- Model details list each model's share, tokens, and estimated cost. Estimated cost excludes models with no known price, and the UI says how many were skipped. The most-used skills and connectors come last.
+- **Share image** at the top right turns this into a PNG in portrait, square, or wide. The image follows the current theme unless you pick another, and the avatar and name, model details, and project link can each be switched off. Estimated cost stays off the image unless you turn it on. The image is drawn on this machine; copy it to the clipboard or save it.
 
 ## Diagnostics
 

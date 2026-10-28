@@ -8,6 +8,7 @@ import {
   DESKTOP_CLI_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
   killConversationProcessTree,
 } from '../services/conversationService.js'
+import { hahaOAuthService } from '../services/hahaOAuthService.js'
 import { ProviderService } from '../services/providerService.js'
 import { sessionService } from '../services/sessionService.js'
 import { updateTraceCaptureSettings } from '../services/traceCaptureService.js'
@@ -106,9 +107,13 @@ describe('ConversationService', () => {
     // tests assert. Clear it; the per-test fake shell is the only intended source.
     delete process.env.NVM_DIR
     resetTerminalShellEnvironmentCacheForTests()
+    // Spawning an official-mode session looks the account up through the
+    // profile endpoint; keep that off the network.
+    hahaOAuthService.setFetchAccountUuidFn(async () => 'account-uuid-from-profile')
   })
 
   afterEach(async () => {
+    hahaOAuthService.setFetchAccountUuidFn()
     if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
     else process.env.CLAUDE_CONFIG_DIR = originalConfigDir
 
@@ -222,12 +227,14 @@ describe('ConversationService', () => {
     sent: string[],
     networkDerivedFirstTokenTimeout = true,
     networkDerivedStreamMaxDuration = true,
+    networkDerivedToolInputDuration = true,
   ) {
     const session = {
       outputCallbacks: [],
       networkRoutingFingerprint: '',
       networkDerivedFirstTokenTimeout,
       networkDerivedStreamMaxDuration,
+      networkDerivedToolInputDuration,
       sdkSocket: {
         send(line: string) {
           sent.push(line)
@@ -302,9 +309,11 @@ describe('ConversationService', () => {
       // defaults this to 0 (disabled), so the desktop MUST inject it or the
       // fast-fail silently never arms.
       expect(env.CLAUDE_STREAM_MAX_THINKING_DURATION_MS).toBe('300000')
-      // Tool JSON gets a shorter inactivity budget. Progress resets it, while
-      // the overall response cap still bounds a stream that trickles forever.
-      expect(env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS).toBe('120000')
+      // Tool JSON has its own inactivity budget. Progress resets it, while the
+      // overall response cap still bounds a stream that trickles forever. It
+      // follows the request timeout (default 30 min), not a fixed 120s: a long
+      // file `content` string is silent until it is complete (#1536).
+      expect(env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS).toBe('1800000')
       // Non-streaming fallback stays off — its retry loop also hangs the UI (#766).
       expect(env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK).toBe('1')
     } finally {
@@ -657,11 +666,31 @@ describe('ConversationService', () => {
       expect(env.API_TIMEOUT_MS).toBe(String(timeoutMs))
       expect(env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS).toBe(String(timeoutMs))
       expect(env.CLAUDE_STREAM_MAX_DURATION_MS).toBe(String(timeoutMs))
+      // A silent tool-argument gap is legitimate generation time too (#1536).
+      expect(env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS).toBe(String(timeoutMs))
     } finally {
       if (prev === undefined) delete process.env.CLAUDE_STREAM_MAX_DURATION_MS
       else process.env.CLAUDE_STREAM_MAX_DURATION_MS = prev
       if (prevFirstToken === undefined) delete process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS
       else process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS = prevFirstToken
+    }
+  })
+
+  test('buildChildEnv keeps the 120s tool-input floor for a short request timeout and lets caller env override (#1536)', async () => {
+    const prev = process.env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS
+    delete process.env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({ network: { aiRequestTimeoutMs: 30_000 } }),
+      'utf-8',
+    )
+    try {
+      const service = new ConversationService() as any
+      const env = (await service.buildChildEnv('/tmp')) as Record<string, string>
+      expect(env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS).toBe('120000')
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS
+      else process.env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS = prev
     }
   })
 
@@ -714,7 +743,7 @@ describe('ConversationService', () => {
       accessToken: 'haha-fresh-token',
       refreshToken: 'haha-refresh-xxx',
       expiresAt: Date.now() + 30 * 60_000,
-      scopes: ['user:inference'],
+      scopes: ['user:inference', 'user:profile'],
       subscriptionType: 'max',
     })
 
@@ -723,6 +752,31 @@ describe('ConversationService', () => {
 
     expect(env.CLAUDE_CODE_ENTRYPOINT).toBe('claude-desktop')
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('haha-fresh-token')
+    // The CLI cannot read the account off an env-injected token, so the host
+    // hands it over for metadata.user_id.
+    expect(env.CLAUDE_CODE_ACCOUNT_UUID).toBe('account-uuid-from-profile')
+  })
+
+  test('buildChildEnv does not inherit another account uuid from the parent env', async () => {
+    const originalAccountUuid = process.env.CLAUDE_CODE_ACCOUNT_UUID
+    process.env.CLAUDE_CODE_ACCOUNT_UUID = 'inherited-parent-account'
+    try {
+      const ccHahaDir = path.join(tmpDir, 'cc-haha')
+      await fs.mkdir(ccHahaDir, { recursive: true })
+      await fs.writeFile(
+        path.join(ccHahaDir, 'settings.json'),
+        JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 'custom-provider-token' } }),
+        'utf-8',
+      )
+
+      const service = new ConversationService() as any
+      const env = (await service.buildChildEnv('/tmp')) as Record<string, string>
+
+      expect(env.CLAUDE_CODE_ACCOUNT_UUID).toBeUndefined()
+    } finally {
+      if (originalAccountUuid === undefined) delete process.env.CLAUDE_CODE_ACCOUNT_UUID
+      else process.env.CLAUDE_CODE_ACCOUNT_UUID = originalAccountUuid
+    }
   })
 
   test('sendMessage updates a running official OAuth CLI token before the user turn', async () => {
@@ -1035,6 +1089,7 @@ describe('ConversationService', () => {
     expect(update.variables.API_TIMEOUT_MS).toBe(String(timeoutMs))
     expect(update.variables.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS).toBe(String(timeoutMs))
     expect(update.variables.CLAUDE_STREAM_MAX_DURATION_MS).toBe(String(timeoutMs))
+    expect(update.variables.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS).toBe(String(timeoutMs))
     expect(JSON.parse(sent[1]!).type).toBe('user')
   })
 
@@ -1505,6 +1560,36 @@ describe('ConversationService', () => {
     }
   })
 
+  test('replacing the empty placeholder keeps an effort reset to auto as one runtime record', async () => {
+    const service = new ConversationService() as any
+    const requestedWorkDir = path.join(tmpDir, 'placeholder-effort-auto')
+    await fs.mkdir(requestedWorkDir, { recursive: true })
+    const { sessionId, workDir } = await sessionService.createSession(requestedWorkDir, undefined, 'acceptEdits', 'lean')
+    const selection = { runtimeProviderId: 'provider-a', runtimeModelId: 'model-a' }
+    await sessionService.appendSessionMetadata(sessionId, { workDir, ...selection, effortLevel: 'high', openAIFastMode: false })
+    // Choosing auto again writes a complete selection without an effort override.
+    await sessionService.appendSessionMetadata(sessionId, { workDir, ...selection, openAIFastMode: false })
+    const before = await sessionService.getSessionLaunchInfo(sessionId)
+    expect(before).toMatchObject({ ...selection, openAIFastMode: false, permissionMode: 'acceptEdits', transcriptMessageCount: 0 })
+    expect(before?.effortLevel).toBeUndefined()
+    const args = spyOn(service, 'buildSessionCliArgs').mockImplementation(() => { throw new Error('Fixture stops before spawning') })
+    try {
+      await expect(service.startSession(sessionId, workDir, 'ws://127.0.0.1/sdk/fixture', {
+        providerId: null, model: 'model-a',
+      })).rejects.toThrow('Fixture stops before spawning')
+    } finally {
+      args.mockRestore()
+    }
+
+    const after = await sessionService.getSessionLaunchInfo(sessionId)
+    expect(after).toMatchObject({ ...selection, openAIFastMode: false, agentProfile: 'lean', permissionMode: 'acceptEdits' })
+    expect(after?.effortLevel).toBeUndefined()
+    const metas = (await fs.readFile(after!.filePath, 'utf8')).trim().split('\n')
+      .map(line => JSON.parse(line)).filter(entry => entry.type === 'session-meta')
+    expect(metas).toHaveLength(1)
+    expect(metas[0]).not.toHaveProperty('effortLevel')
+  })
+
   test('Fast mode is isolated to explicit ChatGPT OAuth launches and cannot leak from parent env', async () => {
     const original = process.env.CC_HAHA_OPENAI_FAST_MODE
     process.env.CC_HAHA_OPENAI_FAST_MODE = '1'
@@ -1540,6 +1625,43 @@ describe('ConversationService', () => {
     expect(env.ANTHROPIC_API_KEY).toBeUndefined()
     expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
     expect(env.ANTHROPIC_BASE_URL).toBeUndefined()
+  })
+
+  test('buildChildEnv builds the DeepSeek account env for a session-scoped selection over another active provider', async () => {
+    const ccHahaDir = path.join(tmpDir, 'cc-haha')
+    await fs.mkdir(ccHahaDir, { recursive: true })
+    await fs.writeFile(
+      path.join(ccHahaDir, 'providers.json'),
+      JSON.stringify({ activeId: 'grok-official', providers: [], providerOrder: [] }),
+    )
+    await fs.writeFile(
+      path.join(ccHahaDir, 'settings.json'),
+      JSON.stringify({
+        env: {
+          CC_HAHA_GROK_OAUTH_PROVIDER: '1',
+          GROK_OAUTH_FILE: '/stale/grok.json',
+          ANTHROPIC_MODEL: 'grok-4.5',
+          ANTHROPIC_AUTH_TOKEN: 'stale-token',
+        },
+      }),
+    )
+    const service = new ConversationService() as any
+    const env = (await service.buildChildEnv('/tmp', undefined, {
+      providerId: 'deepseek-account',
+      model: 'deepseek-v4-flash',
+    })) as Record<string, string>
+
+    expect(env.CC_HAHA_DEEPSEEK_OAUTH_PROVIDER).toBe('1')
+    expect(env.DEEPSEEK_OAUTH_FILE).toBe(path.join(tmpDir, 'cc-haha', 'deepseek-oauth.json'))
+    expect(env.ANTHROPIC_BASE_URL).toBe('https://api.deepseek.com/anthropic')
+    expect(env.ANTHROPIC_MODEL).toBe('deepseek-v4-flash')
+    expect(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBe('1')
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+    // The account grant never reaches the child; the fetch layer reads the file.
+    expect(JSON.stringify(env)).not.toContain('dsh_')
+    expect(env.CC_HAHA_GROK_OAUTH_PROVIDER).toBeUndefined()
+    expect(env.GROK_OAUTH_FILE).toBeUndefined()
+    expect(env.CC_HAHA_OPENAI_OAUTH_PROVIDER).toBeUndefined()
   })
 
   test('buildChildEnv passes OpenAI-native effort without leaking Claude effort state', async () => {
