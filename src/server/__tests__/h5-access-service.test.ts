@@ -638,11 +638,17 @@ describe('H5AccessService', () => {
   })
 
   test('a running named tunnel keeps the LAN origin allowed alongside the public domain', async () => {
+    // updateSettings validates that a private base URL is bound to a real local
+    // interface, so a hard-coded 192.168.x.x only passes on a machine that
+    // happens to own it. Use this host's actual LAN address.
+    const lanIp = findPrivateLanAddress()
+    if (!lanIp) return // no LAN interface: nothing to assert
+    const lanBase = `http://${lanIp}:58390`
     const service = new H5AccessService()
 
     await service.enable()
     await service.updateSettings({
-      publicBaseUrl: 'http://192.168.1.3:58390',
+      publicBaseUrl: lanBase,
       tunnelBaseUrl: 'https://codecli.example.online',
     })
     // The live tunnel URL becomes the effective publicBaseUrl, which used to be
@@ -661,7 +667,7 @@ describe('H5AccessService', () => {
     })
 
     const origins = await service.getKnownOrigins()
-    expect(origins).toContain('http://192.168.1.3:58390')
+    expect(origins).toContain(lanBase)
     expect(origins).toContain('https://codecli.example.online')
   })
 
@@ -701,10 +707,14 @@ describe('H5AccessService', () => {
   })
 
   test('getKnownOrigins reports nothing while H5 access is disabled', async () => {
+    // Same local-interface requirement as above; the point of the test is the
+    // disabled state, not a particular LAN address.
+    const lanIp = findPrivateLanAddress()
+    if (!lanIp) return
     const service = new H5AccessService()
 
     await service.updateSettings({
-      publicBaseUrl: 'http://192.168.1.3:58390',
+      publicBaseUrl: `http://${lanIp}:58390`,
       tunnelBaseUrl: 'https://codecli.example.online',
     })
 

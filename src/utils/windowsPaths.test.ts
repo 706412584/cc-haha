@@ -20,6 +20,15 @@ describe('Windows Git Bash discovery', () => {
     delete process.env.CLAUDE_CODE_GIT_BASH_PATH
     const git = 'C:\\Program Files\\Git\\cmd\\git.exe'
     const bash = 'C:\\Program Files\\Git\\bin\\bash.exe'
+    // The fork derives the default install locations from ProgramFiles instead
+    // of hard-coding C:\Program Files, so the fixture has to supply it: Linux
+    // CI has no ProgramFiles and the candidate list would be empty.
+    const originalProgramFiles = process.env.ProgramFiles
+    process.env.ProgramFiles = 'C:\\Program Files'
+    cleanups.push(() => {
+      if (originalProgramFiles === undefined) delete process.env.ProgramFiles
+      else process.env.ProgramFiles = originalProgramFiles
+    })
     // This fork probes with statSync().isFile() rather than existsSync, so a
     // directory or link cannot masquerade as an executable.
     const exists = spyOn(fs, 'statSync').mockImplementation(file => {
