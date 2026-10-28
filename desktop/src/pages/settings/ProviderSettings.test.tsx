@@ -172,7 +172,7 @@ describe('active sponsor providers', () => {
     })))
   })
 
-  it('adds Modelflare from the second sponsor pill with badges, model discovery and Claude 5.5 defaults', async () => {
+  it('adds Modelflare as a plain preset with model discovery and Claude 5.5 defaults', async () => {
     const create = vi.spyOn(providersApi, 'create').mockImplementation(async (input) => ({
       provider: { ...input, id: 'saved-modelflare', apiFormat: input.apiFormat ?? 'anthropic' },
     }))
@@ -192,12 +192,15 @@ describe('active sponsor providers', () => {
     const sponsor = dialog.getByRole('button', { name: 'Modelflare' })
     expect(sponsor.previousElementSibling).toBe(dialog.getByRole('button', { name: 'AruHub' }))
     expect(sponsor.nextElementSibling).toBe(dialog.getByRole('button', { name: 'Atlas Cloud' }))
-    expect(within(sponsor).getByText('New')).toBeInTheDocument()
-    expect(within(sponsor).getByLabelText('Sponsor')).toBeInTheDocument()
+    // This fork strips the sponsored featured slots: no New badge, no Sponsor
+    // star. The preset is offered as an ordinary entry (FORK_CUSTOMIZATIONS B).
+    expect(within(sponsor).queryByText('New')).not.toBeInTheDocument()
+    expect(within(sponsor).queryByLabelText('Sponsor')).not.toBeInTheDocument()
     expect(sponsor.querySelector('img')?.getAttribute('src')).toContain('modelflare-logo')
     expect(dialog.getByRole('button', { name: 'AruHub' }).querySelector('img')?.getAttribute('src')).toContain('aruhub-logo')
     expect(dialog.getByRole('button', { name: 'Atlas Cloud' }).querySelector('img')).toBeNull()
-    expect(dialog.queryByRole('button', { name: 'ApiSmart' })).not.toBeInTheDocument()
+    // ApiSmart stays selectable here: the fork rejects upstream's retirement.
+    expect(dialog.getByRole('button', { name: 'ApiSmart' })).toBeInTheDocument()
 
     fireEvent.click(sponsor)
     expect(dialog.getByDisplayValue('https://modelflare.dev')).toBeInTheDocument()
@@ -284,7 +287,7 @@ describe('active sponsor providers', () => {
       .not.toBeChecked()
   })
 
-  it('keeps a saved ApiSmart provider but no longer offers it as a new provider', async () => {
+  it('keeps ApiSmart selectable as a new provider alongside a saved one', async () => {
     vi.mocked(providersApi.list).mockResolvedValue({ providers: [{
       ...savedProviders[0]!, id: 'old-apismart', presetId: 'apismart', name: 'ApiSmart',
       baseUrl: 'https://gw.apismart.ai/v1', apiFormat: 'openai_chat',
@@ -295,7 +298,9 @@ describe('active sponsor providers', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add Model/ }))
     const dialog = within(screen.getByRole('dialog'))
     expect(dialog.getByRole('button', { name: 'Atlas Cloud' })).toBeInTheDocument()
-    expect(dialog.queryByRole('button', { name: 'ApiSmart' })).not.toBeInTheDocument()
+    // The fork keeps ApiSmart usable: upstream retired the preset, this fork
+    // rejected that and still offers it for new providers (section B).
+    expect(dialog.getByRole('button', { name: 'ApiSmart' })).toBeInTheDocument()
   })
 })
 

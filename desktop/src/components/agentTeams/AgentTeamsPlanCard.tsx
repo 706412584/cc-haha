@@ -149,28 +149,33 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
             <span className="min-w-0 [overflow-wrap:anywhere]">{stateLabel} · {t('teamPlan.memberCount', { count: members.length })}</span>
           </p>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {/* A live team has no review dialog to open, so its controls live on
-              the card itself: stop the workers, or remove the team entirely. */}
-          {canStop ? <Button data-testid="team-plan-stop" variant="danger-outline" disabled={stoppingPlanId === plan.planId} onClick={() => {
-            if (stoppingPlanId === plan.planId) return
-            setStoppingPlanId(plan.planId)
-            useChatStore.getState().stopGeneration(sessionId)
-          }}>{stoppingPlanId === plan.planId ? t('teamPlan.stopping') : t('teamPlan.stop')}</Button> : null}
-          {canResume ? <Button data-testid="team-plan-resume" variant="secondary" disabled={entry.busy} onClick={() => {
-            if (heldTaskIds.length === 0) submitResume([])
-            else { setConfirmedTaskIds([]); setConfirmingResume(true) }
-          }}>{t('teamPlan.resume')}</Button> : null}
-          {canDisband ? <Button data-testid="team-plan-disband" variant="ghost" loading={disbanding} onClick={() => {
-            setDisbanding(true)
-            void useTeamStore.getState().disbandTeam(plan.teamName, sessionId, plan.incarnationId).finally(() => setDisbanding(false))
-          }}>{t('teamPlan.disband')}</Button> : null}
-          <Button data-testid="team-plan-hide" variant="ghost" onClick={() => {
-            setOpen(false)
-            useTeamStore.getState().hideTeamStrip(sessionId, plan.incarnationId)
-          }}>{t('teamPlan.hide')}</Button>
-          {!approved ? <Button data-testid="team-plan-open" size="base" variant={plan.state === 'review_pending' ? 'primary' : 'secondary'} onClick={openEditor}>{t('teamPlan.open')}</Button> : null}
-        </div>
+        {/* Open sits in the header's wrapping row (upstream #1626) so a long
+            team name can push it onto its own line instead of squeezing the
+            control strip. The live-team controls stay grouped below it. */}
+        {!approved ? <Button data-testid="team-plan-open" size="base" variant={plan.state === 'review_pending' ? 'primary' : 'secondary'} onClick={openEditor}>{t('teamPlan.open')}</Button> : null}
+        {(canStop || canResume || canDisband) ? (
+          <div className="flex shrink-0 items-center gap-2">
+            {/* A live team has no review dialog to open, so its controls live on
+                the card itself: stop the workers, or remove the team entirely. */}
+            {canStop ? <Button data-testid="team-plan-stop" variant="danger-outline" disabled={stoppingPlanId === plan.planId} onClick={() => {
+              if (stoppingPlanId === plan.planId) return
+              setStoppingPlanId(plan.planId)
+              useChatStore.getState().stopGeneration(sessionId)
+            }}>{stoppingPlanId === plan.planId ? t('teamPlan.stopping') : t('teamPlan.stop')}</Button> : null}
+            {canResume ? <Button data-testid="team-plan-resume" variant="secondary" disabled={entry.busy} onClick={() => {
+              if (heldTaskIds.length === 0) submitResume([])
+              else { setConfirmedTaskIds([]); setConfirmingResume(true) }
+            }}>{t('teamPlan.resume')}</Button> : null}
+            {canDisband ? <Button data-testid="team-plan-disband" variant="ghost" loading={disbanding} onClick={() => {
+              setDisbanding(true)
+              void useTeamStore.getState().disbandTeam(plan.teamName, sessionId, plan.incarnationId).finally(() => setDisbanding(false))
+            }}>{t('teamPlan.disband')}</Button> : null}
+          </div>
+        ) : null}
+        <Button data-testid="team-plan-hide" variant="ghost" onClick={() => {
+          setOpen(false)
+          useTeamStore.getState().hideTeamStrip(sessionId, plan.incarnationId)
+        }}>{t('teamPlan.hide')}</Button>
       </div>
       <Modal open={open} onClose={() => { if (!entry.busy) setOpen(false) }} title={t('teamPlan.title')} width={1080} className="team-plan-dialog" typography="interface" footer={(
         <div className="team-plan-footer flex w-full flex-wrap items-center justify-between gap-3">
