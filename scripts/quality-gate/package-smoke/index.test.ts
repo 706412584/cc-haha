@@ -1040,6 +1040,9 @@ describe('packaged artifact inspection', () => {
     writeFile(rootDir, `${resources}/app-update.yml`)
     writeFile(rootDir, `${resources}/app.asar.unpacked/src-tauri/binaries/claude-sidecar-x86_64-unknown-linux-gnu`)
     writeFile(rootDir, `${resources}/app.asar.unpacked/node_modules/node-pty/package.json`)
+    // The fork's release check requires the bundled plugin seed; upstream's
+    // fixture predates it, so every Linux fixture must carry it too.
+    writeFile(rootDir, `${resources}/app.asar.unpacked/plugin-seed/marketplaces/cc-haha-builtin/.claude-plugin/marketplace.json`, '{}')
     for (const [relativePath, content] of Object.entries(nodePtyFiles)) {
       writeFile(rootDir, `${resources}/app.asar.unpacked/node_modules/node-pty/${relativePath}`, content)
     }
