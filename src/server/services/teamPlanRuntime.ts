@@ -856,6 +856,10 @@ export async function launchTeamPlanRuntime(plan: TeamPlanRecord): Promise<{ mem
         })
         await sendTeamSnapshot(plan.sessionId, plan.teamName, launch.createdAt)
       }
+      // Member state only. The lead's idle notification is owned by
+      // notifyLead() through the startWorker() onOutput handler; writing a
+      // second one here duplicated every result in the lead's mailbox, which
+      // the replay cassette (one notification per turn) rejects.
       conversationService.onOutput(id, message => {
         if (message?.type !== 'result') return
         void withTaskListLifecycleLock(getCanonicalTeamTaskListId(plan.teamName), async () => {
@@ -864,11 +868,6 @@ export async function launchTeamPlanRuntime(plan: TeamPlanRecord): Promise<{ mem
           const entry = team.members.find(entry => entry.sessionId === id)
           if (entry) { entry.isActive = false; if (!conversationService.hasSession(id)) entry.terminated = true; await writeTeamFileAsync(plan.teamName, team) }
         }).catch(error => console.error('[TeamPlanRuntime] cannot update idle member', error))
-        const failed = !conversationService.hasSession(id) || message.is_error
-        void writeToMailbox('team-lead', {
-          from: member.name, timestamp: new Date().toISOString(),
-          text: JSON.stringify(createIdleNotification(member.name, { idleReason: failed ? 'failed' : 'available', summary: typeof message.result === 'string' ? message.result.slice(0, 1000) : undefined })),
-        }, plan.teamName)
       })
       const brief = memberBrief(member, members, approved.tasks, taskMapping, plan.resume
         ? task => task.resumeState === 'held' || task.resumeState === 'done'
