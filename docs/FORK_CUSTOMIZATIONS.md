@@ -18,6 +18,7 @@
 | 定制 | 锚点 | 验证 |
 | --- | --- | --- |
 | ★ README.md / README.zh-CN.md 永不被上游覆盖（Code Council 品牌、定制节、fork 链接） | `README.md`、`README.zh-CN.md`、`README.en.md` | `git diff <merge-base> main -- README.md README.zh-CN.md` 预期仅 fork 侧有改动；冲突一律取 fork |
+| README.en.md 跟随上游内容性更新（上游英文版）：头部 NanmiCoder 徽章链接、上游自有赞助横幅（v0.7.5 Modelflare）**豁免/保留**；去广告锚点仅限 providerPresets.json；tokenUsage 分享图默认署名须指向 fork repo | `README.en.md`、`desktop/src/features/tokenUsage/useActivityProfile.ts:13` | `grep -c NanmiCoder README.en.md` 与 fork HEAD 计数一致即可；`grep 706412584 useActivityProfile.ts` 应为 1 |
 | ★ Code Council wordmark | `desktop/src/components/layout/Sidebar.tsx:1146`（`Code <span>Council</span>`；AppShell.tsx 无 Council 字样，2026-10-28 核实） | grep `Council` Sidebar.tsx |
 | ★ 全库 GitHub 链接指向 `706412584/cc-haha` | 全库 | `grep -rn "NanmiCoder/cc-haha\|anthropics/claude-code" --include="*.md" --include="*.ts"`（排除 node_modules/release-notes 历史报告）应为 0 |
 
