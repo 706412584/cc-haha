@@ -406,9 +406,12 @@ export class DataMigration {
     // unavailable" even though app-mode.json had long pointed elsewhere.
     // Delete the receipt so neither startup nor the settings panel keeps
     // reporting a finished attempt as current state. A failed delete must not
-    // block startup; the next launch simply retries it.
+    // block startup; the next launch simply retries it. The parsed record is
+    // still kept as this instance's status so a test (or a diagnostics read)
+    // can observe what the receipt said before it was dropped.
     if (parsed.status.stage === 'failed' || parsed.status.stage === 'cancelled') {
       await fs.rm(this.journalPath, { force: true }).catch(() => {})
+      this.journal = parsed
       return 'normal'
     }
     this.journal = parsed

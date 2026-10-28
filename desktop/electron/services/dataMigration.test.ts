@@ -753,7 +753,9 @@ describe('data directory migration', () => {
     // The receipt is a record of a finished attempt, not current state: it must
     // not survive to be re-reported on the next startup or in the settings panel.
     await expect(fs.stat(path.join(f.userData, MIGRATION_JOURNAL_FILE))).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(f.migration.status).toBeNull()
+    // The instance keeps the parsed stage so this run can still say what the
+    // dropped receipt recorded.
+    expect(f.migration.status).toMatchObject({ stage })
     // Recovery must not roll the startup pointer back for a receipt that was
     // already rolled back when it was written.
     await expect(fs.stat(path.join(f.userData, 'app-mode.json'))).rejects.toMatchObject({ code: 'ENOENT' })
@@ -780,7 +782,7 @@ describe('data directory migration', () => {
     // drive and abort every launch with "Data directory unavailable".
     await expect(f.migration.recover()).resolves.toBe('normal')
     await expect(fs.stat(path.join(f.userData, MIGRATION_JOURNAL_FILE))).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(f.migration.status).toBeNull()
+    expect(f.migration.status).toMatchObject({ stage: 'cancelled' })
   })
 
   it('fails closed when startup rollback would recreate a missing original directory', async () => {

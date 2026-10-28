@@ -53,6 +53,7 @@ import {
   isGrokOfficialProviderId,
 } from './grokOfficialProvider.js'
 import {
+  DEEPSEEK_ACCOUNT_PROVIDER,
   DEEPSEEK_OAUTH_FILE_ENV_KEY,
   DEEPSEEK_OAUTH_PROVIDER_ENV_KEY,
   applyDeepSeekAccountRuntimeEnv,
@@ -766,6 +767,13 @@ function buildActiveProviderManagedEnv(
   }
   if (isGrokOfficialProviderId(index.activeId)) {
     return buildGrokOfficialRuntimeEnv(index.officialProviderModels[GROK_OFFICIAL_PROVIDER_ID])
+  }
+  if (isDeepSeekAccountProviderId(index.activeId)) {
+    const models = index.officialProviderModels[DEEPSEEK_ACCOUNT_PROVIDER_ID]
+    return buildProviderManagedEnv(
+      { ...DEEPSEEK_ACCOUNT_PROVIDER, ...(models && { models }) },
+      { serverPort: options?.serverPort },
+    )
   }
 
   const provider = index.providers.find((entry) => entry.id === index.activeId)

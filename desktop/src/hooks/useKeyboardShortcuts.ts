@@ -11,9 +11,6 @@ import { hasRunningSubagentTasks } from '../lib/backgroundTasks'
 import { detectPlatform } from '../lib/workspace/shortcuts'
 
 export function useKeyboardShortcuts() {
-  const setActiveSession = useSessionStore((s) => s.setActiveSession)
-  const setActiveView = useUIStore((s) => s.setActiveView)
-  const setSidebarOpen = useUIStore((s) => s.setSidebarOpen)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
   const openModal = useUIStore((s) => s.openModal)
   const closeModal = useUIStore((s) => s.closeModal)
@@ -101,5 +98,5 @@ export function useKeyboardShortcuts() {
 
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [closeModal, openModal, sessionContentSearchEnabled, setActiveSession, setActiveView, setSidebarOpen, toggleSidebar, setUiZoom, stopGeneration])
+  }, [closeModal, openModal, sessionContentSearchEnabled, toggleSidebar, setUiZoom, stopGeneration])
 }
