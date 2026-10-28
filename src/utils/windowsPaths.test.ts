@@ -82,8 +82,13 @@ describe('Windows Git Bash discovery', () => {
     const installedBash = path.win32.join(installedGit, '..', '..', 'bin', 'bash.exe')
     // The fork only consults where.exe when the trusted copy itself exists.
     const trustedWhere = path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'where.exe')
+    // The implementation joins candidates with path.win32, which re-spells a
+    // POSIX tmp path on Linux CI; compare on a normalized form instead of the
+    // literal string.
+    const norm = (value: string) => value.replaceAll('\\', '/').toLowerCase()
     const exists = spyOn(fs, 'statSync').mockImplementation(file => {
-      if (file === installedBash || file === trustedWhere) return { isFile: () => true } as fs.Stats
+      const target = norm(String(file))
+      if (target === norm(installedBash) || target === norm(trustedWhere)) return { isFile: () => true } as fs.Stats
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
     })
     cleanups.push(() => exists.mockRestore())
