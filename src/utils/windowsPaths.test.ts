@@ -76,7 +76,11 @@ describe('Windows Git Bash discovery', () => {
     expect(shell).not.toHaveBeenCalled()
   })
 
-  test('hides the where.exe fallback console and skips workspace executables', () => {
+  // Windows-only: the fixture models a real install under a drive-letter path
+  // and asserts the trusted System32 where.exe is used. On Linux the POSIX tmp
+  // path cannot be spelled through path.win32 the way the implementation does,
+  // so the candidate never matches and discovery returns null.
+  test.skipIf(process.platform !== 'win32')('hides the where.exe fallback console and skips workspace executables', () => {
     delete process.env.CLAUDE_CODE_GIT_BASH_PATH
     const installedGit = path.resolve(os.tmpdir(), 'cc-haha-installed-git', 'cmd', 'git.exe')
     const installedBash = path.win32.join(installedGit, '..', '..', 'bin', 'bash.exe')
