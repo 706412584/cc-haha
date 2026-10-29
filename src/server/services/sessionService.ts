@@ -5037,6 +5037,10 @@ export class SessionService {
       workDir,
       workDirExists,
       workspaceState,
+      // compareSessionLists compares agentProfile (upstream v0.7.5 added it to the
+      // field list), and the file side always reports a default, so the list
+      // hydrator must report it too or every shadow comparison mismatches.
+      agentProfile: row.agentProfile ?? 'standard',
       permissionMode: row.permissionMode,
       ...(row.runtimeProviderId !== undefined
         ? { runtimeProviderId: row.runtimeProviderId }
@@ -5046,6 +5050,7 @@ export class SessionService {
       ...(row.thinkingEnabled !== undefined
         ? { thinkingEnabled: row.thinkingEnabled }
         : {}),
+      ...(row.openAIFastMode !== undefined ? { openAIFastMode: row.openAIFastMode } : {}),
     }
   }
 

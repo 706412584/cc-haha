@@ -856,19 +856,13 @@ export async function launchTeamPlanRuntime(plan: TeamPlanRecord): Promise<{ mem
         })
         await sendTeamSnapshot(plan.sessionId, plan.teamName, launch.createdAt)
       }
-      // Member state only. The lead's idle notification is owned by
-      // notifyLead() through the startWorker() onOutput handler; writing a
-      // second one here duplicated every result in the lead's mailbox, which
-      // the replay cassette (one notification per turn) rejects.
-      conversationService.onOutput(id, message => {
-        if (message?.type !== 'result') return
-        void withTaskListLifecycleLock(getCanonicalTeamTaskListId(plan.teamName), async () => {
-          const team = readTeamFile(plan.teamName)
-          if (!team || team.createdAt !== launch.createdAt) return
-          const entry = team.members.find(entry => entry.sessionId === id)
-          if (entry) { entry.isActive = false; if (!conversationService.hasSession(id)) entry.terminated = true; await writeTeamFileAsync(plan.teamName, team) }
-        }).catch(error => console.error('[TeamPlanRuntime] cannot update idle member', error))
-      })
+      // No second onOutput handler here. handleWorkerResult() already owns the
+      // member entry (isActive, terminated, lastError, autoRetry) and the lead's
+      // idle notification, and it writes through mutateTeamFileAsync. The
+      // handler that used to sit here re-wrote the whole team file from a
+      // snapshot taken before handleWorkerResult ran, so a turn that recovered
+      // from a transient failure kept the failure it had just cleared. It also
+      // wrote a duplicate idle notification the replay cassette rejects.
       const brief = memberBrief(member, members, approved.tasks, taskMapping, plan.resume
         ? task => task.resumeState === 'held' || task.resumeState === 'done'
         : undefined)
@@ -1098,13 +1092,21 @@ export async function stopTeamPlanRuntimesForParent(parentSessionId: string, opt
   const stopOwned = () => Promise.all(owned().map(([planId]) => stopTeamPlanRuntime(planId)))
   const hadReleasedWork = owned().some(([, launch]) => launch.released)
   const endedRunning = owned().filter(([, launch]) => launch.running).map(([, launch]) => launch.plan)
+  // The user's Stop pauses a live team: its launch stays owned, the members are
+  // marked stopped, and the plan keeps reading `running` so the UI still shows
+  // a team the user can resume. Only an ended team lands on `interrupted`.
+  const pausedPlanIds = new Set(options.pauseReleased
+    ? [...launches.values()]
+      .filter(launch => launch.parentId === parentSessionId && launch.running && !launch.stopped)
+      .map(launch => launch.plan.planId)
+    : [])
   await stopOwned()
   const plan = await findTeamPlanForSession(parentSessionId)
   // `running` used to fall through untouched: stopping a live team killed the
   // workers but left the plan reading "running", so the UI kept showing a team
   // that no longer existed and the plan could never be cleared. A running team
   // has necessarily started work, so it lands on `interrupted`.
-  if (plan?.state === 'launching' || plan?.state === 'running') {
+  if (plan && !pausedPlanIds.has(plan.planId) && (plan.state === 'launching' || plan.state === 'running')) {
     const running = plan.state === 'running'
     const executionStarted = hadReleasedWork || running
     // Only a run that released work can be resumed; a cancelled startup has
