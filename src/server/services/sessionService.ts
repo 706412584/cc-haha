@@ -32,6 +32,7 @@ import {
   getProviderUsageTrust,
   hasMediaInput,
 } from '../../utils/contextBudget.js'
+import { isENOENT } from '../../utils/errors.js'
 import { getCanonicalName } from '../../utils/model/model.js'
 import { isFirstPartyAnthropicBaseUrl } from '../../utils/model/providers.js'
 import {
@@ -1207,7 +1208,7 @@ export class SessionService {
           )
           return await this.hydrateIndexedSession(row)
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+          if (isENOENT(error)) return null
           this.markIndexReadFailure()
           throw new ApiError(409, 'Project history changed; retry from the first page', 'PROJECT_HISTORY_CHANGED')
         }
@@ -1695,7 +1696,7 @@ export class SessionService {
         }
         return { entries, exists: true, parseComplete }
       } catch (err: unknown) {
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        if (isENOENT(err)) {
           return { entries: [], exists: false, parseComplete: false }
         }
         throw err
@@ -1708,7 +1709,7 @@ export class SessionService {
     try {
       stat = await fs.stat(filePath)
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (isENOENT(err)) {
         return { entries: [], exists: false, parseComplete: false }
       }
       throw err
@@ -1870,7 +1871,7 @@ export class SessionService {
       const { bytesRead } = await handle.read(buffer, 0, length, start)
       return bytesRead === length ? buffer : null
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+      if (isENOENT(err)) return null
       throw err
     } finally {
       await handle?.close().catch(() => {})
@@ -2014,7 +2015,7 @@ export class SessionService {
     try {
       content = await fs.readFile(filePath, 'utf-8')
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (isENOENT(err)) {
         this.invalidateReadCache(filePath)
         return { entries: [], exists: false, parseComplete: false }
       }
@@ -2118,7 +2119,7 @@ export class SessionService {
       }
       return this.parseJsonlContent(text).entries
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (isENOENT(err)) {
         return []
       }
       throw err
@@ -2320,7 +2321,7 @@ export class SessionService {
         handleLine(line, false)
       }
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      if (!isENOENT(err)) {
         throw err
       }
     } finally {
@@ -2727,7 +2728,7 @@ export class SessionService {
       handle = await fs.open(filePath, constants.O_WRONLY | constants.O_APPEND |
         (entry.type === 'session-meta' ? constants.O_CREAT : 0))
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      if (isENOENT(error)) return
       throw error
     }
     try {
@@ -3897,7 +3898,7 @@ export class SessionService {
           const hydratedMatches: Array<SessionFileMatch & { mtimeMs: number }> = []
           let hydrationFailed = false
           const failUnlessMissing = (error: unknown) =>
-            (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'drop' as const : 'fail' as const
+            isENOENT(error) ? 'drop' as const : 'fail' as const
           for (const match of indexedMatches) {
             try {
               const stat = await this.validateIndexedTranscriptPath(
@@ -5321,7 +5322,7 @@ export class SessionService {
         transcriptPath: filePath,
       })
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      if (isENOENT(error)) return null
       throw error
     }
   }
@@ -5636,7 +5637,7 @@ export class SessionService {
     const leaf = toolRef.slice(toolRef.lastIndexOf('/') + 1)
     const ids = new Set([toolRef, leaf])
     const stat = await fs.stat(filePath, { bigint: true }).catch(error => {
-      if (error.code === 'ENOENT') return null
+      if (isENOENT(error)) return null
       throw error
     })
     if (!stat) return { messages: [], taskNotifications: [], historyComplete: true }
@@ -5769,7 +5770,7 @@ export class SessionService {
           historyComplete: result.page.historyComplete,
         }
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { messages: [], taskNotifications: [], historyComplete: true }
+        if (isENOENT(error)) return { messages: [], taskNotifications: [], historyComplete: true }
         throw error
       }
     }
@@ -6570,7 +6571,7 @@ export class SessionService {
         const repository = (record as Record<string, unknown>).repository
         if (repository && typeof repository === 'object') preserved.repository = repository as PreparedSessionWorkspace['repository']
       }, undefined, { maxRecordBytes: HISTORY_SEMANTIC_RECORD_BYTES }).catch(error => {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        if (!isENOENT(error)) throw error
       })
       const workDir = (preserved.workDir && normalizeDriveRootPathForPlatform(preserved.workDir))
         || (preserved.cwd && normalizeDriveRootPathForPlatform(preserved.cwd))
@@ -6822,7 +6823,7 @@ export class SessionService {
     try {
       projectDirs = await fs.readdir(projectsDir, { withFileTypes: true })
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 0
+      if (isENOENT(err)) return 0
       throw err
     }
 
@@ -6933,7 +6934,7 @@ export class SessionService {
    */
   private async reduceFileHistoryBaselines(filePath: string): Promise<RawEntry[]> {
     const identity = () => fs.stat(filePath).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT') return null
+      if (isENOENT(error)) return null
       throw error
     })
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -7013,7 +7014,7 @@ export class SessionService {
         onEntry(entry, lineNumber, line)
       }
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+      if (!isENOENT(err)) throw err
     } finally {
       lines.close()
       stream.destroy()
