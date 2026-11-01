@@ -278,6 +278,17 @@ export function parseStatus(code: string): WorkspaceFileStatus {
 }
 
 export class WorkspaceService {
+  /**
+   * Status is polled by every open session, and one call spawns git and folds the
+   * transcript's file-history evidence (measured 0.3–1.7s on a 60MB session).
+   * Several open sessions therefore repeat identical work on every tick. A short
+   * TTL collapses those repeats while staying well inside the poll cadence, so the
+   * view still tracks git within a few seconds.
+   */
+  private readonly statusCache = new Map<string, { at: number; status: WorkspaceStatusResult }>()
+  private readonly statusCacheTtlMs = 3_000
+  private readonly statusCacheMaxEntries = 32
+
   constructor(
     private readonly resolveSessionWorkDir: (
       sessionId: string,
@@ -288,9 +299,35 @@ export class WorkspaceService {
     private readonly resolveSessionFileHistorySnapshots: (
       sessionId: string,
     ) => Promise<FileHistorySnapshot[]> = async () => [],
+    private readonly now: () => number = Date.now,
   ) {}
 
   async getStatus(sessionId: string): Promise<WorkspaceStatusResult> {
+    const cached = this.statusCache.get(sessionId)
+    if (cached && this.now() - cached.at < this.statusCacheTtlMs) {
+      // Refresh recency so a polled session is not evicted by a one-off read.
+      this.statusCache.delete(sessionId)
+      this.statusCache.set(sessionId, cached)
+      return cached.status
+    }
+    const status = await this.loadStatus(sessionId)
+    this.statusCache.delete(sessionId)
+    this.statusCache.set(sessionId, { at: this.now(), status })
+    while (this.statusCache.size > this.statusCacheMaxEntries) {
+      const oldest = this.statusCache.keys().next().value
+      if (oldest === undefined) break
+      this.statusCache.delete(oldest)
+    }
+    return status
+  }
+
+  /** Drop cached status after a change the caller itself made. */
+  invalidateStatus(sessionId?: string): void {
+    if (sessionId === undefined) this.statusCache.clear()
+    else this.statusCache.delete(sessionId)
+  }
+
+  private async loadStatus(sessionId: string): Promise<WorkspaceStatusResult> {
     const workDir = await this.requireWorkDir(sessionId)
     const workspaceInfo = await this.getWorkspaceRoot(workDir)
     if (workspaceInfo.kind === 'missing') {
@@ -666,6 +703,9 @@ export class WorkspaceService {
         const event = { paths: [...paths], directories: [...directories] }
         paths.clear()
         directories.clear()
+        // A watched change is exactly what the status cache must not hide: the
+        // client refreshes on this event, so drop the cached answer first.
+        this.invalidateStatus(sessionId)
         onChange(event)
       }, 60)
     }

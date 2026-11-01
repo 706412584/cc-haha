@@ -918,7 +918,6 @@ export function hasMalformedFileHistoryBefore(snapshot: FileHistorySnapshot): bo
 
 export class SessionService {
   private readonly uiFileHistoryReads = new Map<string, Promise<RawEntry[]>>()
-  private readonly inspectionSnapshots = new Map<string, Promise<SessionInspectionTranscriptSnapshot | null>>()
 
   private providerService = new ProviderService()
   // Keep launch state available when retention disables or removes transcripts.
@@ -1049,14 +1048,15 @@ export class SessionService {
    * The snapshot is a fold over an append-only transcript whose every
    * accumulator is monotonic (sums, min/max, last-wins scalars, Map upserts),
    * so resuming from a byte offset yields the same result as a full re-parse.
-   * Holds small aggregates, not file content. Bounded to a handful of entries
-   * because only sessions under active inspection are polled.
+   * Holds small aggregates, not file content. Sized to match
+   * `inspectionSnapshots`: a session whose fold seed was evicted re-reads its
+   * whole transcript, and several sessions poll at once.
    */
   private readonly inspectionFoldCache = new Map<string, {
     offset: number
     fold: InspectionFoldState
   }>()
-  private readonly inspectionFoldCacheMaxEntries = 8
+  private readonly inspectionFoldCacheMaxEntries = 32
   /**
    * Resume point for the session-list summary fold, keyed by transcript path.
    *
@@ -1121,8 +1121,17 @@ export class SessionService {
   /**
    * Inspection snapshots shared by the metadata/context/usage readers, keyed by the
    * transcript's stat signature plus the provider/env revision its token budget depends on.
+   *
+   * An append changes the stat signature, so every active conversation creates a
+   * new entry on each poll. The cap must therefore cover every session a user can
+   * have open at once, or the oldest are evicted before their next tick and the
+   * whole transcript is folded again — measured at ~3.9s per round for twelve
+   * sessions with a cap of 8. `inspectionFoldCache` resumes a fold from a byte
+   * offset and is what keeps a cache miss cheap, so both are sized together.
    */
-  private readonly inspectionSnapshots = new Map<string, Promise<SessionInspectionTranscriptSnapshot | null>>()
+  private readonly inspectionSnapshots = new Map<string, { signature: string; request: Promise<SessionInspectionTranscriptSnapshot | null> }>()
+  /** Room for every session a user plausibly keeps open at once. */
+  private readonly inspectionSnapshotsMaxEntries = 32
   /**
    * Coalesces overlapping whole-history reads. Deliberately not a cache: retaining
    * histories would pin hundreds of MB per session after callers close their views.
@@ -4371,14 +4380,26 @@ export class SessionService {
         'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_USE_AZURE_OPENAI',
       ].map(name => process.env[name] ?? null),
     })).digest('hex')
-    const key = `${found.filePath}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}:${contextRevision}`
-    const existing = this.inspectionSnapshots.get(key)
-    if (existing) return existing
+    const signature = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}:${contextRevision}`
+    // Keyed by transcript, not by signature: an append changes the signature, so a
+    // signature-keyed map missed on every poll of an active conversation and its
+    // entries crowded out every other open session. The signature is checked on
+    // hit instead, and a miss still resumes from the fold's byte offset.
+    const cached = this.inspectionSnapshots.get(found.filePath)
+    if (cached?.signature === signature) {
+      this.inspectionSnapshots.delete(found.filePath)
+      this.inspectionSnapshots.set(found.filePath, cached)
+      return cached.request
+    }
     const request = this.readInspectionSnapshotForSession(sessionId, found.filePath)
-    this.inspectionSnapshots.set(key, request)
-    while (this.inspectionSnapshots.size > 8) this.inspectionSnapshots.delete(this.inspectionSnapshots.keys().next().value!)
+    this.inspectionSnapshots.set(found.filePath, { signature, request })
+    while (this.inspectionSnapshots.size > this.inspectionSnapshotsMaxEntries) {
+      const oldest = this.inspectionSnapshots.keys().next().value
+      if (oldest === undefined) break
+      this.inspectionSnapshots.delete(oldest)
+    }
     try { return await request }
-    catch (error) { this.inspectionSnapshots.delete(key); throw error }
+    catch (error) { this.inspectionSnapshots.delete(found.filePath); throw error }
   }
 
   private async readInspectionSnapshotForSession(sessionId: string, filePath: string): Promise<SessionInspectionTranscriptSnapshot | null> {
