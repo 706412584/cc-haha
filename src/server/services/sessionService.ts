@@ -1104,10 +1104,17 @@ export class SessionService {
   private readonly projectHistory: ProjectSessionHistory
   /**
    * Recovery snapshots keyed by session, invalidated by the transcript's stat
-   * signature. Capped at two: these hold whole transcripts and only the session
-   * the user is looking at (plus one transition) is worth pinning.
+   * signature. A recovery pass is a whole-source state reduction (usage totals,
+   * tool ownership, budget eviction), so an append cannot be folded incrementally
+   * and every miss re-reads the transcript from byte 0 — measured at ~920ms per
+   * round for four sessions when the cap of two let active polls evict each
+   * other. The cap must cover every session a user can keep open at once, and
+   * the in-flight request is stored so concurrent callers share one pass instead
+   * of queueing behind the single recovery read lane.
    */
-  private readonly historyRecoveryCache = new Map<string, SessionHistoryRecovery>()
+  private readonly historyRecoveryCacheMaxEntries = 16
+  private readonly historyRecoveryCache = new Map<string, { signature: string; request: Promise<SessionHistoryRecovery> }>()
+  private readonly historyRecoveryRequests = new Map<string, Promise<SessionHistoryRecovery>>()
   /**
    * Bounded metadata projection shared by launch-info, work-dir and title reads
    * (re-ported from upstream). One fold means a picker asking for a title never
@@ -5481,15 +5488,37 @@ export class SessionService {
     const version = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`
     const cacheKey = this.memorySessionKey(sessionId)
     const cached = this.historyRecoveryCache.get(cacheKey)
-    if (cached?.sourceVersion === version) {
-      // Refresh recency so the two-entry cap evicts the least recently used session.
+    if (cached?.signature === version) {
+      // Refresh recency so the cap evicts the least recently used session.
       this.historyRecoveryCache.delete(cacheKey)
       this.historyRecoveryCache.set(cacheKey, cached)
-      return cached
+      return cached.request
     }
+    const inFlight = this.historyRecoveryRequests.get(cacheKey)
+    if (inFlight) {
+      if (options.signal?.aborted) throw options.signal.reason ?? new DOMException('Aborted', 'AbortError')
+      return inFlight
+    }
+    const request = this.recoverSessionHistoryIntoCache(found.filePath, cacheKey)
+    this.historyRecoveryRequests.set(cacheKey, request)
+    try {
+      return await request
+    } finally {
+      if (this.historyRecoveryRequests.get(cacheKey) === request) {
+        this.historyRecoveryRequests.delete(cacheKey)
+      }
+    }
+  }
+
+  /**
+   * Run one recovery pass and put it in the snapshot cache. The pass reads the
+   * transcript without the caller's abort signal: a shared in-flight request
+   * must not die because the one caller that triggered it was cancelled —
+   * concurrent callers hold the same promise, and the result stays cached.
+   */
+  private async recoverSessionHistoryIntoCache(filePath: string, cacheKey: string): Promise<SessionHistoryRecovery> {
     const recovery = await recoverBoundedSessionHistory({
-      filePath: found.filePath,
-      signal: options.signal,
+      filePath,
       toMessage: (entry, owner) => {
         const raw = entry as RawEntry
         const goal = this.goalLocalCommandEntryToMessage(raw)
@@ -5500,8 +5529,12 @@ export class SessionService {
       notifications: entry => this.taskNotificationsFromEntries([entry as RawEntry]),
     })
     this.historyRecoveryCache.delete(cacheKey)
-    this.historyRecoveryCache.set(cacheKey, recovery)
-    while (this.historyRecoveryCache.size > 2) this.historyRecoveryCache.delete(this.historyRecoveryCache.keys().next().value!)
+    this.historyRecoveryCache.set(cacheKey, { signature: recovery.sourceVersion, request: Promise.resolve(recovery) })
+    while (this.historyRecoveryCache.size > this.historyRecoveryCacheMaxEntries) {
+      const oldest = this.historyRecoveryCache.keys().next().value
+      if (oldest === undefined) break
+      this.historyRecoveryCache.delete(oldest)
+    }
     return recovery
   }
 

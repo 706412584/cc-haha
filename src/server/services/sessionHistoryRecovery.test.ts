@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 import { mkdtemp, mkdir, writeFile, appendFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -304,3 +304,25 @@ for (const order of ['shell-write', 'write-shell'] as const) {
     expect(recovery.messages).toHaveLength(2048)
   })
 }
+
+test('recovery snapshots stay cached across sessions instead of evicting each other between polls', async () => {
+  // The old cap of two held whole-reduction snapshots keyed by stat signature, so
+  // every poll of an active conversation re-folded the transcript from byte 0 and
+  // evicted the session polled just before it (~920ms per round for four sessions).
+  const entry = { type: 'user', uuid: 'x', message: { role: 'user', content: 'x' }, timestamp: '2026-01-01T00:00:00.000Z' }
+  const internals = service as unknown as {
+    recoverSessionHistoryIntoCache: (filePath: string, cacheKey: string) => Promise<unknown>
+    historyRecoveryCache: Map<string, { signature: string; request: Promise<unknown> }>
+  }
+  const passes = spyOn(internals, 'recoverSessionHistoryIntoCache')
+  const project = join(directory, 'projects', '-tmp-history')
+  const sessions = Array.from({ length: 6 }, (_, index) => `aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee${index}`)
+  for (const sessionId of sessions) {
+    await writeFile(join(project, `${sessionId}.jsonl`), JSON.stringify(entry) + '\n')
+    const first = await service.getSessionHistoryRecovery(sessionId)
+    expect((await service.getSessionHistoryRecovery(sessionId)) as unknown).toBe(first)
+  }
+  expect(internals.historyRecoveryCache.size).toBe(sessions.length)
+  expect(passes).toHaveBeenCalledTimes(sessions.length)
+  passes.mockRestore()
+})
