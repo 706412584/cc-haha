@@ -252,6 +252,7 @@ export type SettingsTab =
   | 'skills'
   | 'memory'
   | 'orchestration'
+  | 'systemPrompt'
   | 'plugins'
   | 'pets'
   | 'computerUse'

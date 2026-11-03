@@ -619,6 +619,41 @@ ${CYBER_RISK_INSTRUCTION}`,
   ].filter(s => s !== null)
 }
 
+/**
+ * The static sections of the standard system prompt, joined for display.
+ *
+ * This is a fork addition used by the settings UI to seed a "load built-in
+ * default" draft for the main system-prompt override. It deliberately returns
+ * ONLY the static half of `getSystemPrompt` — the intro, system, doing-tasks,
+ * actions, tools, tone and output-efficiency sections — because the dynamic
+ * registry sections (environment info, memory, active skills, language, output
+ * style, MCP instructions, …) are recomputed per session from the working
+ * directory, model and provider, so a snapshot of them would not describe the
+ * session the user is about to start.
+ *
+ * The sections are assembled in the same order as `getSystemPrompt` so the
+ * draft matches what the model sees ahead of the dynamic block.
+ */
+export async function getStaticSystemPromptSnapshot(): Promise<string> {
+  const outputStyleConfig = await getOutputStyleConfig()
+  const sections = [
+    getSimpleIntroSection(outputStyleConfig),
+    getSimpleSystemSection(),
+    // Matches the runtime gate in `getSystemPrompt`: an output style may opt out
+    // of the coding-task instructions.
+    outputStyleConfig === null || outputStyleConfig.keepCodingInstructions === true
+      ? getSimpleDoingTasksSection()
+      : null,
+    getActionsSection(),
+    // The task-tool bullet is dropped when neither task tool is enabled, so feed
+    // both names to keep the draft representative of an ordinary session.
+    getUsingYourToolsSection(new Set([TASK_CREATE_TOOL_NAME, TODO_WRITE_TOOL_NAME])),
+    getSimpleToneAndStyleSection(),
+    getOutputEfficiencySection(),
+  ].filter((section): section is string => section !== null)
+  return sections.join('\n\n')
+}
+
 function getMcpInstructions(mcpClients: MCPServerConnection[]): string | null {
   const connectedClients = mcpClients.filter(
     (client): client is ConnectedMCPServer => client.type === 'connected',

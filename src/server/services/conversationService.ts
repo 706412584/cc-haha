@@ -61,9 +61,11 @@ import {
   orchestrationPromptPreferencesService,
   type OrchestrationPromptMode,
 } from './orchestrationPromptPreferencesService.js'
+import { systemPromptPreferencesService } from './systemPromptPreferencesService.js'
 import {
   composeAppendSystemPrompt,
   writeSessionAppendPromptFile,
+  writeSessionSystemPromptFile,
 } from './sessionPromptFileService.js'
 import { sanitizePath } from '../../utils/path.js'
 import { getProcessEnvWithTerminalShellEnvironment } from '../../utils/terminalShellEnvironment.js'
@@ -448,6 +450,15 @@ export type SessionStartOptions = {
    * silently wins.
    */
   resolvedAppendPromptPath?: string
+  /**
+   * Absolute path to a file holding the user's REPLACEMENT main system prompt,
+   * passed to the CLI as `--system-prompt-file`. Distinct from
+   * `resolvedAppendPromptPath`: that channel APPENDS, this one replaces the
+   * built-in prompt wholesale. Resolved asynchronously in `startSession` so
+   * `getRuntimeArgs` can stay synchronous. A file rather than inline text for
+   * the same Windows command-line-length reason as the append path.
+   */
+  resolvedSystemPromptPath?: string
   resumeInterruptedTurn?: boolean
 }
 
@@ -970,7 +981,10 @@ export class ConversationService {
       )
     }
 
-    const resolvedOptions = await this.resolveAppendPromptFile(sessionId, options)
+    // Append (mode prompt + hand-off) and replace (main system prompt) are two
+    // separate CLI channels, so resolve one, then the other.
+    const withAppend = await this.resolveAppendPromptFile(sessionId, options)
+    const resolvedOptions = await this.resolveSystemPromptFile(sessionId, withAppend)
 
     const args = this.buildSessionCliArgs(
       sessionId,
@@ -2439,6 +2453,40 @@ export class ConversationService {
     return filePath ? { ...options, resolvedAppendPromptPath: filePath } : options
   }
 
+  /**
+   * Resolve the user's replacement main system prompt, if any, to a file path
+   * for `--system-prompt-file`.
+   *
+   * Distinct from `resolveAppendPromptFile`: this REPLACES the built-in prompt
+   * rather than appending to it, so it is the user's explicit choice to drop
+   * the built-in environment/memory/skill sections. A read failure must not
+   * block startup — fall back to the built-in prompt (leave the flag off).
+   *
+   * Async for the same reason as `resolveAppendPromptFile`: the write completes
+   * before `Bun.spawn`, so a restart always re-reads the current text.
+   */
+  private async resolveSystemPromptFile(
+    sessionId: string,
+    options: SessionStartOptions | undefined,
+  ): Promise<SessionStartOptions | undefined> {
+    if (!options) return options
+
+    const resolved = await systemPromptPreferencesService
+      .getResolvedPrompt()
+      .catch((error: unknown) => {
+        console.warn(
+          `[ConversationService] Ignoring the custom system prompt: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
+        return null
+      })
+    if (!resolved?.custom) return options
+
+    const filePath = await writeSessionSystemPromptFile(sessionId, resolved.custom)
+    return filePath ? { ...options, resolvedSystemPromptPath: filePath } : options
+  }
+
   private getRuntimeArgs(options: SessionStartOptions | undefined): string[] {
     const args: string[] = []
 
@@ -2461,6 +2509,12 @@ export class ConversationService {
     // mean the last one silently wins.
     if (options?.resolvedAppendPromptPath) {
       args.push('--append-system-prompt-file', options.resolvedAppendPromptPath)
+    }
+
+    // Replacement main system prompt. Mutually usable with the append flag: the
+    // CLI applies `--system-prompt-file` as the base and appends the addendum.
+    if (options?.resolvedSystemPromptPath) {
+      args.push('--system-prompt-file', options.resolvedSystemPromptPath)
     }
 
     return args

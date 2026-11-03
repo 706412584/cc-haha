@@ -35,7 +35,7 @@ import {
   ConversationStartupError,
   conversationService,
 } from '../services/conversationService.js'
-import { removeSessionAppendPromptFile } from '../services/sessionPromptFileService.js'
+import { removeSessionAppendPromptFile, removeSessionSystemPromptFile } from '../services/sessionPromptFileService.js'
 import { endTeamsForParent, hasActiveTeamWorkForParent, noteLeadUserMessage } from '../services/teamPlanRuntime.js'
 import { computerUseApprovalService } from '../services/computerUseApprovalService.js'
 import {
@@ -4392,6 +4392,9 @@ function cleanupSessionRuntimeState(
   // rewrites the file, so removing it on the restart path would delete the
   // file the new process is about to read.
   void removeSessionAppendPromptFile(sessionId)
+  // Same reasoning as the append file above: only on real teardown, since a
+  // mode-switch restart rewrites it before the new process reads it.
+  void removeSessionSystemPromptFile(sessionId)
   activeUserTurns.delete(sessionId)
   sessionActivityCoordinator.clear(sessionId)
   activeCliRuns.delete(sessionId)

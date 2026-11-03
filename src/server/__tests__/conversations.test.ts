@@ -23,6 +23,7 @@ import {
 } from '../services/conversationService.js'
 import { getSoloPipelineSystemPrompt } from '../../coordinator/soloPipelinePrompt.js'
 import { orchestrationPromptPreferencesService } from '../services/orchestrationPromptPreferencesService.js'
+import { systemPromptPreferencesService } from '../services/systemPromptPreferencesService.js'
 import { ORCHESTRATION_PROMPT_MARKER, ORCHESTRATION_SYSTEM_PROMPT, ORCHESTRATION_PROPAGATE_RULES_MARKER } from '../orchestrationPrompt.js'
 import {
   ASK_USER_QUESTION_CLARIFY_MESSAGE,
@@ -1090,6 +1091,94 @@ describe('ConversationService', () => {
       expect(text).not.toContain(ORCHESTRATION_PROMPT_MARKER)
     } finally {
       preferences.readPreferences = originalRead
+    }
+  })
+
+  /**
+   * Resolve the replacement main system prompt to a file path via the same
+   * two-step indirection the append prompt uses, so assertions can read the
+   * text the CLI will actually receive.
+   */
+  async function resolveSystemPrompt(
+    svc: ConversationService,
+    options: Record<string, unknown>,
+    sessionId = 'system-prompt-file-test-session',
+  ): Promise<{ args: string[]; path: string | null; text: string }> {
+    const resolved = await (svc as any).resolveSystemPromptFile(sessionId, options)
+    const args = (svc as any).getRuntimeArgs(resolved) as string[]
+    const idx = args.indexOf('--system-prompt-file')
+    if (idx < 0) return { args, path: null, text: '' }
+    const filePath = args[idx + 1]!
+    return { args, path: filePath, text: readFileSync(filePath, 'utf8') }
+  }
+
+  it('passes a replacement main system prompt by file when one is set', async () => {
+    const svc = new ConversationService()
+    const preferences = systemPromptPreferencesService as any
+    const originalResolved = preferences.getResolvedPrompt
+    preferences.getResolvedPrompt = async () => ({ custom: 'You are a pirate assistant.', isCustom: true })
+    try {
+      const { args, path: filePath, text } = await resolveSystemPrompt(svc, { model: 'x' })
+      expect(filePath).toBeString()
+      expect(text).toBe('You are a pirate assistant.')
+      // The replacement must travel by file, not inline text.
+      expect(args).toContain('--system-prompt-file')
+      expect(args).not.toContain('--system-prompt')
+      // Model args still present alongside it.
+      expect(args).toContain('x')
+    } finally {
+      preferences.getResolvedPrompt = originalResolved
+    }
+  })
+
+  it('does not pass any replacement prompt when no override is set', async () => {
+    const svc = new ConversationService()
+    const preferences = systemPromptPreferencesService as any
+    const originalResolved = preferences.getResolvedPrompt
+    preferences.getResolvedPrompt = async () => ({ custom: null, isCustom: false })
+    try {
+      const { args, path: filePath } = await resolveSystemPrompt(svc, {})
+      expect(filePath).toBeNull()
+      expect(args).not.toContain('--system-prompt-file')
+    } finally {
+      preferences.getResolvedPrompt = originalResolved
+    }
+  })
+
+  it('falls back to the built-in prompt when the preferences read fails', async () => {
+    const svc = new ConversationService()
+    const preferences = systemPromptPreferencesService as any
+    const originalResolved = preferences.getResolvedPrompt
+    preferences.getResolvedPrompt = async () => {
+      throw new Error('corrupt preferences')
+    }
+    try {
+      // A broken preferences file must not block session startup.
+      const { args, path: filePath } = await resolveSystemPrompt(svc, {})
+      expect(filePath).toBeNull()
+      expect(args).not.toContain('--system-prompt-file')
+    } finally {
+      preferences.getResolvedPrompt = originalResolved
+    }
+  })
+
+  it('carries both the replacement and the append prompt on their own flags', async () => {
+    const svc = new ConversationService()
+    const preferences = systemPromptPreferencesService as any
+    const originalResolved = preferences.getResolvedPrompt
+    preferences.getResolvedPrompt = async () => ({ custom: 'REPLACEMENT-MAIN', isCustom: true })
+    try {
+      const withAppend = await (svc as any).resolveAppendPromptFile('both-flags-session', { coordinatorMode: true })
+      const resolved = await (svc as any).resolveSystemPromptFile('both-flags-session', withAppend)
+      const args = (svc as any).getRuntimeArgs(resolved) as string[]
+      expect(args).toContain('--system-prompt-file')
+      expect(args).toContain('--append-system-prompt-file')
+      const main = readFileSync(args[args.indexOf('--system-prompt-file') + 1]!, 'utf8')
+      const append = readFileSync(args[args.indexOf('--append-system-prompt-file') + 1]!, 'utf8')
+      expect(main).toBe('REPLACEMENT-MAIN')
+      expect(append).toContain(ORCHESTRATION_PROMPT_MARKER)
+    } finally {
+      preferences.getResolvedPrompt = originalResolved
     }
   })
 

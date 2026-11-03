@@ -47,6 +47,43 @@ describe('useTranslation', () => {
     expect(translate('kr', 'session.timeMinutes', { n: 5 })).toBe('5분 전')
   })
 
+  it('localizes the system-prompt settings page in every locale', () => {
+    // A missing key returns the key itself, so this catches a locale that was
+    // not updated alongside the new Settings → System Prompt tab.
+    const keys = [
+      'settings.tab.systemPrompt',
+      'settings.systemPrompt.title',
+      'settings.systemPrompt.description',
+      'settings.systemPrompt.customBadge',
+      'settings.systemPrompt.defaultBadge',
+      'settings.systemPrompt.resetToDefault',
+      'settings.systemPrompt.resetConfirm',
+      'settings.systemPrompt.loadDefault',
+      'settings.systemPrompt.save',
+      'settings.systemPrompt.saved',
+      'settings.systemPrompt.saveFailed',
+      'settings.systemPrompt.loadFailed',
+      'settings.systemPrompt.unsaved',
+      'settings.systemPrompt.applyHint',
+      'settings.systemPrompt.replaceWarning',
+      'settings.systemPrompt.editDefaultHint',
+      'settings.systemPrompt.placeholder',
+      'settings.systemPrompt.edit',
+      'settings.systemPrompt.preview',
+    ] as const
+    for (const key of keys) {
+      for (const locale of ['en', 'zh', 'zh-TW', 'jp', 'kr'] as const) {
+        const value = translate(locale, key)
+        expect(value, `${locale} is missing ${key}`).not.toBe(key)
+        expect(value.length, `${locale} / ${key}`).toBeGreaterThan(0)
+      }
+      // The Chinese string must be written natively, not left as English.
+      expect(translate('zh', key)).not.toBe(translate('en', key))
+    }
+    // The parameterized one must actually substitute the ceiling.
+    expect(translate('zh', 'settings.systemPrompt.tooLong', { max: 200_000 })).toContain('200000')
+  })
+
   it('resolves the recommended-skill catalog descriptions in every locale', () => {
     // Each newly-added catalog entry must have a real, locale-specific
     // description across all five locales — otherwise the desktop Settings →
