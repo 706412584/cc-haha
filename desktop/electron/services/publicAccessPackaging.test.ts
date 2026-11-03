@@ -31,11 +31,12 @@ describe('remote access packaging', () => {
     expect(steps[prepared]).toMatchObject({ 'working-directory': 'desktop', run: 'bun run prepare:cloudflared', env: { SIDECAR_TARGET_TRIPLE: '${{ matrix.target_triple }}' } })
   })
 
-  it('does not ship the retired ngrok provider or its native loader', () => {
-    expect(manifest.dependencies['@ngrok/ngrok']).toBeUndefined()
-    expect(manifest.build.asarUnpack).not.toContain('node_modules/@ngrok/**')
-    expect(manifest.build.files).not.toContain('node_modules/@ngrok/**')
-    expect(manifest.scripts['build:electron']).not.toContain('--external @ngrok/ngrok')
+  it('ships the ngrok provider as an optional tunnel fallback', () => {
+    // fork: ngrok is kept as an optional H5 tunnel fallback alongside cloudflared
+    expect(manifest.dependencies['@ngrok/ngrok']).toBeDefined()
+    expect(manifest.build.asarUnpack).toContain('node_modules/@ngrok/**')
+    expect(manifest.build.files).toContain('node_modules/@ngrok/**')
+    expect(manifest.scripts['build:electron']).toContain('--external @ngrok/ngrok')
   })
   it.each(['release-desktop.yml', 'build-desktop-dev.yml'])('%s installs native addons for cross-architecture packages', workflow => {
     const source = parse(readFileSync(path.join(repositoryRoot, '.github', 'workflows', workflow), 'utf8'))

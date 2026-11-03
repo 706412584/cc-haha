@@ -116,9 +116,8 @@ describe('feature quality contract', () => {
     const buildSidecars = readFileSync('desktop/scripts/build-sidecars.ts', 'utf8')
 
     expect(prQuality).toContain('run: bun run check:native')
-    expect(prQuality).toContain('SIDECAR_TARGET_TRIPLE: x86_64-unknown-linux-gnu')
-    expect(prQuality).toContain('run: bun run prepare:ripgrep')
-    expect(prQuality.indexOf('run: bun run prepare:ripgrep')).toBeLessThan(
+    expect(prQuality).toContain('run: bun run prepare:cloudflared')
+    expect(prQuality.indexOf('run: bun run prepare:cloudflared')).toBeLessThan(
       prQuality.indexOf('run: bun run check:native'),
     )
     expect(prQuality).not.toContain('dtolnay/rust-toolchain')

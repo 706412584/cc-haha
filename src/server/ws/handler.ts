@@ -39,7 +39,7 @@ import {
   conversationService,
 } from '../services/conversationService.js'
 import { removeSessionAppendPromptFile, removeSessionSystemPromptFile } from '../services/sessionPromptFileService.js'
-import { endTeamsForParent, hasActiveTeamWorkForParent, noteLeadUserMessage } from '../services/teamPlanRuntime.js'
+import { endTeamsForParent, hasActiveTeamWorkForParent, listTeamPlanRuntimeParentIds, noteLeadUserMessage } from '../services/teamPlanRuntime.js'
 import { computerUseApprovalService } from '../services/computerUseApprovalService.js'
 import {
   sessionService,
@@ -68,13 +68,13 @@ import {
   getOpenAIModelCatalogEntry,
   isOpenAIReasoningEffort,
 } from '../../services/openaiAuth/models.js'
-import { GROK_DEFAULT_MAIN_MODEL } from '../../services/grokAuth/models.js'
-import { getGrokModelCatalog } from '../../services/grokAuth/modelCatalog.js'
-import { hahaGrokOAuthService } from '../services/hahaGrokOAuthService.js'
+import { GROK_DEFAULT_MAIN_MODEL, resolveGrokModel } from '../../services/grokAuth/models.js'
+import { getDesktopGrokModelCatalog } from '../services/grokModelCatalog.js'
 import { resolveClaudeOfficialRuntimeModel } from '../services/claudeOfficialRuntime.js'
 import {
   getModelReasoningCapabilityOverride,
   isModelReasoningEffort,
+  MODEL_REASONING_EFFORTS,
   normalizeModelReasoningEffort,
   resolveModelReasoningProfile,
 } from '../../shared/modelReasoning.js'
@@ -311,6 +311,7 @@ type ActiveUserTurnState = {
   admissionPending?: boolean
   messageSent: boolean
   collaborationAck?: 'queued' | 'consumed'
+  scheduledTask?: ScheduledTaskMetadata
   sendStarted?: boolean
   stopped?: boolean
   titleTurnNumber?: number
@@ -351,6 +352,7 @@ const activeCliRuns = new Set<string>()
 const cliRunsAwaitingBackgroundTasks = new Set<string>()
 const pendingInterruptedTurnResults = new Map<string, number>()
 const interruptedTurnResultMessages = new WeakMap<object, string>()
+const scheduledTurnResults = new WeakMap<object, { sessionId: string; metadata: ScheduledTaskMetadata }>()
 const sessionClearInProgress = new Set<string>()
 const deferredRuntimeRestarts = new Map<string, RuntimeOverride>()
 const deferredPermissionModes = new Map<string, PermissionMode>()
@@ -372,12 +374,14 @@ const legacyQueuedSessionChats = new Set<string>()
 const interruptedSessionChats = new Set<string>()
 
 function beginSessionChatActivity(sessionId: string): void {
+  mobileActivityClock.start(sessionId)
   terminalSessionChatStates.delete(sessionId)
   legacyQueuedSessionChats.delete(sessionId)
   interruptedSessionChats.delete(sessionId)
 }
 
 function failSessionChatActivity(sessionId: string): void {
+  mobileActivityClock.finish(sessionId)
   legacyQueuedSessionChats.delete(sessionId)
   interruptedSessionChats.delete(sessionId)
   terminalSessionChatStates.set(sessionId, 'failed')
@@ -385,6 +389,7 @@ function failSessionChatActivity(sessionId: string): void {
 
 function settleSessionChatActivity(sessionId: string, cliMsg: any): void {
   if (cliMsg?.type !== 'result') return
+  mobileActivityClock.finish(sessionId)
 
   legacyQueuedSessionChats.delete(sessionId)
   if (interruptedSessionChats.has(sessionId)) {
@@ -699,19 +704,27 @@ export type LiveSessionActivity = {
  * socket to, and asking each one would cost a request per row. Team workers
  * are left out: their requests already surface on the lead.
  */
-export function listLiveSessionActivity(): LiveSessionActivity[] {
+export function listLiveSessionActivity(options: { includeTeamWorkers?: boolean } = {}): LiveSessionActivity[] {
   const ids = new Set<string>([
     ...conversationService.getActiveSessions(),
     ...activeUserTurns.keys(),
     ...activeCliRuns,
     ...legacyQueuedSessionChats,
+    // Independent workers can keep working after their lead CLI exits.
+    ...(options.includeTeamWorkers ? listTeamPlanRuntimeParentIds() : []),
   ])
   const live: LiveSessionActivity[] = []
   for (const id of ids) {
-    if (conversationService.isTeamWorkerSession(id)) continue
+    // Power management must see workers even when their lead's turn is idle.
+    // The phone/pet projection still hides them by default.
+    if (!options.includeTeamWorkers && conversationService.isTeamWorkerSession(id)) continue
     const activityState = getSessionChatActivityState(id)
     if (activityState === 'running' || activityState === 'waiting') {
       live.push({ id, activityState })
+    } else if (options.includeTeamWorkers && hasActiveTeamWorkForParent(id)) {
+      // TeamPlanRuntime starts workers outside this handler's turn observer.
+      // Its own lifecycle also covers automatic continuation between turns.
+      live.push({ id, activityState: 'running' })
     }
   }
   return live
@@ -1316,12 +1329,13 @@ async function handleUserMessage(
   ws: SessionConnection,
   message: Extract<ClientMessage, { type: 'user_message' }>,
   activeTurn: ActiveUserTurnState,
-  collaboration?: { messageId: string; sourceSessionId: string; canSend?: () => boolean },
+  delivery?: { messageId: string; sourceSessionId?: string; scheduledTask?: ScheduledTaskMetadata; canSend?: () => boolean; beforeSend?: () => Promise<boolean>; signal?: AbortSignal },
 ) {
   const persistTitleSource = sessionService.shouldPersistSession()
   const { sessionId } = ws.data
+  const collaboration = delivery && !delivery.scheduledTask
 
-  const desktopSlashCommand = collaboration ? null : getDesktopSlashCommand(message.content)
+  const desktopSlashCommand = delivery ? null : getDesktopSlashCommand(message.content)
 
   // Reject invalid /clear before waiting on stop settlement so a latched Stop
   // cannot trap argument validation behind an unresolved force-kill timer.
@@ -1439,7 +1453,7 @@ async function handleUserMessage(
       }
       sessionTitleState.set(sessionId, titleState)
     }
-    const titleInput = getTitleInputForUserMessage(message.content, desktopSlashCommand)
+    const titleInput = delivery?.scheduledTask ? '' : getTitleInputForUserMessage(message.content, desktopSlashCommand)
     let titleTurnNumber: number | null = null
     if (titleInput) {
       titleState.persistTitleSource &&= persistTitleSource
@@ -1537,13 +1551,14 @@ async function handleUserMessage(
     refreshDisconnectedTurnCleanupWatcher(sessionId)
 
     activeTurn.sendStarted = true
-    const sent = collaboration
+    const sent = delivery
       ? await (async () => {
           if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) return false
-          const result = await conversationService.requestControl(sessionId, {
-            subtype: 'enqueue_session_message', message_id: collaboration.messageId,
-            sender_session_id: collaboration.sourceSessionId, text: content, start_if_idle: true,
-          }, 10_000, undefined, () => activeUserTurns.get(sessionId) === activeTurn && !activeTurn.cancelled && (collaboration.canSend?.() ?? true))
+          const request = delivery.scheduledTask
+            ? { subtype: 'enqueue_scheduled_task', message_id: delivery.messageId, text: content, scheduled_task: delivery.scheduledTask, start_if_idle: true }
+            : { subtype: 'enqueue_session_message', message_id: delivery.messageId, sender_session_id: delivery.sourceSessionId, text: content, start_if_idle: true }
+          const result = await conversationService.requestControl(sessionId, request, 10_000, delivery.signal,
+            () => activeUserTurns.get(sessionId) === activeTurn && !activeTurn.cancelled && (delivery.canSend?.() ?? true), delivery.beforeSend)
           if (result.status !== 'queued' && result.status !== 'consumed') return false
           activeTurn.collaborationAck = result.status
           activeTurn.messageSent = true
@@ -1566,7 +1581,7 @@ async function handleUserMessage(
         },
       },
     )
-    if (collaboration && sent && activeTurn.messageSent && !activeUserTurns.has(sessionId)) return
+    if (delivery && sent && activeTurn.messageSent && !activeUserTurns.has(sessionId)) return
     if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) {
       // Once onCommitted has run the SDK owns this turn and will still emit its
       // terminal result. Keep the completion callback long enough to consume
@@ -1600,7 +1615,7 @@ async function handleUserMessage(
     activeTurn.messageSent = true
     if (!collaboration) emitSessionTurnEvent({ type: 'input-committed', sessionId })
     // After the user's own words, so the lead weighs them first.
-    if (!collaboration) {
+    if (!delivery) {
       void noteLeadUserMessage(sessionId).catch(error =>
         console.error('[WS] cannot tell the lead about its stopped team members', error),
       )
@@ -1987,6 +2002,9 @@ function bindActiveUserTurnCompletion(
 ): () => void {
   const callback = (cliMsg: any) => {
     const interruptedResult = consumeInterruptedTurnResult(sessionId, cliMsg)
+    if (cliMsg?.type === 'result' && activeTurn.scheduledTask && !isAgentRunMessageFrame(cliMsg)) {
+      scheduledTurnResults.set(cliMsg, { sessionId, metadata: activeTurn.scheduledTask })
+    }
     if (activeTurn.cancelled) {
       if (cliMsg?.type === 'result') {
         const stillOwnsTurn = activeUserTurns.get(sessionId) === activeTurn
@@ -2008,6 +2026,7 @@ function bindActiveUserTurnCompletion(
 
     acknowledgeActiveTurnReplay(sessionId, cliMsg)
     if (activeTurn.replacementAfterStop || interruptedResult) return
+    mobileActivityClock.progress(sessionId)
     if (
       cliMsg?.type !== 'result' ||
       (!activeTurn.messageSent && !cliMsg.is_error)
@@ -2508,27 +2527,24 @@ async function handleSetPermissionMode(
     sendMessage(ws, { type: 'error', message: 'Plan mode is unavailable in lean sessions. Choose another permission mode.', code: 'LEAN_CAPABILITY_UNAVAILABLE' })
     return
   }
-  const pendingStartup = sessionStartupPromises.get(sessionId)
-
-  if (pendingStartup) {
-    await enqueueRuntimeTransition(sessionId, async () => {
+  // Cold sessions must participate in the same transition queue: a following
+  // turn or prewarm must not start with stale metadata while this write waits.
+  await enqueueRuntimeTransition(sessionId, async () => {
+    const pendingStartup = sessionStartupPromises.get(sessionId)
+    if (pendingStartup) {
       await pendingStartup.catch(() => undefined)
       if (!conversationService.hasSession(sessionId)) return
-      await applyPermissionModeToActiveSession(ws, sessionId, message.mode)
-    })
-    return
-  }
-
-  if (!conversationService.hasSession(sessionId)) {
-    if (await persistSessionPermissionMode(sessionId, message.mode)) {
-      sendMessage(ws, { type: 'permission_mode_changed', mode: message.mode })
     }
-    return
-  }
 
-  await enqueueRuntimeTransition(sessionId, () =>
-    applyPermissionModeToActiveSession(ws, sessionId, message.mode),
-  )
+    if (!conversationService.hasSession(sessionId)) {
+      if (await persistSessionPermissionMode(sessionId, message.mode)) {
+        sendMessage(ws, { type: 'permission_mode_changed', mode: message.mode })
+      }
+      return
+    }
+
+    await applyPermissionModeToActiveSession(ws, sessionId, message.mode)
+  })
 }
 
 const BYPASS_CAPABILITY_UNAVAILABLE =
@@ -4426,6 +4442,7 @@ function cleanupSessionRuntimeState(
   sessionId: string,
   options?: { preserveRetryableAgentStops?: boolean },
 ) {
+  mobileActivityClock.delete(sessionId)
   cancelSessionDisconnectWatcher(sessionId)
   startupDeferredDisconnectCleanups.delete(sessionId)
   clearBackgroundTaskDisconnectCeiling(sessionId)
@@ -4704,6 +4721,12 @@ async function ensureCliSessionStarted(
   sessionId: string,
   reason: 'user_message' | 'prewarm_session',
 ): Promise<void> {
+  // Wait before registering startup; a transition may itself await an existing
+  // startup. Registering a startup that waits on that transition would deadlock.
+  while (runtimeTransitionPromises.has(sessionId)) {
+    await runtimeTransitionPromises.get(sessionId)
+  }
+
   const pendingStartup = sessionStartupPromises.get(sessionId)
   if (pendingStartup) {
     await pendingStartup
@@ -4747,6 +4770,10 @@ export async function ensureCliSessionStartedForControl(
   requestUrl: URL,
   reason: 'agent_message' | 'team_approval' = 'agent_message',
 ): Promise<void> {
+  while (runtimeTransitionPromises.has(sessionId)) {
+    await runtimeTransitionPromises.get(sessionId)
+  }
+
   const pendingStartup = sessionStartupPromises.get(sessionId)
   if (pendingStartup) {
     await pendingStartup
@@ -4762,14 +4789,23 @@ export async function ensureCliSessionStartedForControl(
     const workDir = await resolveSessionWorkDir(sessionId)
     lastResolvedStartupWorkDirs.set(sessionId, workDir)
     const runtimeSettings = await getRuntimeSettings(sessionId)
-    const protocol = requestUrl.protocol === 'https:' ? 'wss:' : 'ws:'
-    const authority = requestUrl.hostname === '0.0.0.0'
-      ? `127.0.0.1${requestUrl.port ? `:${requestUrl.port}` : ''}`
-      : requestUrl.host
-    const sdkUrl = new URL(
-      `${protocol}//${authority}/sdk/${encodeURIComponent(sessionId)}`,
-    )
-    sdkUrl.searchParams.set('token', crypto.randomUUID())
+    // A control request can arrive through the paired-phone listener, whose
+    // host the CLI cannot connect back to (/sdk needs a local, unpaired
+    // socket). A client watching this session already knows the local endpoint.
+    const watcher = activeSessions.get(sessionId)?.values().next().value as SessionConnection | undefined
+    let sdkUrl: URL
+    if (watcher) {
+      sdkUrl = new URL(buildSdkWebSocketUrl(watcher, sessionId))
+    } else {
+      const protocol = requestUrl.protocol === 'https:' ? 'wss:' : 'ws:'
+      const authority = requestUrl.hostname === '0.0.0.0'
+        ? `127.0.0.1${requestUrl.port ? `:${requestUrl.port}` : ''}`
+        : requestUrl.host
+      sdkUrl = new URL(
+        `${protocol}//${authority}/sdk/${encodeURIComponent(sessionId)}`,
+      )
+      sdkUrl.searchParams.set('token', crypto.randomUUID())
+    }
 
     console.log(`[WS] Starting CLI for ${sessionId} due to ${reason}`)
     await conversationService.startSession(
@@ -5195,6 +5231,19 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
       // 对话结果（成功或错误）
       const usage = translateCliUsage(cliMsg.usage)
       const timing = translateCliTiming(cliMsg)
+      // Renderer reconnects and consumed human guides cannot recover the root
+      // trigger from the last user message. Keep host-owned provenance on the
+      // terminal frame, including when admission cleanup runs before forwarding.
+      const activeTurn = activeUserTurns.get(sessionId)
+      const remembered = scheduledTurnResults.get(cliMsg)
+      const scheduledTask = remembered?.sessionId === sessionId
+        ? remembered.metadata
+        : activeTurn?.scheduledTask
+      const completion: ServerMessage = {
+        type: 'message_complete', usage,
+        ...(timing ? { timing } : {}),
+        ...(scheduledTask ? { scheduledTask } : {}),
+      }
       // Buffered assistant blocks can arrive as a batch after all raw events
       // for one provider message. Keep deduplication active across the entire
       // batch, then clear it only at the terminal result boundary.
@@ -5209,7 +5258,7 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
           interruptedTurnResultMessages.get(cliMsg) === sessionId ||
           sessionStopRequested.has(sessionId)
         ) {
-          return [{ type: 'message_complete', usage, ...(timing ? { timing } : {}) }]
+          return [{ type: 'message_complete', usage, ...(timing ? { timing } : {}), ...(scheduledTask ? { scheduledTask } : {}) }]
         }
 
         const resultMessage =
@@ -5224,7 +5273,7 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
           : []
         if (isDuplicateOfLastApiError(streamState.lastApiError, resultMessage)) {
           streamState.lastApiError = undefined
-          return [...stoppedTasks, { type: 'message_complete', usage, ...(timing ? { timing } : {}) }]
+          return [...stoppedTasks, { type: 'message_complete', usage, ...(timing ? { timing } : {}), ...(scheduledTask ? { scheduledTask } : {}) }]
         }
         return [
           ...stoppedTasks,
@@ -5233,12 +5282,12 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
             message: resultMessage,
             code: 'CLI_ERROR',
           },
-          { type: 'message_complete', usage, ...(timing ? { timing } : {}) },
+          { type: 'message_complete', usage, ...(timing ? { timing } : {}), ...(scheduledTask ? { scheduledTask } : {}) },
         ]
       }
 
       streamState.lastApiError = undefined
-      return [{ type: 'message_complete', usage, ...(timing ? { timing } : {}) }]
+      return [{ type: 'message_complete', usage, ...(timing ? { timing } : {}), ...(scheduledTask ? { scheduledTask } : {}) }]
     }
 
     case 'system': {
@@ -5830,6 +5879,7 @@ function replayPendingPermissionRequests(
       input: request.input,
       ...(request.description ? { description: request.description } : {}),
       ...(request.displayName ? { displayName: request.displayName } : {}),
+      ...(request.autoAnswerDeadline !== undefined ? { autoAnswerDeadline: request.autoAnswerDeadline } : {}),
     })
   }
   return requests.map((request) => request.requestId)
@@ -6336,18 +6386,18 @@ async function getGrokReasoningEfforts(modelId: string): Promise<{
   defaultEffort?: string
   supportedEfforts: string[]
 }> {
-  const tokens = await hahaGrokOAuthService.ensureFreshTokens()
-  const catalog = await getGrokModelCatalog({
-    ...(tokens?.accessToken ? { accessToken: tokens.accessToken } : {}),
-    accountKey: tokens?.email ?? (tokens ? 'authenticated-default' : 'logged-out'),
-  })
-  const model = catalog.find((entry) => entry.value === modelId)
-    ?? catalog.find((entry) => entry.value === GROK_DEFAULT_MAIN_MODEL)
-    ?? catalog[0]
+  const catalog = await getDesktopGrokModelCatalog()
+  const resolvedModelId = resolveGrokModel(modelId)
+  const model = catalog.find((entry) => entry.value === resolvedModelId)
   return {
-    modelId: model?.value ?? GROK_DEFAULT_MAIN_MODEL,
+    // A refreshed selection can outlive the in-memory catalog. Only known
+    // compatibility aliases may change its ID; another model's metadata must
+    // never turn a concrete saved model into the bundled default.
+    modelId: resolvedModelId,
     ...(model?.reasoningEffort ? { defaultEffort: model.reasoningEffort } : {}),
-    supportedEfforts: model?.reasoningEfforts ?? [],
+    supportedEfforts: model?.supportsReasoningEffort === false
+      ? []
+      : model?.reasoningEfforts ?? [...MODEL_REASONING_EFFORTS],
   }
 }
 
@@ -7047,6 +7097,7 @@ export function __cleanupWebSocketRuntimeStateForTests(): void {
 }
 
 export function __resetWebSocketHandlerStateForTests(): void {
+  mobileActivityClock.clear()
   strictCollaborationRuntimeSessions.clear()
   disableDisconnectCleanupForTests = false
   getCachedSessionSummaryForHandler = getCachedSessionSummary

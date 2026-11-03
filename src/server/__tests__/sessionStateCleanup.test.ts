@@ -98,6 +98,10 @@ const CONTAINERS: Record<string, Classification> = {
     kind: 'not-session-state',
     reason: 'WeakMap keyed by the CLI message object, so entries die with the message.',
   },
+  scheduledTurnResults: {
+    kind: 'not-session-state',
+    reason: 'WeakMap keyed by the CLI result object, so scheduled provenance dies with its message.',
+  },
   settledStopTerminalFrames: {
     kind: 'not-session-state',
     reason: 'WeakSet keyed by the CLI message object, so entries die with the message.',
