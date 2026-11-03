@@ -1658,6 +1658,37 @@ export function stopSessionTurn(sessionId: string): void {
   handleStopGeneration(sessionTurnConnection(sessionId, { serverHost: '127.0.0.1', serverPort: 0 }))
 }
 
+export async function submitScheduledTaskTurn(
+  sessionId: string,
+  content: string,
+  options: { serverHost: string; serverPort: number; messageId: string; scheduledTask: ScheduledTaskMetadata; canSend?: () => boolean; beforeSend?: () => Promise<boolean>; signal?: AbortSignal },
+): Promise<{ status: 'queued' | 'consumed' }> {
+  if (options.signal?.aborted || (options.canSend && !options.canSend())) throw new Error('Scheduled delivery was cancelled')
+  if (getSessionTurnState(sessionId) !== 'idle') throw new Error('Session already has an active turn')
+  let failure: string | undefined
+  const connection = sessionTurnConnection(sessionId, options, message => {
+    if (message.type === 'error') failure = message.message
+  })
+  const turn: ActiveUserTurnState = { messageSent: false, expectedReplayUuid: sessionMessageUuid(options.messageId), scheduledTask: options.scheduledTask }
+  try {
+    await handleUserMessage(connection, { type: 'user_message', content }, turn, options)
+  } catch (error) {
+    if (activeUserTurns.get(sessionId) === turn) {
+      releaseUserTurnWithoutResult(sessionId, turn)
+      failSessionChatActivity(sessionId)
+    }
+    throw error
+  }
+  if (!turn.messageSent || !turn.collaborationAck) throw new Error(failure ?? 'CLI did not acknowledge the scheduled task')
+  return { status: turn.collaborationAck }
+}
+
+/** Cancel only the scheduled delivery that still owns this session's turn. */
+export function stopScheduledTaskTurn(sessionId: string, messageId: string): void {
+  if (activeUserTurns.get(sessionId)?.expectedReplayUuid !== sessionMessageUuid(messageId)) return
+  stopSessionTurn(sessionId)
+}
+
 /** Read the applied process snapshot; never substitute the global provider for a stale explicit choice. */
 export async function getCollaborationRuntime(sessionId: string): Promise<SessionRuntimeSelection> {
   strictCollaborationRuntimeSessions.add(sessionId)
