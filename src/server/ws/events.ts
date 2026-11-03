@@ -44,7 +44,7 @@ export type ClientMessage =
   | { type: 'set_permission_mode'; mode: PermissionMode }
   | {
       type: 'set_runtime_config'
-      requestId: string
+      requestId?: string
       providerId: string | null
       modelId: string
       effortLevel?: string
