@@ -1,10 +1,13 @@
+import { feature } from 'bun:bundle'
 import { z } from 'zod/v4'
 import { getSessionId } from '../../bootstrap/state.js'
+import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { getAgentProfile } from '../../utils/agentProfile.js'
 import { isTodoV2Enabled } from '../../utils/tasks.js'
 import { TodoListSchema } from '../../utils/todo/types.js'
+import { VERIFICATION_AGENT_TYPE } from '../AgentTool/constants.js'
 import { TODO_WRITE_TOOL_NAME } from './constants.js'
 import { DESCRIPTION, PROMPT } from './prompt.js'
 
@@ -19,6 +22,7 @@ const outputSchema = lazySchema(() =>
   z.object({
     oldTodos: TodoListSchema().describe('The todo list before the update'),
     newTodos: TodoListSchema().describe('The todo list after the update'),
+    verificationNudgeNeeded: z.boolean().optional(),
   }),
 )
 type OutputSchema = ReturnType<typeof outputSchema>
@@ -68,6 +72,18 @@ export const TodoWriteTool = buildTool({
     const allDone = todos.every(_ => _.status === 'completed')
     const newTodos = allDone ? [] : todos
 
+    let verificationNudgeNeeded = false
+    if (
+      feature('VERIFICATION_AGENT') &&
+      getFeatureValue_CACHED_MAY_BE_STALE('tengu_hive_evidence', false) &&
+      !context.agentId &&
+      allDone &&
+      todos.length >= 3 &&
+      !todos.some(t => /verif/i.test(t.content))
+    ) {
+      verificationNudgeNeeded = true
+    }
+
     context.setAppState(prev => ({
       ...prev,
       todos: {
@@ -80,14 +96,19 @@ export const TodoWriteTool = buildTool({
       data: {
         oldTodos,
         newTodos: todos,
+        verificationNudgeNeeded,
       },
     }
   },
-  mapToolResultToToolResultBlockParam(_content, toolUseID) {
+  mapToolResultToToolResultBlockParam({ verificationNudgeNeeded }, toolUseID) {
+    const base = `Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable`
+    const nudge = verificationNudgeNeeded && getAgentProfile() !== 'lean'
+      ? `\n\nNOTE: You just closed out 3+ tasks and none of them was a verification step. Before writing your final summary, spawn the verification agent (subagent_type="${VERIFICATION_AGENT_TYPE}"). You cannot self-assign PARTIAL by listing caveats in your summary — only the verifier issues a verdict.`
+      : ''
     return {
       tool_use_id: toolUseID,
       type: 'tool_result',
-      content: `Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable`,
+      content: base + nudge,
     }
   },
 } satisfies ToolDef<InputSchema, Output>)

@@ -15,6 +15,7 @@ import { isShutdownTeamPrompt } from '../../utils/swarm/teamShutdownPrompt.js'
 import { isTeamLeadNotice } from '../../utils/swarm/teamLeadNotice.js'
 import { readScheduledTaskMetadata, scheduledTaskDisplayText, type ScheduledTaskMetadata } from '../../utils/scheduledTaskMessage.js'
 import { getMobileActivityTiming, mobileActivityClock } from './mobileActivityClock.js'
+import { projectLiveToolResult } from '../services/toolImageMedia.js'
 import { admitSessionUserTurn, emitSessionTurnEvent } from '../services/sessionTurnEvents.js'
 import { ApiError } from '../middleware/errorHandler.js'
 import type { SessionRuntimeSelection } from '../../shared/sessionDelegation.js'
@@ -889,6 +890,8 @@ export type WebSocketData = {
   sdkToken: string | null
   serverPort: number
   serverHost: string
+  /** The client fetches tool-result images by reference (`?media=ref`). */
+  mediaRefs?: boolean
 }
 
 // Active WebSocket clients, grouped by session. Desktop, H5, and IM adapters can
@@ -908,6 +911,11 @@ const observedTerminalTasks = new Map<string, Set<string>>()
 const sessionTranscriptEpochs = new Map<string, number>()
 
 export const handleWebSocket = {
+  // SDK user-message replay retains original images even when the provider
+  // request uses uploaded file references. Ten 5 MiB images plus their envelope
+  // exceed Bun's default 16 MiB frame limit and otherwise reconnect forever,
+  // preventing the following result from reaching the renderer.
+  maxPayloadLength: 64 * 1024 * 1024,
   open(ws: SessionConnection) {
     const { sessionId, channel, sdkToken } = ws.data
 
@@ -994,6 +1002,13 @@ export const handleWebSocket = {
         canAcceptPermissionRequest: (message) =>
           canAcceptPermissionRequestDuringStop(sessionId, message),
       })
+      return
+    }
+
+    // Raising the SDK receive budget must not raise the renderer input budget.
+    // The public-access gateway applies its own smaller limit before this handler.
+    if (Buffer.byteLength(rawMessage) > 16 * 1024 * 1024) {
+      ws.close(1009, 'Client message exceeds 16 MiB')
       return
     }
 
@@ -5191,6 +5206,8 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
               : undefined,
           input: cliMsg.request.input || {},
           description: cliMsg.request.description,
+          ...(cliMsg.request.auto_answer_deadline === null || (typeof cliMsg.request.auto_answer_deadline === 'number' && Number.isFinite(cliMsg.request.auto_answer_deadline))
+            ? { autoAnswerDeadline: cliMsg.request.auto_answer_deadline } : {}),
           ...(typeof cliMsg.request.display_name === 'string' &&
           cliMsg.request.display_name.trim()
             ? { displayName: cliMsg.request.display_name.trim() }
@@ -5537,9 +5554,12 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
 
 
 function sendMessage(ws: SessionConnection, message: ServerMessage) {
-  const outgoing = ws.data.clientKind === 'pet'
+  let outgoing = ws.data.clientKind === 'pet'
     ? toPetServerMessage(message)
     : message
+  if (outgoing?.type === 'tool_result' && ws.data.mediaRefs) {
+    outgoing = projectLiveToolResult(outgoing, ws.data.sessionId)
+  }
   if (outgoing) ws.send(JSON.stringify(outgoing))
 }
 

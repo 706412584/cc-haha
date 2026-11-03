@@ -810,7 +810,7 @@ describe('desktop UI preferences API', () => {
     const response = await handleDesktopUiApi(request.req, request.url, request.segments)
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({
-      profile: { displayName: 'cc-haha', subtitle: 'github.com/NanmiCoder/cc-haha', avatarDataUrl: null },
+      profile: { displayName: 'cc-haha', subtitle: 'github.com/706412584/cc-haha', avatarDataUrl: null },
     })
   })
 

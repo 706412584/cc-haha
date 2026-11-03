@@ -1350,7 +1350,7 @@ export async function streamCompactSummary({
   context,
   preCompactTokenCount,
   cacheSafeParams,
-  compactAbort,
+  compactAbort: externalAbort,
   apiAttemptBudget,
 }: {
   messages: Message[]
@@ -1359,9 +1359,10 @@ export async function streamCompactSummary({
   context: ToolUseContext
   preCompactTokenCount: number
   cacheSafeParams: CacheSafeParams
-  compactAbort: AbortController
+  compactAbort?: AbortController
   apiAttemptBudget: ApiAttemptBudget
 }): Promise<AssistantMessage> {
+  const compactAbort = externalAbort ?? new AbortController()
   // When prompt cache sharing is enabled, use forked agent to reuse the
   // main conversation's cached prefix (system prompt, tools, context messages).
   // Falls back to regular streaming path on failure.
