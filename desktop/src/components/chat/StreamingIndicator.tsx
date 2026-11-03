@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { LoaderCircle, RefreshCw } from 'lucide-react'
 import { Badge } from '@/components/ui/Badge'
+import { CopyButton } from '@/components/ui/CopyButton'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useTranslation, type TranslationKey } from '../../i18n'
@@ -45,7 +46,7 @@ function formatRetrySeconds(ms: number): number {
 const HUMAN_READABLE_RETRY_THRESHOLD_MS = 60_000
 
 function formatErrorType(errorType: string | undefined): string | null {
-  if (!errorType) return null
+  if (!errorType || errorType === 'unknown') return null
   return errorType
     .replace(/[_-]+/g, ' ')
     .replace(/\s+/g, ' ')
@@ -88,8 +89,17 @@ export function StreamingIndicator() {
       ? [t('chat.retry.rateLimit'), httpStatusText].filter(Boolean).join(' · ')
       : isStreamDisconnect
         ? t('chat.retry.streamDisconnect')
-        : httpStatusText ?? formatErrorType(apiRetry.errorType) ?? t('chat.retry.networkError')
-    const detailText = apiRetry.errorMessage?.trim()
+        : httpStatusText ?? formatErrorType(apiRetry.errorType) ?? t('chat.retry.interrupted')
+    const detailText = apiRetry.errorMessage?.trim() || t('chat.retry.missingReason')
+    const diagnostics = [
+      `${t('chat.retry.session')}: ${activeTabId}`,
+      `${t('chat.retry.time')}: ${new Date(apiRetry.receivedAt).toISOString()}`,
+      t('chat.retry.attempt', { attempt: apiRetry.attempt, max: apiRetry.maxRetries }),
+      statusText,
+      apiRetry.errorType,
+      apiRetry.requestId ? `${t('chat.retry.requestId')}: ${apiRetry.requestId}` : null,
+      detailText,
+    ].filter(Boolean).join('\n')
     const waitText = remainingMs <= 0
       ? t('chat.retry.retrying')
       : remainingMs >= HUMAN_READABLE_RETRY_THRESHOLD_MS
@@ -123,11 +133,19 @@ export function StreamingIndicator() {
           {statusText}
         </Badge>
         <span>{waitText}</span>
-        {detailText && (
-          <span className="min-w-0 max-w-full truncate opacity-80" title={detailText}>
-            {detailText}
-          </span>
-        )}
+        <details className="w-full min-w-0">
+          <summary className="cursor-pointer rounded-[var(--radius-sm)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]">
+            {t('chat.retry.details')}
+          </summary>
+          <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px]">{diagnostics}</pre>
+          <p className="mt-2">{t('chat.retry.historyHint')}</p>
+          <CopyButton
+            text={diagnostics}
+            label={t('chat.retry.copyDiagnostics')}
+            copiedLabel={t('common.copied')}
+            className="mt-2 rounded-[var(--radius-sm)] border border-current px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+          />
+        </details>
       </div>
     )
   }
