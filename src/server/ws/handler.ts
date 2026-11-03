@@ -12,6 +12,9 @@ import type { ServerWebSocket } from 'bun'
 import { sessionMessageUuid } from '../../utils/sessionMessageInbox.js'
 import { parseSessionCollaborationEnvelope } from '../../utils/sessionCollaborationEnvelope.js'
 import { isShutdownTeamPrompt } from '../../utils/swarm/teamShutdownPrompt.js'
+import { isTeamLeadNotice } from '../../utils/swarm/teamLeadNotice.js'
+import { readScheduledTaskMetadata, scheduledTaskDisplayText, type ScheduledTaskMetadata } from '../../utils/scheduledTaskMessage.js'
+import { getMobileActivityTiming, mobileActivityClock } from './mobileActivityClock.js'
 import { admitSessionUserTurn, emitSessionTurnEvent } from '../services/sessionTurnEvents.js'
 import { ApiError } from '../middleware/errorHandler.js'
 import type { SessionRuntimeSelection } from '../../shared/sessionDelegation.js'
@@ -712,6 +715,34 @@ export function listLiveSessionActivity(): LiveSessionActivity[] {
     }
   }
   return live
+}
+
+export function listMobileSessionActivity() {
+  const ids = new Set([
+    ...conversationService.getActiveSessions(), ...activeUserTurns.keys(),
+    ...activeCliRuns, ...legacyQueuedSessionChats, ...terminalSessionChatStates.keys(),
+    ...activeAgentTasks.keys(), ...activeNonAgentTasks.keys(),
+  ])
+  return [...ids].filter(id => !conversationService.isTeamWorkerSession(id)).map(id => {
+    const activityState = getSessionChatActivityState(id)
+    const request = activityState === 'waiting' ? conversationService.getPendingPermissionRequests(id)[0] : undefined
+    const computerUse = activityState === 'waiting' ? computerUseApprovalService.getPendingRequests(id)[0] : undefined
+    const timing = getMobileActivityTiming(id)
+    const questions = request?.toolName === 'AskUserQuestion' ? request.input.questions : undefined
+    const firstQuestion = Array.isArray(questions) ? questions[0] : undefined
+    const text = request?.toolName === 'Bash' ? request.input.command : firstQuestion && typeof firstQuestion === 'object' ? firstQuestion.question : undefined
+    const preview = typeof text === 'string' ? text.replace(/\s+/g, ' ').trim().slice(0, 200) : ''
+    return {
+      id, activityState, ...timing,
+      ...(timing ? { stalled: activityState === 'running' && timing.completedAt === undefined && Date.now() - timing.lastProgressAt >= 300000 } : {}),
+      ...(request ? {
+        requestId: request.requestId,
+        toolName: request.toolName,
+        preview: preview || (request.toolName === 'AskUserQuestion' ? '等待你回答问题' : request.toolName === 'ExitPlanMode' ? '计划等待确认' : '等待工具权限确认'),
+        ...(request.autoAnswerDeadline !== undefined ? { autoAnswerDeadline: request.autoAnswerDeadline } : {}),
+      } : computerUse ? { requestId: computerUse.requestId, toolName: 'ComputerUse', preview: '等待电脑操作权限确认' } : {}),
+    }
+  })
 }
 
 /** Compatibility fallback for the legacy REST enqueue endpoint. */
@@ -4903,8 +4934,16 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
         }
       }
 
+      const scheduledTask = readScheduledTaskMetadata(cliMsg.scheduledTask)
       const replayText = extractReplayUserText(cliMsg)
-      if (replayText && !isShutdownTeamPrompt(cliMsg.message?.content) && (!cliMsg.isMeta || parseSessionCollaborationEnvelope(replayText))) {
+      if (scheduledTask && replayText) {
+        messages.push({ type: 'user_message_replay', content: String(scheduledTaskDisplayText(replayText)), scheduledTask })
+      } else if (
+        replayText &&
+        !isShutdownTeamPrompt(cliMsg.message?.content) &&
+        !isTeamLeadNotice(cliMsg.message?.content) &&
+        (!cliMsg.isMeta || parseSessionCollaborationEnvelope(replayText))
+      ) {
         const collaborationEnvelope = parseSessionCollaborationEnvelope(replayText)
         messages.push(collaborationEnvelope
           ? {
