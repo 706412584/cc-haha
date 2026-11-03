@@ -70,7 +70,7 @@ export function isDarkThemeMode(value: unknown): value is DarkThemeMode {
   return typeof value === 'string' && (DARK_THEME_MODES as readonly string[]).includes(value)
 }
 
-export type WebSearchMode = 'auto' | 'anthropic' | 'tavily' | 'brave' | 'disabled'
+export type WebSearchMode = 'auto' | 'anthropic' | 'tavily' | 'brave' | 'deepseek' | 'disabled'
 
 export type ChatSendBehavior = 'enter' | 'modifierEnter'
 
@@ -102,6 +102,7 @@ export type WebSearchSettings = {
   mode?: WebSearchMode
   tavilyApiKey?: string
   braveApiKey?: string
+  deepseekApiKey?: string
 }
 
 export type UpdateProxyMode = 'system' | 'manual'

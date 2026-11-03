@@ -4,7 +4,8 @@ import { isInBundledMode } from '../../utils/bundledMode.js'
 import { errorMessage } from '../../utils/errors.js'
 
 export type SharpInstance = {
-  metadata(): Promise<{ width: number; height: number; format: string }>
+  metadata(): Promise<{ width: number; height: number; format: string; orientation?: number }>
+  autoOrient?(): SharpInstance
   resize(
     width: number,
     height: number,
@@ -41,7 +42,13 @@ export function resetImageProcessorForTests(): void {
   imageCreatorModule = null
 }
 
-export async function getImageProcessor(): Promise<SharpFunction> {
+export async function getImageProcessor(
+  options: { requireAutoOrient?: boolean } = {},
+): Promise<SharpFunction> {
+  // Request-level re-encoding must preserve EXIF display orientation. The
+  // optional native processor has no orientation contract; use shipped sharp
+  // through the same executable-relative loader as other bundled fallbacks.
+  if (options.requireAutoOrient) return unwrapDefault(await loadSharp())
   if (imageProcessorModule) {
     return imageProcessorModule.default
   }

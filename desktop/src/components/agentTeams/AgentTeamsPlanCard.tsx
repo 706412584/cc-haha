@@ -76,9 +76,9 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
     if (approved) setOpen(false)
   }, [approved])
 
-  // Keep polling for failed launches and subsequent reviews, but release the
-  // composer once approval has handed control to the running team.
-  if (!plan) return null
+  // Keep polling for failed launches and subsequent reviews. Approved cards
+  // stay mounted so their live Stop control remains reachable.
+  if (!plan || (plan.state === 'cancelled' && !plan.parentPlanId)) return null
   const leaderRuntime = currentLeaderSelection ? runtimeFor(currentLeaderSelection) : plan.leaderRuntime
   const agents = Object.entries(plan.agentCatalog ?? {}).map(([agentType, definition]) => ({ agentType, ...definition }))
   const draft = entry.draft
@@ -191,7 +191,11 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
             </>}
             {/* Stop lives on the card header so it stays reachable for a running
                 team, which has no review dialog. */}
-            {plan.state === 'launch_failed' && <Button disabled={entry.busy} onClick={() => void act(sessionId, 'retry')}>{t('teamPlan.retry')}</Button>}
+            {plan.state === 'launch_failed' && <>
+              <Button data-testid="team-plan-cancel-failed" variant="ghost" disabled={entry.busy} onClick={() => void act(sessionId, 'cancel')}>{t('teamPlan.cancel')}</Button>
+              <Button disabled={entry.busy} onClick={() => void act(sessionId, 'retry')}>{t('teamPlan.retry')}</Button>
+            </>}
+            {plan.state === 'interrupted' && <Button data-testid="team-plan-end" variant="danger-outline" disabled={entry.busy} onClick={() => void act(sessionId, 'end')}>{t('teamPlan.end')}</Button>}
           </div>
         </div>
       )}>
@@ -203,7 +207,8 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
             </div>
             <Badge tone={stateTone} size="sm">{stateLabel}</Badge>
           </div>
-          {plan.launch?.error && <p role="alert" className="mb-4 text-sm text-[var(--color-error)]">{plan.launch.error}</p>}
+          {/* A member that crashed while starting reports its own output, line by line. */}
+          {plan.launch?.error && <p role="alert" data-testid="team-plan-launch-error" className="mb-4 max-h-48 overflow-y-auto whitespace-pre-wrap text-sm text-[var(--color-error)]">{plan.launch.error}</p>}
           {entry.error && <p role="alert" className="mb-4 text-sm text-[var(--color-error)]">{entry.error}</p>}
           {plan.state === 'review_pending' && invalidNames.length > 0 && <p role="alert" className="mb-4 text-sm text-[var(--color-error)]">{t('teamPlan.invalidMemberNames', { names: invalidNames.join(', ') })}</p>}
           {entry.conflict && <div role="alert" className="mb-4 space-y-2 rounded-[var(--radius-md)] bg-[var(--color-warning-container)] p-3 text-[var(--color-on-warning-container)]">

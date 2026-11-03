@@ -251,6 +251,7 @@ export type PerSessionState = {
     text: string
     attachments?: UIAttachment[]
     sessionReferences?: Array<{ sessionId: string }>
+    mentions?: ComposerMention[]
     mode?: ComposerPrefillMode
     nonce: number
   } | null
@@ -513,6 +514,7 @@ type ChatStore = {
       text: string
       attachments?: UIAttachment[]
       sessionReferences?: Array<{ sessionId: string }>
+      mentions?: ComposerMention[]
       mode?: ComposerPrefillMode
     },
     /** Retain an edit after its committed rewind outlives the source tab. */
@@ -5209,6 +5211,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
             composerPrefill: {
               text: prefill.text,
               attachments: prefill.attachments,
+              ...(prefill.mentions ? { mentions: prefill.mentions } : {}),
               ...(prefill.sessionReferences ? { sessionReferences: prefill.sessionReferences } : {}),
               mode: prefill.mode,
               nonce: Date.now(),

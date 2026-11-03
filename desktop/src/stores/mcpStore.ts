@@ -7,7 +7,7 @@ import {
   isSameMcpServer,
   mcpProjectPathKey,
 } from '../lib/mcpIdentity'
-import type { McpServerRecord, McpToggleResult, McpUpsertPayload, McpUpsertResult } from '../types/mcp'
+import type { McpReconnectResult, McpServerRecord, McpToggleResult, McpUpsertPayload, McpUpsertResult } from '../types/mcp'
 
 type McpStore = {
   servers: McpServerRecord[]
@@ -20,7 +20,7 @@ type McpStore = {
   updateServer: (server: McpServerRecord, payload: McpUpsertPayload, cwd?: string) => Promise<McpUpsertResult>
   deleteServer: (server: McpServerRecord, cwd?: string) => Promise<void>
   toggleServer: (server: McpServerRecord, cwd?: string, sessionId?: string) => Promise<McpToggleResult>
-  reconnectServer: (server: McpServerRecord, cwd?: string, sessionId?: string) => Promise<McpUpsertResult>
+  reconnectServer: (server: McpServerRecord, cwd?: string, sessionId?: string) => Promise<McpReconnectResult>
   refreshServerStatus: (server: McpServerRecord, cwd?: string) => Promise<McpServerRecord>
   selectServer: (server: McpServerRecord | null) => void
 }

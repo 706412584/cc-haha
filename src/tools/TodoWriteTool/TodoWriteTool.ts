@@ -2,6 +2,7 @@ import { z } from 'zod/v4'
 import { getSessionId } from '../../bootstrap/state.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import { lazySchema } from '../../utils/lazySchema.js'
+import { getAgentProfile } from '../../utils/agentProfile.js'
 import { isTodoV2Enabled } from '../../utils/tasks.js'
 import { TodoListSchema } from '../../utils/todo/types.js'
 import { TODO_WRITE_TOOL_NAME } from './constants.js'
@@ -33,7 +34,9 @@ export const TodoWriteTool = buildTool({
     return DESCRIPTION
   },
   async prompt() {
-    return PROMPT
+    return getAgentProfile() === 'lean'
+      ? 'Replace the current task checklist with todos. Track complex multi-step work or a requested checklist; skip trivial tasks. Include all remaining items and update their status as work progresses. Mark an item completed only after it is done and verified.'
+      : PROMPT
   },
   get inputSchema(): InputSchema {
     return inputSchema()

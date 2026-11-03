@@ -1,3 +1,4 @@
+import { sanitizeRetryDiagnosticText } from '../../services/api/errorUtils.js'
 import { closeSideChatsForParent, getSideChat, isSideChatId, SIDE_CHAT_BOUNDARY } from './sideChatRegistry.js'
 import { migrationMaintenance, waitForMigrationExit } from '../migrationMaintenance.js'
 /**
@@ -78,8 +79,8 @@ import {
   resolveStreamToolInputDurationMs,
   SYSTEM_PROXY_URL_ENV,
   type NetworkSettings,
-} from './networkSettings.js'
-import { readTraceCaptureSettings } from './traceCaptureService.js'
+  resolveProviderNetworkSettings,} from './networkSettings.js'
+import { readTraceCaptureSettings, traceCaptureService } from './traceCaptureService.js'
 import {
   killWindowsProcessTree,
   type WindowsTaskkillSpawn,
@@ -248,6 +249,7 @@ type TrackedPermissionRequest = {
   autoAnswerAbortController?: AbortController
   autoAnswerCancelled?: boolean
   autoAnswerCreatedAt?: number
+  autoAnswerDeadline?: number | null
   autoAnswerGeneration?: number
   /**
    * Backstop that fires regardless of the auto-answer setting. Nothing else in
@@ -344,6 +346,7 @@ type SessionProcess = {
   teamWorker?: TeamWorkerStart
   providerId?: string | null
   providerConfigFingerprint?: string
+  providerAuth?: { baseUrl: string; apiKey: string; authToken: string }
   networkRoutingFingerprint: string
   networkDerivedFirstTokenTimeout: boolean
   networkDerivedStreamMaxDuration: boolean
@@ -382,6 +385,7 @@ export type PendingPermissionRequest = {
   input: Record<string, unknown>
   description?: string
   displayName?: string
+  autoAnswerDeadline?: number | null
 }
 
 export type TeamWorkerStart = {
@@ -631,8 +635,9 @@ export class ConversationService {
   }
 
   cancelAutoQuestionAnswer(sessionId: string, requestId: string): void {
-    const request = this.sessions.get(sessionId)?.pendingPermissionRequests.get(requestId)
-    if (request?.toolName !== 'AskUserQuestion') return
+    const session = this.sessions.get(sessionId)
+    const request = session?.pendingPermissionRequests.get(requestId)
+    if (request?.toolName !== 'AskUserQuestion' || request.autoAnswerCancelled) return
     this.clearAutoAnswerWait(request)
     request.autoAnswerTimer = undefined
     request.autoAnswerAbortController = undefined
@@ -642,7 +647,6 @@ export class ConversationService {
     // Restart the idle clock rather than clearing it: an answer being composed
     // right now must not be yanked away at the deadline, but a question the user
     // clicked once and then abandoned must still expire instead of hanging.
-    const session = this.sessions.get(sessionId)
     if (session) this.armQuestionDeadline(sessionId, session, requestId, request)
   }
 
@@ -672,12 +676,16 @@ export class ConversationService {
       const settings = normalizeAutoQuestionSettings(
         (await new SettingsService().getUserSettings()).autoQuestion,
       )
-      if (!settings.enabled || request.autoAnswerCancelled ||
+      if (request.autoAnswerCancelled ||
         (request.autoAnswerGeneration ?? 0) !== generation || this.sessions.get(sessionId) !== session ||
         session.pendingPermissionRequests.get(requestId) !== request) return
-
-      const remainingMs = Math.max(0, (request.autoAnswerCreatedAt ?? Date.now()) +
-        settings.timeoutMinutes * 60_000 - Date.now())
+      request.autoAnswerCreatedAt ??= Date.now()
+      request.autoAnswerDeadline = settings.enabled
+        ? request.autoAnswerCreatedAt + settings.timeoutMinutes * 60_000
+        : null
+      this.publishAutoQuestionDeadline(sessionId, session, requestId, request)
+      if (request.autoAnswerDeadline === null) return
+      const remainingMs = Math.max(0, request.autoAnswerDeadline - Date.now())
       console.info(`[ConversationService] Automatic answer scheduled: session=${sessionId} request=${requestId} remainingMs=${remainingMs}`)
       request.autoAnswerTimer = setTimeout(() => {
         request.autoAnswerTimer = undefined
@@ -1107,6 +1115,13 @@ export class ConversationService {
         ...(options.openAIFastMode !== undefined ? { openAIFastMode: options.openAIFastMode } : {}),
       } : undefined,
       providerConfigFingerprint: providerCapture.fingerprint,
+      ...(typeof options?.providerId === 'string' && {
+        providerAuth: {
+          baseUrl: childEnv.ANTHROPIC_BASE_URL ?? '',
+          apiKey: childEnv.ANTHROPIC_API_KEY ?? '',
+          authToken: childEnv.ANTHROPIC_AUTH_TOKEN ?? '',
+        },
+      }),
       networkRoutingFingerprint: networkRoutingFingerprint(networkSettings, childEnv),
       networkDerivedFirstTokenTimeout: networkRuntimeMetadata.firstTokenTimeoutDerived,
       networkDerivedStreamMaxDuration: networkRuntimeMetadata.streamMaxDurationDerived,
@@ -1279,10 +1294,14 @@ export class ConversationService {
       return false
     }
     session = this.sessions.get(sessionId)
+    if (session && !await this.refreshProviderCredentialsBeforeTurn(sessionId, session)) {
+      return false
+    }
+    session = this.sessions.get(sessionId)
     if (session) {
       await this.refreshOfficialOAuthTokenBeforeTurn(sessionId, session)
     }
-    // Building attachments, refreshing network settings, and refreshing OAuth
+    // Building attachments and refreshing network settings or credentials
     // can all suspend this call. Stop may revoke the owning desktop turn while
     // one of those awaits is pending, so check ownership at the last possible
     // point before writing the user message to the SDK socket.
@@ -1301,11 +1320,45 @@ export class ConversationService {
     return sent
   }
 
+  private async refreshProviderCredentialsBeforeTurn(
+    sessionId: string,
+    session: SessionProcess,
+  ): Promise<boolean> {
+    if (!session.providerId || !session.providerAuth) return true
+    let env: Record<string, string>
+    try {
+      env = await this.providerService.getProviderRuntimeEnv(session.providerId)
+    } catch {
+      // A removed provider must not silently switch this session to another one.
+      return this.sessions.get(sessionId) === session
+    }
+    if (this.sessions.get(sessionId) !== session) return false
+    // A credential saved for a new address must never reach the old endpoint.
+    if ((env.ANTHROPIC_BASE_URL ?? '') !== session.providerAuth.baseUrl) return true
+    const apiKey = env.ANTHROPIC_API_KEY ?? ''
+    const authToken = env.ANTHROPIC_AUTH_TOKEN ?? ''
+    if (apiKey === session.providerAuth.apiKey && authToken === session.providerAuth.authToken) return true
+    const sent = this.sendSdkMessage(sessionId, {
+      type: 'update_environment_variables',
+      variables: { ANTHROPIC_API_KEY: apiKey, ANTHROPIC_AUTH_TOKEN: authToken },
+    })
+    if (sent) session.providerAuth = { ...session.providerAuth, apiKey, authToken }
+    return sent
+  }
+
   private async refreshNetworkEnvironmentBeforeTurn(
     sessionId: string,
     session: SessionProcess,
   ): Promise<boolean> {
-    const settings = await loadNetworkSettings()
+    // The session may pin a provider whose proxy override diverges from the
+    // global network settings; the hot update must keep honoring it.
+    const sessionProvider = session.providerId
+      ? await this.providerService.getProvider(session.providerId).catch(() => null)
+      : null
+    const settings = resolveProviderNetworkSettings(
+      await loadNetworkSettings(),
+      sessionProvider?.proxy,
+    )
     const baseEnv = await getProcessEnvWithTerminalShellEnvironment()
     const networkEnv = buildNetworkEnvironment(settings, baseEnv)
     const fingerprint = networkRoutingFingerprint(settings, {
@@ -1613,6 +1666,7 @@ export class ConversationService {
     timeoutMs = 10_000,
     signal?: AbortSignal,
     canSend?: () => boolean,
+    beforeSend?: () => Promise<boolean>,
   ): Promise<Record<string, unknown>> {
     if (signal?.aborted) {
       return Promise.reject(controlRequestAbortReason(signal))
@@ -1627,6 +1681,22 @@ export class ConversationService {
     if (!session) {
       throw new Error('CLI session is not running')
     }
+    if (request.subtype === 'enqueue_scheduled_task') {
+      // Scheduled work starts a user turn through the control channel. A live
+      // CLI must receive changed provider proxy/timeouts just like sendMessage.
+      // Refresh before the durable delivery receipt, and recheck ownership after
+      // the asynchronous settings read so cancellation cannot enqueue stale work.
+      if (signal?.aborted) throw controlRequestAbortReason(signal)
+      if (canSend && !canSend()) throw new Error('Scheduled delivery was cancelled')
+      if (!await this.refreshNetworkEnvironmentBeforeTurn(sessionId, session)) {
+        throw new Error('CLI session is not running')
+      }
+      if (signal?.aborted) throw controlRequestAbortReason(signal)
+      if (this.sessions.get(sessionId) !== session || (canSend && !canSend())) {
+        throw new Error('Scheduled delivery was cancelled')
+      }
+    }
+    if (beforeSend && !await beforeSend()) throw new Error('Scheduled task changed before delivery')
     const responseTimeoutMs = Math.max(1, timeoutMs - (Date.now() - startedAt))
     const requestId = crypto.randomUUID()
     return new Promise((resolve, reject) => {
@@ -1731,6 +1801,7 @@ export class ConversationService {
       input: request.input,
       ...(request.description ? { description: request.description } : {}),
       ...(request.displayName ? { displayName: request.displayName } : {}),
+      ...(request.autoAnswerDeadline !== undefined ? { autoAnswerDeadline: request.autoAnswerDeadline } : {}),
     }))
   }
 
@@ -1842,11 +1913,23 @@ export class ConversationService {
         if (sdkError) {
           void diagnosticsService.recordEvent({
             type: sdkError.type,
-            severity: 'error',
+            // A retry the CLI is still attempting is a recoverable state, not an error; the
+            // exhausted request is recorded separately as an error.
+            severity: sdkError.type === 'sdk_api_retry' ? 'info' : 'error',
             sessionId,
             summary: sdkError.summary,
             details: sdkError.details,
           })
+          if (sdkError.type === 'sdk_api_retry') {
+            void traceCaptureService.recordEvent({
+              sessionId,
+              phase: 'api_retry',
+              severity: 'warning',
+              title: 'API request retry',
+              message: sdkError.summary,
+              metadata: sdkError.details,
+            }).catch(() => {})
+          }
         }
         if (msg?.type === 'system' && msg.subtype === 'init') {
           session.initMessage = msg
@@ -2344,16 +2427,22 @@ export class ConversationService {
       // processes, their messages queue in the lead's mailbox, and the next
       // lead start receives the team snapshot again. Explicit stops (close,
       // delete, /clear) still stop workers through stopSession.
-      this.cancelPendingControlRequests(
-        activeSession,
-        new Error('CLI session exited before the control request completed'),
-      )
       if (activeSession.startupPending) {
+        this.cancelPendingControlRequests(
+          activeSession,
+          new Error('CLI session exited before the control request completed'),
+        )
         activeSession.startupExitCode = code
         return
       }
       await this.waitForProcessOutputDrain(activeSession)
       const exitError = this.buildRuntimeExitMessage(sessionId, code)
+      // A caller waiting on the process (a team member's startup) has to say
+      // why it is gone, not only that it is.
+      this.cancelPendingControlRequests(
+        activeSession,
+        new Error(`CLI session exited before the control request completed. ${exitError}`),
+      )
       void diagnosticsService.recordEvent({
         type: 'cli_runtime_exit',
         severity: cliExitSeverity(code),
@@ -2593,7 +2682,10 @@ export class ConversationService {
       : null
     if (explicitProviderEnv) delete explicitProviderEnv.CC_HAHA_OPENAI_FAST_MODE
     const networkEnv = buildNetworkEnvironment(
-      networkSettingsOverride ?? await loadNetworkSettings(),
+      resolveProviderNetworkSettings(
+        networkSettingsOverride ?? await loadNetworkSettings(),
+        explicitProvider?.proxy,
+      ),
       cleanEnv,
     )
     // The overall-duration cap has to scale with the user's "请求超时" or raising
@@ -3039,13 +3131,12 @@ export class ConversationService {
     }
 
     const normalizedDetail = this.truncateUserVisibleErrorDetail(detail.trim())
-    // A Windows Bun that crashes before running any code almost always failed
-    // to commit memory for JavaScriptCore: the machine's commit limit (RAM +
-    // page file) is used up, which every extra CLI process (e.g. each team
-    // member) brings closer. The raw crash report alone points at Bun instead.
+    // A Bun crash report identifies a runtime failure, not its cause. Preserve
+    // the panic and report URL without inferring memory exhaustion from the
+    // platform, exit code, or process memory snapshot.
     if (/Bun has crashed/i.test(normalizedDetail) && /\bWindows\b/.test(normalizedDetail)) {
       return new ConversationStartupError(
-        `CLI runtime crashed during startup (code ${exitCode}). On Windows this usually means the system has run out of commit memory (RAM + page file). Close other programs, set the page file (virtual memory) to system managed, or start fewer team members, then retry. Crash output: ${normalizedDetail}`,
+        `CLI runtime crashed during startup (code ${exitCode}). Include the crash output and diagnostics when reporting this problem. Crash output: ${normalizedDetail}`,
         'CLI_START_FAILED',
         true,
       )
@@ -3171,6 +3262,23 @@ export class ConversationService {
     summary: string
     details: Record<string, unknown>
   } | null {
+    if (message?.type === 'system' && message.subtype === 'api_retry') {
+      const detail = typeof message.error_message === 'string' ? message.error_message : ''
+      return {
+        type: 'sdk_api_retry',
+        summary: sanitizeRetryDiagnosticText(detail || `API request retry: ${message.error ?? 'unknown'}`),
+        details: {
+          attempt: message.attempt,
+          maxRetries: message.max_retries,
+          retryDelayMs: message.retry_delay_ms,
+          errorStatus: message.error_status,
+          error: message.error,
+          requestId: typeof message.request_id === 'string' ? sanitizeRetryDiagnosticText(message.request_id) : undefined,
+          messageUuid: message.uuid,
+        },
+      }
+    }
+
     if (this.isAssistantApiErrorMessage(message)) {
       const summary = this.redactProcessOutput(
         this.extractAssistantApiErrorDetail(message) || 'Assistant API error',

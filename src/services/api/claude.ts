@@ -75,6 +75,7 @@ import { resolveAppliedEffort } from "../../utils/effort.js";
 import { isEnvTruthy } from "../../utils/envUtils.js";
 import { errorMessage } from "../../utils/errors.js";
 import { computeFingerprintFromMessages } from "../../utils/fingerprint.js";
+import { normalizeImagesForAPI } from '../../utils/imageValidation.js'
 import { captureAPIRequest, logError } from "../../utils/log.js";
 import {
   createSystemStreamingFallbackMessage,
@@ -89,6 +90,7 @@ import {
   stripToolReferenceBlocksFromUserMessage,
 } from "../../utils/messages.js";
 import {
+  getCanonicalName,
   getDefaultOpusModel,
   getDefaultSonnetModel,
   getSmallFastModel,
@@ -1660,9 +1662,12 @@ async function* queryModel(
     API_MAX_MEDIA_PER_REQUEST,
   );
 
-  // Shrink total base64 media payload to stay under the API's ~20 MB request
-  // size limit. Images accumulate in conversations (Read tool + image-gen)
-  // and are never evicted by toolResultStorage; this is the safety net.
+  const provider = getAPIProvider()
+  messagesForAPI = await normalizeImagesForAPI(messagesForAPI, {
+    countDocuments: provider === 'bedrock' || provider === 'vertex',
+  })
+  // Shrink total base64 media payload after request-level image normalization,
+  // so the final encoded request stays under the API's ~20 MB size limit.
   messagesForAPI = shrinkMediaToSizeBudget(
     messagesForAPI,
     API_MAX_MEDIA_BYTES_BUDGET,
@@ -1969,7 +1974,7 @@ async function* queryModel(
 
     // Opus 5 and Haiku 5.5 reject disabled thinking above high effort. Preserve
     // the user's explicit thinking choice and use the highest compatible effort.
-    const modelId = options.model.toLowerCase()
+    const modelId = getCanonicalName(options.model)
     if (
       sendsExplicitDisabledThinking &&
       (modelId.includes('claude-opus-5') || modelId.includes('claude-haiku-5-5')) &&

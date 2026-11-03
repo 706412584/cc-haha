@@ -6,18 +6,29 @@
  * the failure paths a real provider cannot be made to produce on demand.
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { PROVIDER_PRESETS } from '../../../src/server/config/providerPresets'
 import type { LiveScenarioRunner } from '../agent-flow/live'
 import { LIVE_AGENT_FLOW_SCENARIOS } from '../agent-flow/liveScenarios'
 import { MOCK_IMAGE_PNG_BASE64, type MockLlmServer, type RecordedRequest } from './server'
-import { UPSTREAM_ERROR_TRIGGER } from './scriptedModel'
+import { UPSTREAM_ERROR_TRIGGER, UPSTREAM_REFUSAL_TRIGGER } from './scriptedModel'
+import { createScheduleInput, newScheduleDraft } from '../../../mobile/src/core/scheduleDraft'
 
 export type MockAgentScenario = { id: string; title: string }
 
 export const MOCK_ONLY_SCENARIOS: readonly MockAgentScenario[] = [
+  { id: 'mock-cold-permission-switch', title: 'A cold permission switch reaches the real CLI before its first tool call' },
+  { id: 'mock-team-task-owner', title: 'Real task tools reject an unknown teammate and recover with a valid assignment' },
+  { id: 'mock-openrouter-required-thinking', title: 'OpenRouter Claude defaults preserve compatible thinking and effort through the real CLI' },
+  { id: 'mock-deepseek-web-search', title: 'DeepSeek standalone search returns summaries through the real CLI to the model' },
+  { id: 'mock-mcp-late-reconnect', title: 'Reconnect a late-starting MCP service into an already running CLI session' },
   { id: 'mock-session-delegation-review', title: 'Real CLI yields for model allocation and starts a child only after UI confirmation' },
+  { id: 'mock-scheduled-task-roundtrip', title: 'Real CLI creates a desktop schedule and reads a persisted execution result through the scheduled task tool' },
+  { id: 'mock-scheduled-task-session-resume', title: 'Desktop scheduler resumes the actual original CLI conversation and persists scheduled provenance' },
+  { id: 'mock-scheduled-task-default-runtime', title: 'A task-page new conversation without model overrides runs on the active custom provider' },
+  { id: 'mock-scheduled-task-native-runtime', title: 'A mobile schedule using native API-key settings completes through the real CLI' },
   {
     id: 'mock-image-provider-protocols',
     title: 'Configured image protocols generate and edit real files through the CLI and return their paths to the model',
@@ -41,6 +52,10 @@ export const MOCK_ONLY_SCENARIOS: readonly MockAgentScenario[] = [
   {
     id: 'mock-upstream-error-recovers',
     title: 'An upstream error ends the turn visibly and the next turn still works',
+  },
+  {
+    id: 'mock-provider-refusal-recovers',
+    title: 'A third-party refusal names the selected model without changing provider and the next turn still works',
   },
 ]
 
@@ -81,8 +96,413 @@ function streamedText(messages: ReadonlyArray<{ type: string; text?: unknown }>)
 export function createMockOnlyRunners(
   requests: readonly RecordedRequest[],
   imageRequests: MockLlmServer['imageRequests'] = [],
+  searchRequests: MockLlmServer['searchRequests'] = [],
 ): Record<string, LiveScenarioRunner> {
   return {
+    async 'mock-cold-permission-switch'(ctx) {
+      const sessionId = await ctx.createSession()
+      const socket = await ctx.openSocket(sessionId)
+      // Outside the workspace, but still inside the disposable config fixture.
+      const target = join(ctx.configDir, `cold-permission-${sessionId}.txt`)
+      const deniedTarget = join(ctx.configDir, `default-permission-${sessionId}.txt`)
+      const writePrompt = (filePath: string) => `MOCK_TEAM_OWNER ${JSON.stringify({
+        tool: 'Write', input: { file_path: filePath, content: 'PERMISSION_MODE_REACHED_CLI' },
+      })}`
+      try {
+        ctx.pinRuntime(socket)
+        socket.send({ type: 'set_permission_mode', mode: 'bypassPermissions' })
+        socket.send({ type: 'prewarm_session' })
+        const since = requests.length
+        socket.send({ type: 'user_message', content: writePrompt(target) })
+        const settled = await socket.waitFor(message =>
+          ['permission_request', 'message_complete', 'error'].includes(message.type),
+        ctx.stepTimeoutMs, 'first tool after cold permission switch')
+        if (settled.type !== 'message_complete' || !existsSync(target) ||
+          readFileSync(target, 'utf8') !== 'PERMISSION_MODE_REACHED_CLI' ||
+          !toolResultsSentUpstream(requests, since).some(result => !result.is_error)) {
+          throw new Error(`The bypass turn did not write without approval: ${JSON.stringify(settled)}`)
+        }
+
+        const resetStart = socket.messages.length
+        socket.send({ type: 'set_permission_mode', mode: 'default' })
+        await socket.waitFor(message => message.type === 'permission_mode_changed' && message.mode === 'default',
+          ctx.stepTimeoutMs, 'return to default permission mode', resetStart)
+        socket.send({ type: 'user_message', content: writePrompt(deniedTarget) })
+        const request = await socket.waitFor(message => message.type === 'permission_request',
+          ctx.stepTimeoutMs, 'default mode asks again', resetStart)
+        socket.send({ type: 'permission_response', requestId: request.requestId, allowed: false })
+        await socket.waitFor(message => message.type === 'message_complete',
+          ctx.stepTimeoutMs, 'denied default-mode turn', resetStart)
+        if (existsSync(deniedTarget)) throw new Error('Default mode unexpectedly kept bypass permissions')
+      } finally { socket.close() }
+    },
+    async 'mock-team-task-owner'(ctx) {
+      const sessionId = await ctx.createSession()
+      const teamName = `owner-${sessionId}`
+      const socket = await ctx.openSocket(sessionId)
+      const turn = async (tool: string, input: Record<string, unknown>) => {
+        const start = socket.messages.length
+        socket.send({ type: 'user_message', content: `MOCK_TEAM_OWNER ${JSON.stringify({ tool, input })}` })
+        const settled = await socket.waitFor(message => message.type === 'permission_request' || message.type === 'message_complete', ctx.stepTimeoutMs, `${tool} completion`, start)
+        if (settled.type === 'permission_request') socket.send({ type: 'permission_response', requestId: settled.requestId, allowed: true, rule: 'agent-flow-mock' })
+        await socket.waitFor(message => message.type === 'message_complete', ctx.stepTimeoutMs, `${tool} completion`, start)
+      }
+      try {
+        ctx.pinRuntime(socket)
+        await turn('TeamCreate', { team_name: teamName, description: 'Disposable ownership fixture' })
+        await turn('TaskCreate', { subject: 'Fix Guide state', description: 'Fixture task' })
+        const taskPath = join(ctx.configDir, 'tasks', teamName, '1.json')
+        if (!existsSync(taskPath)) throw new Error('Real TeamCreate and TaskCreate did not persist the fixture task')
+        const since = requests.length
+        await turn('TaskUpdate', { taskId: '1', owner: 'patcher' })
+        const rejected = toolResultsSentUpstream(requests, since).some(result => contentText(result.content).includes("No teammate named 'patcher'"))
+        const unchanged = JSON.parse(readFileSync(taskPath, 'utf8'))
+        if (!rejected || unchanged.owner || unchanged.status !== 'pending' || existsSync(join(ctx.configDir, 'teams', teamName, 'inboxes', 'patcher.json'))) {
+          throw new Error('Unknown owner must reach the model as a rejected assignment without task or inbox mutation')
+        }
+        await turn('TaskUpdate', { taskId: '1', owner: 'team-lead' })
+        if (JSON.parse(readFileSync(taskPath, 'utf8')).owner !== 'team-lead') throw new Error('The next turn must recover by assigning an existing team member')
+      } finally { socket.close() }
+    },
+    async 'mock-openrouter-required-thinking'(ctx) {
+      const preset = PROVIDER_PRESETS.find(candidate => candidate.id === 'openrouter')!
+      const settingsUrl = `${ctx.baseUrl}/api/settings/user`
+      const original = await (await fetch(settingsUrl)).json() as { alwaysThinkingEnabled?: boolean }
+      const updateThinking = async (enabled: boolean) => {
+        const response = await fetch(settingsUrl, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ alwaysThinkingEnabled: enabled }),
+        })
+        if (!response.ok) throw new Error(`Updating fixture thinking failed: ${response.status}`)
+      }
+      let providerId: string | undefined
+      try {
+        const response = await fetch(`${ctx.baseUrl}/api/providers`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            presetId: preset.id, name: 'OpenRouter offline fixture', apiKey: 'mock-openrouter-key',
+            baseUrl: ctx.target.host, apiFormat: preset.apiFormat, authStrategy: preset.authStrategy,
+            models: preset.defaultModels,
+          }),
+        })
+        if (!response.ok) throw new Error(`Creating OpenRouter fixture failed: ${response.status}`)
+        providerId = ((await response.json()) as { provider: { id: string } }).provider.id
+        await updateThinking(false)
+        for (const modelId of [preset.defaultModels.sonnet, preset.defaultModels.opus, preset.defaultModels.haiku]) {
+          const socket = await ctx.openSocket(await ctx.createSession())
+          try {
+            socket.send({ type: 'set_runtime_config', providerId, modelId, effortLevel: 'max' })
+            const since = requests.length
+            socket.send({ type: 'user_message', content: 'Reply with one short sentence.' })
+            await socket.waitFor(message => message.type === 'message_complete', ctx.stepTimeoutMs, 'OpenRouter completion')
+            if (socket.messages.some(message => message.type === 'error') || !streamedText(socket.messages).trim()) {
+              throw new Error(`OpenRouter ${modelId} did not complete a reply`)
+            }
+            const sent = requests.slice(since).filter(request => request.stream && request.body.model === modelId)
+            if (sent.length === 0) throw new Error(`No request preserved OpenRouter model ID ${modelId}`)
+            for (const request of sent) {
+              const body = request.body as typeof request.body & { thinking?: { type?: string }; output_config?: { effort?: string } }
+              const isHaiku = modelId === preset.defaultModels.haiku
+              const expectedThinking = isHaiku ? 'disabled' : 'adaptive'
+              if (body.thinking?.type !== expectedThinking || (isHaiku && body.output_config?.effort !== 'high')) {
+                throw new Error(`OpenRouter ${modelId} sent incompatible controls: ${JSON.stringify({ thinking: body.thinking, output: body.output_config })}`)
+              }
+            }
+          } finally { socket.close() }
+        }
+      } finally {
+        await updateThinking(original.alwaysThinkingEnabled !== false)
+        if (providerId) await fetch(`${ctx.baseUrl}/api/providers/${providerId}`, { method: 'DELETE' })
+      }
+    },
+    async 'mock-scheduled-task-default-runtime'(ctx) {
+      const providers = await (await fetch(`${ctx.baseUrl}/api/providers`)).json() as { activeId: string | null }
+      let taskId: string | undefined
+      try {
+        const activated = await fetch(`${ctx.baseUrl}/api/providers/${ctx.target.providerId}/activate`, { method: 'POST' })
+        if (!activated.ok) throw new Error('Cannot activate the isolated mock provider')
+        const response = await fetch(`${ctx.baseUrl}/api/scheduled-tasks`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: 'Default runtime fixture', prompt: 'Reply with Ready when you are.', folderPath: ctx.workRoot,
+            execution: { kind: 'new-session' }, schedule: { kind: 'once', runAt: '2099-01-01T00:00:00Z', timeZone: 'UTC' } }),
+        })
+        if (!response.ok) throw new Error(`Task-page creation failed: ${response.status}`)
+        const { task } = await response.json() as { task: { id: string; sourceSessionId?: string; providerId?: string; model?: string } }
+        taskId = task.id
+        if (task.sourceSessionId || task.providerId || task.model) throw new Error('Fixture must exercise omitted provider/model with no source conversation')
+        const since = requests.length
+        const started = await fetch(`${ctx.baseUrl}/api/scheduled-tasks/${taskId}/run`, { method: 'POST' })
+        if (!started.ok) throw new Error(`Task start failed: ${started.status}`)
+        const deadline = Date.now() + ctx.stepTimeoutMs
+        let run: { status: string; sessionId?: string; output?: string; error?: string } | undefined
+        do {
+          const page = await (await fetch(`${ctx.baseUrl}/api/scheduled-tasks/${taskId}/runs?limit=5`)).json() as { runs: typeof run[] }
+          run = page.runs[0]
+          if (run && run.status !== 'running') break
+          await Bun.sleep(50)
+        } while (Date.now() < deadline)
+        if (run?.status !== 'completed' || !run.sessionId || !run.output) throw new Error(`Default scheduled runtime did not complete: ${JSON.stringify(run)}`)
+        if (!requests.slice(since).some(request => request.body.model === ctx.target.modelId)) throw new Error('Scheduled CLI did not reach the selected default model')
+      } finally {
+        if (taskId) await fetch(`${ctx.baseUrl}/api/scheduled-tasks/${taskId}`, { method: 'DELETE' })
+        await fetch(providers.activeId ? `${ctx.baseUrl}/api/providers/${providers.activeId}/activate` : `${ctx.baseUrl}/api/providers/official`, { method: 'POST' })
+      }
+    },
+    async 'mock-scheduled-task-native-runtime'(ctx) {
+      const providers = await (await fetch(`${ctx.baseUrl}/api/providers`)).json() as { activeId: string | null }
+      const settingsPath = join(ctx.configDir, 'settings.json')
+      const originalSettings = existsSync(settingsPath) ? readFileSync(settingsPath, 'utf8') : undefined
+      let taskId: string | undefined
+      try {
+        const activated = await fetch(`${ctx.baseUrl}/api/providers/official`, { method: 'POST' })
+        if (!activated.ok) throw new Error('Cannot select the isolated native runtime')
+        const original = originalSettings ? JSON.parse(originalSettings) as Record<string, unknown> : {}
+        writeFileSync(settingsPath, JSON.stringify({ ...original, model: ctx.target.modelId, env: {
+          ...(original.env as Record<string, unknown> ?? {}),
+          ANTHROPIC_API_KEY: 'mock-native-api-key', ANTHROPIC_BASE_URL: ctx.target.host, ANTHROPIC_MODEL: ctx.target.modelId,
+        } }))
+        const catalog = await (await fetch(`${ctx.baseUrl}/api/models`)).json() as { provider: { id: string } | null; runtimeSource?: string }
+        const current = await (await fetch(`${ctx.baseUrl}/api/models/current`)).json() as { model: { id: string } }
+        if (catalog.provider || catalog.runtimeSource !== 'standalone') throw new Error('Fixture did not select the native API-key source')
+        const payload = createScheduleInput({ name: 'Mobile native runtime fixture', prompt: 'Reply with Ready when you are.',
+          execution: { kind: 'new-session' }, folderPath: ctx.workRoot, useWorktree: false, notificationPolicy: 'none', channels: [],
+          runtime: { providerId: null, modelId: current.model.id }, followDefaultRuntime: true,
+        }, { ...newScheduleDraft('UTC'), frequency: 'once', runAt: '2099-01-01T00:00' })
+        const response = await fetch(`${ctx.baseUrl}/api/scheduled-tasks`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        })
+        if (!response.ok) throw new Error(`Native mobile schedule creation failed: ${response.status}`)
+        const { task } = await response.json() as { task: { id: string; model?: string; providerId?: string | null } }
+        taskId = task.id
+        if (task.model !== undefined || task.providerId !== undefined) throw new Error('The native source was incorrectly persisted as an explicit OAuth selection')
+        const since = requests.length
+        const started = await fetch(`${ctx.baseUrl}/api/scheduled-tasks/${taskId}/run`, { method: 'POST' })
+        if (!started.ok) throw new Error(`Native task start failed: ${started.status}`)
+        const deadline = Date.now() + ctx.stepTimeoutMs
+        let run: { status: string; sessionId?: string; output?: string; error?: string } | undefined
+        do {
+          const page = await (await fetch(`${ctx.baseUrl}/api/scheduled-tasks/${taskId}/runs?limit=5`)).json() as { runs: typeof run[] }
+          run = page.runs[0]
+          if (run && run.status !== 'running') break
+          await Bun.sleep(50)
+        } while (Date.now() < deadline)
+        if (run?.status !== 'completed' || !run.sessionId || !run.output) throw new Error(`Native mobile schedule did not complete: ${JSON.stringify(run)}`)
+        if (!requests.slice(since).some(request => request.body.model === ctx.target.modelId)) throw new Error('The native scheduled CLI did not reach the loopback model')
+      } finally {
+        if (taskId) await fetch(`${ctx.baseUrl}/api/scheduled-tasks/${taskId}`, { method: 'DELETE' })
+        await fetch(providers.activeId ? `${ctx.baseUrl}/api/providers/${providers.activeId}/activate` : `${ctx.baseUrl}/api/providers/official`, { method: 'POST' })
+        if (originalSettings !== undefined) writeFileSync(settingsPath, originalSettings)
+        else rmSync(settingsPath, { force: true })
+      }
+    },
+    async 'mock-scheduled-task-session-resume'(ctx) {
+      const sessionId = await ctx.createSession()
+      const socket = await ctx.openSocket(sessionId)
+      let taskId: string | undefined
+      try {
+        ctx.pinRuntime(socket)
+        socket.send({ type: 'user_message', content: 'MOCK_SCHEDULED_TASK_CREATE' })
+        const first = await socket.waitFor(message => message.type === 'permission_request' || message.type === 'message_complete', ctx.stepTimeoutMs, 'create scheduled task')
+        if (first.type === 'permission_request') socket.send({ type: 'permission_response', requestId: first.requestId, allowed: true, rule: 'agent-flow-mock' })
+        await socket.waitFor(message => message.type === 'message_complete', ctx.stepTimeoutMs, 'original creation turn completed')
+        const { tasks } = await (await fetch(`${ctx.baseUrl}/api/scheduled-tasks`)).json() as { tasks: Array<{ id: string; sourceSessionId?: string }> }
+        taskId = tasks.find(task => task.sourceSessionId === sessionId)?.id
+        if (!taskId) throw new Error('The conversation did not create its scheduled task')
+        const start = socket.messages.length
+        const ran = await fetch(`${ctx.baseUrl}/api/scheduled-tasks/${taskId}/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        if (!ran.ok) throw new Error(`Manual scheduler trigger failed: ${ran.status}`)
+        const completed = await socket.waitFor(message => message.type === 'message_complete', ctx.stepTimeoutMs, 'scheduled turn on original conversation', start)
+        const deadline = Date.now() + ctx.stepTimeoutMs
+        let run: Record<string, unknown> | undefined
+        do {
+          const page = await (await fetch(`${ctx.baseUrl}/api/scheduled-tasks/${taskId}/runs?limit=5`)).json() as { runs: Array<Record<string, unknown>> }
+          run = page.runs.find(item => item.taskId === taskId)
+          if (run && run.status !== 'running') break
+          await Bun.sleep(50)
+        } while (Date.now() < deadline)
+        if (run?.status !== 'completed' || run.sessionId !== sessionId || typeof run.output !== 'string' || !run.output) throw new Error(`Scheduler must capture completion from the original CLI: ${JSON.stringify(run)}`)
+        if ((completed as { scheduledTask?: { runId: string } }).scheduledTask?.runId !== run.id) throw new Error('Completion must carry host-owned scheduled provenance for reconnect-safe notifications')
+        const replay = socket.messages.slice(start).find(message => message.type === 'user_message_replay' && (message as unknown as { scheduledTask?: { runId?: string } }).scheduledTask?.runId === run!.id)
+        if (!replay) throw new Error('The actual SDK replay must carry scheduled task metadata')
+        const history = await (await fetch(`${ctx.baseUrl}/api/sessions/${sessionId}/messages`)).json() as { messages: Array<{ type: string; scheduledTask?: { taskId: string; runId: string }; content: unknown }> }
+        const triggers = history.messages.filter(message => message.scheduledTask?.runId === run!.id)
+        if (triggers.length !== 1 || triggers[0]!.scheduledTask?.taskId !== taskId) throw new Error(`History must preserve exactly one scheduled trigger: ${JSON.stringify(triggers)}`)
+        if (JSON.stringify(triggers[0]!.content).includes('Scheduled task invocation (host context)')) throw new Error('History must display the task prompt instead of host instructions')
+      } finally {
+        socket.close()
+        if (taskId) await fetch(`${ctx.baseUrl}/api/scheduled-tasks/${taskId}`, { method: 'DELETE' })
+      }
+    },
+    async 'mock-scheduled-task-roundtrip'(ctx) {
+      const sessionId = await ctx.createSession()
+      const socket = await ctx.openSocket(sessionId)
+      const runsPath = join(ctx.configDir, 'scheduled_tasks_log.json')
+      const runId = `mock-scheduled-run-${sessionId}`
+      let taskId: string | undefined
+      const readRuns = () => existsSync(runsPath) ? JSON.parse(readFileSync(runsPath, 'utf8')) as { runs: Array<Record<string, unknown>> } : { runs: [] }
+      const turn = async (content: string) => {
+        const start = socket.messages.length
+        socket.send({ type: 'user_message', content })
+        const settled = await socket.waitFor(message => message.type === 'permission_request' || message.type === 'message_complete', ctx.stepTimeoutMs, 'scheduled task tool permission or completion', start)
+        if (settled.type === 'permission_request') socket.send({ type: 'permission_response', requestId: settled.requestId, allowed: true, rule: 'agent-flow-mock' })
+        await socket.waitFor(message => message.type === 'message_complete', ctx.stepTimeoutMs, 'scheduled task tool completion', start)
+      }
+      try {
+        ctx.pinRuntime(socket)
+        const since = requests.length
+        await turn('MOCK_SCHEDULED_TASK_CREATE')
+        const response = await fetch(`${ctx.baseUrl}/api/scheduled-tasks`)
+        const body = await response.json() as { tasks: Array<{ id: string; name?: string; execution?: { kind: string; targetSessionId?: string } }> }
+        const task = body.tasks.find(item => item.name === 'Fixture scheduled review')
+        if (!task || task.execution?.kind !== 'session' || task.execution.targetSessionId !== sessionId) throw new Error('The tool must create the same desktop task and bind the current authenticated session')
+        taskId = task.id
+        const created = toolResultsSentUpstream(requests, since).some(result => {
+          try { const data = JSON.parse(contentText(result.content)); return !result.is_error && data.kind === 'scheduled_task' && data.operation === 'created' && data.taskId === taskId } catch { return false }
+        })
+        if (!created) throw new Error('A versioned creation snapshot must survive the actual tool_result roundtrip')
+        // Only the disposable quality-gate config is seeded. Runtime execution
+        // is tested separately; this lane proves result access through the LLM.
+        const history = readRuns()
+        history.runs.push({ id: runId, taskId, taskName: task.name, prompt: 'Fixture review', status: 'completed', startedAt: '2026-01-01T00:00:00Z', completedAt: '2026-01-01T00:00:01Z', sessionId, output: 'SCHEDULED_FIXTURE_RESULT: reviewed 3 fixture files', durationMs: 1000 })
+        writeFileSync(runsPath, JSON.stringify(history))
+        const resultSince = requests.length
+        await turn(`MOCK_SCHEDULED_TASK_RESULTS ${taskId}`)
+        const readResult = toolResultsSentUpstream(requests, resultSince).some(result => {
+          try {
+            const data = JSON.parse(contentText(result.content))
+            return !result.is_error && data.kind === 'scheduled_task_runs' && data.operation === 'viewed' && data.runs?.[0]?.sessionId === sessionId && data.runs[0].output?.includes('SCHEDULED_FIXTURE_RESULT')
+          } catch { return false }
+        })
+        if (!readResult) throw new Error('The model must receive the persisted status, output and session link through runs and run')
+        await turn(`MOCK_SCHEDULED_TASK_DELETE ${taskId}`)
+        const remaining = await (await fetch(`${ctx.baseUrl}/api/scheduled-tasks`)).json() as { tasks: Array<{ id: string }> }
+        if (remaining.tasks.some(item => item.id === taskId)) throw new Error('Deleting from the conversation must update the desktop task list')
+      } finally {
+        socket.close()
+        if (taskId) await fetch(`${ctx.baseUrl}/api/scheduled-tasks/${taskId}`, { method: 'DELETE' })
+        const history = readRuns()
+        if (history.runs.some(run => run.id === runId)) writeFileSync(runsPath, JSON.stringify({ ...history, runs: history.runs.filter(run => run.id !== runId) }))
+      }
+    },
+    async 'mock-deepseek-web-search'(ctx) {
+      const settingsUrl = `${ctx.baseUrl}/api/settings/user`
+      const originalResponse = await fetch(settingsUrl)
+      if (!originalResponse.ok) throw new Error('reading sandbox settings failed')
+      const original = await originalResponse.json() as { webSearch?: unknown }
+      const update = async (webSearch: unknown) => {
+        const response = await fetch(settingsUrl, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ webSearch }),
+        })
+        if (!response.ok) throw new Error(`updating search settings failed: ${response.status}`)
+      }
+      await update({ mode: 'deepseek', deepseekApiKey: 'mock-deepseek-key' })
+      const socket = await ctx.openSocket(await ctx.createSession())
+      try {
+        ctx.pinRuntime(socket)
+        const since = requests.length
+        const searchStart = searchRequests.length
+        socket.send({ type: 'user_message', content: 'MOCK_DEEPSEEK_SEARCH' })
+        const settled = await socket.waitFor(m => m.type === 'permission_request' || m.type === 'message_complete', ctx.stepTimeoutMs, 'DeepSeek search permission or completion')
+        if (settled.type === 'permission_request') {
+          socket.send({ type: 'permission_response', requestId: settled.requestId, allowed: true, rule: 'agent-flow-mock' })
+          await socket.waitFor(m => m.type === 'message_complete', ctx.stepTimeoutMs, 'DeepSeek search completion')
+        }
+        const searches = searchRequests.slice(searchStart)
+        if (searches.length !== 1) throw new Error(`expected one intercepted search, got ${searches.length}`)
+        const search = searches[0]!
+        if (search.headers.get('authorization') !== 'Bearer mock-deepseek-key') throw new Error('search did not use its own fake API key')
+        if (search.body.query !== 'DeepSeek fixture' || search.body.count !== 8 || search.body.need_content !== false) throw new Error(`unexpected search request: ${JSON.stringify(search.body)}`)
+        if (!toolResultsSentUpstream(requests, since).some(result => !result.is_error && contentText(result.content).includes('DEEPSEEK_SUMMARY_REACHED_MODEL'))) throw new Error('search summary did not reach the model')
+        if (!streamedText(socket.messages).includes('DEEPSEEK_SUMMARY_REACHED_MODEL')) throw new Error('search summary did not reach the client')
+      } finally {
+        socket.close()
+        await update(original.webSearch ?? { mode: 'auto' })
+      }
+    },
+    async 'mock-mcp-late-reconnect'(ctx) {
+      const cwd = realpathSync(ctx.workRoot)
+      let ready = false
+      let calls = 0
+      let unavailableAttempts = 0
+      const mcp = Bun.serve({
+        hostname: '127.0.0.1', port: 0,
+        async fetch(req) {
+          if (!ready) {
+            unavailableAttempts += 1
+            return new Response('MCP application has not started', { status: 503 })
+          }
+          if (req.method !== 'POST') return new Response(null, { status: 405 })
+          const request = await req.json() as { id?: number | string; method: string }
+          if (request.id === undefined) return new Response(null, { status: 202 })
+          let result: unknown
+          if (request.method === 'initialize') {
+            result = { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'late-fixture', version: '1' } }
+          } else if (request.method === 'tools/list') {
+            result = { tools: [{ name: 'echo', description: 'Return the late MCP fixture marker', inputSchema: { type: 'object', properties: {} } }] }
+          } else if (request.method === 'tools/call') {
+            calls += 1
+            result = { content: [{ type: 'text', text: 'LATE_MCP_AVAILABLE' }] }
+          } else {
+            return Response.json({ jsonrpc: '2.0', id: request.id, error: { code: -32601, message: 'Method not found' } })
+          }
+          return Response.json({ jsonrpc: '2.0', id: request.id, result })
+        },
+      })
+      const name = 'late_start'
+      let socket: Awaited<ReturnType<typeof ctx.openSocket>> | undefined
+      let oldSocket: Awaited<ReturnType<typeof ctx.openSocket>> | undefined
+      try {
+        // Keep a CLI whose cached config predates this MCP alongside the CLI
+        // that starts with the configured but unavailable service.
+        oldSocket = await ctx.openSocket(await ctx.createSession())
+        ctx.pinRuntime(oldSocket)
+        oldSocket.send({ type: 'user_message', content: 'Reply with one short sentence.' })
+        await oldSocket.waitFor(message => message.type === 'message_complete', ctx.stepTimeoutMs, 'turn before adding MCP config')
+        const created = await fetch(`${ctx.baseUrl}/api/mcp`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cwd, name, scope: 'local', config: { type: 'http', url: `http://127.0.0.1:${mcp.port}/mcp` } }),
+        })
+        if (!created.ok) throw new Error(`creating the fixture MCP config failed: ${created.status}`)
+        const sessionId = await ctx.createSession()
+        socket = await ctx.openSocket(sessionId)
+        ctx.pinRuntime(socket)
+        socket.send({ type: 'user_message', content: 'Reply with one short sentence.' })
+        await socket.waitFor(message => message.type === 'message_complete', ctx.stepTimeoutMs, 'initial turn without MCP')
+        if (unavailableAttempts === 0) throw new Error('The CLI must attempt the configured MCP before the application starts')
+        if (calls !== 0) throw new Error('The unavailable MCP must not execute a tool')
+        ready = true
+        const reconnected = await fetch(`${ctx.baseUrl}/api/mcp/${name}/reconnect`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cwd, sessionId }),
+        })
+        const receipt = await reconnected.json() as { sessionSync?: { applied: boolean }; server?: { status: string } }
+        if (!reconnected.ok || receipt.server?.status !== 'connected' || !receipt.sessionSync?.applied) {
+          throw new Error(`reconnect did not update the running conversation: ${JSON.stringify(receipt)}`)
+        }
+        for (const active of [oldSocket, socket]) {
+          const since = requests.length
+          const start = active.messages.length
+          active.send({ type: 'user_message', content: 'MOCK_LATE_MCP' })
+          const settled = await active.waitFor(message => message.type === 'permission_request' || message.type === 'message_complete', ctx.stepTimeoutMs, 'late MCP permission or completion', start)
+          if (settled.type === 'permission_request') {
+            active.send({ type: 'permission_response', requestId: settled.requestId, allowed: true, rule: 'agent-flow-mock' })
+          }
+          await active.waitFor(message => message.type === 'message_complete', ctx.stepTimeoutMs, 'late MCP tool call', start)
+          const roundtrip = toolResultsSentUpstream(requests, since).some(result => contentText(result.content).includes('LATE_MCP_AVAILABLE') && !result.is_error)
+          if (!roundtrip) throw new Error('Each reconnected CLI must return the actual MCP tool result to the model')
+        }
+        if (calls !== 2) throw new Error('Both reconnected CLIs must execute the MCP tool exactly once')
+      } finally {
+        socket?.close()
+        oldSocket?.close()
+        try {
+          await fetch(`${ctx.baseUrl}/api/mcp/${name}?scope=local&cwd=${encodeURIComponent(cwd)}`, { method: 'DELETE' })
+        } finally {
+          mcp.stop(true)
+        }
+      }
+    },
     async 'mock-session-delegation-review'(ctx) {
       const sessionId = await ctx.createSession()
       const socket = await ctx.openSocket(sessionId)
@@ -335,6 +755,50 @@ export function createMockOnlyRunners(
         socket.send({ type: 'user_message', content: 'Reply with one short sentence after compact.' })
         await socket.waitFor(m => m.type === 'message_complete', ctx.stepTimeoutMs, 'next turn after reconnect', nextStart)
         if (!streamedText(socket.messages.slice(nextStart)).trim()) throw new Error('no reply after compact and reconnect')
+      } finally {
+        socket.close()
+      }
+    },
+
+    async 'mock-provider-refusal-recovers'(ctx) {
+      const sessionId = await ctx.createSession()
+      const socket = await ctx.openSocket(sessionId)
+      const assertRuntime = async () => {
+        const response = await fetch(`${ctx.baseUrl}/api/sessions/${sessionId}/summary`)
+        if (!response.ok) throw new Error(`reading refusal session runtime failed: ${response.status}`)
+        const session = await response.json() as { runtimeProviderId?: string | null; runtimeModelId?: string }
+        if (session.runtimeProviderId !== ctx.target.providerId || session.runtimeModelId !== ctx.target.modelId) {
+          throw new Error(`Refusal changed the selected provider or model: ${JSON.stringify(session)}`)
+        }
+      }
+      const requestStart = requests.length
+      try {
+        ctx.pinRuntime(socket)
+        const start = socket.messages.length
+        socket.send({ type: 'user_message', content: `${UPSTREAM_REFUSAL_TRIGGER}: refuse this turn.` })
+        await socket.waitFor(m => m.type === 'message_complete', ctx.stepTimeoutMs, 'refused turn completion', start)
+        const errors = socket.messages.slice(start).filter(m => m.type === 'error')
+        const detail = errors.map(m => String(m.message ?? '')).join('\n')
+        if (!/selected model.*refus/i.test(detail)) throw new Error(`Refusal did not identify the selected model: ${detail}`)
+        if (/anthropic\.com|Usage Policy|claude-sonnet|Claude Code/i.test(detail)) {
+          throw new Error(`Third-party refusal was attributed to Anthropic: ${detail}`)
+        }
+        if (requests.slice(requestStart).some(request => request.body.model !== ctx.target.modelId)) {
+          throw new Error('Refusal switched the upstream request model')
+        }
+        await assertRuntime()
+
+        const next = socket.messages.length
+        const recoveryRequestStart = requests.length
+        socket.send({ type: 'user_message', content: 'Reply with one short sentence after refusal.' })
+        await socket.waitFor(m => m.type === 'message_complete', ctx.stepTimeoutMs, 'next turn after refusal', next)
+        if (!streamedText(socket.messages.slice(next)).trim() || socket.messages.slice(next).some(m => m.type === 'error')) {
+          throw new Error('The session did not answer normally after a provider refusal')
+        }
+        if (requests.length === recoveryRequestStart || requests.slice(recoveryRequestStart).some(request => request.body.model !== ctx.target.modelId)) {
+          throw new Error('The turn after refusal did not use the selected upstream model')
+        }
+        await assertRuntime()
       } finally {
         socket.close()
       }

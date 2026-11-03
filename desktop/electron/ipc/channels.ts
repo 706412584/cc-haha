@@ -1,11 +1,11 @@
 export const ELECTRON_IPC_CHANNELS = {
   publicAccessGetStatus: 'desktop:public-access:get-status',
-  publicAccessSaveCredential: 'desktop:public-access:save-credential',
-  publicAccessDeleteCredential: 'desktop:public-access:delete-credential',
+  publicAccessConfigure: 'desktop:public-access:configure',
   publicAccessStart: 'desktop:public-access:start',
   publicAccessStop: 'desktop:public-access:stop',
   publicAccessSetAutoStart: 'desktop:public-access:set-auto-start',
   appGetVersion: 'desktop:app:get-version',
+  powerSetPreventSleepWhileRunning: 'desktop:power:set-prevent-sleep-while-running',
   appGetLocalePreference: 'desktop:app:get-locale-preference',
   appSetLocalePreference: 'desktop:app:set-locale-preference',
   appGetPreferredSystemLanguages: 'desktop:app:get-preferred-system-languages',

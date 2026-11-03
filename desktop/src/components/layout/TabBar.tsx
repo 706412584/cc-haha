@@ -16,6 +16,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useSessionStore } from '../../stores/sessionStore'
+import { useUIStore } from '../../stores/uiStore'
 import type { UIMessage } from '../../types/chat'
 import { useWorkspaceStore } from '../../stores/workspaceStore'
 import { useCLITaskStore } from '../../stores/cliTaskStore'
@@ -139,12 +140,20 @@ export function TabBar() {
   const otherAttentionCount = attentionList.filter((sessionId) => sessionId !== activeTabId).length
   const activeTab = tabs.find((tab) => tab.sessionId === activeTabId) ?? null
   const isActiveSessionTab = isSessionTab(activeTab) || isSessionTabId(activeTabId)
+  const newSessionDraft = useUIStore((state) => state.newSessionDraft)
+  // The desktop's new-session page is a draft: no tab is active and no server
+  // session exists until the first send (see `startNewSessionDraft`).
+  const isDraftHome = !activeTabId && !!newSessionDraft
+  const requestDraftWorkspace = useUIStore((state) => state.requestDraftWorkspace)
+  const activeView = useUIStore((state) => state.activeView)
   const activeSession = useSessionStore((state) =>
     activeTabId ? state.sessions.find((session) => session.id === activeTabId) : undefined,
   )
   const openProjectPath = isActiveSessionTab
     ? getSessionBrowsablePath(activeSession) ?? null
-    : null
+    : isDraftHome
+      ? newSessionDraft?.workDir || null
+      : null
   const workspaceLayout = useWorkspaceStore((state) =>
     activeTabId && isActiveSessionTab ? state.bySession[activeTabId]?.layout ?? 'hidden' : 'hidden',
   )
@@ -772,6 +781,9 @@ export function TabBar() {
         {isDesktopRuntime && isActiveSessionTab && !isWorkbenchOpen && (
           <OpenProjectMenu path={openProjectPath} />
         )}
+        {isDesktopRuntime && isDraftHome && !isWorkbenchOpen && (
+          <OpenProjectMenu path={openProjectPath} />
+        )}
         {isActiveSessionTab && activeTabId ? (
           <WorkspaceLayoutControls
             layout={workspaceLayout}
@@ -782,6 +794,14 @@ export function TabBar() {
               getSessionBrowsablePath(activeSession) ?? '',
             )}
             onToggleWorkspace={() => useWorkspaceStore.getState().toggleWorkspace(activeTabId)}
+          />
+        ) : isDesktopRuntime && isDraftHome ? (
+          <WorkspaceLayoutControls
+            layout="hidden"
+            bottomOpen={false}
+            onToggleFullscreen={() => requestDraftWorkspace('toggle-fullscreen', activeTabId, activeView)}
+            onToggleBottom={() => requestDraftWorkspace('toggle-bottom', activeTabId, activeView)}
+            onToggleWorkspace={() => requestDraftWorkspace('toggle-side', activeTabId, activeView)}
           />
         ) : (
           <IconButton
