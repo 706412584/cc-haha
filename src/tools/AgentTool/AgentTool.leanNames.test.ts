@@ -70,6 +70,7 @@ beforeEach(() => {
   previousSession = { id: getSessionId(), projectDir: getSessionProjectDir() }
   configDir = mkdtempSync(join(tmpdir(), 'cc-haha-lean-names-'))
   process.env.CLAUDE_CONFIG_DIR = configDir
+  process.env.CLAUDE_CODE_AGENT_LIMITER_OFF = '1'
   process.env.TEST_ENABLE_SESSION_PERSISTENCE = '1'
   switchSession('62b92be7-2304-43f0-9dd5-7c78ad20a1ef' as SessionId, join(configDir, 'project'))
   resetProjectForTesting()
