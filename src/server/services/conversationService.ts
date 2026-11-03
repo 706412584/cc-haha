@@ -644,6 +644,8 @@ export class ConversationService {
     console.info(`[ConversationService] Automatic answer cancelled by user activity: session=${sessionId} request=${requestId}`)
     request.autoAnswerCancelled = true
     request.autoAnswerGeneration = (request.autoAnswerGeneration ?? 0) + 1
+    request.autoAnswerDeadline = null
+    if (session) this.publishAutoQuestionDeadline(sessionId, session, requestId, request)
     // Restart the idle clock rather than clearing it: an answer being composed
     // right now must not be yanked away at the deadline, but a question the user
     // clicked once and then abandoned must still expire instead of hanging.
