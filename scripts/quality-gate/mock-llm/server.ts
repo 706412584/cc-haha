@@ -30,7 +30,13 @@ export type MockLlmServer = {
   stop(): Promise<void>
 }
 
-export const MOCK_IMAGE_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg=='
+// 1x1 grayscale+alpha PNG. The scanline bytes are the fixture's original
+// `[1, 255, 255]`; only the container was repaired to satisfy PNG: the IDAT
+// CRC is recomputed and the IEND chunk is complete. The previous fixture was
+// 67 bytes with a both corrupt IDAT CRC and a truncated IEND, so any reader
+// that validates PNG structure (the fork's FileReadTool, a real guard against
+// HTTP error bodies saved as `*.png`) rejected it before it reached history.
+export const MOCK_IMAGE_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII='
 const MODEL_FALLBACK = 'mock-model'
 
 function usage(outputTokens: number) {

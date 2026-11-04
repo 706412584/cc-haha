@@ -1493,6 +1493,8 @@ function startProxyTraceCall({
   startedAt: string
 }): string {
   const callId = createTraceCallId()
+  // Best-effort diagnostics: the call id must be returned synchronously, so the
+  // pending write cannot be awaited here and must not surface a rejection.
   void traceCaptureService.recordCall({
     id: callId,
     sessionId: context.sessionId,
@@ -1514,7 +1516,7 @@ function startProxyTraceCall({
       phase: 'upstream_fetch_started',
       ...(context.protocolTrace ? { protocolTrace: context.protocolTrace.snapshot() } : {}),
     },
-  })
+  }).catch(() => {})
   void traceCaptureService.recordEvent({
     sessionId: context.sessionId,
     callId,
@@ -1528,7 +1530,7 @@ function startProxyTraceCall({
     metadata: {
       url: upstreamUrl,
     },
-  })
+  }).catch(() => {})
   return callId
 }
 

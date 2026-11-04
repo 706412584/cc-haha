@@ -76,6 +76,8 @@ import { isEnvTruthy } from "../../utils/envUtils.js";
 import { errorMessage } from "../../utils/errors.js";
 import { computeFingerprintFromMessages } from "../../utils/fingerprint.js";
 import { normalizeImagesForAPI } from '../../utils/imageValidation.js'
+import { normalizeAnthropicBaseUrl } from './anthropicBaseUrl.js'
+import { resolveProviderMediaEndpoint } from './providerMedia/providers.js'
 import { captureAPIRequest, logError } from "../../utils/log.js";
 import {
   createSystemStreamingFallbackMessage,
@@ -1089,6 +1091,26 @@ function isToolResult(
 }
 
 /**
+ * Whether the current endpoint offloads oversized media to a provider files
+ * API at the fetch seam (see `providerMedia`). Such a provider can carry a
+ * request larger than the generic client budget without a 413, so the local
+ * shrink must not pre-empt the offload. Resolved from the same base URL the
+ * SDK fetch uses, so the client and the transport agree on the endpoint.
+ */
+function providerOffloadsOversizedMedia(): boolean {
+  const baseUrl = process.env.ANTHROPIC_BASE_URL?.trim()
+  if (!baseUrl) return false
+  try {
+    // Mirror how the SDK builds the request URL: normalize the base the same
+    // way, then append the messages path the endpoint resolver matches on.
+    const base = normalizeAnthropicBaseUrl(baseUrl).replace(/\/+$/, '')
+    return Boolean(resolveProviderMediaEndpoint(new URL(`${base}/v1/messages`)))
+  } catch {
+    return false
+  }
+}
+
+/**
  * Returns the base64 payload size (in bytes) for a media block, or 0 if the
  * block uses a URL/file source (which doesn't contribute to request body size).
  */
@@ -1667,11 +1689,18 @@ async function* queryModel(
     countDocuments: provider === 'bedrock' || provider === 'vertex',
   })
   // Shrink total base64 media payload after request-level image normalization,
-  // so the final encoded request stays under the API's ~20 MB size limit.
-  messagesForAPI = shrinkMediaToSizeBudget(
-    messagesForAPI,
-    API_MAX_MEDIA_BYTES_BUDGET,
-  );
+  // so the final encoded request stays under the API's ~20 MB size limit. A
+  // provider with a files-API offload (see providerMedia/) is exempt: its
+  // transport uploads oversized media and replaces the inline payload at the
+  // fetch seam, which is strictly better than dropping images here. Shrinking
+  // first would keep the request below that provider's own trigger and defeat
+  // the offload (the model would lose visual context the endpoint can accept).
+  if (!providerOffloadsOversizedMedia()) {
+    messagesForAPI = shrinkMediaToSizeBudget(
+      messagesForAPI,
+      API_MAX_MEDIA_BYTES_BUDGET,
+    );
+  }
 
   // Instrumentation: Track message count after normalization
   logEvent("tengu_api_after_normalize", {

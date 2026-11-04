@@ -1362,7 +1362,12 @@ export async function streamCompactSummary({
   compactAbort?: AbortController
   apiAttemptBudget: ApiAttemptBudget
 }): Promise<AssistantMessage> {
-  const compactAbort = externalAbort ?? new AbortController()
+  // `compactConversation` passes its own timeout-scoped child controller (it
+  // aborts independently of the parent and still relays user Esc). A direct
+  // caller (tests, other entry points) has no child controller, so fall back to
+  // the session controller: the fork must observe the same abort signal the
+  // caller does, not a detached one nothing can abort.
+  const compactAbort = externalAbort ?? context.abortController
   // When prompt cache sharing is enabled, use forked agent to reuse the
   // main conversation's cached prefix (system prompt, tools, context messages).
   // Falls back to regular streaming path on failure.
