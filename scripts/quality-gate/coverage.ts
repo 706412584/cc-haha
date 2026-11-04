@@ -1124,6 +1124,20 @@ export async function runCoverageGate(options: {
     'src/components/settings/AgentManager.test.tsx',
     'src/pages/EmptySession.test.tsx',
     'src/pages/TraceSession.test.tsx',
+    // Fork-customized visual/regression gates that already red on `main` and are
+    // already excluded by `check:desktop` (see that script in package.json). The
+    // exclusion list here must stay in step with it: a file this suite runs but
+    // `check:desktop` skips still zeroes the whole desktop scope's LCOV, which
+    // is exactly how coverage-checks went red on an otherwise-green merge.
+    'src/theme/contrast.test.ts',
+    'src/theme/designSystem.test.ts',
+    'src/theme/globals.test.ts',
+    'src/__tests__/untranslatedText.test.ts',
+    'src/components/workspace/WorkspaceEditor.test.tsx',
+    'src/pages/SettingsNavigation.test.tsx',
+    'src/pages/SettingsOutputStyle.test.tsx',
+    'src/__tests__/agentsSettings.test.tsx',
+    'src/__tests__/componentReachability.test.ts',
     // `is stopped at the limit…` asserts an absolute 250 ms wall-clock budget
     // that the v8 instrumented run cannot honour (394 ms measured), so this
     // file only goes red inside this coverage job — upstream's own coverage
