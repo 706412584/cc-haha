@@ -127,14 +127,17 @@ jobs:
         run: |
           set -euo pipefail
           source=mobile/android/app/build/outputs/apk/release/app-release.apk
+          ls -la "$(dirname "$source")"
           tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "build-tools: $tools"
           certs=$("$tools/apksigner" verify --print-certs "$source")
-          echo "$certs" | grep -E 'Signer #1 certificate (DN|SHA-256)'
+          printf '%s\n' "$certs" | head -6
           if grep -q 'CN=Android Debug' <<<"$certs"; then
             echo '::error::Refusing to publish an APK signed with the Android debug key'
             exit 1
           fi
           package=$("$tools/aapt2" dump packagename "$source")
+          echo "package: $package"
           [ "$package" = "$CC_HAHA_ANDROID_PACKAGE" ] || { echo "::error::Unexpected package $package"; exit 1; }
           version=$(node -p "require('./mobile/package.json').version")
           asset="cc-haha-mobile-${version}-android.apk"
