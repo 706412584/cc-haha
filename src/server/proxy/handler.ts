@@ -13,6 +13,7 @@ import { getOpenAIPolicyError } from '../../services/openaiAuth/policyError.js'
 import { extractConnectionErrorDetails } from '../../services/api/errorUtils.js'
 import { buildOpenaiEndpoint } from './openaiEndpoint.js'
 import { normalizeAnthropicBaseUrl } from '../../services/api/anthropicBaseUrl.js'
+import { buildProviderMediaFetch } from '../../services/api/providerMedia/fetch.js'
 import { createGunzip, createInflate } from 'node:zlib'
 
 import { ProviderService } from '../services/providerService.js'
@@ -48,6 +49,7 @@ import {
   getNetworkProxyFetchOptions,
   loadNetworkSettings,
   type NetworkSettings,
+  resolveProviderNetworkSettings,
 } from '../services/networkSettings.js'
 import { normalizeModelStringForAPI } from '../../utils/model/model.js'
 import {
@@ -203,9 +205,20 @@ async function fetchUpstreamWithTimeout(
   init: Omit<UpstreamRequestInit, 'signal'>,
   timeoutMs: number,
   isStream: boolean,
+  onRequest?: (body: string, headers: Headers) => void,
 ): Promise<Response> {
+  // Convert media only after the protocol transform and final authentication.
+  // Observe inference sends (including recovery), never multipart uploads, so
+  // completion traces describe the actual upstream request.
+  const mediaFetch = buildProviderMediaFetch((async (input, requestInit) => {
+    const requestUrl = input instanceof Request ? input.url : String(input)
+    if (requestUrl === url && typeof requestInit?.body === 'string') {
+      onRequest?.(requestInit.body, new Headers(requestInit.headers))
+    }
+    return fetch(input, requestInit)
+  }) as typeof fetch)
   if (!isStream) {
-    return fetch(url, {
+    return mediaFetch(url, {
       ...init,
       signal: AbortSignal.timeout(timeoutMs),
     })
@@ -215,7 +228,7 @@ async function fetchUpstreamWithTimeout(
   // response headers. Keeping the signal alive aborts long generations mid-body.
   const timeout = createTimeoutController(timeoutMs)
   try {
-    return await fetch(url, {
+    return await mediaFetch(url, {
       ...init,
       signal: timeout.signal,
     })
@@ -331,7 +344,7 @@ export async function handleProxyRequest(req: Request, url: URL): Promise<Respon
 
   const isStream = body.stream === true
   const baseUrl = config.baseUrl.replace(/\/+$/, '')
-  const networkSettings = await loadNetworkSettings()
+  const networkSettings = resolveProviderNetworkSettings(await loadNetworkSettings(), config.proxy)
   const traceContext = buildProxyTraceContext(req, config, body)
   const inboundSessionId = req.headers.get('x-claude-code-session-id')
   const promptCacheKey = resolvePromptCacheKey(body, inboundSessionId)
@@ -583,7 +596,7 @@ async function handleAnthropicCompatible(
   // The media hoist is a compatibility rewrite for endpoints that drop media
   // nested in tool_result. A native Messages endpoint accepts it unchanged, so it
   // only runs when the provider actually asked for it.
-  const transformed = hoistNestedMedia ? hoistToolResultMediaForCompatibility(body) : body
+  let transformed = hoistNestedMedia ? hoistToolResultMediaForCompatibility(body) : body
   const url = `${normalizeAnthropicBaseUrl(baseUrl)}/v1/messages`
   const proxyOptions = getNetworkProxyFetchOptions(networkSettings, url)
 
@@ -657,16 +670,24 @@ async function handleAnthropicCompatible(
 
   let upstream: Response
   try {
+    const initialRequest = transformed
+    const serialized = JSON.stringify(initialRequest)
     upstream = await fetchUpstreamWithTimeout(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify(transformed),
+      body: serialized,
       // Keep the raw bytes: Bun decompresses by default, which would leave a
       // decompressed body behind the upstream Content-Encoding/Length headers
       // when forwarding the response unchanged.
       decompress: false,
       ...proxyOptions,
-    }, networkSettings.aiRequestTimeoutMs, isStream)
+    }, networkSettings.aiRequestTimeoutMs, isStream, (sentBody, sentHeaders) => {
+      // Recovery can restore inline media after a file reference fails.
+      transformed = sentBody === serialized ? initialRequest : JSON.parse(sentBody)
+      const beta = sentHeaders.get('anthropic-beta')
+      if (beta) traceHeaders['anthropic-beta'] = beta
+      else delete traceHeaders['anthropic-beta']
+    })
   } catch (err) {
     recordTraceError(err)
     console.error('[Proxy] Upstream anthropic request failed:', err)
@@ -814,7 +835,7 @@ async function handleOpenaiChat(
     ...getOpenAIChatUnsupportedReasoningFields(url, body.model),
     ...rejectedReasoningFields,
   ])
-  const transformed = anthropicToOpenaiChat(body, {
+  let transformed = anthropicToOpenaiChat(body, {
     ...requestOptions,
     // Fork invariant: reasoning round-trips unconditionally on OpenAI Chat
     // hosts — third-party Anthropic-compatible endpoints hide reasoning behind
@@ -852,12 +873,16 @@ async function handleOpenaiChat(
 
   let upstream: Response
   try {
+    const initialRequest = transformed
+    const serialized = JSON.stringify(initialRequest)
     upstream = await fetchUpstreamWithTimeout(url, {
       method: 'POST',
       headers: upstreamRequestHeaders,
-      body: JSON.stringify(transformed),
+      body: serialized,
       ...proxyOptions,
-    }, networkSettings.aiRequestTimeoutMs, isStream)
+    }, networkSettings.aiRequestTimeoutMs, isStream, sentBody => {
+      transformed = sentBody === serialized ? initialRequest : JSON.parse(sentBody)
+    })
   } catch (err) {
     if (traceContext) {
       recordProxyTraceInBackground({
@@ -1082,7 +1107,7 @@ async function handleOpenaiResponses(
   requestOptions: RequestCompatibilityOptions = {},
   upstreamHeaders: Record<string, string> = {},
 ): Promise<Response> {
-  const transformed = anthropicToOpenaiResponses(body, { ...requestOptions, cacheKey: promptCacheKey })
+  let transformed = anthropicToOpenaiResponses(body, { ...requestOptions, cacheKey: promptCacheKey })
   if (traceContext) {
     traceContext.protocolTrace = new ProtocolTraceObserver('openai_responses', transformed,
       resolveRequestCompatibility(body, { ...requestOptions, protocol: 'openai_responses' }).outputBudget)
@@ -1110,12 +1135,16 @@ async function handleOpenaiResponses(
 
   let upstream: Response
   try {
+    const initialRequest = transformed
+    const serialized = JSON.stringify(initialRequest)
     upstream = await fetchUpstreamWithTimeout(url, {
       method: 'POST',
       headers: upstreamRequestHeaders,
-      body: JSON.stringify(transformed),
+      body: serialized,
       ...proxyOptions,
-    }, networkSettings.aiRequestTimeoutMs, isStream)
+    }, networkSettings.aiRequestTimeoutMs, isStream, sentBody => {
+      transformed = sentBody === serialized ? initialRequest : JSON.parse(sentBody)
+    })
   } catch (err) {
     if (traceContext) {
       recordProxyTraceInBackground({
@@ -1464,6 +1493,8 @@ function startProxyTraceCall({
   startedAt: string
 }): string {
   const callId = createTraceCallId()
+  // Best-effort diagnostics: the call id must be returned synchronously, so the
+  // pending write cannot be awaited here and must not surface a rejection.
   void traceCaptureService.recordCall({
     id: callId,
     sessionId: context.sessionId,
@@ -1485,7 +1516,7 @@ function startProxyTraceCall({
       phase: 'upstream_fetch_started',
       ...(context.protocolTrace ? { protocolTrace: context.protocolTrace.snapshot() } : {}),
     },
-  })
+  }).catch(() => {})
   void traceCaptureService.recordEvent({
     sessionId: context.sessionId,
     callId,
@@ -1499,7 +1530,7 @@ function startProxyTraceCall({
     metadata: {
       url: upstreamUrl,
     },
-  })
+  }).catch(() => {})
   return callId
 }
 

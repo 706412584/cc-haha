@@ -997,3 +997,70 @@ describe('WorkspaceService document previews', () => {
     })
   })
 })
+
+describe('WorkspaceService.getStatus caching', () => {
+  // Every open session polls status, and one call spawns git plus folds the
+  // transcript's file-history evidence (0.3–1.7s on a 60MB session). Without a
+  // cache, several open sessions repeat identical work on every tick.
+  it('serves a repeated poll from cache and recomputes after the TTL', async () => {
+    const repoDir = await createGitWorkspace()
+    let clock = 1_000
+    const service = new WorkspaceService(
+      async () => repoDir, async () => [], async () => [], () => clock,
+    )
+    const internals = service as unknown as { loadStatus: (id: string) => Promise<unknown> }
+    const load = spyOn(internals, 'loadStatus')
+    try {
+      const first = await service.getStatus('session-1')
+      expect(first.state).toBe('ok')
+      expect(load).toHaveBeenCalledTimes(1)
+
+      // Same instant: served from the cache, so the workspace is not re-read.
+      clock += 1_000
+      const second = await service.getStatus('session-1')
+      expect(load).toHaveBeenCalledTimes(1)
+      expect(second).toEqual(first)
+
+      // Past the TTL: the poll must see a fresh answer.
+      clock += 3_000
+      await service.getStatus('session-1')
+      expect(load).toHaveBeenCalledTimes(2)
+    } finally { load.mockRestore() }
+  })
+
+  it('recomputes immediately when the status is invalidated', async () => {
+    const repoDir = await createGitWorkspace()
+    const service = new WorkspaceService(async () => repoDir, async () => [], async () => [], () => 1_000)
+    const internals = service as unknown as { loadStatus: (id: string) => Promise<unknown> }
+    const load = spyOn(internals, 'loadStatus')
+    try {
+      await service.getStatus('session-1')
+      expect(load).toHaveBeenCalledTimes(1)
+
+      // A watched file change means the cached answer is exactly what must not
+      // be shown, even though the TTL has not elapsed.
+      service.invalidateStatus('session-1')
+      await service.getStatus('session-1')
+      expect(load).toHaveBeenCalledTimes(2)
+    } finally { load.mockRestore() }
+  })
+
+  it('keeps sessions apart and bounds the cache', async () => {
+    const repoDir = await createGitWorkspace()
+    const service = new WorkspaceService(async () => repoDir, async () => [], async () => [], () => 1_000)
+    const internals = service as unknown as {
+      loadStatus: (id: string) => Promise<unknown>
+      statusCache: Map<string, unknown>
+    }
+    const load = spyOn(internals, 'loadStatus')
+    try {
+      await service.getStatus('session-a')
+      await service.getStatus('session-b')
+      expect(load).toHaveBeenCalledTimes(2)
+      expect(internals.statusCache.size).toBe(2)
+
+      for (let index = 0; index < 40; index += 1) await service.getStatus(`filler-${index}`)
+      expect(internals.statusCache.size).toBeLessThanOrEqual(32)
+    } finally { load.mockRestore() }
+  })
+})

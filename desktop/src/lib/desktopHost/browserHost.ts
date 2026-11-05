@@ -39,8 +39,7 @@ const defaultPermissionState: NotificationPermissionState = 'default'
 export const browserHost: DesktopHost = {
   publicAccess: {
     async getStatus() { return unsupported('Public access management') },
-    async saveCredential() { return unsupported('Public access management') },
-    async deleteCredential() { return unsupported('Public access management') },
+    async configure() { return unsupported('Public access management') },
     async start() { return unsupported('Public access management') },
     async stop() { return unsupported('Public access management') },
     async setAutoStart() { return unsupported('Public access management') },
@@ -84,6 +83,11 @@ export const browserHost: DesktopHost = {
   commands: {
     async invoke() {
       unsupported('Native commands')
+    },
+  },
+  power: {
+    async setPreventSleepWhileRunning() {
+      unsupported('Preventing system sleep')
     },
   },
   clipboard: {

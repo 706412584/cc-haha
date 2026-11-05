@@ -18,6 +18,7 @@ import { TraceList } from './TraceList'
 import { ActivitySettings } from './ActivitySettings'
 import { MemorySettings } from './MemorySettings'
 import { OrchestrationPromptSettings } from '../components/settings/OrchestrationPromptSettings'
+import { SystemPromptSettings } from '../components/settings/SystemPromptSettings'
 import { ProjectRulesSettings } from './ProjectRulesSettings'
 import { PetSettings } from '../features/pets/PetSettings'
 import { useUIStore } from '../stores/uiStore'
@@ -83,6 +84,7 @@ export function DesktopSettings() {
             <TabButton icon="auto_awesome" label={t('settings.tab.skills')} active={activeTab === 'skills'} onClick={() => setActiveTab('skills')} />
             <TabButton icon="history_edu" label={t('settings.tab.memory')} active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} />
             <TabButton icon="account_tree" label={t('settings.tab.orchestration')} active={activeTab === 'orchestration'} onClick={() => setActiveTab('orchestration')} />
+            <TabButton icon="shield_person" label={t('settings.tab.systemPrompt')} active={activeTab === 'systemPrompt'} onClick={() => setActiveTab('systemPrompt')} />
             <TabButton icon="description" label={t('settings.tab.projectRules')} active={activeTab === 'projectRules'} onClick={() => setActiveTab('projectRules')} />
             <TabButton icon="extension" label={t('settings.tab.plugins')} active={activeTab === 'plugins'} onClick={() => setActiveTab('plugins')} />
             <TabButton icon="pets" label={t('settings.tab.pets')} active={activeTab === 'pets'} onClick={() => setActiveTab('pets')} />
@@ -110,6 +112,7 @@ export function DesktopSettings() {
           {activeTab === 'skills' && <SkillSettings />}
           {activeTab === 'memory' && <MemorySettings />}
           {activeTab === 'orchestration' && <OrchestrationPromptSettings />}
+          {activeTab === 'systemPrompt' && <SystemPromptSettings />}
           {activeTab === 'projectRules' && <ProjectRulesSettings />}
           {activeTab === 'plugins' && <PluginSettings />}
           {activeTab === 'pets' && <PetSettings />}

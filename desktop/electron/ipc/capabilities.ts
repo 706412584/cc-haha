@@ -1,4 +1,5 @@
 import { PUBLIC_ACCESS_CONSENT_VERSION } from '../../src/lib/desktopHost/types'
+import { isPublicAccessConfiguration } from '../../src/lib/desktopHost/publicAccessConfiguration'
 import { ELECTRON_IPC_CHANNELS, type ElectronIpcChannel } from './channels'
 
 type Validator = (payload: unknown) => boolean
@@ -339,14 +340,14 @@ const localePreference: Validator = value =>
 
 export const ELECTRON_IPC_VALIDATORS = {
   [ELECTRON_IPC_CHANNELS.appGetVersion]: noPayload,
+  [ELECTRON_IPC_CHANNELS.powerSetPreventSleepWhileRunning]: booleanPayload,
   [ELECTRON_IPC_CHANNELS.appGetLocalePreference]: noPayload,
   [ELECTRON_IPC_CHANNELS.appSetLocalePreference]: localePreference,
   [ELECTRON_IPC_CHANNELS.appGetPreferredSystemLanguages]: noPayload,
   [ELECTRON_IPC_CHANNELS.appGetKeepActiveInBackground]: noPayload,
   [ELECTRON_IPC_CHANNELS.appSetKeepActiveInBackground]: booleanPayload,
   [ELECTRON_IPC_CHANNELS.publicAccessGetStatus]: noPayload,
-  [ELECTRON_IPC_CHANNELS.publicAccessSaveCredential]: value => typeof value === 'string' && value.trim().length > 0 && value.length <= 4096 && !/\s/.test(value.trim()),
-  [ELECTRON_IPC_CHANNELS.publicAccessDeleteCredential]: noPayload,
+  [ELECTRON_IPC_CHANNELS.publicAccessConfigure]: isPublicAccessConfiguration,
   // Tracks the shared consent constant so a version bump cannot silently
   // invalidate the payload the renderer actually sends.
   [ELECTRON_IPC_CHANNELS.publicAccessStart]: value => value === PUBLIC_ACCESS_CONSENT_VERSION,

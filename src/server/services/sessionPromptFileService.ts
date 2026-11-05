@@ -1,5 +1,5 @@
 /**
- * Per-session system-prompt addendum files.
+ * Per-session system-prompt files: the addendum AND the replacement.
  *
  * The orchestration mode prompts (and the one-shot hand-off summary) are passed
  * to the CLI through `--append-system-prompt-file` rather than
@@ -12,9 +12,13 @@
  *     last one win — the hand-off summary used to silently displace the mode
  *     prompt. Merging both into one file makes the combination explicit.
  *
- * `src/main.tsx` already registers `--append-system-prompt-file` and reads it
- * with readFileSync, and rejects being given both flags at once, so the CLI side
- * needs no changes.
+ * The user's replacement main system prompt uses the same file channel through
+ * `--system-prompt-file` (see `writeSessionSystemPromptFile`), which the CLI
+ * applies as the base before the append addendum.
+ *
+ * `src/main.tsx` already registers both flags and reads them with readFileSync,
+ * and rejects being given both `--system-prompt` and `--system-prompt-file` at
+ * once, so the CLI side needs no changes.
  */
 
 import * as fs from 'node:fs/promises'
@@ -45,6 +49,16 @@ function getSessionPromptsDir(): string {
 
 function getSessionPromptFilePath(sessionId: string): string {
   return path.join(getSessionPromptsDir(), `${assertSafeSessionId(sessionId)}.txt`)
+}
+
+/**
+ * Path for the REPLACEMENT main system prompt (the `--system-prompt-file`
+ * channel), distinct from the append file above. Both live in the same
+ * per-session directory and are swept together; the `.system.txt` suffix keeps
+ * the two channels from ever colliding on one session id.
+ */
+function getSessionSystemPromptFilePath(sessionId: string): string {
+  return path.join(getSessionPromptsDir(), `${assertSafeSessionId(sessionId)}.system.txt`)
 }
 
 /**
@@ -94,13 +108,51 @@ export async function writeSessionAppendPromptFile(
 }
 
 /**
- * Remove one session's file. Best-effort: a missing file is the normal case
+ * Write the session's replacement main system prompt and return its absolute
+ * path. Same atomic-write shape as the append file; returns null when the body
+ * is blank so the caller can leave `--system-prompt-file` off entirely.
+ */
+export async function writeSessionSystemPromptFile(
+  sessionId: string,
+  content: string,
+): Promise<string | null> {
+  if (content.trim().length === 0) return null
+
+  const filePath = getSessionSystemPromptFilePath(sessionId)
+  const tmpFile = `${filePath}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`
+
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+
+  try {
+    await fs.writeFile(tmpFile, content, 'utf-8')
+    await fs.rename(tmpFile, filePath)
+  } catch (error) {
+    await fs.unlink(tmpFile).catch(() => {})
+    throw error
+  }
+
+  return filePath
+}
+
+/**
+ * Remove one session's files. Best-effort: a missing file is the normal case
  * (no mode active), and a failure here must never block session teardown.
  */
 export async function removeSessionAppendPromptFile(sessionId: string): Promise<void> {
   let filePath: string
   try {
     filePath = getSessionPromptFilePath(sessionId)
+  } catch {
+    return
+  }
+  await fs.unlink(filePath).catch(() => {})
+}
+
+/** Remove the replacement main system prompt file. Same best-effort contract. */
+export async function removeSessionSystemPromptFile(sessionId: string): Promise<void> {
+  let filePath: string
+  try {
+    filePath = getSessionSystemPromptFilePath(sessionId)
   } catch {
     return
   }
@@ -144,4 +196,5 @@ export const _SESSION_PROMPT_INTERNALS = {
   SAFE_SESSION_ID,
   getSessionPromptsDir,
   getSessionPromptFilePath,
+  getSessionSystemPromptFilePath,
 } as const

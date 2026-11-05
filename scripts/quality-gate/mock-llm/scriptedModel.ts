@@ -23,7 +23,7 @@ export type MockReply =
   | {
     kind: 'message'
     content: MockContentBlock[]
-    stopReason: 'end_turn' | 'tool_use'
+    stopReason: 'end_turn' | 'tool_use' | 'refusal'
     /** Delay between streamed text chunks; only the interrupt scenario needs it. */
     chunkDelayMs?: number
   }
@@ -52,6 +52,7 @@ export type MockRequest = {
 /** Prompt that makes the scripted model fail the request the way a provider would. */
 export const UPSTREAM_ERROR_TRIGGER = 'MOCK_UPSTREAM_ERROR'
 export const UPSTREAM_ERROR_MESSAGE = 'mock upstream rejected this request'
+export const UPSTREAM_REFUSAL_TRIGGER = 'MOCK_UPSTREAM_REFUSAL'
 
 function blocksOf(message: RequestMessage | undefined): RequestBlock[] {
   if (!message) return []
@@ -155,11 +156,34 @@ export function decideReply(request: MockRequest): MockReply {
     return { kind: 'error', status: 400, errorType: 'invalid_request_error', message: UPSTREAM_ERROR_MESSAGE }
   }
 
+  if (prompt.includes(UPSTREAM_REFUSAL_TRIGGER)) {
+    return { kind: 'message', content: [], stopReason: 'refusal' }
+  }
+
   const isAgentTurn = hasTool(request, 'Write') || hasTool(request, 'Bash')
   if (!isAgentTurn) return text('Mock title')
 
   // A tool just ran: report what came back, the way a model summarises a result.
   const results = blocksOf(last).filter((block) => block.type === 'tool_result')
+  if (prompt.startsWith('MOCK_TEAM_OWNER ')) {
+    const { tool, input } = JSON.parse(prompt.slice('MOCK_TEAM_OWNER '.length)) as { tool: string; input: Record<string, unknown> }
+    const discovered = results.some(block => Array.isArray(block.content) &&
+      block.content.some(reference => reference?.type === 'tool_reference' && reference.tool_name === tool))
+    if (results.length === 0 || discovered) {
+      if (hasTool(request, tool)) return toolUse(tool, input)
+      if (hasTool(request, 'ToolSearch')) return toolUse('ToolSearch', { query: `select:${tool}` })
+    }
+  }
+  if (prompt === 'MOCK_LATE_MCP' && !results.some(block => toolResultText(block).includes('LATE_MCP_AVAILABLE'))) {
+    const toolName = 'mcp__late_start__echo'
+    if (hasTool(request, toolName)) return toolUse(toolName, {})
+    if (hasTool(request, 'ToolSearch') && !results.some(block => block.is_error)) return toolUse('ToolSearch', { query: `select:${toolName}` })
+    return text('Late MCP tool is unavailable')
+  }
+  if (prompt === 'MOCK_DEEPSEEK_SEARCH' && !results.some(block => toolResultText(block).includes('DEEPSEEK_SUMMARY_REACHED_MODEL') || block.is_error)) {
+    if (hasTool(request, 'WebSearch')) return toolUse('WebSearch', { query: 'DeepSeek fixture' })
+    if (hasTool(request, 'ToolSearch')) return toolUse('ToolSearch', { query: 'select:WebSearch' })
+  }
   const imageTool = prompt.startsWith('MOCK_IMAGE_EDIT ') ? 'ImageEdit' : 'ImageGen'
   if (prompt.startsWith('MOCK_IMAGE_')) {
     // A deferred tool may first be loaded by ToolSearch. The next request must
@@ -185,6 +209,14 @@ export function decideReply(request: MockRequest): MockReply {
   if (last?.role === 'user' && results.length > 0) {
     const result = results[results.length - 1]!
     const body = toolResultText(result).trim()
+    if (prompt.startsWith('MOCK_SCHEDULED_TASK_RESULTS ') && !result.is_error && hasTool(request, 'ScheduledTask')) {
+      try {
+        const parsed = JSON.parse(body)
+        if (parsed.kind === 'scheduled_task_runs' && parsed.operation === 'listed' && parsed.runs?.[0]?.id) {
+          return toolUse('ScheduledTask', { action: 'run', runId: parsed.runs[0].id })
+        }
+      } catch { /* The ordinary error/result response below exposes invalid fixture output. */ }
+    }
     return text(result.is_error ? `The tool failed: ${body}` : `Tool result: ${body}`)
   }
 
@@ -201,6 +233,18 @@ export function decideReply(request: MockRequest): MockReply {
   }
   if (prompt === 'MOCK_SESSION_DELEGATION' && hasTool(request, 'CreateSessions')) {
     return toolUse('CreateSessions', { requestId: 'mock-delegation', sessions: [{ title: 'Independent review', prompt: 'Reply with Ready when you are.' }] })
+  }
+  if (prompt === 'MOCK_SCHEDULED_TASK_CREATE' && hasTool(request, 'ScheduledTask')) {
+    return toolUse('ScheduledTask', {
+      action: 'create', requestId: 'mock-scheduled-task', name: 'Fixture scheduled review', prompt: 'Inspect the disposable fixture.',
+      schedule: { kind: 'once', runAt: '2099-01-01T09:00:00+08:00', timeZone: 'Asia/Shanghai' },
+    })
+  }
+  if (prompt.startsWith('MOCK_SCHEDULED_TASK_RESULTS ') && hasTool(request, 'ScheduledTask')) {
+    return toolUse('ScheduledTask', { action: 'runs', taskId: prompt.slice('MOCK_SCHEDULED_TASK_RESULTS '.length), limit: 5 })
+  }
+  if (prompt.startsWith('MOCK_SCHEDULED_TASK_DELETE ') && hasTool(request, 'ScheduledTask')) {
+    return toolUse('ScheduledTask', { action: 'delete', id: prompt.slice('MOCK_SCHEDULED_TASK_DELETE '.length) })
   }
 
   const cwd = workingDirectoryOf(request)

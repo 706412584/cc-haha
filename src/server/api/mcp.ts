@@ -111,6 +111,10 @@ type McpServerIdentity = {
   projectPath?: string
 }
 
+type McpSessionAction =
+  | { subtype: 'mcp_reconnect'; serverName: string }
+  | { subtype: 'mcp_toggle'; serverName: string; enabled: boolean; alreadyPersisted: true }
+
 const EDITABLE_SCOPES = new Set<ConfigScope>(['local', 'project', 'user'])
 
 function parseJsonBody(req: Request): Promise<Record<string, unknown>> {
@@ -137,7 +141,7 @@ function parseScopeParam(value: string | null): ConfigScope {
 async function syncMcpControlToSession(
   sessionId: string | undefined,
   server: McpServerIdentity,
-  buildRequest: (name: string) => Record<string, unknown>,
+  buildRequest: (name: string) => McpSessionAction,
   timeoutMs = 120_000,
 ): Promise<McpSessionSyncDto> {
   if (!sessionId) return { applied: false, reason: 'no_session' }
@@ -165,7 +169,7 @@ async function syncMcpControlToSession(
     }
   }
 
-  // A lean CLI has no MCP runtime to toggle; asking it would only come back as an
+  // A lean CLI has no MCP runtime; asking it would only come back as an
   // error that the desktop reports as a failed chat sync.
   const launchInfo = await sessionService.getSessionLaunchInfo(sessionId).catch(() => null)
   if (launchInfo?.agentProfile === 'lean') return { applied: false, reason: 'lean_profile' }
@@ -879,6 +883,7 @@ async function syncMcpControlToSessions(
   sessionId: string | undefined,
   server: McpServerIdentity,
   syncOne: (sessionId: string | undefined, server: McpServerIdentity) => Promise<McpSessionSyncDto>,
+
 ): Promise<McpSessionSyncDto> {
   const sessionIds = [...new Set([
     ...(sessionId ? [sessionId] : []),

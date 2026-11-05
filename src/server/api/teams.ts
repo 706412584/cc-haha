@@ -94,7 +94,7 @@ export async function handleTeamsApi(
           : []
         return Response.json({ plan: await teamPlanService.resume(teamName, parsed.data, confirmTaskIds) })
       }
-      if (action === 'return' || action === 'cancel' || action === 'retry') return Response.json({ plan: await teamPlanService.action(teamName, action, parsed.data) })
+      if (action === 'return' || action === 'cancel' || action === 'retry' || action === 'end') return Response.json({ plan: await teamPlanService.action(teamName, action, parsed.data) })
       throw ApiError.badRequest('Unknown team plan action')
     }
 

@@ -66,6 +66,7 @@
 | Material Symbols 字体类（自托管 woff2，防 21 个图标 span 渲染原始文本） | `desktop/src/theme/globals.css:4-12` | grep `material-symbols-outlined.woff2` |
 | 文件树右键 WorkspaceFileTreeMenu + WorkspaceEditableFile（上游已删，fork 保留） | `desktop/src/components/workbench/WorkspaceFileTreeMenu.tsx`、`WorkspaceEditableFile.tsx` | 文件存在 + 对应测试绿 |
 | 聊天内容列宽 `var(--chat-content-max-width)`（不得回退到上游 800px 硬编码） | `desktop/src/components/chat/BackgroundTasksBar.tsx`、`SessionTaskBar.tsx` | grep `max-w-\[900px\]` 应为 0 |
+| 设置 → 系统提示词页：主系统提示词**替换**（`--system-prompt-file`，与编排提示词的 append 通道区分）+ 载入内置默认快照 | `desktop/src/components/settings/SystemPromptSettings.tsx`、`src/server/api/system-prompt.ts`、`src/server/services/systemPromptPreferencesService.ts`、`src/constants/prompts.ts`（`getStaticSystemPromptSnapshot`）、`src/server/services/conversationService.ts`（`resolveSystemPromptFile`） | grep `resolvedSystemPromptPath`、`getStaticSystemPromptSnapshot`；`system-prompt.test.ts`、`system-prompt-api.test.ts`、`SystemPromptSettings.test.tsx` 绿。注意：上游合并时 `getStaticSystemPromptSnapshot` 是加法导出，若丢失则「载入内置默认」按钮静默为空 |
 
 ## F. 服务端行为
 

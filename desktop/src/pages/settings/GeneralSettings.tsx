@@ -48,6 +48,7 @@ import { ChatAppearanceSettings } from './ChatAppearanceSettings'
 import { DataMigrationSettings } from './DataMigrationSettings'
 import { TabBehaviorSettings } from './TabBehaviorSettings'
 import { LeanModeSettings } from './LeanModeSettings'
+import { PreventSleepSettings } from './PreventSleepSettings'
 
 /**
  * The General settings panel — the largest of the seven, and the one most often
@@ -372,6 +373,7 @@ export function GeneralSettings() {
     { value: 'auto', label: t('settings.general.webSearch.mode.auto') },
     { value: 'tavily', label: t('settings.general.webSearch.mode.tavily') },
     { value: 'brave', label: t('settings.general.webSearch.mode.brave') },
+    { value: 'deepseek', label: t('settings.general.webSearch.mode.deepseek') },
     { value: 'anthropic', label: t('settings.general.webSearch.mode.anthropic') },
     { value: 'disabled', label: t('settings.general.webSearch.mode.disabled') },
   ]
@@ -1250,6 +1252,8 @@ export function GeneralSettings() {
         </SettingsGroup>
       </SettingsSection>
 
+      <PreventSleepSettings />
+
       <SettingsSection title={t('settings.general.networkTitle')} description={t('settings.general.networkDescription')}>
         <SettingsGroup>
           <SettingsBlock>
@@ -1506,6 +1510,40 @@ export function GeneralSettings() {
                 setWebSearchDraft({
                   ...webSearchDraft,
                   braveApiKey: event.target.value,
+                })
+              }
+            />
+          </SettingsRow>
+          <SettingsRow
+            title={t('settings.general.webSearchDeepSeekKey')}
+            htmlFor="web-search-deepseek-key"
+            description={(
+              <>
+                {t('settings.general.webSearchDeepSeekHint')}{' '}
+                <a
+                  href="https://platform.deepseek.com/api_keys"
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label={t('settings.general.webSearchDeepSeekApiKeyLink')}
+                  className="whitespace-nowrap text-[var(--color-text-accent)] hover:underline"
+                >
+                  {t('settings.general.webSearchGetApiKey')}
+                </a>
+              </>
+            )}
+          >
+            <Input
+              id="web-search-deepseek-key"
+              type="password"
+              size="md"
+              containerClassName="w-full sm:w-[260px]"
+              value={webSearchDraft.deepseekApiKey ?? ''}
+              placeholder={t('settings.general.webSearchDeepSeekPlaceholder')}
+              autoComplete="off"
+              onChange={(event) =>
+                setWebSearchDraft({
+                  ...webSearchDraft,
+                  deepseekApiKey: event.target.value,
                 })
               }
             />

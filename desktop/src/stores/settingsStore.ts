@@ -276,7 +276,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   sessionContentSearchEnabled: true,
   desktopTerminal: DEFAULT_DESKTOP_TERMINAL_SETTINGS,
   workspaceLsp: {},
-  webSearch: { mode: 'auto', tavilyApiKey: '', braveApiKey: '' },
+  webSearch: { mode: 'auto', tavilyApiKey: '', braveApiKey: '', deepseekApiKey: '' },
   updateProxy: DEFAULT_UPDATE_PROXY_SETTINGS,
   autoUpdateEnabled: true,
   network: DEFAULT_NETWORK_SETTINGS,
@@ -974,6 +974,7 @@ function normalizeWebSearchSettings(settings: WebSearchSettings | undefined): We
     mode: settings?.mode ?? 'auto',
     tavilyApiKey: settings?.tavilyApiKey ?? '',
     braveApiKey: settings?.braveApiKey ?? '',
+    deepseekApiKey: settings?.deepseekApiKey ?? '',
   }
 }
 

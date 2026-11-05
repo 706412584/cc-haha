@@ -23,6 +23,7 @@ import {
 } from '../services/conversationService.js'
 import { getSoloPipelineSystemPrompt } from '../../coordinator/soloPipelinePrompt.js'
 import { orchestrationPromptPreferencesService } from '../services/orchestrationPromptPreferencesService.js'
+import { systemPromptPreferencesService } from '../services/systemPromptPreferencesService.js'
 import { ORCHESTRATION_PROMPT_MARKER, ORCHESTRATION_SYSTEM_PROMPT, ORCHESTRATION_PROPAGATE_RULES_MARKER } from '../orchestrationPrompt.js'
 import {
   ASK_USER_QUESTION_CLARIFY_MESSAGE,
@@ -40,6 +41,7 @@ import { SettingsService } from '../services/settingsService.js'
 import { hahaOAuthService } from '../services/hahaOAuthService.js'
 import { resetTerminalShellEnvironmentCacheForTests } from '../../utils/terminalShellEnvironment.js'
 import * as openAIModelCatalog from '../../services/openaiAuth/modelCatalog.js'
+import * as titleService from '../services/titleService.js'
 
 async function rmWithRetry(targetPath: string): Promise<void> {
   const attempts = process.platform === 'win32' ? 5 : 1
@@ -1090,6 +1092,94 @@ describe('ConversationService', () => {
       expect(text).not.toContain(ORCHESTRATION_PROMPT_MARKER)
     } finally {
       preferences.readPreferences = originalRead
+    }
+  })
+
+  /**
+   * Resolve the replacement main system prompt to a file path via the same
+   * two-step indirection the append prompt uses, so assertions can read the
+   * text the CLI will actually receive.
+   */
+  async function resolveSystemPrompt(
+    svc: ConversationService,
+    options: Record<string, unknown>,
+    sessionId = 'system-prompt-file-test-session',
+  ): Promise<{ args: string[]; path: string | null; text: string }> {
+    const resolved = await (svc as any).resolveSystemPromptFile(sessionId, options)
+    const args = (svc as any).getRuntimeArgs(resolved) as string[]
+    const idx = args.indexOf('--system-prompt-file')
+    if (idx < 0) return { args, path: null, text: '' }
+    const filePath = args[idx + 1]!
+    return { args, path: filePath, text: readFileSync(filePath, 'utf8') }
+  }
+
+  it('passes a replacement main system prompt by file when one is set', async () => {
+    const svc = new ConversationService()
+    const preferences = systemPromptPreferencesService as any
+    const originalResolved = preferences.getResolvedPrompt
+    preferences.getResolvedPrompt = async () => ({ custom: 'You are a pirate assistant.', isCustom: true })
+    try {
+      const { args, path: filePath, text } = await resolveSystemPrompt(svc, { model: 'x' })
+      expect(filePath).toBeString()
+      expect(text).toBe('You are a pirate assistant.')
+      // The replacement must travel by file, not inline text.
+      expect(args).toContain('--system-prompt-file')
+      expect(args).not.toContain('--system-prompt')
+      // Model args still present alongside it.
+      expect(args).toContain('x')
+    } finally {
+      preferences.getResolvedPrompt = originalResolved
+    }
+  })
+
+  it('does not pass any replacement prompt when no override is set', async () => {
+    const svc = new ConversationService()
+    const preferences = systemPromptPreferencesService as any
+    const originalResolved = preferences.getResolvedPrompt
+    preferences.getResolvedPrompt = async () => ({ custom: null, isCustom: false })
+    try {
+      const { args, path: filePath } = await resolveSystemPrompt(svc, {})
+      expect(filePath).toBeNull()
+      expect(args).not.toContain('--system-prompt-file')
+    } finally {
+      preferences.getResolvedPrompt = originalResolved
+    }
+  })
+
+  it('falls back to the built-in prompt when the preferences read fails', async () => {
+    const svc = new ConversationService()
+    const preferences = systemPromptPreferencesService as any
+    const originalResolved = preferences.getResolvedPrompt
+    preferences.getResolvedPrompt = async () => {
+      throw new Error('corrupt preferences')
+    }
+    try {
+      // A broken preferences file must not block session startup.
+      const { args, path: filePath } = await resolveSystemPrompt(svc, {})
+      expect(filePath).toBeNull()
+      expect(args).not.toContain('--system-prompt-file')
+    } finally {
+      preferences.getResolvedPrompt = originalResolved
+    }
+  })
+
+  it('carries both the replacement and the append prompt on their own flags', async () => {
+    const svc = new ConversationService()
+    const preferences = systemPromptPreferencesService as any
+    const originalResolved = preferences.getResolvedPrompt
+    preferences.getResolvedPrompt = async () => ({ custom: 'REPLACEMENT-MAIN', isCustom: true })
+    try {
+      const withAppend = await (svc as any).resolveAppendPromptFile('both-flags-session', { coordinatorMode: true })
+      const resolved = await (svc as any).resolveSystemPromptFile('both-flags-session', withAppend)
+      const args = (svc as any).getRuntimeArgs(resolved) as string[]
+      expect(args).toContain('--system-prompt-file')
+      expect(args).toContain('--append-system-prompt-file')
+      const main = readFileSync(args[args.indexOf('--system-prompt-file') + 1]!, 'utf8')
+      const append = readFileSync(args[args.indexOf('--append-system-prompt-file') + 1]!, 'utf8')
+      expect(main).toBe('REPLACEMENT-MAIN')
+      expect(append).toContain(ORCHESTRATION_PROMPT_MARKER)
+    } finally {
+      preferences.getResolvedPrompt = originalResolved
     }
   })
 
@@ -3827,6 +3917,23 @@ describe('WebSocket Chat Integration', () => {
     expect(messages.at(-1)?.type).toBe('message_complete')
   }, 15_000)
 
+  it('tells a caller waiting on a control request why the CLI exited', async () => {
+    const sessionId = `chat-control-exit-${crypto.randomUUID()}`
+    let rejection: Promise<string> | undefined
+    await runTurnUntilComplete(sessionId, 'hello', (message) => {
+      if (rejection || message.type === 'connected' || !conversationService.hasSession(sessionId)) return
+      rejection = conversationService.requestControl(sessionId, {
+        subtype: 'mock_exit_with_stderr', code: 3, stderr: 'Error: provider settings are unreadable',
+      }).then(() => 'resolved', (error: Error) => error.message)
+    })
+
+    expect(rejection).toBeDefined()
+    const reason = await rejection!
+    expect(reason).toContain('CLI session exited before the control request completed')
+    expect(reason).toContain('code 3')
+    expect(reason).toContain('Error: provider settings are unreadable')
+  }, 15_000)
+
   it('should handle permission_response without error', async () => {
     const messages: any[] = []
     const ws = new WebSocket(`${wsUrl}/ws/chat-test-4`)
@@ -6269,6 +6376,96 @@ describe('WebSocket Chat Integration', () => {
       })
     }
   }, 20_000)
+
+  for (const stopDuringTitle of [false, true]) {
+    it(`should ${stopDuringTitle ? 'cancel startup' : 'finish the first turn'} after a pending placeholder title save`, async () => {
+      const createRes = await fetch(`${baseUrl}/api/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workDir: process.cwd(), permissionMode: 'acceptEdits' }),
+      })
+      expect(createRes.status).toBe(201)
+      const { sessionId } = await createRes.json() as { sessionId: string }
+      const titleStarted = withResolvers<void>()
+      const releaseTitle = withResolvers<void>()
+      const titleFinished = withResolvers<void>()
+      let titlePending = false
+      let startupReadDuringTitle = false
+      let startupReads = 0
+      const originalSaveTitle = titleService.saveAiTitle
+      const originalWorkDir = sessionService.getSessionWorkDir.bind(sessionService)
+      const titleSpy = spyOn(titleService, 'saveAiTitle').mockImplementation(async (...args) => {
+        if (args[0] !== sessionId) return originalSaveTitle(...args)
+        titlePending = true
+        titleStarted.resolve()
+        try {
+          await releaseTitle.promise
+          return await originalSaveTitle(...args)
+        } finally {
+          titlePending = false
+          titleFinished.resolve()
+        }
+      })
+      const workDirSpy = spyOn(sessionService, 'getSessionWorkDir').mockImplementation(async (sid) => {
+        if (sid === sessionId) {
+          startupReads++
+          startupReadDuringTitle ||= titlePending
+        }
+        return originalWorkDir(sid)
+      })
+      const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+      const messages: any[] = []
+      const connected = withResolvers<void>()
+      ws.onmessage = (event) => {
+        const message = JSON.parse(event.data as string)
+        messages.push(message)
+        if (message.type === 'connected') connected.resolve()
+      }
+      try {
+        await connected.promise
+        ws.send(JSON.stringify({ type: 'user_message', content: 'first turn after permission switch' }))
+        await titleStarted.promise
+        if (stopDuringTitle) {
+          ws.send(JSON.stringify({ type: 'stop_generation' }))
+          await waitUntil(() => messages.some(message => message.type === 'status' && message.state === 'idle'), 'stop while saving placeholder title')
+        }
+        releaseTitle.resolve()
+        await titleFinished.promise
+        if (!stopDuringTitle) {
+          await waitUntil(() => messages.some(message => message.type === 'message_complete'), 'first turn after placeholder title save')
+          expect(conversationService.getSessionPermissionMode(sessionId)).toBe('acceptEdits')
+          expect(startupReads).toBeGreaterThan(0)
+        } else {
+          // Let the handler resume from the completed save before observing it.
+          await new Promise<void>(resolve => setImmediate(resolve))
+          expect(startupReads).toBe(0)
+          expect(conversationService.hasSession(sessionId)).toBe(false)
+        }
+        expect(startupReadDuringTitle).toBe(false)
+        expect(messages.filter(message => message.type === 'error')).toEqual([])
+      } finally {
+        releaseTitle.resolve()
+        ws.close()
+        titleSpy.mockRestore()
+        workDirSpy.mockRestore()
+        conversationService.stopSession(sessionId)
+      }
+    }, 20_000)
+  }
+
+  it('should finish the first turn when saving the placeholder title fails', async () => {
+    const sessionId = `title-save-failure-${crypto.randomUUID()}`
+    const titleSpy = spyOn(titleService, 'saveAiTitle').mockRejectedValue(new Error('fixture title write failed'))
+    try {
+      const messages = await runTurnUntilComplete(sessionId, 'continue despite a title write failure')
+      expect(titleSpy).toHaveBeenCalled()
+      expect(messages.some(message => message.type === 'message_complete')).toBe(true)
+      expect(messages.filter(message => message.type === 'error')).toEqual([])
+    } finally {
+      titleSpy.mockRestore()
+      conversationService.stopSession(sessionId)
+    }
+  })
 
   it('should switch from bypass permissions back to default without restarting', async () => {
     const createRes = await fetch(`${baseUrl}/api/sessions`, {

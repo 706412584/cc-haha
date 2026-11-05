@@ -1,13 +1,13 @@
 import { ApiError } from '../middleware/errorHandler.js'
 import * as fs from 'node:fs/promises'
-import { watch, type FSWatcher } from 'node:fs'
+import { constants as fsConstants, watch, type FSWatcher } from 'node:fs'
 import { execFile as execFileCallback } from 'node:child_process'
 import * as path from 'node:path'
 import { promisify } from 'node:util'
-import { diffLines } from 'diff'
 import type { MessageEntry } from './sessionService.js'
 import type { FileHistorySnapshot } from '../../utils/fileHistory.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
+import { countLineChangeStats } from '../../utils/lineChangeStats.js'
 import { isWithinRegisteredFilesystemRoot } from './filesystemAccessRoots.js'
 import {
   changedWorkspaceWatchEntries,
@@ -29,6 +29,7 @@ import {
 } from './workspaceDocumentPreview.js'
 
 const MAX_PREVIEW_BYTES = 1024 * 1024
+export const MAX_WORKSPACE_DOWNLOAD_BYTES = 20 * 1024 * 1024
 const MAX_UNTRACKED_STAT_BYTES = 256 * 1024
 const GIT_TIMEOUT_MS = 5_000
 const MAX_GIT_BUFFER_BYTES = 2_000_000
@@ -37,6 +38,22 @@ const execFile = promisify(execFileCallback)
 
 function isVcsMetadataDirectoryName(name: string): boolean {
   return VCS_METADATA_DIRECTORY_NAMES.has(name.toLowerCase())
+}
+
+/** Downloads may include arbitrary binary artifacts, but never known credential stores. */
+function isProtectedDownloadPath(filePath: string): boolean {
+  const parts = filePath.toLowerCase().split(/[\\/]/)
+  return parts.some((name, index) => {
+    // These agents keep authorized source checkouts under their config home.
+    // Only that subtree is a workspace; sibling config/credential paths stay protected.
+    if ((name === '.codex' || name === '.claude') && parts[index + 1] === 'worktrees') return false
+    return isVcsMetadataDirectoryName(name) ||
+      ['.claude', '.codex', '.ssh', '.aws', '.azure', '.kube', '.gnupg', '.config',
+        '.npmrc', '.netrc', '.pypirc', '.git-credentials', 'credentials.json', '.credentials.json'].includes(name) ||
+      name === '.env' || name.startsWith('.env.') ||
+      /^id_(rsa|dsa|ecdsa|ed25519)(?:\.|$)/.test(name) ||
+      /\.(pem|key|p12|pfx|keystore)$/.test(name)
+  })
 }
 
 const LANGUAGE_MAP: Record<string, string> = {
@@ -278,6 +295,17 @@ export function parseStatus(code: string): WorkspaceFileStatus {
 }
 
 export class WorkspaceService {
+  /**
+   * Status is polled by every open session, and one call spawns git and folds the
+   * transcript's file-history evidence (measured 0.3–1.7s on a 60MB session).
+   * Several open sessions therefore repeat identical work on every tick. A short
+   * TTL collapses those repeats while staying well inside the poll cadence, so the
+   * view still tracks git within a few seconds.
+   */
+  private readonly statusCache = new Map<string, { at: number; status: WorkspaceStatusResult }>()
+  private readonly statusCacheTtlMs = 3_000
+  private readonly statusCacheMaxEntries = 32
+
   constructor(
     private readonly resolveSessionWorkDir: (
       sessionId: string,
@@ -288,9 +316,35 @@ export class WorkspaceService {
     private readonly resolveSessionFileHistorySnapshots: (
       sessionId: string,
     ) => Promise<FileHistorySnapshot[]> = async () => [],
+    private readonly now: () => number = Date.now,
   ) {}
 
   async getStatus(sessionId: string): Promise<WorkspaceStatusResult> {
+    const cached = this.statusCache.get(sessionId)
+    if (cached && this.now() - cached.at < this.statusCacheTtlMs) {
+      // Refresh recency so a polled session is not evicted by a one-off read.
+      this.statusCache.delete(sessionId)
+      this.statusCache.set(sessionId, cached)
+      return cached.status
+    }
+    const status = await this.loadStatus(sessionId)
+    this.statusCache.delete(sessionId)
+    this.statusCache.set(sessionId, { at: this.now(), status })
+    while (this.statusCache.size > this.statusCacheMaxEntries) {
+      const oldest = this.statusCache.keys().next().value
+      if (oldest === undefined) break
+      this.statusCache.delete(oldest)
+    }
+    return status
+  }
+
+  /** Drop cached status after a change the caller itself made. */
+  invalidateStatus(sessionId?: string): void {
+    if (sessionId === undefined) this.statusCache.clear()
+    else this.statusCache.delete(sessionId)
+  }
+
+  private async loadStatus(sessionId: string): Promise<WorkspaceStatusResult> {
     const workDir = await this.requireWorkDir(sessionId)
     const workspaceInfo = await this.getWorkspaceRoot(workDir)
     if (workspaceInfo.kind === 'missing') {
@@ -601,6 +655,68 @@ export class WorkspaceService {
     }
   }
 
+  /** Explicit attachment download; independent of the document preview allowlist. */
+  async readDownloadFile(sessionId: string, requestedPath: string, signal?: AbortSignal) {
+    signal?.throwIfAborted()
+    const resolved = await this.resolveWorkspacePath(sessionId, requestedPath)
+    if (isProtectedDownloadPath(resolved.absolutePath) || isProtectedDownloadPath(resolved.canonicalTargetPath)) {
+      throw new ApiError(403, 'Credential and configuration files cannot be downloaded', 'FORBIDDEN')
+    }
+    const stat = await this.safeStat(resolved.canonicalTargetPath)
+    if (stat.kind === 'error') throw ApiError.internal(stat.message)
+    if (stat.kind === 'missing' || !stat.stat.isFile()) {
+      throw ApiError.notFound(`File not found: ${resolved.relativePath}`)
+    }
+    const tooLarge = () => new ApiError(413, 'File exceeds the 20 MiB download limit', 'PAYLOAD_TOO_LARGE')
+    if (stat.stat.size > MAX_WORKSPACE_DOWNLOAD_BYTES) throw tooLarge()
+
+    // Pin the checked inode. NOFOLLOW prevents a final-component symlink swap;
+    // fstat detects replacement through an ancestor while opening. NONBLOCK
+    // prevents a swapped FIFO from hanging before its file type can be checked.
+    const file = await fs.open(resolved.canonicalTargetPath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK)
+    try {
+      const opened = await file.stat()
+      if (!opened.isFile() || opened.dev !== stat.stat.dev || opened.ino !== stat.stat.ino) {
+        throw ApiError.conflict('File changed while preparing the download; retry')
+      }
+      // Resolution preceded stat/open. Recheck the path against the workspace
+      // after opening too, so swapping an ancestor before stat cannot authorize
+      // an outside inode merely because stat and fstat then happen to agree.
+      const checked = await this.resolveWorkspacePath(sessionId, requestedPath)
+      if (checked.canonicalTargetPath !== resolved.canonicalTargetPath ||
+        isProtectedDownloadPath(checked.absolutePath) || isProtectedDownloadPath(checked.canonicalTargetPath)) {
+        throw ApiError.conflict('File changed while preparing the download; retry')
+      }
+      const checkedStat = await this.safeStat(checked.canonicalTargetPath)
+      if (checkedStat.kind !== 'ok' || checkedStat.stat.dev !== opened.dev || checkedStat.stat.ino !== opened.ino) {
+        throw ApiError.conflict('File changed while preparing the download; retry')
+      }
+      if (opened.size > MAX_WORKSPACE_DOWNLOAD_BYTES) throw tooLarge()
+      const chunks: Buffer[] = []
+      let total = 0
+      while (true) {
+        signal?.throwIfAborted()
+        const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, MAX_WORKSPACE_DOWNLOAD_BYTES + 1 - total))
+        const { bytesRead } = await file.read(chunk, 0, chunk.length, null)
+        if (bytesRead === 0) break
+        total += bytesRead
+        // Enforce the limit while reading too: the file may grow after stat.
+        if (total > MAX_WORKSPACE_DOWNLOAD_BYTES) throw tooLarge()
+        chunks.push(chunk.subarray(0, bytesRead))
+      }
+      const name = path.basename(resolved.absolutePath)
+      return {
+        bytes: Buffer.concat(chunks, total),
+        name,
+        mimeType: documentFormatForPath(name)?.mimeType ?? this.detectImageMimeType(name) ??
+          (path.extname(name).toLowerCase() === '.txt' ? 'text/plain' : 'application/octet-stream'),
+      }
+    } finally {
+      await file.close()
+    }
+  }
+
   /** Watch only the requested directory levels, never the whole repository. */
   async watchDirectories(
     sessionId: string,
@@ -666,6 +782,9 @@ export class WorkspaceService {
         const event = { paths: [...paths], directories: [...directories] }
         paths.clear()
         directories.clear()
+        // A watched change is exactly what the status cache must not hide: the
+        // client refreshes on this event, so drop the cached answer first.
+        this.invalidateStatus(sessionId)
         onChange(event)
       }, 60)
     }
@@ -1192,13 +1311,8 @@ export class WorkspaceService {
   }
 
   private countDiffStats(oldContent: string, newContent: string): { additions: number; deletions: number } {
-    let additions = 0
-    let deletions = 0
-    for (const change of diffLines(oldContent, newContent)) {
-      if (change.added) additions += change.count || 0
-      if (change.removed) deletions += change.count || 0
-    }
-    return { additions, deletions }
+    const { insertions, deletions } = countLineChangeStats(oldContent, newContent)
+    return { additions: insertions, deletions }
   }
 
   private extractSessionChangesFromTool(

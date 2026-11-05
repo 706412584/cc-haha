@@ -75,6 +75,9 @@ import { resolveAppliedEffort } from "../../utils/effort.js";
 import { isEnvTruthy } from "../../utils/envUtils.js";
 import { errorMessage } from "../../utils/errors.js";
 import { computeFingerprintFromMessages } from "../../utils/fingerprint.js";
+import { normalizeImagesForAPI } from '../../utils/imageValidation.js'
+import { normalizeAnthropicBaseUrl } from './anthropicBaseUrl.js'
+import { resolveProviderMediaEndpoint } from './providerMedia/providers.js'
 import { captureAPIRequest, logError } from "../../utils/log.js";
 import {
   createSystemStreamingFallbackMessage,
@@ -89,6 +92,7 @@ import {
   stripToolReferenceBlocksFromUserMessage,
 } from "../../utils/messages.js";
 import {
+  getCanonicalName,
   getDefaultOpusModel,
   getDefaultSonnetModel,
   getSmallFastModel,
@@ -1087,6 +1091,26 @@ function isToolResult(
 }
 
 /**
+ * Whether the current endpoint offloads oversized media to a provider files
+ * API at the fetch seam (see `providerMedia`). Such a provider can carry a
+ * request larger than the generic client budget without a 413, so the local
+ * shrink must not pre-empt the offload. Resolved from the same base URL the
+ * SDK fetch uses, so the client and the transport agree on the endpoint.
+ */
+function providerOffloadsOversizedMedia(): boolean {
+  const baseUrl = process.env.ANTHROPIC_BASE_URL?.trim()
+  if (!baseUrl) return false
+  try {
+    // Mirror how the SDK builds the request URL: normalize the base the same
+    // way, then append the messages path the endpoint resolver matches on.
+    const base = normalizeAnthropicBaseUrl(baseUrl).replace(/\/+$/, '')
+    return Boolean(resolveProviderMediaEndpoint(new URL(`${base}/v1/messages`)))
+  } catch {
+    return false
+  }
+}
+
+/**
  * Returns the base64 payload size (in bytes) for a media block, or 0 if the
  * block uses a URL/file source (which doesn't contribute to request body size).
  */
@@ -1660,13 +1684,23 @@ async function* queryModel(
     API_MAX_MEDIA_PER_REQUEST,
   );
 
-  // Shrink total base64 media payload to stay under the API's ~20 MB request
-  // size limit. Images accumulate in conversations (Read tool + image-gen)
-  // and are never evicted by toolResultStorage; this is the safety net.
-  messagesForAPI = shrinkMediaToSizeBudget(
-    messagesForAPI,
-    API_MAX_MEDIA_BYTES_BUDGET,
-  );
+  const provider = getAPIProvider()
+  messagesForAPI = await normalizeImagesForAPI(messagesForAPI, {
+    countDocuments: provider === 'bedrock' || provider === 'vertex',
+  })
+  // Shrink total base64 media payload after request-level image normalization,
+  // so the final encoded request stays under the API's ~20 MB size limit. A
+  // provider with a files-API offload (see providerMedia/) is exempt: its
+  // transport uploads oversized media and replaces the inline payload at the
+  // fetch seam, which is strictly better than dropping images here. Shrinking
+  // first would keep the request below that provider's own trigger and defeat
+  // the offload (the model would lose visual context the endpoint can accept).
+  if (!providerOffloadsOversizedMedia()) {
+    messagesForAPI = shrinkMediaToSizeBudget(
+      messagesForAPI,
+      API_MAX_MEDIA_BYTES_BUDGET,
+    );
+  }
 
   // Instrumentation: Track message count after normalization
   logEvent("tengu_api_after_normalize", {
@@ -1969,7 +2003,7 @@ async function* queryModel(
 
     // Opus 5 and Haiku 5.5 reject disabled thinking above high effort. Preserve
     // the user's explicit thinking choice and use the highest compatible effort.
-    const modelId = options.model.toLowerCase()
+    const modelId = getCanonicalName(options.model)
     if (
       sendsExplicitDisabledThinking &&
       (modelId.includes('claude-opus-5') || modelId.includes('claude-haiku-5-5')) &&

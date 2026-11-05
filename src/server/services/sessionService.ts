@@ -5,6 +5,8 @@
  * 确保 Desktop App 与 CLI 的数据完全互通。
  */
 
+import { readScheduledTaskMetadata, scheduledTaskDisplayText, type ScheduledTaskMetadata } from '../../utils/scheduledTaskMessage.js'
+import { measureEntryWithMediaRefs, projectMessageMedia } from './toolImageMedia.js'
 import { constants, createReadStream, type Stats } from 'node:fs'
 import { createHash } from 'node:crypto'
 import * as fs from 'node:fs/promises'
@@ -18,12 +20,15 @@ import { findCanonicalGitRoot } from '../../utils/git.js'
 import { calculateUSDCost, MODEL_COSTS } from '../../utils/modelCost.js'
 import {
   MODEL_CONTEXT_WINDOW_DEFAULT,
+  applyAutoCompactWindowLimit,
   getContextWindowForModel,
   getModelMaxOutputTokens,
   hasKnownContextWindow,
   is1mContextDisabled,
+  isModelWindowKnownForAutoCompact,
 } from '../../utils/context.js'
 import {
+  AUTO_COMPACT_WINDOW_ENV_KEY,
   MODEL_CONTEXT_WINDOWS_ENV_KEY,
   getModelContextWindowFromEnvValue,
 } from '../../utils/model/modelContextWindows.js'
@@ -32,6 +37,7 @@ import {
   getProviderUsageTrust,
   hasMediaInput,
 } from '../../utils/contextBudget.js'
+import { isENOENT } from '../../utils/errors.js'
 import { getCanonicalName } from '../../utils/model/model.js'
 import { isFirstPartyAnthropicBaseUrl } from '../../utils/model/providers.js'
 import {
@@ -88,9 +94,13 @@ import type {
 import type { LocalIndexStatus } from './localIndex/types.js'
 import { diagnosticsService } from './diagnosticsService.js'
 import {
+  claimUsageIncrement,
   isBillableUsageRecord,
   isForkInheritedUsageRecord,
   usageRecordKey,
+  type PricedTokens,
+  type UsageIncrement,
+  type UsageLedger,
 } from '../../utils/usageAccounting.js'
 import {
   ProjectSessionHistory,
@@ -101,6 +111,7 @@ import {
 } from './projectSessionHistory.js'
 import { getSideChat, isSideChatId, sideChatSummary } from './sideChatRegistry.js'
 import { isShutdownTeamPrompt } from '../../utils/swarm/teamShutdownPrompt.js'
+import { isTeamLeadNotice } from '../../utils/swarm/teamLeadNotice.js'
 
 // ============================================================================
 // Types
@@ -282,6 +293,9 @@ export type MessageUsage = {
 }
 
 export type MessageEntry = {
+  scheduledTask?: ScheduledTaskMetadata
+  /** Set when a bounded history reader omitted part of the original content. */
+  bodyTruncated?: boolean
   id: string
   type: 'user' | 'assistant' | 'system' | 'tool_use' | 'tool_result'
   content: unknown
@@ -488,6 +502,7 @@ export type TranscriptContextEstimate = {
 
 /** Raw entry parsed from a single JSONL line */
 type RawEntry = {
+  scheduledTask?: unknown
   type?: string
   subtype?: string
   content?: unknown
@@ -549,18 +564,23 @@ type TranscriptContextAccumulator = {
 }
 
 /**
- * Whether this line's `usage` is the first sighting of its reply.
+ * What this line's `usage` adds to its reply's running total, or null when the line is not
+ * billable (e.g. inherited by a fork).
  *
- * Claude Code writes one JSONL line per content block of an assistant message and repeats the
- * complete `usage` object on every one — a reply with thinking, text and 12 tool_use blocks is
- * 14 lines carrying the same numbers. Summing raw lines overstated real transcripts by 2.2x,
- * which is why `stats.ts` and the activity index both deduplicate; the inspector paths had
- * inherited only the fork check and so reported inflated totals to the context panel.
+ * Claude Code writes one JSONL line per content block of an assistant message, each carrying a
+ * `usage` object — a reply with thinking, text and 12 tool_use blocks is 14 lines. Summing raw
+ * lines overstated real transcripts by 2.2x, while keeping only the first line under-counted
+ * replies whose first line was written with zero/partial usage. Each field is therefore counted at
+ * the largest value any line reported and only the excess is billed.
  *
  * Rules (and the key shape) come from `usageAccounting.ts` so every reader of a transcript
  * agrees about what one session cost.
  */
-function claimUsageRecord(entry: RawEntry, countedKeys: Set<string>): boolean {
+function claimUsageRecord(
+  entry: RawEntry,
+  ledger: UsageLedger,
+  tokens: PricedTokens,
+): UsageIncrement | null {
   const record = entry as unknown as Record<string, unknown>
   const identity = {
     version: record.version,
@@ -569,12 +589,12 @@ function claimUsageRecord(entry: RawEntry, countedKeys: Set<string>): boolean {
     messageId: entry.message?.id,
     forkedFrom: record.forkedFrom,
   }
-  if (!isBillableUsageRecord(identity)) return false
+  if (!isBillableUsageRecord(identity)) return null
   const key = usageRecordKey(identity)
-  if (key === null) return true
-  if (countedKeys.has(key)) return false
-  countedKeys.add(key)
-  return true
+  if (key !== null && !ledger.has(key) && (ledger.size >= 50_000 || key.length > 4096)) {
+    throw new ApiError(413, 'Usage inspection exceeds its record budget', 'HISTORY_INSPECTION_LIMIT')
+  }
+  return claimUsageIncrement(ledger, key, tokens)
 }
 
 function createTranscriptContextAccumulator(): TranscriptContextAccumulator {
@@ -814,6 +834,8 @@ type InspectionFoldState = {
   estimatedTokensFromMessages: number
   estimatedTokensAfterUsage: number
   transcriptHasMediaInput: boolean
+  /** Running per-reply maxima, retained so an append is not billed a second time. */
+  usageLedger: UsageLedger
 }
 
 function createInspectionFoldState(): InspectionFoldState {
@@ -845,6 +867,7 @@ function createInspectionFoldState(): InspectionFoldState {
     estimatedTokensFromMessages: 0,
     estimatedTokensAfterUsage: 0,
     transcriptHasMediaInput: false,
+    usageLedger: new Map(),
   }
 }
 
@@ -864,6 +887,9 @@ function cloneInspectionFoldState(state: InspectionFoldState): InspectionFoldSta
     ),
     modelRuntimeHints: new Map(
       [...state.modelRuntimeHints.entries()].map(([key, value]) => [key, { ...value }]),
+    ),
+    usageLedger: new Map(
+      [...state.usageLedger.entries()].map(([key, value]) => [key, { ...value }]),
     ),
   }
 }
@@ -917,7 +943,6 @@ export function hasMalformedFileHistoryBefore(snapshot: FileHistorySnapshot): bo
 
 export class SessionService {
   private readonly uiFileHistoryReads = new Map<string, Promise<RawEntry[]>>()
-  private readonly inspectionSnapshots = new Map<string, Promise<SessionInspectionTranscriptSnapshot | null>>()
 
   private providerService = new ProviderService()
   // Keep launch state available when retention disables or removes transcripts.
@@ -1048,14 +1073,15 @@ export class SessionService {
    * The snapshot is a fold over an append-only transcript whose every
    * accumulator is monotonic (sums, min/max, last-wins scalars, Map upserts),
    * so resuming from a byte offset yields the same result as a full re-parse.
-   * Holds small aggregates, not file content. Bounded to a handful of entries
-   * because only sessions under active inspection are polled.
+   * Holds small aggregates, not file content. Sized to match
+   * `inspectionSnapshots`: a session whose fold seed was evicted re-reads its
+   * whole transcript, and several sessions poll at once.
    */
   private readonly inspectionFoldCache = new Map<string, {
     offset: number
     fold: InspectionFoldState
   }>()
-  private readonly inspectionFoldCacheMaxEntries = 8
+  private readonly inspectionFoldCacheMaxEntries = 32
   /**
    * Resume point for the session-list summary fold, keyed by transcript path.
    *
@@ -1103,10 +1129,17 @@ export class SessionService {
   private readonly projectHistory: ProjectSessionHistory
   /**
    * Recovery snapshots keyed by session, invalidated by the transcript's stat
-   * signature. Capped at two: these hold whole transcripts and only the session
-   * the user is looking at (plus one transition) is worth pinning.
+   * signature. A recovery pass is a whole-source state reduction (usage totals,
+   * tool ownership, budget eviction), so an append cannot be folded incrementally
+   * and every miss re-reads the transcript from byte 0 — measured at ~920ms per
+   * round for four sessions when the cap of two let active polls evict each
+   * other. The cap must cover every session a user can keep open at once, and
+   * the in-flight request is stored so concurrent callers share one pass instead
+   * of queueing behind the single recovery read lane.
    */
-  private readonly historyRecoveryCache = new Map<string, SessionHistoryRecovery>()
+  private readonly historyRecoveryCacheMaxEntries = 16
+  private readonly historyRecoveryCache = new Map<string, { signature: string; request: Promise<SessionHistoryRecovery> }>()
+  private readonly historyRecoveryRequests = new Map<string, Promise<SessionHistoryRecovery>>()
   /**
    * Bounded metadata projection shared by launch-info, work-dir and title reads
    * (re-ported from upstream). One fold means a picker asking for a title never
@@ -1120,8 +1153,17 @@ export class SessionService {
   /**
    * Inspection snapshots shared by the metadata/context/usage readers, keyed by the
    * transcript's stat signature plus the provider/env revision its token budget depends on.
+   *
+   * An append changes the stat signature, so every active conversation creates a
+   * new entry on each poll. The cap must therefore cover every session a user can
+   * have open at once, or the oldest are evicted before their next tick and the
+   * whole transcript is folded again — measured at ~3.9s per round for twelve
+   * sessions with a cap of 8. `inspectionFoldCache` resumes a fold from a byte
+   * offset and is what keeps a cache miss cheap, so both are sized together.
    */
-  private readonly inspectionSnapshots = new Map<string, Promise<SessionInspectionTranscriptSnapshot | null>>()
+  private readonly inspectionSnapshots = new Map<string, { signature: string; request: Promise<SessionInspectionTranscriptSnapshot | null> }>()
+  /** Room for every session a user plausibly keeps open at once. */
+  private readonly inspectionSnapshotsMaxEntries = 32
   /**
    * Coalesces overlapping whole-history reads. Deliberately not a cache: retaining
    * histories would pin hundreds of MB per session after callers close their views.
@@ -1207,7 +1249,7 @@ export class SessionService {
           )
           return await this.hydrateIndexedSession(row)
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+          if (isENOENT(error)) return null
           this.markIndexReadFailure()
           throw new ApiError(409, 'Project history changed; retry from the first page', 'PROJECT_HISTORY_CHANGED')
         }
@@ -1695,7 +1737,7 @@ export class SessionService {
         }
         return { entries, exists: true, parseComplete }
       } catch (err: unknown) {
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        if (isENOENT(err)) {
           return { entries: [], exists: false, parseComplete: false }
         }
         throw err
@@ -1708,7 +1750,7 @@ export class SessionService {
     try {
       stat = await fs.stat(filePath)
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (isENOENT(err)) {
         return { entries: [], exists: false, parseComplete: false }
       }
       throw err
@@ -1870,7 +1912,7 @@ export class SessionService {
       const { bytesRead } = await handle.read(buffer, 0, length, start)
       return bytesRead === length ? buffer : null
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+      if (isENOENT(err)) return null
       throw err
     } finally {
       await handle?.close().catch(() => {})
@@ -2014,7 +2056,7 @@ export class SessionService {
     try {
       content = await fs.readFile(filePath, 'utf-8')
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (isENOENT(err)) {
         this.invalidateReadCache(filePath)
         return { entries: [], exists: false, parseComplete: false }
       }
@@ -2118,7 +2160,7 @@ export class SessionService {
       }
       return this.parseJsonlContent(text).entries
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (isENOENT(err)) {
         return []
       }
       throw err
@@ -2320,7 +2362,7 @@ export class SessionService {
         handleLine(line, false)
       }
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      if (!isENOENT(err)) {
         throw err
       }
     } finally {
@@ -2727,7 +2769,7 @@ export class SessionService {
       handle = await fs.open(filePath, constants.O_WRONLY | constants.O_APPEND |
         (entry.type === 'session-meta' ? constants.O_CREAT : 0))
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      if (isENOENT(error)) return
       throw error
     }
     try {
@@ -3072,10 +3114,10 @@ export class SessionService {
         }) ?? undefined
       : undefined
 
-    // Re-ported from upstream: a collaboration delivery is persisted as a model-facing
-    // prompt wrapper around the real payload, and a user turn may carry a reference
-    // context block. Both must be split off before the transcript renders.
-    let content = msg.content
+    // A scheduled-task prompt has a human-facing display body. Keep collaboration
+    // deliveries and reference context processing on the content selected above.
+    const scheduledTask = type === 'user' ? readScheduledTaskMetadata(entry.scheduledTask) : undefined
+    let content = scheduledTask ? scheduledTaskDisplayText(msg.content) : msg.content
     let sessionReferences: { sessionId: string }[] | undefined
     let collaboration: { sourceSessionId: string; messageId: string } | undefined
     if (type === 'user') {
@@ -3104,6 +3146,8 @@ export class SessionService {
       content,
       ...(collaboration ? { collaboration } : {}),
       ...(sessionReferences ? { sessionReferences } : {}),
+      ...(scheduledTask ? { scheduledTask } : {}),
+      ...(entry.bodyTruncated === true ? { bodyTruncated: true } : {}),
       ...(entry.toolUseResult !== undefined ? { toolUseResult: entry.toolUseResult } : {}),
       timestamp: entry.timestamp || new Date().toISOString(),
       model: msg.model,
@@ -3310,6 +3354,7 @@ export class SessionService {
     if (role === 'user') {
       return (
         isShutdownTeamPrompt(content) ||
+        isTeamLeadNotice(content) ||
         shouldHideCommandMetadataContent(content) ||
         this.isTaskNotificationContent(content)
       )
@@ -3897,7 +3942,7 @@ export class SessionService {
           const hydratedMatches: Array<SessionFileMatch & { mtimeMs: number }> = []
           let hydrationFailed = false
           const failUnlessMissing = (error: unknown) =>
-            (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'drop' as const : 'fail' as const
+            isENOENT(error) ? 'drop' as const : 'fail' as const
           for (const match of indexedMatches) {
             try {
               const stat = await this.validateIndexedTranscriptPath(
@@ -3980,10 +4025,15 @@ export class SessionService {
     return `$${cost > 0.5 ? (Math.round(cost * 100) / 100).toFixed(2) : cost.toFixed(4)}`
   }
 
+  /**
+   * `hints.autoCompactWindow` receives the fallback window of the provider the
+   * session runs on, so the shown window can honour the same cap compaction does.
+   */
   private async getProviderContextWindowForSession(
     sessionId: string,
     model: string,
     launchInfoOverride?: ProviderContextWindowHint | null,
+    hints: { autoCompactWindow?: string } = {},
   ): Promise<number | undefined> {
     const launchInfo = launchInfoOverride ?? await this.getSessionLaunchInfo(sessionId).catch(() => null)
     const providerIds: string[] = []
@@ -4018,8 +4068,17 @@ export class SessionService {
       'ANTHROPIC_DEFAULT_OPUS_MODEL',
     ] as const
 
+    // The provider the session actually runs on is the first one that still
+    // exists: a recorded provider that was deleted hands over to the active one.
+    let sessionProviderAutoCompactWindow: string | undefined
+    let sawSessionProvider = false
     for (const providerId of providerIds) {
       const env = await this.providerService.getProviderRuntimeEnv(providerId).catch(() => null)
+      hints.autoCompactWindow = env?.[AUTO_COMPACT_WINDOW_ENV_KEY]
+      if (env && !sawSessionProvider) {
+        sawSessionProvider = true
+        sessionProviderAutoCompactWindow = hints.autoCompactWindow
+      }
       if (!env && providerId === recordedProviderId) {
         // The provider this session recorded no longer exists (deleted or
         // re-created under a new id). A resumed session is relaunched with the
@@ -4079,6 +4138,10 @@ export class SessionService {
         }
       }
     }
+
+    // Nothing matched: the model is resolved without provider configuration, and
+    // only the provider the session started on may cap it.
+    hints.autoCompactWindow = sessionProviderAutoCompactWindow
 
     // A session without recorded provider metadata always infers from saved
     // providers. When a provider was recorded but could not tell us the window
@@ -4163,17 +4226,23 @@ export class SessionService {
     model: string,
     launchInfo?: ProviderContextWindowHint | null,
   ): Promise<number> {
+    const hints: { autoCompactWindow?: string } = {}
     const providerContextWindow = await this.getProviderContextWindowForSession(
       sessionId,
       model,
       launchInfo,
+      hints,
     )
     if (providerContextWindow !== undefined) {
-      return providerContextWindow
+      return applyAutoCompactWindowLimit(providerContextWindow, hints.autoCompactWindow, true)
     }
 
     try {
-      return getContextWindowForModel(model)
+      return applyAutoCompactWindowLimit(
+        getContextWindowForModel(model),
+        hints.autoCompactWindow,
+        isModelWindowKnownForAutoCompact(model),
+      )
     } catch (err) {
       if (
         err instanceof Error &&
@@ -4370,14 +4439,26 @@ export class SessionService {
         'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_USE_AZURE_OPENAI',
       ].map(name => process.env[name] ?? null),
     })).digest('hex')
-    const key = `${found.filePath}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}:${contextRevision}`
-    const existing = this.inspectionSnapshots.get(key)
-    if (existing) return existing
+    const signature = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}:${contextRevision}`
+    // Keyed by transcript, not by signature: an append changes the signature, so a
+    // signature-keyed map missed on every poll of an active conversation and its
+    // entries crowded out every other open session. The signature is checked on
+    // hit instead, and a miss still resumes from the fold's byte offset.
+    const cached = this.inspectionSnapshots.get(found.filePath)
+    if (cached?.signature === signature) {
+      this.inspectionSnapshots.delete(found.filePath)
+      this.inspectionSnapshots.set(found.filePath, cached)
+      return cached.request
+    }
     const request = this.readInspectionSnapshotForSession(sessionId, found.filePath)
-    this.inspectionSnapshots.set(key, request)
-    while (this.inspectionSnapshots.size > 8) this.inspectionSnapshots.delete(this.inspectionSnapshots.keys().next().value!)
+    this.inspectionSnapshots.set(found.filePath, { signature, request })
+    while (this.inspectionSnapshots.size > this.inspectionSnapshotsMaxEntries) {
+      const oldest = this.inspectionSnapshots.keys().next().value
+      if (oldest === undefined) break
+      this.inspectionSnapshots.delete(oldest)
+    }
     try { return await request }
-    catch (error) { this.inspectionSnapshots.delete(key); throw error }
+    catch (error) { this.inspectionSnapshots.delete(found.filePath); throw error }
   }
 
   private async readInspectionSnapshotForSession(sessionId: string, filePath: string): Promise<SessionInspectionTranscriptSnapshot | null> {
@@ -4428,7 +4509,7 @@ export class SessionService {
     contextState.estimatedTokensFromMessages = seed.fold.estimatedTokensFromMessages
     contextState.estimatedTokensAfterUsage = seed.fold.estimatedTokensAfterUsage
     contextState.transcriptHasMediaInput = seed.fold.transcriptHasMediaInput
-    const countedUsageKeys = new Set<string>()
+    const usageLedger = seed.fold.usageLedger
 
     const { consumed: consumedOffset } = await this.streamJsonlFileFrom(filePath, startOffset, (entry) => {
       // Inspection reduces original records, so a record above the semantic read limit
@@ -4515,34 +4596,43 @@ export class SessionService {
         ? usage.server_tool_use.web_search_requests
         : 0
 
-      // Fork-inherited lines and the repeated usage objects of a multi-block reply are the
-      // same class of over-count; `claimUsageRecord` rejects both.
-      if (!claimUsageRecord(entry, countedUsageKeys)) return
-
-      if (
-        inputTokens === 0 &&
-        outputTokens === 0 &&
-        cacheReadInputTokens === 0 &&
-        cacheCreationInputTokens === 0 &&
-        webSearchRequests === 0
-      ) {
-        return
-      }
+      // Fork-inherited lines are skipped, and the usage objects of a multi-block reply are folded
+      // into one running total so only the part not yet counted is billed.
+      const increment = claimUsageRecord(entry, usageLedger, {
+        inputTokens,
+        outputTokens,
+        cacheReadInputTokens,
+        cacheCreationInputTokens,
+        webSearchRequests,
+      })
+      if (!increment || increment.isEmpty) return
 
       const canonical = getCanonicalName(model)
       if (!Object.prototype.hasOwnProperty.call(MODEL_COSTS, canonical)) {
         hasUnknownModelCost = true
       }
 
-      const costUsage = {
-        input_tokens: inputTokens,
-        output_tokens: outputTokens,
-        cache_read_input_tokens: cacheReadInputTokens,
-        cache_creation_input_tokens: cacheCreationInputTokens,
-        server_tool_use: { web_search_requests: webSearchRequests },
-        speed: usage.speed,
-      } as Parameters<typeof calculateUSDCost>[1]
-      const costUSD = calculateUSDCost(model, costUsage)
+      const priceTokens = (tokens: Required<PricedTokens>) =>
+        calculateUSDCost(model, {
+          input_tokens: tokens.inputTokens,
+          output_tokens: tokens.outputTokens,
+          cache_read_input_tokens: tokens.cacheReadInputTokens,
+          cache_creation_input_tokens: tokens.cacheCreationInputTokens,
+          server_tool_use: { web_search_requests: tokens.webSearchRequests },
+          speed: usage.speed,
+        } as Parameters<typeof calculateUSDCost>[1])
+      // Billed as cost(running total) - cost(already counted) so a prompt-length tier is decided by
+      // the whole reply rather than by whichever fragment arrived last.
+      const costUSD =
+        priceTokens(increment.total) -
+        (increment.previous ? priceTokens(increment.previous) : 0)
+      const {
+        inputTokens: addedInput,
+        outputTokens: addedOutput,
+        cacheReadInputTokens: addedCacheRead,
+        cacheCreationInputTokens: addedCacheCreation,
+        webSearchRequests: addedWebSearch,
+      } = increment.delta
 
       let modelUsage = models.get(model)
       if (!modelUsage) {
@@ -4563,20 +4653,20 @@ export class SessionService {
         modelRuntimeHints.set(model, { ...currentRuntimeHint })
       }
 
-      modelUsage.inputTokens += inputTokens
-      modelUsage.outputTokens += outputTokens
-      modelUsage.cacheReadInputTokens += cacheReadInputTokens
-      modelUsage.cacheCreationInputTokens += cacheCreationInputTokens
-      modelUsage.webSearchRequests += webSearchRequests
+      modelUsage.inputTokens += addedInput
+      modelUsage.outputTokens += addedOutput
+      modelUsage.cacheReadInputTokens += addedCacheRead
+      modelUsage.cacheCreationInputTokens += addedCacheCreation
+      modelUsage.webSearchRequests += addedWebSearch
       modelUsage.costUSD += costUSD
       modelUsage.costDisplay = this.formatCost(modelUsage.costUSD)
 
       totalCostUSD += costUSD
-      totalInputTokens += inputTokens
-      totalOutputTokens += outputTokens
-      totalCacheReadInputTokens += cacheReadInputTokens
-      totalCacheCreationInputTokens += cacheCreationInputTokens
-      totalWebSearchRequests += webSearchRequests
+      totalInputTokens += addedInput
+      totalOutputTokens += addedOutput
+      totalCacheReadInputTokens += addedCacheRead
+      totalCacheCreationInputTokens += addedCacheCreation
+      totalWebSearchRequests += addedWebSearch
 
       if (entry.timestamp) {
         const time = Date.parse(entry.timestamp)
@@ -4616,6 +4706,7 @@ export class SessionService {
       estimatedTokensFromMessages: contextState.estimatedTokensFromMessages,
       estimatedTokensAfterUsage: contextState.estimatedTokensAfterUsage,
       transcriptHasMediaInput: contextState.transcriptHasMediaInput,
+      usageLedger,
     })
 
     const workDir = latestWorkDir || latestCwd || this.desanitizePath(path.basename(path.dirname(filePath))) || process.cwd()
@@ -5321,7 +5412,7 @@ export class SessionService {
         transcriptPath: filePath,
       })
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      if (isENOENT(error)) return null
       throw error
     }
   }
@@ -5459,15 +5550,37 @@ export class SessionService {
     const version = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`
     const cacheKey = this.memorySessionKey(sessionId)
     const cached = this.historyRecoveryCache.get(cacheKey)
-    if (cached?.sourceVersion === version) {
-      // Refresh recency so the two-entry cap evicts the least recently used session.
+    if (cached?.signature === version) {
+      // Refresh recency so the cap evicts the least recently used session.
       this.historyRecoveryCache.delete(cacheKey)
       this.historyRecoveryCache.set(cacheKey, cached)
-      return cached
+      return cached.request
     }
+    const inFlight = this.historyRecoveryRequests.get(cacheKey)
+    if (inFlight) {
+      if (options.signal?.aborted) throw options.signal.reason ?? new DOMException('Aborted', 'AbortError')
+      return inFlight
+    }
+    const request = this.recoverSessionHistoryIntoCache(found.filePath, cacheKey)
+    this.historyRecoveryRequests.set(cacheKey, request)
+    try {
+      return await request
+    } finally {
+      if (this.historyRecoveryRequests.get(cacheKey) === request) {
+        this.historyRecoveryRequests.delete(cacheKey)
+      }
+    }
+  }
+
+  /**
+   * Run one recovery pass and put it in the snapshot cache. The pass reads the
+   * transcript without the caller's abort signal: a shared in-flight request
+   * must not die because the one caller that triggered it was cancelled —
+   * concurrent callers hold the same promise, and the result stays cached.
+   */
+  private async recoverSessionHistoryIntoCache(filePath: string, cacheKey: string): Promise<SessionHistoryRecovery> {
     const recovery = await recoverBoundedSessionHistory({
-      filePath: found.filePath,
-      signal: options.signal,
+      filePath,
       toMessage: (entry, owner) => {
         const raw = entry as RawEntry
         const goal = this.goalLocalCommandEntryToMessage(raw)
@@ -5478,15 +5591,23 @@ export class SessionService {
       notifications: entry => this.taskNotificationsFromEntries([entry as RawEntry]),
     })
     this.historyRecoveryCache.delete(cacheKey)
-    this.historyRecoveryCache.set(cacheKey, recovery)
-    while (this.historyRecoveryCache.size > 2) this.historyRecoveryCache.delete(this.historyRecoveryCache.keys().next().value!)
+    this.historyRecoveryCache.set(cacheKey, { signature: recovery.sourceVersion, request: Promise.resolve(recovery) })
+    while (this.historyRecoveryCache.size > this.historyRecoveryCacheMaxEntries) {
+      const oldest = this.historyRecoveryCache.keys().next().value
+      if (oldest === undefined) break
+      this.historyRecoveryCache.delete(oldest)
+    }
     return recovery
   }
 
   /**
    * Paged transcript read for the desktop history API (re-ported from upstream).
    */
-  async getSessionHistoryPage(sessionId: string, options: { cursor?: string; limit?: number; signal?: AbortSignal; full?: boolean; projectContext?: boolean } = {}): Promise<{
+  async getSessionHistoryPage(sessionId: string, options: {
+    cursor?: string; limit?: number; signal?: AbortSignal; full?: boolean; projectContext?: boolean
+    /** Replace tool-result image bytes with references and page by the projected size. */
+    mediaRefs?: boolean
+  } = {}): Promise<{
     messages: MessageEntry[]
     taskNotifications: SessionTaskNotification[]
     page: HistoryPageInfo
@@ -5504,7 +5625,8 @@ export class SessionService {
       }
       throw ApiError.notFound(`Session not found: ${sessionId}`)
     }
-    const result = await readBoundedHistoryPage(found.filePath, options)
+    const mediaRefs = options.mediaRefs === true && !options.full
+    const result = await readBoundedHistoryPage(found.filePath, mediaRefs ? { ...options, measure: measureEntryWithMediaRefs } : options)
     // A referenced-session read only needs the records on this page. Building the
     // ownership index scans the transcript from the start, which is what stalls the
     // shared server while a model pages backward.
@@ -5512,7 +5634,12 @@ export class SessionService {
       ? { entries: result.entries.map(item => item.entry as RawEntry), contextScanBytes: 0 }
       : await this.projectHistoryPageEntries(found.filePath, result, options.signal)
     const entries = result.entries.map(item => item.entry as RawEntry)
-    const response = { messages: this.entriesToMessages(projection.entries), taskNotifications: this.taskNotificationsFromEntries(entries), page: { ...result.page, contextScanBytes: projection.contextScanBytes } }
+    const messages = this.entriesToMessages(projection.entries)
+    const response = {
+      messages: mediaRefs ? messages.map(message => projectMessageMedia(message, sessionId)) : messages,
+      taskNotifications: this.taskNotificationsFromEntries(entries),
+      page: { ...result.page, contextScanBytes: projection.contextScanBytes },
+    }
     // The full-history path is already bounded by the reader's own byte budget, so
     // only the single-record page path needs the "one oversized record" envelope check.
     if (!options.full && Buffer.byteLength(JSON.stringify(response)) > 2 * HISTORY_SEMANTIC_RECORD_BYTES + HISTORY_PAGE_BYTES) {
@@ -5636,7 +5763,7 @@ export class SessionService {
     const leaf = toolRef.slice(toolRef.lastIndexOf('/') + 1)
     const ids = new Set([toolRef, leaf])
     const stat = await fs.stat(filePath, { bigint: true }).catch(error => {
-      if (error.code === 'ENOENT') return null
+      if (isENOENT(error)) return null
       throw error
     })
     if (!stat) return { messages: [], taskNotifications: [], historyComplete: true }
@@ -5769,7 +5896,7 @@ export class SessionService {
           historyComplete: result.page.historyComplete,
         }
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { messages: [], taskNotifications: [], historyComplete: true }
+        if (isENOENT(error)) return { messages: [], taskNotifications: [], historyComplete: true }
         throw error
       }
     }
@@ -6570,7 +6697,7 @@ export class SessionService {
         const repository = (record as Record<string, unknown>).repository
         if (repository && typeof repository === 'object') preserved.repository = repository as PreparedSessionWorkspace['repository']
       }, undefined, { maxRecordBytes: HISTORY_SEMANTIC_RECORD_BYTES }).catch(error => {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        if (!isENOENT(error)) throw error
       })
       const workDir = (preserved.workDir && normalizeDriveRootPathForPlatform(preserved.workDir))
         || (preserved.cwd && normalizeDriveRootPathForPlatform(preserved.cwd))
@@ -6822,7 +6949,7 @@ export class SessionService {
     try {
       projectDirs = await fs.readdir(projectsDir, { withFileTypes: true })
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 0
+      if (isENOENT(err)) return 0
       throw err
     }
 
@@ -6933,7 +7060,7 @@ export class SessionService {
    */
   private async reduceFileHistoryBaselines(filePath: string): Promise<RawEntry[]> {
     const identity = () => fs.stat(filePath).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT') return null
+      if (isENOENT(error)) return null
       throw error
     })
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -7013,7 +7140,7 @@ export class SessionService {
         onEntry(entry, lineNumber, line)
       }
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+      if (!isENOENT(err)) throw err
     } finally {
       lines.close()
       stream.destroy()

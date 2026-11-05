@@ -291,6 +291,8 @@ export function createDumpPromptsFetch(
       : undefined
 
     if (timestamp && traceCallId) {
+      // Trace capture is best-effort diagnostics with no awaiter here; a lost
+      // write scope must not surface as an unhandled rejection.
       void traceCaptureService.recordCall({
         id: traceCallId,
         sessionId: traceSessionId,
@@ -310,7 +312,7 @@ export function createDumpPromptsFetch(
           ...encodingMetadata,
           phase: 'api_call_started',
         },
-      })
+      }).catch(() => {})
       void traceCaptureService.recordEvent({
         sessionId: traceSessionId,
         callId: traceCallId,
@@ -325,7 +327,7 @@ export function createDumpPromptsFetch(
           ...encodingMetadata,
           url: traceRequestUrl,
         },
-      })
+      }).catch(() => {})
     }
 
     // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
@@ -359,7 +361,7 @@ export function createDumpPromptsFetch(
             phase: 'api_call_failed',
             ...(aborted ? { aborted: true } : {}),
           },
-        })
+        }).catch(() => {})
         void traceCaptureService.recordEvent({
           sessionId: traceSessionId,
           callId: traceCallId,
@@ -376,7 +378,7 @@ export function createDumpPromptsFetch(
             url: traceRequestUrl,
             ...(aborted ? { aborted: true } : {}),
           },
-        })
+        }).catch(() => {})
       }
       throw err
     }
@@ -521,7 +523,7 @@ export function createDumpPromptsFetch(
             responseCaptureFailed: true,
           },
         })
-      })()
+      })().catch(() => {})
     }
 
     // Save response async

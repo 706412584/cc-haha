@@ -25,6 +25,7 @@ describe('managed SQLite database paths', () => {
   test.skipIf(process.platform === 'win32').each([
     ['session', 'index-v1.sqlite', openLocalIndexDatabase],
     ['trace', 'trace-index-v1.sqlite', openTraceIndexDatabase],
+    ['custom trace', 'trace-storage-index-v1.sqlite', (options: { path: string, scope: string }) => openTraceIndexDatabase({ ...options, customStorage: true })],
     ['scheduled', 'scheduled-runs-v1.sqlite', openScheduledRunIndex],
     ['search', 'search-index-v1.sqlite', openSearchContentDatabase],
   ] as const)(

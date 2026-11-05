@@ -1081,14 +1081,14 @@ export function McpSettings() {
       return { ...current, server: optimistic }
     })
     try {
-      const updated = await reconnectServer(server, resolveOperationCwd(server), activeSessionId ?? undefined)
-      const updatedServer = updated.server
-      addToast({
-        type: updatedServer.status === 'connected' ? 'success' : 'warning',
-        message: updatedServer.status === 'connected'
-          ? t('settings.mcp.toast.reconnected', { name: server.name })
-          : updatedServer.statusDetail || updatedServer.statusLabel,
-      })
+      const { server: updatedServer, sessionSync } = await reconnectServer(server, resolveOperationCwd(server), activeSessionId ?? undefined)
+      if (updatedServer.status !== 'connected') {
+        addToast({ type: 'warning', message: updatedServer.statusDetail || updatedServer.statusLabel })
+      } else if (!sessionSync?.applied) {
+        addToast({ type: 'warning', message: syncWarningDetail(sessionSync) })
+      } else {
+        addToast({ type: 'success', message: t('settings.mcp.toast.reconnected', { name: server.name }) })
+      }
       if (view.type === 'edit') setView({ type: 'edit', server: updatedServer })
       if (view.type === 'details') setView({ type: 'details', server: updatedServer })
     } catch (error) {

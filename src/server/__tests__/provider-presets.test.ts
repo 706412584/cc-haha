@@ -218,10 +218,10 @@ describe('provider presets API', () => {
     expect(ollama?.authStrategy).toBe('auth_token_empty_api_key')
     expect(ollama?.defaultModels.main).toBe('qwen3.6:27b')
     expect(deepseek?.authStrategy).toBe('auth_token')
-    expect(deepseek?.defaultModels.main).toBe('deepseek-v4-pro[1m]')
-    expect(deepseek?.defaultModels.haiku).toBe('deepseek-v4-flash')
-    expect(deepseek?.defaultModels.sonnet).toBe('deepseek-v4-pro[1m]')
-    expect(deepseek?.defaultModels.opus).toBe('deepseek-v4-pro[1m]')
+    expect(deepseek?.defaultModels.main).toBe('deepseek-flash[1m]')
+    expect(deepseek?.defaultModels.haiku).toBe('deepseek-flash[1m]')
+    expect(deepseek?.defaultModels.sonnet).toBe('deepseek-flash[1m]')
+    expect(deepseek?.defaultModels.opus).toBe('deepseek-flash[1m]')
     expect(deepseek?.defaultEnv?.CC_HAHA_SEND_DISABLED_THINKING).toBeUndefined()
     expect(deepseek?.defaultEnv).toEqual({
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1000000',

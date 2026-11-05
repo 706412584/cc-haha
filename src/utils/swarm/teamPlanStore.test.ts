@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { approveTeamPlan, deleteTeamPlan, ensureTeamDraft, findTeamPlanForSession, readTeamPlan, replaceTeamPlan, resumeTeamPlan, stageMember, submitTeamPlan } from './teamPlanStore.js'
+import { approveTeamPlan, deleteTeamPlan, ensureTeamDraft, findTeamPlanForSession, listTeamPlansAwaitingReview, readTeamPlan, replaceTeamPlan, resumeTeamPlan, stageMember, submitTeamPlan } from './teamPlanStore.js'
 import { getTeamDir, writeTeamFileAsync } from './teamHelpers.js'
 import type { TeamPlanRecord } from '../../shared/teamPlan.js'
 let root: string
@@ -144,6 +144,17 @@ test('draft permits unfinished allocation but submission rejects extra unassigne
   expect((await readTeamPlan('review'))?.revision).toBe(unassigned.revision)
   const complete = await submitTeamPlan('review', identity(unassigned), { tasks: unassigned.tasks.map(task => ({ ...task, ownerId: 'worker' })) })
   expect(complete.state).toBe('review_pending')
+})
+
+test('only submitted plans of the current team incarnation wait for review, corrupt ones are skipped', async () => {
+  const plan = await draft()
+  expect(await listTeamPlansAwaitingReview()).toEqual([])
+  const submitted = await submitTeamPlan('review', identity(plan))
+  await writeTeamFileAsync('broken', { name: 'broken', createdAt: 1, leadAgentId: 'other', leadSessionId: 'other-session', members: [] })
+  await writeFile(join(getTeamDir('broken'), 'plan.json'), '{broken')
+  expect((await listTeamPlansAwaitingReview()).map(item => [item.sessionId, item.planId])).toEqual([['session', submitted.planId]])
+  await approveTeamPlan('review', identity(submitted), 'request', submitted)
+  expect(await listTeamPlansAwaitingReview()).toEqual([])
 })
 
 test('disband removes a settled plan but refuses to erase one that is still running', async () => {

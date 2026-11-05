@@ -9,6 +9,23 @@ type Check = {
 const rootDir = process.cwd()
 const checks: Check[] = [
   {
+    title: 'Issue router shared SQLite schema migration and consistent backup recovery',
+    command: ['bun', '--no-env-file', 'test', './scripts/issue-router/persistence.test.ts'],
+  },
+  {
+    title: 'Desktop scheduled tasks preserve legacy definitions and replay scheduled provenance',
+    command: ['bun', 'test', './src/server/services/scheduledTaskRuntime.test.ts', './src/server/services/sessionService.scheduledTask.test.ts'],
+  },
+  {
+    title: 'Desktop WebSearch settings migrate old fixtures for the DeepSeek backend',
+    command: ['bun', 'run', 'test', '--', '--run', 'src/stores/settingsStoreWebSearch.test.ts'],
+    cwd: 'desktop',
+  },
+  {
+    title: 'WebSearch legacy settings remain compatible with the DeepSeek backend',
+    command: ['bun', 'test', './src/tools/WebSearchTool/deepseekSearch.test.ts'],
+  },
+  {
     title: 'Data directory relocation metadata and legacy attachment aliases',
     command: ['bun', 'test', './src/utils/storageMigrationMetadata.test.ts', './src/utils/storageRelocations.test.ts'],
   },
@@ -42,11 +59,15 @@ const checks: Check[] = [
     command: ['bun', 'test', './src/server/services/connectorsPersistence.test.ts'],
   },
   {
+    title: 'Mobile push registration encryption and schema migration',
+    command: ['bun', 'test', './src/server/services/mobilePushService.test.ts', '--test-name-pattern', 'migration|extensions|encrypted'],
+  },
+  {
     title: 'Public browser device store migration',
     command: ['bun', 'test', './src/server/publicAccess.test.ts', '--test-name-pattern', 'old store migration'],
   },
   {
-    title: 'Private ngrok credential store migration',
+    title: 'Private remote access settings migrate from legacy tunnels to Cloudflare',
     command: ['bun', 'run', 'test', '--', '--run', 'electron/services/publicAccess.test.ts', '-t', 'migrat'],
     cwd: 'desktop',
   },

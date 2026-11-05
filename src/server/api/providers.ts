@@ -1,7 +1,7 @@
 /**
  * Providers REST API
  *
- * GET    /api/providers                  — list all saved providers + activeId
+ * GET    /api/providers                  — list all saved providers + activeId + providerOrder
  * GET    /api/providers/presets           — list available presets
  * GET    /api/providers/auth-status       — check whether any usable auth exists
  *                                           (?providerId=<id>: only that provider's own auth)
@@ -29,6 +29,7 @@ import {
   CreateProviderSchema,
   DEEPSEEK_ACCOUNT_PROVIDER_ID,
   ModelMappingSchema,
+  ProviderProxyConfigSchema,
   UpdateProviderSchema,
   TestProviderSchema,
   FetchModelsSchema,
@@ -53,6 +54,7 @@ const FetchProviderModelsSchema = z.object({
   baseUrl: z.string().min(1),
   apiKey: z.string().min(1),
   isFullUrl: z.boolean().optional(),
+  proxy: ProviderProxyConfigSchema.optional(),
   // `modelsUrl` is deliberately NOT accepted over HTTP. The service still
   // supports the override for internal callers, but exposing a free-form
   // endpoint on an authenticated route only widens the request surface — no
@@ -143,12 +145,12 @@ export async function handleProvidersApi(
     // /api/providers (no ID)
     if (!id) {
       if (req.method === 'GET') {
-        const { providers, activeId } = await providerService.listProviders()
+        const { providers, activeId, providerOrder } = await providerService.listProviders()
         // The built-in DeepSeek account is not a saved provider, but the model
         // picker shows its alias rows like one, from the mapping the user saved.
         const deepSeekAccountModels =
           await providerService.getOfficialProviderModels(DEEPSEEK_ACCOUNT_PROVIDER_ID)
-        return Response.json({ providers, activeId, deepSeekAccountModels })
+        return Response.json({ providers, activeId, providerOrder, deepSeekAccountModels })
       }
       if (req.method === 'POST') {
         return await handleCreate(req)

@@ -28,6 +28,9 @@ artifacts/
 # Downloaded CI coverage reports (gh run download)
 cov-*/
 
+# Shared local issue-router state (all worktrees use the primary checkout)
+/.issue-router/
+
 # Desktop build output
 desktop/dist/
 desktop/electron-dist/
