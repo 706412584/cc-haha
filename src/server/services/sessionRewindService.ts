@@ -2,10 +2,11 @@ import type { UUID } from 'crypto'
 import { constants } from 'node:fs'
 import { access, lstat, mkdir, open, realpath, unlink, type FileHandle } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
-import { createTwoFilesPatch, diffLines } from 'diff'
+import { createTwoFilesPatch } from 'diff'
 import { ApiError } from '../middleware/errorHandler.js'
 import { recordedCommandIsReadOnly } from '../../tools/BashTool/readOnlyValidation.js'
 import { applyEditToFile } from '../../tools/FileEditTool/utils.js'
+import { countLineChangeStats } from '../../utils/lineChangeStats.js'
 import {
   type FileHistorySnapshot,
   readBackupFileSafely,
@@ -517,13 +518,7 @@ function countTurnDiffStats(
   beforeContent: string | null,
   afterContent: string | null,
 ): { insertions: number; deletions: number } {
-  let insertions = 0
-  let deletions = 0
-  for (const change of diffLines(beforeContent ?? '', afterContent ?? '')) {
-    if (change.added) insertions += change.count || 0
-    if (change.removed) deletions += change.count || 0
-  }
-  return { insertions, deletions }
+  return countLineChangeStats(beforeContent ?? '', afterContent ?? '')
 }
 
 function getTurnMessageRange(

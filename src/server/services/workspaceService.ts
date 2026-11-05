@@ -4,10 +4,10 @@ import { constants as fsConstants, watch, type FSWatcher } from 'node:fs'
 import { execFile as execFileCallback } from 'node:child_process'
 import * as path from 'node:path'
 import { promisify } from 'node:util'
-import { diffLines } from 'diff'
 import type { MessageEntry } from './sessionService.js'
 import type { FileHistorySnapshot } from '../../utils/fileHistory.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
+import { countLineChangeStats } from '../../utils/lineChangeStats.js'
 import { isWithinRegisteredFilesystemRoot } from './filesystemAccessRoots.js'
 import {
   changedWorkspaceWatchEntries,
@@ -1311,13 +1311,8 @@ export class WorkspaceService {
   }
 
   private countDiffStats(oldContent: string, newContent: string): { additions: number; deletions: number } {
-    let additions = 0
-    let deletions = 0
-    for (const change of diffLines(oldContent, newContent)) {
-      if (change.added) additions += change.count || 0
-      if (change.removed) deletions += change.count || 0
-    }
-    return { additions, deletions }
+    const { insertions, deletions } = countLineChangeStats(oldContent, newContent)
+    return { additions: insertions, deletions }
   }
 
   private extractSessionChangesFromTool(
