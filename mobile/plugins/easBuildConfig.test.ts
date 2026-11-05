@@ -1,9 +1,20 @@
 import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import appConfig, { withEasProject } from '../app.config'
+import appConfig, { withAndroidPackage, withEasProject } from '../app.config'
 import app from '../app.json'
 import eas from '../eas.json'
+
+test('fork builds can replace the Android package without dropping other Android config', () => {
+  const config = { android: { package: 'app.cchaha.mobile', permissions: ['CAMERA'] } }
+  expect(withAndroidPackage(config, undefined)).toBe(config)
+  expect(withAndroidPackage(config, ' ')).toBe(config)
+  expect(withAndroidPackage(config, 'io.github.x706412584.cchaha').android).toEqual({
+    package: 'io.github.x706412584.cchaha',
+    permissions: ['CAMERA'],
+  })
+  expect(() => withAndroidPackage(config, 'Not A Package')).toThrow('包名')
+})
 
 test('existing app config remains valid before EAS association', () => {
   const legacy = { name: 'fixture', slug: 'fixture', extra: { feature: true } }

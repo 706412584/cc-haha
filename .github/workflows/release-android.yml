@@ -1,0 +1,154 @@
+name: Release Android
+
+# Fork-owned Android delivery: a Gradle release build signed with the fork's own
+# keystore, attached to an existing desktop Release. Upstream ships its APK through
+# EAS under the upstream Expo account and signing key, which the fork cannot use.
+
+on:
+  # TEMP: branch smoke trigger, removed before merge
+  push:
+    branches: [ci/android-apk]
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      ref:
+        description: 'Commit to build (defaults to the release tag; drafts have no tag yet)'
+        required: false
+        type: string
+      upload:
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: true
+      ANDROID_KEYSTORE_PASSWORD:
+        required: true
+      ANDROID_KEY_ALIAS:
+        required: true
+      ANDROID_KEY_PASSWORD:
+        required: true
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release (vX.Y.Z) to attach the APK to'
+        required: true
+        type: string
+      ref:
+        description: 'Commit or branch to build (empty = the release tag)'
+        required: false
+        type: string
+      upload:
+        description: 'Attach the APK to the release (off = keep it as a workflow artifact only)'
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-android-${{ inputs.release_tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag || 'v0.8.9' }}
+      CC_HAHA_ANDROID_PACKAGE: io.github.x706412584.cchaha
+      EXPO_NO_DOTENV: '1'
+    steps:
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo '::error::Expected a vX.Y.Z release tag'; exit 1; }
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || inputs.ref || format('refs/tags/{0}', inputs.release_tag) }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: 17
+
+      - name: Install mobile dependencies
+        working-directory: mobile
+        run: bun install --frozen-lockfile
+
+      - name: Generate the Android project
+        working-directory: mobile
+        run: bunx expo prebuild --platform android --no-install --clean
+
+      - name: Restore the release keystore
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      # The injected signing properties override the debug signingConfig that the
+      # Expo template assigns to release builds.
+      - name: Build the signed release APK
+        working-directory: mobile/android
+        shell: bash
+        env:
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          ./gradlew --no-daemon assembleRelease \
+            -PreactNativeArchitectures=armeabi-v7a,arm64-v8a \
+            -Pandroid.injected.signing.store.file="$RUNNER_TEMP/release.jks" \
+            -Pandroid.injected.signing.store.password="$STORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+
+      - name: Verify package and signature
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=mobile/android/app/build/outputs/apk/release/app-release.apk
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          certs=$("$tools/apksigner" verify --print-certs "$source")
+          echo "$certs" | grep -E 'Signer #1 certificate (DN|SHA-256)'
+          if grep -q 'CN=Android Debug' <<<"$certs"; then
+            echo '::error::Refusing to publish an APK signed with the Android debug key'
+            exit 1
+          fi
+          package=$("$tools/aapt2" dump packagename "$source")
+          [ "$package" = "$CC_HAHA_ANDROID_PACKAGE" ] || { echo "::error::Unexpected package $package"; exit 1; }
+          version=$(node -p "require('./mobile/package.json').version")
+          asset="cc-haha-mobile-${version}-android.apk"
+          mkdir -p dist && cp "$source" "dist/$asset"
+          (cd dist && sha256sum "$asset" | tee "$asset.sha256")
+
+      - name: Keep the APK as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: dist/
+          retention-days: 14
+
+      - name: Attach the APK to the release
+        if: inputs.upload
+        shell: bash
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"

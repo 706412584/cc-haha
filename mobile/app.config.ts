@@ -59,4 +59,21 @@ export function withEasProject(
   }
 }
 
-export default ({ config }: ConfigContext) => withGoogleServicesFile(withEasProject(config))
+/**
+ * Fork builds sign with their own key, so they also need their own package:
+ * Android refuses to update an app whose signature changed under the same id.
+ */
+export function withAndroidPackage(
+  config: Partial<ExpoConfig>,
+  androidPackage = process.env.CC_HAHA_ANDROID_PACKAGE
+): Partial<ExpoConfig> {
+  const value = androidPackage?.trim()
+  if (!value) return config
+  if (!/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/.test(value)) {
+    throw new Error('CC_HAHA_ANDROID_PACKAGE 必须是合法的 Android 包名')
+  }
+  return { ...config, android: { ...config.android, package: value } }
+}
+
+export default ({ config }: ConfigContext) =>
+  withGoogleServicesFile(withAndroidPackage(withEasProject(config)))
