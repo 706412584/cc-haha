@@ -373,7 +373,7 @@ export function versionLabel(version: string | undefined, build?: string | null)
   return build ? `${version} (${build})` : version
 }
 
-export const repoUrl = 'https://github.com/NanmiCoder/cc-haha'
+export const repoUrl = 'https://github.com/706412584/cc-haha'
 export const aboutLinks = {
   guide: repoUrl,
   issues: `${repoUrl}/issues`,

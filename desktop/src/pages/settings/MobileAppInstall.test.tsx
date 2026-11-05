@@ -23,7 +23,7 @@ it('sends Android users to the latest GitHub release that carries the APK', () =
   expect(screen.queryByText('Not released')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: 'Download from GitHub' }))
   expect(mocks.open).toHaveBeenCalledTimes(1)
-  expect(mocks.open).toHaveBeenCalledWith('https://github.com/NanmiCoder/cc-haha/releases/latest')
+  expect(mocks.open).toHaveBeenCalledWith('https://github.com/706412584/cc-haha/releases/latest')
   expect(container.querySelector('a, img')).toBeNull()
 })
 

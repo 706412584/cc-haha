@@ -13,7 +13,7 @@ order: 9
 
 | 手机上的打开方式 | 当前状态 | 如何使用 |
 |---|---|---|
-| cc-haha Android App | 已发布，正式签名 APK 随每个桌面端版本发布 | 在 [GitHub Releases](https://github.com/NanmiCoder/cc-haha/releases/latest) 下载 `cc-haha-mobile-*.apk` 安装 |
+| cc-haha Android App | 已发布，正式签名 APK 随每个桌面端版本发布 | 在 [GitHub Releases](https://github.com/706412584/cc-haha/releases/latest) 下载 `cc-haha-mobile-*.apk` 安装 |
 | cc-haha iPhone / iPad App | TestFlight 公开测试 | 先在 App Store 安装 TestFlight，再打开[公开链接](https://testflight.apple.com/join/Nd49JrWZ)加入 |
 | 手机浏览器（H5） | 现在可用 | 点击「先用浏览器连接」，按下方步骤开启连接并扫码 |
 

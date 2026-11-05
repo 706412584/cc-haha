@@ -45,7 +45,7 @@ cc-haha is a **desktop Claude Code workspace** for macOS, Windows, and Linux: mu
 
 <p align="center">
   <a href="https://github.com/NanmiCoder/cc-haha/releases"><img src="https://img.shields.io/badge/⬇_Download_Desktop-macOS_%7C_Windows_%7C_Linux-FF7A00?style=for-the-badge" alt="Download Desktop"></a>
-  <a href="https://github.com/NanmiCoder/cc-haha/releases/latest"><img src="https://img.shields.io/badge/Android-APK-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Download the Android APK"></a>
+  <a href="https://github.com/706412584/cc-haha/releases/latest"><img src="https://img.shields.io/badge/Android-APK-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Download the Android APK"></a>
   <a href="https://testflight.apple.com/join/Nd49JrWZ"><img src="https://img.shields.io/badge/iOS-TestFlight-1F1A17?style=for-the-badge&logo=apple&logoColor=white" alt="Install the iOS app with TestFlight"></a>
 </p>
 
