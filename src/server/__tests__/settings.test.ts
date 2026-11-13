@@ -17,6 +17,8 @@ import { clearDeepSeekAccountModelCatalogCache } from '../../services/deepseekAu
 import { hahaOAuthService } from '../services/hahaOAuthService.js'
 import * as claudeModelCatalog from '../services/claudeModelCatalog.js'
 import { hahaOpenAIOAuthService } from '../services/hahaOpenAIOAuthService.js'
+import { OPENAI_CODEX_CLIENT_VERSION } from '../../services/openaiAuth/client.js'
+import { OPENAI_CODEX_RELEASE_SOURCES } from '../../services/openaiAuth/clientVersion.js'
 import {
   clearOpenAICodexModelCatalogCache,
 } from '../../services/openaiAuth/modelCatalog.js'
@@ -295,6 +297,7 @@ describe('SettingsService', () => {
     )
 
     const svc = new SettingsService()
+    await svc.updateUserSettings({ desktopTerminal: { fontFamily: 'MesloLGS NF', fontSize: 18 } })
     await svc.updateUserSettings({
       desktopTerminal: {
         startupShell: 'pwsh',
@@ -307,12 +310,16 @@ describe('SettingsService', () => {
         startupShell: 'pwsh',
         customShellPath: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
         legacyEncoding: 'utf-8',
+        fontFamily: 'MesloLGS NF',
+        fontSize: 18,
         futureProfile: {
           id: 'work',
           inheritEnvironment: false,
         },
       },
     })
+    expect(JSON.parse(await fs.readFile(path.join(tmpDir, 'settings.json'), 'utf-8')).desktopTerminal)
+      .toMatchObject({ fontFamily: 'MesloLGS NF', fontSize: 18, startupShell: 'pwsh', legacyEncoding: 'utf-8' })
   })
 
   it('should not let cached CLI settings overwrite desktop settings updates', async () => {
@@ -1018,6 +1025,14 @@ describe('Models API', () => {
     const body = await res.json()
     expect(body.models).toEqual([
       {
+        id: 'claude-fable-5-2',
+        name: 'Fable 5.2',
+        description: 'Highest capability for long-running tasks',
+        context: '1m',
+        defaultReasoningEffort: 'medium',
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      {
         id: 'claude-fable-5-1',
         name: 'Fable 5.1',
         description: 'Highest capability for long-running tasks',
@@ -1317,6 +1332,7 @@ describe('Models API', () => {
     )
     const listBody = await listResponse.json()
     expect(listBody.models.map((model: { id: string }) => model.id)).toEqual([
+      'claude-fable-5-2',
       'claude-fable-5-1',
       'claude-fable-5',
       'claude-opus-5-5',
@@ -1494,6 +1510,7 @@ describe('Models API', () => {
       'gpt-6-sol',
       'gpt-6-luna',
       'gpt-6.1-sol',
+      'gpt-6.1-terra',
       'gpt-5.6-sol',
       'gpt-5.6-terra',
       'gpt-5.6-luna',
@@ -1509,7 +1526,8 @@ describe('Models API', () => {
     })
     expect(body.models.find(model => model.id === 'gpt-6.1-sol')).toMatchObject({
       id: 'gpt-6.1-sol',
-      context: '258400',
+      // Codex's default for GPT-6.1 Sol is 500K, at 95%.
+      context: '475000',
       defaultReasoningEffort: 'low',
       supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     })
@@ -1533,7 +1551,10 @@ describe('Models API', () => {
     const originalFetch = globalThis.fetch
     const requests: Headers[] = []
     clearOpenAICodexModelCatalogCache()
-    globalThis.fetch = (async (_input, init) => {
+    globalThis.fetch = (async (input, init) => {
+      if ((OPENAI_CODEX_RELEASE_SOURCES as readonly string[]).includes(String(input))) {
+        return Response.json({ version: OPENAI_CODEX_CLIENT_VERSION })
+      }
       requests.push(new Headers(init?.headers))
       return Response.json({ models: [{
         slug: 'gpt-desktop-account-only',
@@ -1879,11 +1900,19 @@ describe('Model Options', () => {
     expect(getModelOptions().find(option => option.value === 'opus[1m]')?.description)
       .toContain('Opus 5')
 
+    // The Fable alias now resolves to 5.2, so an older pinned Fable is offered the upgrade.
     process.env.ANTHROPIC_MODEL = 'claude-fable-5'
     expect(getModelOptions()).toContainEqual(expect.objectContaining({
       value: 'claude-fable-5',
       label: 'Fable 5',
-      description: 'claude-fable-5',
+      description: 'Newer version available · select Fable for Fable 5.2',
+    }))
+
+    process.env.ANTHROPIC_MODEL = 'claude-fable-5-2'
+    expect(getModelOptions()).toContainEqual(expect.objectContaining({
+      value: 'claude-fable-5-2',
+      label: 'Fable 5.2',
+      description: 'claude-fable-5-2',
     }))
   })
 

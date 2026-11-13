@@ -1,4 +1,5 @@
 import { handleSideChatsRoute } from './sideChats.js'
+import { emitSessionTurnEvent } from '../services/sessionTurnEvents.js'
 /**
  * Session REST API Routes
  *
@@ -27,6 +28,7 @@ import { handleSideChatsRoute } from './sideChats.js'
  *   POST   /api/sessions/batch-delete — 批量删除会话
  *   DELETE /api/sessions/:id        — 删除会话
  *   PATCH  /api/sessions/:id        — 重命名会话
+ *   PATCH  /api/sessions/:id/archive — 归档或恢复会话（保留全部内容）
  */
 
 import * as path from 'node:path'
@@ -35,6 +37,8 @@ import { sessionService } from '../services/sessionService.js'
 import { loadRenderedToolImage } from '../services/toolImageMedia.js'
 import { projectSessionBackgroundActivity, readSessionBackgroundTaskOutputFromTranscript } from '../services/sessionBackgroundActivity.js'
 import { getMobileSessionActivity } from '../services/mobileSessionActivityRuntime.js'
+import { getPowerActivitySnapshot } from '../services/powerActivityRuntime.js'
+import { handlePowerActivityLease } from '../services/powerActivityLease.js'
 import { conversationService } from '../services/conversationService.js'
 import { endTeamsForParent } from '../services/teamPlanRuntime.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
@@ -44,6 +48,8 @@ import {
   getSlashCommands,
   isRuntimeEffortSupported,
   listLiveSessionActivity,
+  assertSessionCanArchive,
+  runSessionRewind,
 } from '../ws/handler.js'
 import { sessionActivityCoordinator } from '../services/sessionActivityCoordinator.js'
 import { listSkillSlashCommands, type SkillSlashCommand } from './skills.js'
@@ -184,6 +190,12 @@ export async function handleSessionsApi(
       return await batchDeleteSessions(req)
     }
 
+    if (sessionId === 'power-activity-lease') return handlePowerActivityLease(req)
+    if (sessionId === 'power-activity') {
+      if (req.method !== 'GET') return Response.json({ error: 'METHOD_NOT_ALLOWED' }, { status: 405 })
+      return Response.json(await getPowerActivitySnapshot(), { headers: { 'Cache-Control': 'no-store' } })
+    }
+
     // Special collection route: /api/sessions/live-status
     if (sessionId === 'live-status' || sessionId === 'mobile-status') {
       if (req.method !== 'GET') {
@@ -214,6 +226,7 @@ export async function handleSessionsApi(
       if (limit !== null && !/^\d+$/.test(limit)) throw ApiError.badRequest('Invalid limit parameter')
       return Response.json(await sessionService.listProjectHistory({
         projectRoot: url.searchParams.get('projectRoot') ?? '',
+        archived: parseArchivedFilter(url),
         ...(limit !== null ? { limit: Number(limit) } : {}),
         ...(url.searchParams.has('cursor') ? { cursor: url.searchParams.get('cursor')! } : {}),
         ...(url.searchParams.has('beforeModifiedAt') ? { beforeModifiedAt: url.searchParams.get('beforeModifiedAt')! } : {}),
@@ -243,6 +256,19 @@ export async function handleSessionsApi(
     if (subResource === 'provider-transition') {
       if (req.method !== 'POST') return methodNotAllowed(req.method)
       return await createProviderTransitionSession(req, sessionId)
+    }
+
+    if (subResource === 'archive') {
+      if (segments.length !== 4) throw ApiError.notFound('Archive route not found')
+      if (req.method !== 'PATCH') return Response.json({ error: 'METHOD_NOT_ALLOWED' }, { status: 405 })
+      let body: unknown
+      try { body = await req.json() } catch { throw ApiError.badRequest('Invalid JSON body') }
+      if (!body || typeof body !== 'object' || Array.isArray(body) || typeof (body as { archived?: unknown }).archived !== 'boolean') {
+        throw ApiError.badRequest('archived (boolean) is required in request body')
+      }
+      const archived = (body as { archived: boolean }).archived
+      await sessionService.setSessionArchived(sessionId, archived, () => assertSessionCanArchive(sessionId))
+      return Response.json({ success: true, archived })
     }
 
     if (subResource === 'summary') {
@@ -575,6 +601,7 @@ async function syncSessionIndexes(): Promise<Response> {
 }
 
 async function listSessions(req: Request, url: URL): Promise<Response> {
+  const archived = parseArchivedFilter(url)
   const project = url.searchParams.get('project') || undefined
   const view = url.searchParams.get('view')
   const requestedLimit = parseInt(url.searchParams.get('limit') || '20', 10)
@@ -598,6 +625,7 @@ async function listSessions(req: Request, url: URL): Promise<Response> {
     }
     return Response.json({
       ...await sessionService.listProjectPreviews(perProjectLimit),
+      archivedSessionIds: sessionService.listArchivedSessionIds(),
       index: localIndexCoordinator.getPublicStatus(),
     })
   }
@@ -606,6 +634,7 @@ async function listSessions(req: Request, url: URL): Promise<Response> {
     ...(petAccess ? {} : { project }),
     limit,
     offset: petAccess ? 0 : offset,
+    archived: petAccess ? false : archived,
   })
   if (petAccess) {
     return Response.json({
@@ -626,6 +655,12 @@ async function listSessions(req: Request, url: URL): Promise<Response> {
     ...result,
     index: localIndexCoordinator.getPublicStatus(),
   })
+}
+
+function parseArchivedFilter(url: URL): boolean {
+  const value = url.searchParams.get('archived')
+  if (value !== null && value !== 'true' && value !== 'false') throw ApiError.badRequest('Invalid archived parameter')
+  return value === 'true'
 }
 
 async function getSession(sessionId: string): Promise<Response> {
@@ -1337,9 +1372,6 @@ async function getSessionRepositoryContext(url: URL): Promise<Response> {
   }
 
   const context = await getRepositoryContext(workDir)
-  registerFilesystemAccessRoot(workDir)
-  registerFilesystemAccessRoot(context.workDir)
-  registerFilesystemAccessRoot(context.repoRoot)
   return Response.json(context)
 }
 
@@ -1509,6 +1541,7 @@ async function deleteSession(sessionId: string): Promise<Response> {
     throw error
   }
   closeSessionConnection(sessionId, 'session deleted')
+  emitSessionTurnEvent({ type: 'deleted', sessionId })
   cleanupAdapterSessionMappings(sessionId)
   recentProjectsCache = null
   // A deleted lead ends its reviewed team for good; Stop and lead restarts only pause it.
@@ -1534,6 +1567,7 @@ async function batchDeleteSessions(req: Request): Promise<Response> {
 
   for (const sessionId of result.successes) {
     closeSessionConnection(sessionId, 'session deleted')
+    emitSessionTurnEvent({ type: 'deleted', sessionId })
     cleanupAdapterSessionMappings(sessionId)
     void endTeamsForParent(sessionId).catch(error => console.error(`[Sessions] Failed to end the deleted session's team: ${error}`))
   }
@@ -1628,29 +1662,44 @@ async function getSessionSlashCommands(sessionId: string): Promise<Response> {
 }
 
 async function getSessionInspection(req: Request, sessionId: string, url: URL): Promise<Response> {
-  const includeContext = url.searchParams.get('includeContext') !== '0'
+  const statusOnly = url.searchParams.get('statusOnly') === '1'
+  const includeContext = !statusOnly && url.searchParams.get('includeContext') !== '0'
   const contextOnly = includeContext && url.searchParams.get('contextOnly') === '1'
   // Lightweight polling mode for the context panel: one `get_session_usage` control and
   // nothing else. The full inspection also scans the skills directory and re-reads the whole
   // transcript to cross-check usage, which is far too much work to repeat every few seconds.
-  const usageOnly = !includeContext && url.searchParams.get('usageOnly') === '1'
+  const usageOnly = !statusOnly && !includeContext && url.searchParams.get('usageOnly') === '1'
   let transcriptSnapshot: Awaited<ReturnType<typeof sessionService.getInspectionTranscriptSnapshot>> | undefined
+  let transcriptLimit: string | undefined
   const getTranscriptSnapshot = async () => {
     if (transcriptSnapshot !== undefined) return transcriptSnapshot
-    transcriptSnapshot = await sessionService.getInspectionTranscriptSnapshot(sessionId)
+    try {
+      transcriptSnapshot = await sessionService.getInspectionTranscriptSnapshot(sessionId)
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.code !== 'HISTORY_INSPECTION_LIMIT') throw error
+      // Keep live data and launch metadata available when historical totals cannot be verified.
+      transcriptLimit = error.message
+      transcriptSnapshot = null
+    }
     return transcriptSnapshot
   }
 
   const active = conversationService.hasSession(sessionId)
-  const workDir =
-    conversationService.getSessionWorkDir(sessionId) ||
-    (await getTranscriptSnapshot())?.launchInfo.workDir
+  const liveWorkDir = conversationService.getSessionWorkDir(sessionId)
+  const needsLaunchInfo = !active || !liveWorkDir
+  const persistedStatus = statusOnly && needsLaunchInfo ? await sessionService.getSessionStatusMetadata(sessionId) : null
+  const launchInfo = statusOnly
+    ? persistedStatus?.launchInfo
+    : needsLaunchInfo
+      ? (await getTranscriptSnapshot())?.launchInfo
+        ?? (transcriptLimit ? await sessionService.getSessionLaunchInfo(sessionId) : null)
+      : null
+  const workDir = liveWorkDir || launchInfo?.workDir
 
   if (!workDir) {
     throw ApiError.notFound(`Session not found: ${sessionId}`)
   }
 
-  const launchInfo = !active ? (await getTranscriptSnapshot())?.launchInfo ?? null : null
   const permissionMode = active
     ? conversationService.getSessionPermissionMode(sessionId)
     : launchInfo?.permissionMode ?? 'default'
@@ -1658,9 +1707,21 @@ async function getSessionInspection(req: Request, sessionId: string, url: URL): 
     [...conversationService.getRecentSdkMessages(sessionId)]
     .reverse()
     .find((message) => message?.type === 'system' && message.subtype === 'init')
-  const transcriptMetadata = !usageOnly && (!active || !initMessage)
-    ? (await getTranscriptSnapshot())?.metadata ?? null
-    : null
+  const transcriptMetadata = statusOnly
+    ? persistedStatus?.transcriptMetadata
+    : !usageOnly && (!active || !initMessage)
+      ? (await getTranscriptSnapshot())?.metadata
+      : undefined
+  const liveRuntime = statusOnly && active ? conversationService.getSessionRuntimeSelection(sessionId) : undefined
+  const model = typeof initMessage?.model === 'string'
+    ? initMessage.model
+    : transcriptMetadata?.model ?? (statusOnly ? liveRuntime?.modelId ?? launchInfo?.runtimeModelId : undefined)
+  const contextWindow = statusOnly && model
+    ? await sessionService.getSessionModelContextWindow(sessionId, model, launchInfo ?? {
+      runtimeProviderId: liveRuntime?.providerId,
+      runtimeModelId: liveRuntime?.modelId,
+    })
+    : undefined
   const cachedSlashCommands = getSlashCommands(sessionId)
   const hasCliSlashCommands = cachedSlashCommands.length > 0
   // `listSkillSlashCommands` walks every skill directory on disk with no cache. The usage
@@ -1677,6 +1738,7 @@ async function getSessionInspection(req: Request, sessionId: string, url: URL): 
     ? initMessage.slash_commands.length
     : fallbackSlashCommands.length
 
+  const errors: Record<string, string> = {}
   const response: Record<string, unknown> = {
     active,
     status: {
@@ -1685,7 +1747,8 @@ async function getSessionInspection(req: Request, sessionId: string, url: URL): 
       permissionMode,
       version: typeof initMessage?.claude_code_version === 'string' ? initMessage.claude_code_version : transcriptMetadata?.version,
       cwd: typeof initMessage?.cwd === 'string' ? initMessage.cwd : transcriptMetadata?.cwd ?? workDir,
-      model: typeof initMessage?.model === 'string' ? initMessage.model : transcriptMetadata?.model,
+      model,
+      contextWindow,
       apiKeySource: typeof initMessage?.apiKeySource === 'string' ? initMessage.apiKeySource : undefined,
       outputStyle: typeof initMessage?.output_style === 'string' ? initMessage.output_style : undefined,
       tools: Array.isArray(initMessage?.tools) ? initMessage.tools : [],
@@ -1693,10 +1756,11 @@ async function getSessionInspection(req: Request, sessionId: string, url: URL): 
       slashCommandCount,
       skillCount: Array.isArray(initMessage?.skills) ? initMessage.skills.length : 0,
     },
-    errors: {},
+    errors,
   }
 
   if (!active) {
+    if (statusOnly) return Response.json(response)
     const snapshot = await getTranscriptSnapshot()
     const transcriptUsage = snapshot?.usage ?? null
     const transcriptContextEstimate = snapshot?.contextEstimate ?? null
@@ -1705,15 +1769,13 @@ async function getSessionInspection(req: Request, sessionId: string, url: URL): 
     }
     if (transcriptUsage) {
       response.usage = transcriptUsage
+    } else {
+      errors.usage = transcriptLimit ?? 'CLI session is not running'
     }
-    response.errors = {
-      ...(transcriptUsage ? {} : { usage: 'CLI session is not running' }),
-      ...(includeContext ? { context: 'CLI session is not running' } : {}),
-    }
+    if (includeContext) errors.context = transcriptLimit ?? 'CLI session is not running'
     return Response.json(response)
   }
 
-  const errors: Record<string, string> = {}
   if (usageOnly) {
     // No `mcp_status`, no skills scan, and deliberately no transcript cross-check: the
     // transcript re-read is what made this endpoint too expensive to poll. The CLI's own
@@ -1732,7 +1794,6 @@ async function getSessionInspection(req: Request, sessionId: string, url: URL): 
       throwIfRequestAborted(req)
       errors.usage = error instanceof Error ? error.message : String(error)
     }
-    response.errors = errors
     return Response.json(response)
   }
 
@@ -1748,16 +1809,12 @@ async function getSessionInspection(req: Request, sessionId: string, url: URL): 
       throwIfRequestAborted(req)
       errors.context = error instanceof Error ? error.message : String(error)
     }
-    if (!response.context) {
-      const transcriptContextEstimate = (await getTranscriptSnapshot())?.contextEstimate ?? null
-      if (transcriptContextEstimate) {
-        response.contextEstimate = transcriptContextEstimate
-      }
-    }
   } else {
     const basicControlTimeoutMs = includeContext ? 10_000 : 4_000
     const [usageResult, contextResult, mcpResult] = await Promise.allSettled([
-      conversationService.requestControl(sessionId, { subtype: 'get_session_usage' }, basicControlTimeoutMs, req.signal),
+      statusOnly
+        ? Promise.resolve(null)
+        : conversationService.requestControl(sessionId, { subtype: 'get_session_usage' }, basicControlTimeoutMs, req.signal),
       includeContext
         ? conversationService.requestControl(
             sessionId,
@@ -1770,32 +1827,24 @@ async function getSessionInspection(req: Request, sessionId: string, url: URL): 
     ])
     throwIfRequestAborted(req)
 
-    if (usageResult.status === 'fulfilled') {
+    if (!statusOnly) {
       const transcriptUsage = (await getTranscriptSnapshot())?.usage ?? null
-      response.usage = chooseRicherUsage(
-        { ...usageResult.value, source: 'current_process' },
-        transcriptUsage,
-      )
-    } else {
-      const transcriptUsage = (await getTranscriptSnapshot())?.usage ?? null
-      if (transcriptUsage) {
+      if (usageResult.status === 'fulfilled') {
+        response.usage = chooseRicherUsage(
+          { ...usageResult.value, source: 'current_process' },
+          transcriptUsage,
+        )
+      } else if (transcriptUsage) {
         response.usage = transcriptUsage
       } else {
-        errors.usage = usageResult.reason instanceof Error ? usageResult.reason.message : String(usageResult.reason)
+        errors.usage = transcriptLimit ?? (usageResult.reason instanceof Error ? usageResult.reason.message : String(usageResult.reason))
       }
     }
 
-    if (!includeContext) {
-      // Context can be expensive on large live sessions. The desktop UI loads it
-      // separately when the context tab is actually selected.
-    } else if (contextResult.status === 'fulfilled' && contextResult.value) {
+    if (contextResult.status === 'fulfilled' && contextResult.value) {
       response.context = contextResult.value
-    } else {
+    } else if (contextResult.status === 'rejected') {
       errors.context = contextResult.reason instanceof Error ? contextResult.reason.message : String(contextResult.reason)
-      const transcriptContextEstimate = (await getTranscriptSnapshot())?.contextEstimate ?? null
-      if (transcriptContextEstimate) {
-        response.contextEstimate = transcriptContextEstimate
-      }
     }
 
     if (mcpResult.status === 'fulfilled' && response.status && typeof response.status === 'object') {
@@ -1806,7 +1855,11 @@ async function getSessionInspection(req: Request, sessionId: string, url: URL): 
     }
   }
 
-  response.errors = errors
+  if (includeContext && !response.context) {
+    const estimate = (await getTranscriptSnapshot())?.contextEstimate
+    if (estimate) response.contextEstimate = estimate
+    else if (transcriptLimit) errors.context = transcriptLimit
+  }
   return Response.json(response)
 }
 
@@ -2004,7 +2057,7 @@ async function rewindSession(req: Request, sessionId: string): Promise<Response>
   const mode = parseSessionRewindMode(body.mode)
   const result = body.dryRun
     ? await previewSessionRewind(sessionId, body)
-    : await executeSessionRewind(sessionId, body, mode)
+    : await runSessionRewind(sessionId, stopRuntime => executeSessionRewind(sessionId, body, mode, stopRuntime))
 
   return Response.json(result)
 }

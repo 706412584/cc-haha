@@ -3,11 +3,12 @@ import { Platform, View } from 'react-native'
 import { getStringAsync } from 'expo-clipboard'
 import { randomUUID } from 'expo-crypto'
 import { StatusBar } from 'expo-status-bar'
-import { router, useFocusEffect, useLocalSearchParams } from 'expo-router'
+import { Redirect, router, useFocusEffect, useLocalSearchParams } from 'expo-router'
 import { createApiClient } from '../state/api'
 import { connectHost, pairingMessage } from '../core/connectHost'
 import { useApp } from '../state/AppContext'
 import { goBack } from '../ui/kit'
+import { goHome } from '../ui/navigation'
 import { errorText, useTheme } from '../ui/theme'
 import { Scanner } from '../ui/connect/Scanner'
 import { ManualSheet } from '../ui/connect/ManualSheet'
@@ -23,12 +24,18 @@ import {
   type ConnectMode,
   type ConnectStage,
 } from '../ui/connect/connectForm'
+import { isH5 } from '../state/h5'
+
+/** 连接其他电脑只属于原生 App；网页版只连接打开它的这台电脑，直接回首页。 */
+export default function ConnectRoute() {
+  return isH5 ? <Redirect href="/" /> : <Connect />
+}
 
 /**
  * 连接电脑：扫码页 → 手动连接面板 →（公网）等电脑批准页。
  * 凭据只有在真实验证 / 批准之后才写入 SecureStore。
  */
-export default function Connect() {
+function Connect() {
   const { add, registry } = useApp()
   const { dark } = useTheme()
   const params = useLocalSearchParams<{ mode?: string }>()
@@ -166,7 +173,7 @@ export default function Connect() {
       if (!controller.signal.aborted && attempt.current === controller) {
         setAddress('')
         setToken('')
-        router.replace('/')
+        goHome()
       }
     } catch (e) {
       if (controller.signal.aborted) return

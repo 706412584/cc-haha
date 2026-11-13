@@ -8,7 +8,7 @@
         "projectId": "4e75f835-1b64-463c-a196-cc181b4c83ec"
       }
     },
-    "version": "0.1.2",
+    "version": "0.1.4",
     "orientation": "portrait",
     "scheme": "cchaha",
     "userInterfaceStyle": "automatic",
@@ -23,7 +23,6 @@
       "infoPlist": {
         "NSLocalNetworkUsageDescription": "连接同一局域网中运行 cc-haha 的电脑。",
         "NSAppTransportSecurity": {
-          "NSAllowsLocalNetworking": true,
           "NSAllowsArbitraryLoads": true
         },
         "ITSAppUsesNonExemptEncryption": false
@@ -58,10 +57,12 @@
         "expo-build-properties",
         {
           "android": {
-            "usesCleartextTraffic": true
+            "usesCleartextTraffic": true,
+            "extraProguardRules": "-keep class org.webrtc.** { *; }\n-dontwarn org.webrtc.**"
           }
         }
       ],
+      "./plugins/withWebRtcDataChannels",
       "expo-font",
       "./plugins/withPinnedWebSockets",
       "expo-sharing",

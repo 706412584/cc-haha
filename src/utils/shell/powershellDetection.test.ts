@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { win32 } from 'node:path'
 import {
   findExecutables,
   resolveGitBashPathFromGitExecutables,
@@ -160,7 +161,14 @@ describe('Windows shell discovery', () => {
       path => path,
     )).toBeNull()
   })
+})
 
+const windowsPowerShellPath = win32.join(
+  process.env.SystemRoot ?? 'C:\\Windows',
+  'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe',
+)
+
+describe('PowerShell detection override', () => {
   test('accepts pwsh and powershell executable paths', () => {
     expect(
       isPowerShellExecutablePath('C:\\Program Files\\PowerShell\\7\\pwsh.exe'),
@@ -213,16 +221,19 @@ describe('Windows shell discovery', () => {
       env: { SystemRoot: 'C:\\Windows' },
       getPlatform: () => 'windows',
       probePath: async path =>
-        path ===
-        'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
-          ? path
-          : null,
+        path === windowsPowerShellPath ? path : null,
       which: async () => null,
     })
 
-    expect(resolved).toBe(
-      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
-    )
+    expect(resolved).toBe(windowsPowerShellPath)
+  })
+
+  test('discovers Windows PowerShell when it is absent from PATH', async () => {
+    await expect(findPowerShell({
+      getPlatform: () => 'windows',
+      probePath: async path => path === windowsPowerShellPath ? path : null,
+      which: async () => null,
+    })).resolves.toBe(windowsPowerShellPath)
   })
 
   test('uses the configured Windows system root for the fallback path', async () => {

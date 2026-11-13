@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { MarketplaceCatalog, MarketplaceRemoteSource, McpReconnectResult, McpServerRecord, McpToggleResult, McpToolToggleResult, McpToolsResult, McpUpsertPayload, McpUpsertResult } from '../types/mcp'
+import type { MarketplaceCatalog, MarketplaceRemoteSource, McpReconnectResult, McpServerRecord, McpToggleResult, McpToolToggleResult, McpToolsResult, McpUpsertPayload, McpUpsertResult, McpProjectSharingSnapshot, McpProjectSharingPayload, McpProjectSharingResult } from '../types/mcp'
 
 export const mcpApi = {
   list: (cwd?: string) => {
@@ -14,6 +14,18 @@ export const mcpApi = {
   configFiles: (cwd?: string) => {
     const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''
     return api.get<{ files: Array<{ scope: string; path: string; label: string }> }>(`/api/mcp/config-files${query}`)
+  },
+
+  projectSharing: (name: string, projectPaths: string[], sourceCwd?: string, configHashes?: string[]) => {
+    const query = new URLSearchParams()
+    for (const path of projectPaths) query.append('projectPath', path)
+    if (sourceCwd) query.set('sourceCwd', sourceCwd)
+    for (const hash of configHashes ?? []) query.append('configHash', hash)
+    return api.get<McpProjectSharingSnapshot>(`/api/mcp/${encodeURIComponent(name)}/projects?${query}`)
+  },
+
+  saveProjectSharing: (name: string, payload: McpProjectSharingPayload) => {
+    return api.put<McpProjectSharingResult>(`/api/mcp/${encodeURIComponent(name)}/projects`, payload)
   },
 
   status: (name: string, cwd?: string) => {

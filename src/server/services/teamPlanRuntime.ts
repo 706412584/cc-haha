@@ -12,15 +12,18 @@ import { normalizeExplicitClaudeOfficialModelId } from './claudeOfficialRuntime.
 import { getModelReasoningCapabilityOverride, isModelReasoningEffort, normalizeModelReasoningEffort } from '../../shared/modelReasoning.js'
 import { getPresetDefaultEnv, getPresetReasoningProviderKind } from './providerRuntimeEnv.js'
 import { validateTeamPlanPresetSource } from '../../utils/swarm/teamPlanPresetSource.js'
-import { readTeamPlan, findTeamPlanForSession, mutateTeamPlan } from '../../utils/swarm/teamPlanStore.js'
+import { readTeamPlan, findTeamPlanForSession, mutateTeamPlan, setRunningMemberRuntime, TeamPlanError } from '../../utils/swarm/teamPlanStore.js'
 import { cleanupTeamDirectories, getTeamDir, mutateTeamFileAsync, readTeamFile, writeTeamFileAsync, type TeamFile } from '../../utils/swarm/teamHelpers.js'
 import { getTeamsDir as getTeamsDirectory } from '../../utils/envUtils.js'
 import { TEAM_LEAD_NAME } from '../../utils/swarm/constants.js'
 import { createTask, deleteTask, listTasks, updateTask, withTaskListLifecycleLock, getCanonicalTeamTaskListId, type Task } from '../../utils/tasks.js'
+import { parseMemberCommand } from '../../utils/swarm/memberCommand.js'
 import { readUnreadMessages, readMailboxHistory, markMessagesAsReadByPredicate, writeToMailbox, createIdleNotification, formatTeammateMessages, isShutdownRequest, type TeammateMessage } from '../../utils/teammateMailbox.js'
 import { formatTeammateAutoContinuePrompt, isTransientTurnFailure, summarizeTurnFailure, TEAMMATE_AUTO_CONTINUE_DELAYS_MS } from '../../utils/swarm/turnFailure.js'
 import { getClaudeAgentModelFamily } from '../../utils/model/agentModelRouting.js'
 import { getCanonicalName } from '../../utils/model/model.js'
+import { powerActivityClock } from './powerActivityClock.js'
+import { teamService } from './teamService.js'
 
 const providerService = new ProviderService()
 const essentialTools = ['SendMessage', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate']
@@ -51,6 +54,8 @@ type WorkerRuntime = {
   starting?: Promise<boolean>
   autoContinueAttempts: number
   autoContinueTimer?: ReturnType<typeof setTimeout>
+  powerOperations?: number
+  powerTurnPending?: boolean
   restartHistory: number[]
   /** Automatic restarts stopped after a crash loop; only an explicit message retries. */
   restartsExhausted: boolean
@@ -72,6 +77,10 @@ type WorkerRuntime = {
   brief?: string
   /** When a shutdown request last reached the member; an approval after it makes its exit an ordinary one. */
   shutdownRequestedAt?: number
+  /** The turn in flight answers a shutdown request. */
+  shutdownTurnPending?: boolean
+  /** The turn in flight is a slash command the user ran in this member's conversation. */
+  commandTurnPending?: boolean
 }
 
 type TeamLaunch = {
@@ -100,6 +109,17 @@ type TeamLaunch = {
 }
 
 const launches = new Map<string, TeamLaunch>()
+const stoppingOperations = new Set<Promise<void>>()
+
+/** Keep async handoffs owned after a retry timer fires and before a roster write. */
+function trackWorkerPowerOperation<T>(worker: WorkerRuntime, operation: () => Promise<T>): Promise<T> {
+  worker.powerOperations = (worker.powerOperations ?? 0) + 1
+  powerActivityClock.changed()
+  return operation().finally(() => {
+    worker.powerOperations = (worker.powerOperations ?? 1) - 1
+    powerActivityClock.changed()
+  })
+}
 /**
  * How much of a failed launch's error the lead is told. The error can carry a
  * crashed process's output; the team card shows all of it.
@@ -110,6 +130,27 @@ const failedLaunchesNoticed = new Set<string>()
 
 function incarnationOf(team: Pick<TeamFile, 'name' | 'leadSessionId' | 'createdAt'>): string {
   return createHash('sha256').update(JSON.stringify([team.name, team.leadSessionId || '', team.createdAt])).digest('hex')
+}
+
+/** The concrete provider and model a member runs on, from what was chosen for it. */
+async function resolveMemberRuntime(member: TeamPlanMember): Promise<{ runtime: TeamPlanMember['runtime']; providerName: string }> {
+  const provider = member.runtime.providerId === CLAUDE_OFFICIAL_PROVIDER_ID ? null : await providerService.getProvider(member.runtime.providerId)
+  const requestedModel = member.runtime.modelId.trim()
+  const aliases = provider?.models as Record<string, string> | undefined
+  if (provider && ['default', 'main', 'fable', 'sonnet', 'opus', 'haiku'].includes(requestedModel) && !aliases?.[requestedModel === 'default' ? 'main' : requestedModel]) throw new Error(`Provider has no mapping for ${requestedModel}`)
+  const family = getClaudeAgentModelFamily(requestedModel)
+  const mappedFamilyModel = family ? aliases?.[family] || (family === 'fable' ? aliases?.opus : undefined) : undefined
+  // Legacy Agent pins follow this member's explicit non-Claude mapping.
+  // Claude providers keep the exact version the user selected.
+  const presetModel = mappedFamilyModel && !getCanonicalName(mappedFamilyModel).startsWith('claude-')
+    ? mappedFamilyModel : requestedModel
+  const modelId = provider
+    ? (aliases?.[requestedModel === 'default' ? 'main' : requestedModel] || presetModel)
+    : normalizeExplicitClaudeOfficialModelId(requestedModel)
+  if (!modelId || !/^[^\s\x00-\x1f]+$/.test(modelId) || modelId === 'inherit') throw new Error(`Choose a concrete model for ${member.name}`)
+  const requestedEffort = member.runtime.effortLevel
+  if (requestedEffort !== undefined && (!isModelReasoningEffort(requestedEffort) || !normalizeModelReasoningEffort(modelId, requestedEffort, provider?.apiFormat ?? 'anthropic', provider ? getModelReasoningCapabilityOverride(modelId, provider.models, getPresetDefaultEnv(provider.presetId)) : undefined, provider ? getPresetReasoningProviderKind(provider.presetId) : undefined))) throw new Error(`Unsupported reasoning effort for ${member.name}`)
+  return { runtime: { ...member.runtime, modelId }, providerName: provider?.name ?? 'Claude' }
 }
 
 /** Validation is local: checking a proposal never invokes a model or discovers credentials. */
@@ -131,28 +172,12 @@ export async function validateTeamPlanRuntime(plan: TeamPlanRecord): Promise<Tea
     ]
     if (unsupported.length) throw new Error(`Agent preset ${member.agentType} uses unsupported team worker settings: ${unsupported.join(', ')}`)
     if (snapshot.maxTurns !== undefined && (!Number.isInteger(snapshot.maxTurns) || snapshot.maxTurns < 1)) throw new Error(`Agent preset ${member.agentType} has invalid maxTurns`)
-    const provider = member.runtime.providerId === CLAUDE_OFFICIAL_PROVIDER_ID ? null : await providerService.getProvider(member.runtime.providerId)
-    const requestedModel = member.runtime.modelId.trim()
-    const aliases = provider?.models as Record<string, string> | undefined
-    if (provider && ['default', 'main', 'fable', 'sonnet', 'opus', 'haiku'].includes(requestedModel) && !aliases?.[requestedModel === 'default' ? 'main' : requestedModel]) throw new Error(`Provider has no mapping for ${requestedModel}`)
-    const family = getClaudeAgentModelFamily(requestedModel)
-    const mappedFamilyModel = family ? aliases?.[family] || (family === 'fable' ? aliases?.opus : undefined) : undefined
-    // Legacy Agent pins follow this member's explicit non-Claude mapping.
-    // Claude providers keep the exact version the user selected.
-    const presetModel = mappedFamilyModel && !getCanonicalName(mappedFamilyModel).startsWith('claude-')
-      ? mappedFamilyModel : requestedModel
-    const modelId = provider
-      ? (aliases?.[requestedModel === 'default' ? 'main' : requestedModel] || presetModel)
-      : normalizeExplicitClaudeOfficialModelId(requestedModel)
-    if (!modelId || !/^[^\s\x00-\x1f]+$/.test(modelId) || modelId === 'inherit') throw new Error(`Choose a concrete model for ${member.name}`)
-    const requestedEffort = member.runtime.effortLevel
-    if (requestedEffort !== undefined && (!isModelReasoningEffort(requestedEffort) || !normalizeModelReasoningEffort(modelId, requestedEffort, provider?.apiFormat ?? 'anthropic', provider ? getModelReasoningCapabilityOverride(modelId, provider.models, getPresetDefaultEnv(provider.presetId)) : undefined, provider ? getPresetReasoningProviderKind(provider.presetId) : undefined))) throw new Error(`Unsupported reasoning effort for ${member.name}`)
-    const runtime = { ...member.runtime, modelId }
+    const { runtime, providerName } = await resolveMemberRuntime(member)
 
     // These restrictions would break the team's mailbox protocol even if the
     // preset were allowed to execute its task successfully.
     if (snapshot.disallowedTools?.some(tool => essentialTools.includes(tool.split('(')[0]!))) throw new Error(`Agent preset ${member.agentType} disables team communication tools`)
-    members.push({ ...member, providerName: provider?.name ?? 'Claude', runtime, agentSnapshot: structuredClone(snapshot) })
+    members.push({ ...member, providerName, runtime, agentSnapshot: structuredClone(snapshot) })
   }
   if (new Set(members.map(member => member.name)).size !== members.length) throw new Error('Teammate names must be unique')
   return { ...plan, members }
@@ -340,8 +365,13 @@ async function startWorkerProcess(launch: TeamLaunch, worker: WorkerRuntime, res
     throw error
   }
   conversationService.onOutput(worker.sessionId, message => {
-    if (message?.type !== 'result') return
-    void migrationMaintenance.track(handleWorkerResult(launch, worker, message)).catch(error => console.error(`[TeamPlanRuntime] cannot record ${member.name}'s turn`, error))
+    if (message?.type !== 'result' || message.parent_tool_use_id) return
+    const completed = worker.powerTurnPending && message.is_error === false && (!message.subtype || message.subtype === 'success')
+    worker.powerTurnPending = false
+    void migrationMaintenance.track(trackWorkerPowerOperation(worker, async () => {
+      await handleWorkerResult(launch, worker, message)
+      if (completed && !launch.stopped && !launch.pausedAt && !worker.stoppedByUser) powerActivityClock.completed()
+    })).catch(error => console.error(`[TeamPlanRuntime] cannot record ${member.name}'s turn`, error))
   })
 }
 
@@ -391,9 +421,11 @@ async function restartWorker(launch: TeamLaunch, worker: WorkerRuntime, reason: 
       return false
     } finally {
       worker.starting = undefined
+      powerActivityClock.changed()
     }
   })()
   worker.starting = start
+  powerActivityClock.changed()
   return start
 }
 
@@ -415,6 +447,7 @@ async function autoContinueWorker(launch: TeamLaunch, worker: WorkerRuntime, rea
   const entry = readTeamFile(launch.plan.teamName)?.members.find(member => member.sessionId === worker.sessionId)
   if (entry?.isActive) return
   await updateWorkerEntry(launch, worker, current => ({ ...current, isActive: true }))
+  worker.powerTurnPending = true
   const sent = await conversationService.sendMessage(worker.sessionId, autoContinuePrompt(reason, attempt))
   if (sent) return
   // No retry is scheduled any more: report the failure instead of leaving a
@@ -432,6 +465,27 @@ async function handleWorkerResult(launch: TeamLaunch, worker: WorkerRuntime, mes
   const alive = conversationService.hasSession(worker.sessionId)
   const text = typeof message.result === 'string' ? message.result : ''
   const failed = !alive || message.is_error === true
+  const answeredShutdown = worker.shutdownTurnPending === true
+  worker.shutdownTurnPending = false
+  if (worker.commandTurnPending && alive) {
+    // A command the user ran here (/compact, a skill) is not work the lead
+    // waits on, so the lead is not told. A command that worked resolves the
+    // failure it was run for; the member then waits for its next message.
+    worker.commandTurnPending = false
+    if (failed) {
+      await updateWorkerEntry(launch, worker, entry => ({ ...entry, isActive: false, lastError: firstLine(text || 'The command failed') }))
+      return
+    }
+    worker.autoContinueAttempts = 0
+    cancelAutoContinue(worker)
+    // The command made room or ran a skill; it did not resume the member's
+    // work. Whatever stopped it (an error, the user's Stop, a restart) stays
+    // on record, so the lead still hears with the user's next message that
+    // this member waits to be woken.
+    await updateWorkerEntry(launch, worker, entry => withoutFailure({ ...entry, isActive: false }))
+    return
+  }
+  worker.commandTurnPending = false
   if (launch.pausedAt) {
     // The user's Stop already accounted for this turn; a burst of failure
     // notices would only make the lead restart members the user just halted.
@@ -457,12 +511,24 @@ async function handleWorkerResult(launch: TeamLaunch, worker: WorkerRuntime, mes
     return
   }
   const reason = firstLine(text || 'The member process exited')
+  if (alive && answeredShutdown && !isTransientWorkerFailure(text)) {
+    // Asked to shut down, it could not even take the turn to answer (its
+    // context or its account no longer allows one), and a retry would fail
+    // the same way. Do what its approval would have done, so the lead can end
+    // the team instead of waiting on a member that can never reply.
+    worker.shutdownRequestedAt = undefined
+    cancelAutoContinue(worker)
+    await conversationService.stopSessionAndWait(worker.sessionId)
+    await updateWorkerEntry(launch, worker, entry => ({ ...entry, isActive: false, terminated: true, lastError: reason }))
+    await notifyFailure(launch, worker, `${worker.member.name} could not answer the shutdown request (${reason}), so the team runtime stopped it. Its conversation is kept.`)
+    return
+  }
   if (alive && isTransientWorkerFailure(text) && worker.autoContinueAttempts < timing.autoContinueDelaysMs.length) {
     const attempt = ++worker.autoContinueAttempts
     const delay = timing.autoContinueDelaysMs[attempt - 1]!
     cancelAutoContinue(worker)
     worker.autoContinueTimer = setTimeout(() => {
-      void migrationMaintenance.track(autoContinueWorker(launch, worker, reason, attempt)).catch(error => console.error(`[TeamPlanRuntime] cannot continue ${worker.member.name}`, error))
+      void migrationMaintenance.track(trackWorkerPowerOperation(worker, () => autoContinueWorker(launch, worker, reason, attempt))).catch(error => console.error(`[TeamPlanRuntime] cannot continue ${worker.member.name}`, error))
     }, delay)
     worker.autoContinueTimer.unref?.()
     await updateWorkerEntry(launch, worker, entry => ({ ...entry, isActive: false, lastError: reason, autoRetry: { attempt, max: timing.autoContinueDelaysMs.length, nextAt: Date.now() + delay } }))
@@ -525,18 +591,27 @@ function clearFailure(worker: WorkerRuntime): void {
 // ── Supervisor ──────────────────────────────────────────────────────────────
 
 async function deliverToWorker(launch: TeamLaunch, worker: WorkerRuntime, messages: TeammateMessage[]): Promise<void> {
+  return trackWorkerPowerOperation(worker, () => deliverToWorkerOnce(launch, worker, messages))
+}
+
+async function deliverToWorkerOnce(launch: TeamLaunch, worker: WorkerRuntime, messages: TeammateMessage[]): Promise<void> {
   cancelAutoContinue(worker)
   // A new instruction starts a fresh retry budget: the lead or the user has
   // looked at the failure and decided the member should go on.
   worker.autoContinueAttempts = 0
   // The message replaces any scheduled retry and answers the last failure;
   // the turn it starts records its own outcome.
+  worker.stoppedByUser = false
   await updateWorkerEntry(launch, worker, entry => withoutFailure({ ...entry, isActive: true, terminated: false }))
   // A member that has not started yet gets its approved instructions with the
   // first thing it is told, unless that is only to shut down.
   const starts = worker.brief !== undefined && !messages.every(message => isShutdownRequest(message.text))
-  if (messages.some(message => isShutdownRequest(message.text))) worker.shutdownRequestedAt = Date.now()
+  if (messages.some(message => isShutdownRequest(message.text))) {
+    worker.shutdownRequestedAt = Date.now()
+    worker.shutdownTurnPending = true
+  }
   const text = formatTeammateMessages(messages)
+  worker.powerTurnPending = true
   const accepted = await conversationService.sendMessage(worker.sessionId, starts ? `${worker.brief}\n\n${text}` : text)
   if (!accepted) {
     await updateWorkerEntry(launch, worker, entry => ({ ...entry, isActive: false }))
@@ -571,6 +646,53 @@ async function wakeForReadyTask(launch: TeamLaunch, worker: WorkerRuntime, entry
     timestamp: new Date().toISOString(),
     read: false,
   }])
+}
+
+/** The user's slash command, sent as typed so the member's own CLI runs it. */
+async function deliverCommandToWorker(launch: TeamLaunch, worker: WorkerRuntime, command: TeammateMessage, entry: MemberEntry | undefined): Promise<void> {
+  return trackWorkerPowerOperation(worker, async () => {
+    if (worker.autoContinueTimer) {
+      // A retry was pending; the command takes that turn instead. Like any
+      // stopped member it then waits to be woken, and the lead is told so.
+      const lastError = (entry as { lastError?: unknown } | undefined)?.lastError
+      worker.failure ??= typeof lastError === 'string' ? lastError : 'its automatic retry gave way to a command'
+      worker.wakeNoticePending = true
+    }
+    cancelAutoContinue(worker)
+    await updateWorkerEntry(launch, worker, entry => ({ ...entry, isActive: true, terminated: false }))
+    worker.commandTurnPending = true
+    const accepted = await conversationService.sendMessage(worker.sessionId, command.text.trim())
+    if (!accepted) {
+      worker.commandTurnPending = false
+      await updateWorkerEntry(launch, worker, entry => ({ ...entry, isActive: false }))
+      return
+    }
+    await markMessagesAsReadByPredicate(worker.member.name, message => command.id
+      ? message.id === command.id
+      : message.from === command.from && message.timestamp === command.timestamp && message.text === command.text, launch.plan.teamName)
+  })
+}
+
+function isUserCommand(message: TeammateMessage): boolean {
+  return message.from === 'user' && parseMemberCommand(message.text) !== null
+}
+
+/** Whether this supervisor pass leaves these messages in the inbox (the rules in superviseLaunch). */
+function isHeldThisPass(launch: TeamLaunch, worker: WorkerRuntime, messages: TeammateMessage[], leadAlive: boolean): boolean {
+  if (launch.pausedAt !== undefined && !hasPausedLaunchResumeMessage(launch, messages)) return true
+  if (worker.brief !== undefined && !messages.some(message => message.from === 'user' || isShutdownRequest(message.text))) return true
+  return !conversationService.hasSession(worker.sessionId) && !leadAlive && !messages.some(message => message.from === 'user')
+}
+
+/**
+ * Bring back a stopped member to run a command. The command resumes nothing,
+ * so a member the user stopped still counts as stopped by the user once its
+ * process is up: the lead hears so with the user's next message.
+ */
+async function restartForCommand(launch: TeamLaunch, worker: WorkerRuntime): Promise<void> {
+  const stoppedByUser = worker.stoppedByUser === true
+  const started = await restartWorker(launch, worker, 'user')
+  if (started && stoppedByUser) worker.stoppedByUser = true
 }
 
 /**
@@ -608,6 +730,15 @@ async function startWhenReady(launch: TeamLaunch, worker: WorkerRuntime, tasks: 
   }])
 }
 
+function hasPausedLaunchResumeMessage(launch: TeamLaunch, messages: TeammateMessage[]): boolean {
+  if (launch.pausedAt === undefined) return false
+  return messages.some(message => {
+    const at = Date.parse(message.timestamp)
+    if (message.from === 'user') return at >= launch.pausedAt! && !isUserCommand(message)
+    return message.from === TEAM_LEAD_NAME && launch.resumeAllowedAt !== undefined && at >= launch.resumeAllowedAt
+  })
+}
+
 async function superviseLaunch(launch: TeamLaunch): Promise<void> {
   if (migrationMaintenance.isActive) return
   const team = readTeamFile(launch.plan.teamName)
@@ -627,18 +758,35 @@ async function superviseLaunch(launch: TeamLaunch): Promise<void> {
     if (entry && entry.terminated !== true && !conversationService.hasSession(worker.sessionId)) {
       await updateWorkerEntry(launch, worker, current => ({ ...current, isActive: false, terminated: true }))
     }
-    const messages = await readUnreadMessages(worker.member.name, launch.plan.teamName)
+    // A command the user typed in this member's conversation has the member
+    // to itself: nothing else reaches it until the command's turn ends, or the
+    // CLI would fold that message into the command's turn and its outcome
+    // would never reach the lead.
+    if (worker.commandTurnPending) continue
+    const unread = await readUnreadMessages(worker.member.name, launch.plan.teamName)
+    // The command runs on the member's next idle turn, after what is ahead of
+    // it in the inbox unless this pass holds that back anyway (a stopped team,
+    // a member waiting on its dependencies, a stopped member without a lead).
+    // It acts on this member's context and resumes nothing; what follows it
+    // waits its turn.
+    const commandAt = unread.findIndex(isUserCommand)
+    if (commandAt !== -1 && (commandAt === 0 || isHeldThisPass(launch, worker, unread.slice(0, commandAt), leadAlive))) {
+      if (!conversationService.hasSession(worker.sessionId)) {
+        void migrationMaintenance.track(restartForCommand(launch, worker))
+        continue
+      }
+      if (entry?.isActive) continue
+      await deliverCommandToWorker(launch, worker, unread[commandAt]!, entry)
+      continue
+    }
+    const messages = commandAt === -1 ? unread : unread.slice(0, commandAt)
     if (launch.pausedAt) {
       // Only a new instruction resumes a paused team: the user's own message to
       // a member, or the lead's once the user has spoken to it again.
-      const resume = messages.some(message => {
-        const at = Date.parse(message.timestamp)
-        if (message.from === 'user') return at >= launch.pausedAt!
-        return message.from === TEAM_LEAD_NAME && launch.resumeAllowedAt !== undefined && at >= launch.resumeAllowedAt
-      })
-      if (!resume) continue
+      if (!hasPausedLaunchResumeMessage(launch, messages)) continue
       launch.pausedAt = undefined
       launch.resumeAllowedAt = undefined
+      powerActivityClock.changed()
     }
     // A member that waits on dependencies is started by its tasks, or by the
     // user writing to it. What the lead or a teammate sends it meanwhile (a
@@ -689,6 +837,7 @@ function pauseLaunchesForLead(parentSessionId: string): boolean {
     if (launch.parentId !== parentSessionId || launch.stopped || !launch.running) continue
     paused = true
     launch.pausedAt = Date.now()
+    powerActivityClock.changed()
     launch.resumeAllowedAt = undefined
     for (const worker of launch.workers.values()) {
       cancelAutoContinue(worker)
@@ -725,7 +874,7 @@ export async function noteLeadUserMessage(parentSessionId: string): Promise<void
     failedLaunchesNoticed.add(`${plan.planId}:${plan.revision}`)
     const error = plan.launch?.error?.trim()
     const failure = error && error.length > LAUNCH_ERROR_NOTICE_CHARS ? `${error.slice(0, LAUNCH_ERROR_NOTICE_CHARS)}…` : error
-    await conversationService.sendMessage(parentSessionId, teamLaunchFailedNotice(plan.teamName, !!plan.parentPlanId, failure))
+    await conversationService.sendMessage(parentSessionId, teamLaunchFailedNotice(plan.teamName, !!plan.parentPlanId, failure), undefined, { synthetic: true })
   }
   for (const launch of launches.values()) {
     if (launch.parentId !== parentSessionId || launch.stopped) continue
@@ -757,6 +906,8 @@ export async function noteLeadUserMessage(parentSessionId: string): Promise<void
     await conversationService.sendMessage(
       parentSessionId,
       teamStoppedNotice(launch.plan.teamName, stoppedByUser ? 'user' : stoppedByRestart ? 'restart' : 'error', lines),
+      undefined,
+      { synthetic: true },
     )
   }
 }
@@ -785,10 +936,93 @@ function ensureRuntimeHooks(): void {
 
 // ── Public lifecycle ────────────────────────────────────────────────────────
 
-export async function stopTeamPlanRuntime(planId: string): Promise<void> {
+export type TeamMemberRuntimeChange = { providerId: string | null; modelId: string; effortLevel?: string }
+
+/**
+ * The user switched a running member to another model from its conversation.
+ * The change is recorded where a restart rebuilds the member from, and applied
+ * to the live process: a model on the same provider switches in place (the
+ * same control a start sends); another provider or effort needs the process
+ * environment rebuilt, so an idle member restarts from its own transcript and
+ * a busy one is refused rather than cut off mid-turn.
+ */
+export async function changeTeamMemberRuntime(teamName: string, agentId: string, change: TeamMemberRuntimeChange): Promise<{ agentId: string; name: string; model: string; providerId: string | null; providerName: string }> {
+  const name = agentId.includes('@') ? agentId.slice(0, agentId.lastIndexOf('@')) : agentId
+  let launch: TeamLaunch | undefined
+  let worker: WorkerRuntime | undefined
+  for (const candidate of launches.values()) {
+    if (candidate.stopped || candidate.plan.teamName !== teamName) continue
+    const match = [...candidate.workers.values()].find(item => item.member.name === name)
+    if (match) { launch = candidate; worker = match }
+  }
+  if (!launch || !worker) throw new TeamPlanError(`${name} is not a member of a running team`, 404)
+  if (worker.starting) throw new TeamPlanError(`${name} is starting; change its model once it is up`)
+  const previous = worker.member.runtime
+  const requested = { ...previous, providerId: change.providerId ?? CLAUDE_OFFICIAL_PROVIDER_ID, modelId: change.modelId.trim() }
+  if (change.effortLevel === undefined) delete requested.effortLevel
+  else requested.effortLevel = change.effortLevel
+  let resolved: Awaited<ReturnType<typeof resolveMemberRuntime>>
+  try {
+    resolved = await resolveMemberRuntime({ ...worker.member, runtime: requested })
+  } catch (error) {
+    throw new TeamPlanError(error instanceof Error ? error.message : String(error), 400)
+  }
+  const providerChanged = resolved.runtime.providerId !== previous.providerId
+  const inPlace = !providerChanged && resolved.runtime.effortLevel === previous.effortLevel
+  const running = conversationService.hasSession(worker.sessionId)
+  const entry = readTeamFile(teamName)?.members.find(member => member.sessionId === worker!.sessionId)
+  if (running && !inPlace && entry?.isActive) throw new TeamPlanError(`${name} is working; change its ${providerChanged ? 'provider' : 'reasoning effort'} once it is idle`)
+  // The live process switches first, so a switch it refuses changes nothing.
+  if (running && inPlace) {
+    try {
+      await conversationService.requestControl(worker.sessionId, { subtype: 'set_model', model: resolved.runtime.modelId }, 30_000)
+    } catch (error) {
+      throw new TeamPlanError(`Could not switch ${name} to ${resolved.runtime.modelId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  const member = worker.member
+  const record = async (runtime: TeamPlanMember['runtime'], providerName: string) => {
+    launch!.plan = await setRunningMemberRuntime(teamName, launch!.plan.planId, member.id, runtime, providerName)
+    worker!.member = { ...worker!.member, runtime, providerName }
+    // The roster carries what the desktop shows, written the way a launch writes it.
+    await updateWorkerEntry(launch!, worker!, current => {
+      const next = { ...current, model: runtime.modelId, providerId: runtime.providerId, providerName } as MemberEntry & { providerId?: string; providerName?: string; effortLevel?: string }
+      if (runtime.effortLevel === undefined) delete next.effortLevel
+      else next.effortLevel = runtime.effortLevel
+      return next
+    })
+  }
+  await record(resolved.runtime, resolved.providerName)
+  if (running && !inPlace) {
+    await conversationService.stopSessionAndWait(worker.sessionId)
+    if (!(await restartWorker(launch, worker, 'user'))) {
+      // It could not start on the new provider: keep the one it ran on, which
+      // its next message starts it on again, and say why.
+      const failure = (readTeamFile(teamName)?.members.find(item => item.sessionId === worker!.sessionId) as { lastError?: unknown } | undefined)?.lastError
+      await record(previous, typeof member.providerName === 'string' ? member.providerName : resolved.providerName)
+      throw new TeamPlanError(`${name} could not start on ${resolved.providerName}${typeof failure === 'string' ? ` (${failure})` : ''}; it keeps its previous model`)
+    }
+  }
+  const providerId = resolved.runtime.providerId === CLAUDE_OFFICIAL_PROVIDER_ID ? null : resolved.runtime.providerId
+  return { agentId, name, model: resolved.runtime.modelId, providerId, providerName: resolved.providerName }
+}
+
+export function stopTeamPlanRuntime(planId: string): Promise<void> {
+  if (!launches.has(planId)) return Promise.resolve()
+  const operation = stopTeamPlanRuntimeOnce(planId)
+  stoppingOperations.add(operation)
+  void operation.finally(() => {
+    stoppingOperations.delete(operation)
+    powerActivityClock.changed()
+  }).catch(() => {})
+  return operation
+}
+
+async function stopTeamPlanRuntimeOnce(planId: string): Promise<void> {
   const launch = launches.get(planId)
   if (!launch) return
   launch.stopped = true
+  powerActivityClock.changed()
   if (launch.timer) clearInterval(launch.timer)
   for (const worker of launch.workers.values()) cancelAutoContinue(worker)
   launches.delete(planId)
@@ -835,6 +1069,7 @@ export async function launchTeamPlanRuntime(plan: TeamPlanRecord): Promise<{ mem
     supervising: false, stopped: false, permissionMode: conversationService.getSessionPermissionMode(plan.sessionId), createdTaskIds: [],
   }
   launches.set(plan.planId, launch)
+  powerActivityClock.changed()
   const memberIds: Record<string, string> = {}
   let taskMapping: Record<string, string> = {}
   let executionStarted = false
@@ -935,6 +1170,7 @@ export async function launchTeamPlanRuntime(plan: TeamPlanRecord): Promise<{ mem
           }
           return
         }
+        if (worker) worker.powerTurnPending = true
         const sent = await conversationService.sendMessage(id, brief, undefined, { canSend: () => !launch.stopped })
         if (!sent) throw new Error(`Failed to release ${member.name}`)
         if (worker) worker.released = true
@@ -944,9 +1180,10 @@ export async function launchTeamPlanRuntime(plan: TeamPlanRecord): Promise<{ mem
     // One supervisor owns each worker inbox. SDK serializes user turns; a worker
     // remains connected while idle and wakes when another teammate writes.
     launch.running = true
+    powerActivityClock.changed()
     startSupervisor(launch)
     const waitingNames = members.filter(member => waiting.has(member.id)).map(member => member.name)
-    await conversationService.sendMessage(plan.sessionId, teamLaunchedNotice(plan.teamName, waitingNames))
+    await conversationService.sendMessage(plan.sessionId, teamLaunchedNotice(plan.teamName, waitingNames), undefined, { synthetic: true })
     return { memberIds }
   } catch (error) {
     await stopTeamPlanRuntime(plan.planId)
@@ -1078,7 +1315,7 @@ export async function rehydrateTeamPlanRuntimesForSession(sessionId: string): Pr
 export async function notifyTeamPlanLeader(plan: TeamPlanRecord, kind: TeamPlanLeaderNotice): Promise<void> {
   // Approval wakes the leader only after launch's readiness barrier and snapshot.
   if (kind === 'approved' || !conversationService.hasSession(plan.sessionId)) return
-  await conversationService.sendMessage(plan.sessionId, teamPlanNotice(kind, plan.teamName, plan.feedback))
+  await conversationService.sendMessage(plan.sessionId, teamPlanNotice(kind, plan.teamName, plan.feedback), undefined, { synthetic: true })
 }
 
 export class TeamPlanExecutionInterruptedError extends Error {
@@ -1157,9 +1394,39 @@ export function hasActiveTeamWorkForParent(parentSessionId: string): boolean {
     if (!launch.running) return true
     const team = readTeamFile(launch.plan.teamName)
     for (const worker of launch.workers.values()) {
-      if (worker.autoContinueTimer) return true
+      if (worker.autoContinueTimer || worker.starting || worker.powerOperations) return true
       if (!conversationService.hasSession(worker.sessionId)) continue
       if (team?.members.find(entry => entry.sessionId === worker.sessionId)?.isActive) return true
+    }
+  }
+  return false
+}
+
+/** Include queued mail and dependency-ready work before the supervisor admits it. */
+export async function hasPendingTeamPowerWork(): Promise<boolean> {
+  if (stoppingOperations.size > 0 || teamService.hasPendingMemberMessages()) return true
+  for (const launch of launches.values()) {
+    // Stopping can still be draining worker I/O; do not call that completed.
+    if ([...launch.workers.values()].some(worker => worker.starting || worker.powerOperations)) return true
+    if (launch.stopped) continue
+    if (hasActiveTeamWorkForParent(launch.parentId)) return true
+    let tasks: Task[] | undefined
+    const leadAlive = conversationService.hasSession(launch.parentId)
+    for (const worker of launch.workers.values()) {
+      if (!worker.released) continue
+      const mail = await readUnreadMessages(worker.member.name, launch.plan.teamName)
+      if (launch.pausedAt) {
+        // The same queued instruction that resumes the supervisor must block
+        // power actions before that supervisor's next timer tick.
+        if (hasPausedLaunchResumeMessage(launch, mail)) return true
+        continue
+      }
+      if (mail.length > 0 && (leadAlive || mail.some(message => message.from === 'user'))) return true
+      if (leadAlive) {
+        tasks ??= await listTasks(getCanonicalTeamTaskListId(launch.plan.teamName))
+        if (readyTasksOf(worker.member.name, tasks).some(task =>
+          worker.brief !== undefined || (task.blockedBy.length > 0 && !worker.wokenForTaskIds.has(task.id)))) return true
+      }
     }
   }
   return false

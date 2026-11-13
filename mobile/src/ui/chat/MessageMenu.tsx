@@ -1,11 +1,12 @@
 import { Fragment } from 'react'
-import { Modal, Platform, Pressable, ScrollView, View, useWindowDimensions } from 'react-native'
+import { Modal, Pressable, ScrollView, View, useWindowDimensions } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Text } from '../Text'
 import type { ChatItem } from '../../core/types'
 import { visibleMessageText } from '../../core/chatComposer'
 import { Icon, Spinner, useColors, type IconName } from '../kit'
 import { Markdown, UserBubble, type BubbleLayout } from '../Message'
+import { simulatedPhoneChrome } from '../webChrome'
 
 export type MessageAction = {
   key: 'copy' | 'select' | 'edit' | 'fork'
@@ -48,7 +49,7 @@ export function MessageMenu({
     (total, action, index) => total + itemHeight(action) + (index ? (action.group ? 6 : 0.5) : 0),
     0
   )
-  const top = Math.max(insets.top, Platform.OS === 'web' ? 54 : 0) + 12
+  const top = Math.max(insets.top, simulatedPhoneChrome ? 54 : 0) + 12
   const bottom = Math.max(insets.bottom, 16) + 12
   const gap = 10
   const available = screenHeight - top - bottom - menuHeight - gap
@@ -92,7 +93,8 @@ export function MessageMenu({
               <UserBubble item={item} text={text} team={text !== item.text} />
             ) : (
               <View style={{ paddingHorizontal: 14, paddingVertical: 12 }}>
-                <Markdown text={text || '附件消息'} selectable={false} />
+                {/* 浮起的副本和列表里用同一个挂载上限，超长消息不会整条再挂一遍。 */}
+                <Markdown text={text || '附件消息'} selectable={false} expandable={false} />
               </View>
             )}
           </ScrollView>

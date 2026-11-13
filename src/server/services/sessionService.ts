@@ -1,3 +1,12 @@
+import { DesktopUiPreferencesService } from './desktopUiPreferencesService.js'
+import { normalizeAdditionalDirectories, validateProjectAdditionalDirectories } from './projectDirectories.js'
+import { getSideChat, isSideChatId, sideChatSummary } from './sideChatRegistry.js'
+import { splitSessionReferenceContext } from './sessionReferenceContext.js'
+import { parseSessionCollaborationEnvelope } from '../../utils/sessionCollaborationEnvelope.js'
+import { isShutdownTeamPrompt } from '../../utils/swarm/teamShutdownPrompt.js'
+import { isTeamLeadNotice } from '../../utils/swarm/teamLeadNotice.js'
+import { readHistoryContexts } from './sessionHistoryContext.js'
+import { recoverBoundedSessionHistory, type SessionHistoryRecovery } from './sessionHistoryRecovery.js'
 /**
  * Session Service — 会话文件的读写操作封装
  *
@@ -45,7 +54,7 @@ import {
   type CreateSessionRepositoryOptions,
   type PreparedSessionWorkspace,
 } from './repositoryLaunchService.js'
-import { registerFilesystemAccessRoot } from './filesystemAccessRoots.js'
+import { registerCanonicalFilesystemAccessRoot } from './filesystemAccessRoots.js'
 import { normalizeDriveRootPathForPlatform } from './windowsDrivePath.js'
 import { cleanSessionTitleSource } from '../../utils/sessionTitleText.js'
 import {
@@ -55,6 +64,7 @@ import { ProviderService } from './providerService.js'
 import { shouldHideCommandMetadataContent } from '../../utils/commandMetadata.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { getSettings_DEPRECATED } from '../../utils/settings/settings.js'
+import { readSessionArchives, withSessionArchiveLock, writeSessionArchive } from '../../utils/sessionArchiveStore.js'
 import {
   extractGoalCreationTitle,
   extractTranscriptUserTitle,
@@ -136,7 +146,10 @@ export type SessionListItem = {
   effortLevel?: string
   thinkingEnabled?: boolean
   openAIFastMode?: boolean
+  archived?: boolean
 }
+
+type SessionListOptions = { project?: string; limit?: number; offset?: number; archived?: boolean }
 
 export type SubagentTranscriptFragment = {
   agentId: string
@@ -253,6 +266,7 @@ export type SessionProviderTransition = {
 }
 
 export type SessionLaunchInfo = {
+  additionalDirectories?: string[]
   filePath: string
   projectDir: string
   workDir: string
@@ -271,6 +285,18 @@ export type SessionLaunchInfo = {
   openAIFastMode?: boolean
 }
 
+type SessionMetadataPatch = {
+  workDir: string
+  customTitle?: string | null
+  additionalDirectories?: string[]
+  repository?: PreparedSessionWorkspace['repository']
+  permissionMode?: string
+  runtimeProviderId?: string | null
+  runtimeModelId?: string
+  effortLevel?: string
+  openAIFastMode?: boolean
+}
+
 type ProviderContextWindowHint = Pick<SessionLaunchInfo, 'runtimeProviderId' | 'runtimeModelId'>
 
 export type SessionInspectionTranscriptSnapshot = {
@@ -278,6 +304,13 @@ export type SessionInspectionTranscriptSnapshot = {
   metadata: TranscriptMetadataSnapshot
   usage: TranscriptUsageSnapshot | null
   contextEstimate: TranscriptContextEstimate | null
+}
+
+type SessionMetadataProjection = {
+  summary: SessionListSummary
+  launchInfo: SessionLaunchInfo
+  customTitle: string | null
+  transcriptMetadata: TranscriptMetadataSnapshot
 }
 
 export type TrimSessionResult = {
@@ -299,6 +332,10 @@ export type MessageEntry = {
   id: string
   type: 'user' | 'assistant' | 'system' | 'tool_use' | 'tool_result'
   content: unknown
+  isApiErrorMessage?: boolean
+  error?: string
+  businessErrorCode?: string
+  bodyTruncated?: boolean
   toolUseResult?: unknown
   timestamp: string
   model?: string
@@ -509,6 +546,7 @@ type RawEntry = {
   uuid?: string
   messageId?: string
   parentUuid?: string | null
+  logicalParentUuid?: string | null
   parent_tool_use_id?: string | null
   isSidechain?: boolean
   isMeta?: boolean
@@ -756,6 +794,7 @@ const USER_INTERRUPTION_TEXTS = new Set([
 const NO_RESPONSE_REQUESTED_TEXT = 'No response requested.'
 const TASK_NOTIFICATION_RE = /^<task-notification>\s*[\s\S]*<\/task-notification>$/i
 const TASK_NOTIFICATION_BLOCK_RE = /<task-notification>\s*[\s\S]*?<\/task-notification>/i
+const TASK_NOTIFICATION_BLOCKS_RE = /<task-notification>\s*[\s\S]*?<\/task-notification>/gi
 const PERSISTED_TASK_NOTIFICATION_ENTRY_TYPE = 'cc-haha-task-notification'
 const PROVIDER_MODEL_ALIAS_SEPARATORS = ['-', '_', ':', '/', '.', ' ']
 
@@ -799,6 +838,7 @@ type InspectionFoldState = {
   latestCwd: string | null
   repository: PreparedSessionWorkspace['repository'] | undefined
   worktreeSession: PersistedWorktreeSession | null | undefined
+  additionalDirectories: string[]
   agentProfile?: 'standard' | 'lean'
   permissionMode: string | undefined
   runtimeProviderId: string | null | undefined
@@ -844,6 +884,7 @@ function createInspectionFoldState(): InspectionFoldState {
     latestCwd: null,
     repository: undefined,
     worktreeSession: undefined,
+    additionalDirectories: [],
     permissionMode: undefined,
     runtimeProviderId: undefined,
     runtimeModelId: undefined,
@@ -879,6 +920,7 @@ function createInspectionFoldState(): InspectionFoldState {
 function cloneInspectionFoldState(state: InspectionFoldState): InspectionFoldState {
   return {
     ...state,
+    additionalDirectories: [...(state.additionalDirectories ?? [])],
     metadata: { ...state.metadata },
     repository: state.repository ? { ...state.repository } : state.repository,
     latestContextUsage: state.latestContextUsage ? { ...state.latestContextUsage } : null,
@@ -922,6 +964,9 @@ type SharedSessionMutationState = {
 }
 
 const sharedSessionMutationStates = new WeakMap<LocalIndexGateway, SharedSessionMutationState>()
+// SDK init and startup can update the same session through different service
+// instances. Cleanup must not remove a launch snapshot during a metadata read.
+const sessionMetadataMutationQueues = new Map<string, Promise<void>>()
 
 function getSharedSessionMutationState(
   gateway: LocalIndexGateway,
@@ -962,6 +1007,19 @@ export class SessionService {
     return `${this.getConfigDir()}:${sessionId}`
   }
 
+  private async withSessionMetadataMutation<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
+    const key = this.memorySessionKey(sessionId)
+    const previous = sessionMetadataMutationQueues.get(key) ?? Promise.resolve()
+    const operation = previous.then(action)
+    const queued = operation.then(() => {}, () => {})
+    sessionMetadataMutationQueues.set(key, queued)
+    try {
+      return await operation
+    } finally {
+      if (sessionMetadataMutationQueues.get(key) === queued) sessionMetadataMutationQueues.delete(key)
+    }
+  }
+
   private rememberPrivateTitle(sessionId: string, title: string): void {
     const key = this.memorySessionKey(sessionId)
     const titles = this.privateTitles.get(key) ?? new Set<string>()
@@ -984,6 +1042,8 @@ export class SessionService {
   private syncIndexedSessionTitle(sessionId: string, title: string): void {
     this.localIndexGateway.updateSessionTitle?.(sessionId, title)
   }
+
+  private readonly historyRecoveryCache = new Map<string, SessionHistoryRecovery>()
 
   private readonly pendingTaskNotificationWrites = new Map<
     string,
@@ -1146,8 +1206,8 @@ export class SessionService {
    * re-scans a transcript the sidebar already folded, and the fixed per-record
    * budget stops a maliciously large scalar from materializing the whole file.
    */
-  private readonly metadataProjectionCache = new Map<string, { signature: string; summary: SessionListSummary; launchInfo: SessionLaunchInfo; customTitle: string | null; complete: boolean }>()
-  private readonly metadataProjectionRequests = new Map<string, Promise<{ summary: SessionListSummary; launchInfo: SessionLaunchInfo; customTitle: string | null; complete: boolean }>>()
+  private readonly metadataProjectionCache = new Map<string, SessionMetadataProjection & { signature: string }>()
+  private readonly metadataProjectionRequests = new Map<string, Promise<SessionMetadataProjection>>()
   /** Addressed Agent call lookups, keyed by `[filePath, toolRef]` and stat signature. */
   private readonly subagentLookupCache = new Map<string, { version: string; transcript: SubagentTranscript }>()
   /**
@@ -1240,14 +1300,15 @@ export class SessionService {
       now: this.now,
       scope: () => this.getConfigDir(),
       revision: () => this.projectHistoryRevision(),
-      mutation: () => `${this.getConfigDir()}:${getSharedSessionMutationState(this.localIndexGateway).epoch}`,
+      mutation: () => `${this.getConfigDir()}:${getSharedSessionMutationState(this.localIndexGateway).epoch}:${readSessionArchives(this.getConfigDir()).revision}`,
       load: () => this.loadProjectHistoryRows(),
-      hydrate: async (row) => {
+      archiveIds: () => readSessionArchives(this.getConfigDir()).ids,
+      hydrate: async (row, archived) => {
         try {
           await this.validateIndexedTranscriptPath(
             row.transcriptPath, row.projectPath, row.id, await fs.realpath(this.getProjectsDir()),
           )
-          return await this.hydrateIndexedSession(row)
+          return await this.hydrateIndexedSession(row, undefined, archived)
         } catch (error) {
           if (isENOENT(error)) return null
           this.markIndexReadFailure()
@@ -1280,16 +1341,14 @@ export class SessionService {
       : fallback
   }
 
-  private sessionListCacheKey(options: {
-    project?: string
-    limit?: number
-    offset?: number
-  } | undefined, scope = this.getConfigDir()): string {
+  private sessionListCacheKey(options: SessionListOptions | undefined, scope = this.getConfigDir()): string {
     return JSON.stringify({
       scope,
       project: options?.project ?? null,
       limit: options?.limit ?? 50,
       offset: options?.offset ?? 0,
+      archived: options?.archived ?? false,
+      archiveRevision: readSessionArchives(scope).revision,
     })
   }
 
@@ -1572,6 +1631,7 @@ export class SessionService {
     metadata: {
       workDir: string
       repository?: PreparedSessionWorkspace['repository']
+      additionalDirectories?: string[]
       permissionMode?: string
       prePlanPermissionMode?: string | null
       runtimeProviderId?: string | null
@@ -1581,6 +1641,7 @@ export class SessionService {
     },
   ): boolean {
     if (!launchInfo) return false
+    if (metadata.additionalDirectories !== undefined && JSON.stringify(launchInfo.additionalDirectories ?? []) !== JSON.stringify(metadata.additionalDirectories)) return false
     if (normalizeDriveRootPathForPlatform(launchInfo.workDir) !== metadata.workDir) {
       return false
     }
@@ -2527,6 +2588,120 @@ export class SessionService {
     }
   }
 
+  private async getMetadataProjection(filePath: string, projectDir: string): Promise<SessionMetadataProjection> {
+    const stat = await fs.stat(filePath, { bigint: true })
+    const signature = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`
+    const key = `${this.getConfigDir()}\0${filePath}`
+    const cached = this.metadataProjectionCache.get(key)
+    if (cached?.signature === signature) {
+      this.metadataProjectionCache.delete(key)
+      this.metadataProjectionCache.set(key, cached)
+      return cached
+    }
+    const requestKey = `${key}\0${signature}`
+    const pending = this.metadataProjectionRequests.get(requestKey)
+    if (pending) return pending
+    const request = withHistoryReadBudget(undefined, async () => {
+      const makeState = () => ({
+        additionalDirectories: undefined as string[] | undefined,
+        workDir: undefined as string | undefined, cwd: undefined as string | undefined,
+        repository: undefined as PreparedSessionWorkspace['repository'] | undefined,
+        worktreeSession: undefined as PersistedWorktreeSession | null | undefined,
+        agentProfile: 'standard' as 'standard' | 'lean',
+        permissionMode: undefined as string | undefined,
+        runtimeProviderId: undefined as string | null | undefined,
+        runtimeModelId: undefined as string | undefined, effortLevel: undefined as string | undefined,
+        openAIFastMode: undefined as boolean | undefined,
+        customTitle: null as string | null, nonemptyCustomTitle: null as string | null,
+        goalTitle: null as string | null, aiTitle: null as string | null, firstUserTitle: null as string | null,
+        createdAt: null as string | null, modifiedAt: null as string | null,
+        count: 0, launchCount: 0, isTeamWorker: false,
+      })
+      const launch = makeState()
+      const summary = makeState()
+      const transcriptMetadata: TranscriptMetadataSnapshot = {}
+      const apply = (state: ReturnType<typeof makeState>, entry: RawEntry) => {
+        if (!state.createdAt && entry.timestamp) state.createdAt = entry.timestamp
+        if ((entry.type === 'user' || entry.type === 'assistant') && entry.message?.role) {
+          state.count++
+          if (!entry.isMeta) state.modifiedAt = this.latestTimestamp(state.modifiedAt, entry.timestamp)
+        }
+        state.launchCount += this.countTranscriptMessages([entry])
+        if (typeof entry.cwd === 'string' && entry.cwd.trim()) state.cwd = normalizeDriveRootPathForPlatform(entry.cwd)
+        const record = entry as Record<string, unknown>
+        if (record.entrypoint === 'claude-desktop-team-worker') state.isTeamWorker = true
+        if (entry.type === 'session-meta') {
+          if (record.additionalDirectories !== undefined) state.additionalDirectories = normalizeAdditionalDirectories(record.additionalDirectories)
+          if (entry.agentProfile === 'standard' || entry.agentProfile === 'lean') state.agentProfile = entry.agentProfile
+          if (typeof record.workDir === 'string') state.workDir = normalizeDriveRootPathForPlatform(record.workDir)
+          state.permissionMode = this.resolvePermissionModeFromEntries([entry]) ?? state.permissionMode
+          if (record.runtimeProviderId === null || typeof record.runtimeProviderId === 'string') state.runtimeProviderId = record.runtimeProviderId as string | null
+          if (typeof record.runtimeModelId === 'string') state.runtimeModelId = record.runtimeModelId
+          state.effortLevel = resolveSessionEffortLevel(record, state.effortLevel)
+          if (typeof record.openAIFastMode === 'boolean') state.openAIFastMode = record.openAIFastMode
+        }
+        state.repository = this.resolveRepositoryFromEntries([entry]) ?? state.repository
+        const worktree = this.resolveWorktreeSessionFromEntries([entry])
+        if (worktree !== undefined) state.worktreeSession = worktree
+        if (entry.type === 'custom-title') {
+          if (typeof entry.customTitle === 'string') state.customTitle = entry.customTitle
+          if (typeof entry.customTitle === 'string' && entry.customTitle.trim()) state.nonemptyCustomTitle = entry.customTitle
+        }
+        state.goalTitle ??= extractGoalCreationTitle(entry)
+        if (entry.type === 'ai-title' && entry.aiTitle) state.aiTitle = cleanSessionTitleSource(String(entry.aiTitle)) || state.aiTitle
+        if (!state.firstUserTitle && entry.type === 'user' && !entry.isMeta && entry.message?.role === 'user') state.firstUserTitle = extractTranscriptUserTitle(entry.message.content)
+        // Metadata has a separate fixed bound even when a file contains only
+        // a handful of maliciously large scalar values or repository fields.
+        if (Buffer.byteLength(JSON.stringify(state)) > 128 * 1024) throw new ApiError(413, 'Session metadata exceeds its resource budget', 'SESSION_METADATA_TOO_LARGE')
+      }
+      const scan = await streamSessionMetadata(filePath, (entry, completeLine) => {
+        const record = entry as RawEntry
+        apply(launch, record)
+        if (completeLine) apply(summary, record)
+        const model = record.message?.model
+        if (typeof model === 'string' && model.length <= 512) transcriptMetadata.model = model
+        if (typeof record.version === 'string' && record.version.length <= 512) transcriptMetadata.version = record.version
+      })
+      const shared = (state: typeof summary) => ({
+        ...(state.additionalDirectories !== undefined ? { additionalDirectories: state.additionalDirectories } : {}),
+        agentProfile: state.agentProfile,
+        ...(state.permissionMode ? { permissionMode: state.permissionMode } : {}),
+        ...(state.runtimeProviderId !== undefined ? { runtimeProviderId: state.runtimeProviderId } : {}),
+        ...(state.runtimeModelId ? { runtimeModelId: state.runtimeModelId } : {}),
+        ...(state.effortLevel ? { effortLevel: state.effortLevel } : {}),
+        ...(state.openAIFastMode !== undefined ? { openAIFastMode: state.openAIFastMode } : {}),
+        ...(state.repository ? { repository: state.repository } : {}),
+        ...(state.worktreeSession !== undefined ? { worktreeSession: state.worktreeSession } : {}),
+      })
+      const result = {
+        summary: {
+          title: summary.customTitle || summary.goalTitle || summary.aiTitle || summary.firstUserTitle || 'Untitled Session',
+          createdAt: summary.createdAt ?? stat.birthtime.toISOString(),
+          modifiedAt: summary.modifiedAt ?? stat.mtime.toISOString(),
+          messageCount: summary.count,
+          ...(summary.isTeamWorker ? { isTeamWorker: true } : {}),
+          workDir: summary.workDir || summary.cwd || this.desanitizePath(projectDir),
+          ...shared(summary),
+        },
+        launchInfo: {
+          filePath, projectDir,
+          workDir: (launch.workDir !== undefined ? launch.workDir : launch.cwd ?? this.desanitizePath(projectDir)) || process.cwd(),
+          customTitle: launch.customTitle,
+          transcriptMessageCount: launch.launchCount,
+          ...shared(launch),
+        },
+        customTitle: launch.nonemptyCustomTitle,
+        transcriptMetadata: { ...transcriptMetadata, cwd: launch.cwd },
+      }
+      this.metadataProjectionCache.delete(key)
+      this.metadataProjectionCache.set(key, { signature: scan.sourceVersion, ...result })
+      while (this.metadataProjectionCache.size > 32) this.metadataProjectionCache.delete(this.metadataProjectionCache.keys().next().value!)
+      return result
+    }, 'metadata')
+    this.metadataProjectionRequests.set(requestKey, request)
+    try { return await request } finally { this.metadataProjectionRequests.delete(requestKey) }
+  }
+
   /**
    * Resolve a session's display title + lightweight metadata from its JSONL file.
    *
@@ -3144,6 +3319,10 @@ export class SessionService {
       id: entry.uuid || crypto.randomUUID(),
       type,
       content,
+      ...(type === 'assistant' && entry.isApiErrorMessage === true ? { isApiErrorMessage: true } : {}),
+      ...(type === 'assistant' && typeof entry.error === 'string' ? { error: entry.error } : {}),
+      ...(type === 'assistant' && typeof entry.businessErrorCode === 'string' ? { businessErrorCode: entry.businessErrorCode } : {}),
+      ...(sessionReferences ? { sessionReferences } : {}),
       ...(collaboration ? { collaboration } : {}),
       ...(sessionReferences ? { sessionReferences } : {}),
       ...(scheduledTask ? { scheduledTask } : {}),
@@ -3240,6 +3419,36 @@ export class SessionService {
   private readXmlTag(xml: string, tag: string): string | undefined {
     const match = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'i'))
     return match?.[1] ? this.decodeXmlText(match[1].trim()) : undefined
+  }
+
+  /**
+   * A <task-notification> user entry is the prompt of a turn the user did not
+   * start: one idle notification, or the isMeta batch of settled agents.
+   * Notifications drained mid-turn are attachments and never get here. Like
+   * generation_stopped, project it as a status so history keeps why the reply
+   * that follows exists, without the model-facing XML.
+   */
+  private backgroundContinueEntryToMessage(entry: RawEntry): MessageEntry | null {
+    if (entry.type !== 'user' || entry.message?.role !== 'user') return null
+    const content = entry.message.content
+    if (!this.isTaskNotificationContent(content)) return null
+    const notifications = this.extractTextBlocks(content)
+      .flatMap((text) => text.match(TASK_NOTIFICATION_BLOCKS_RE) ?? [])
+      .map((xml) => {
+        const rawStatus = this.readXmlTag(xml, 'status')
+        const summary = this.readXmlTag(xml, 'summary')
+        return {
+          taskId: this.readXmlTag(xml, 'task-id') || this.readXmlTag(xml, 'tool-use-id') || '',
+          ...(rawStatus ? { status: rawStatus === 'killed' ? 'stopped' : rawStatus } : {}),
+          ...(summary ? { summary } : {}),
+        }
+      })
+    return {
+      id: entry.uuid || crypto.randomUUID(),
+      type: 'system',
+      content: { subtype: 'background_continue', notifications },
+      timestamp: entry.timestamp || new Date().toISOString(),
+    }
   }
 
   private parseTaskNotificationContent(
@@ -3983,14 +4192,19 @@ export class SessionService {
 
   private async findSessionFilesFromFiles(
     sessionId: string,
+    strict = false,
   ): Promise<Array<{ filePath: string; projectDir: string }>> {
-
+    const onReadError = (error: unknown): 'drop' => {
+      if (strict && (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      return 'drop'
+    }
     const projectsDir = this.getProjectsDir()
     let projectDirs: string[]
 
     try {
       projectDirs = await fs.readdir(projectsDir)
-    } catch {
+    } catch (error) {
+      onReadError(error)
       return []
     }
 
@@ -3998,14 +4212,19 @@ export class SessionService {
     for (const dir of projectDirs) {
       const filePath = path.join(projectsDir, dir, `${sessionId}.jsonl`)
       try {
+        // Project roots can contain ordinary files. They are not uncertain
+        // directories, and must not turn a strict absence check into ENOTDIR.
+        if (strict && !(await fs.stat(path.join(projectsDir, dir))).isDirectory()) continue
         const stat = await fs.stat(filePath)
+        if (strict && !stat.isFile()) throw Object.assign(new Error('Session transcript is not a regular file'), { code: 'INVALID_SESSION_TRANSCRIPT' })
         matches.push({ filePath, projectDir: dir, mtimeMs: stat.mtimeMs })
-      } catch {
+      } catch (error) {
+        onReadError(error)
         continue
       }
     }
 
-    const ranked = await this.rankSessionFileMatches(matches, () => 'drop')
+    const ranked = await this.rankSessionFileMatches(matches, onReadError)
     return ranked!.map(({ filePath, projectDir }) => ({ filePath, projectDir }))
   }
 
@@ -4014,6 +4233,16 @@ export class SessionService {
   ): Promise<{ filePath: string; projectDir: string } | null> {
     if (isSideChatId(sessionId)) return null
     return (await this.findSessionFiles(sessionId))[0] ?? null
+  }
+
+  /** Authoritative absence for decision cleanup; UI/index fallbacks stay forgiving. */
+  async hasSessionStrict(sessionId: string): Promise<boolean> {
+    if (isSideChatId(sessionId)) {
+      const side = getSideChat(sessionId)
+      return !!side && !side.closed
+    }
+    if (!this.isValidSessionId(sessionId)) return false
+    return (await this.findSessionFilesFromFiles(sessionId, true)).length > 0
   }
 
   private isValidSessionId(id: string): boolean {
@@ -4221,7 +4450,7 @@ export class SessionService {
     return contextWindow
   }
 
-  private async getTranscriptContextWindow(
+  async getSessionModelContextWindow(
     sessionId: string,
     model: string,
     launchInfo?: ProviderContextWindowHint | null,
@@ -4275,7 +4504,7 @@ export class SessionService {
     transcriptHasMediaInput: boolean,
     launchInfo?: ProviderContextWindowHint | null,
   ): Promise<TranscriptContextEstimate> {
-    const rawMaxTokens = await this.getTranscriptContextWindow(sessionId, latest.model, launchInfo)
+    const rawMaxTokens = await this.getSessionModelContextWindow(sessionId, latest.model, launchInfo)
     const promptTokens = latest.inputTokens + latest.cacheReadInputTokens + latest.cacheCreationInputTokens
     const providerTokens = promptTokens + latest.outputTokens
     const hasProviderUsage = providerTokens > 0
@@ -4483,6 +4712,7 @@ export class SessionService {
     let customTitle: string | null = seed.fold.customTitle
     let transcriptMessageCount = seed.fold.transcriptMessageCount
     const metadata: TranscriptMetadataSnapshot = seed.fold.metadata
+    let additionalDirectories: string[] = seed.fold.additionalDirectories ?? []
 
     const models = seed.fold.models
     const modelRuntimeHints = seed.fold.modelRuntimeHints
@@ -4531,6 +4761,7 @@ export class SessionService {
       if (entry.type === 'session-meta') {
         if (entry.agentProfile === 'standard' || entry.agentProfile === 'lean') agentProfile = entry.agentProfile
         const record = entry as Record<string, unknown>
+        if (record.additionalDirectories !== undefined) additionalDirectories = normalizeAdditionalDirectories(record.additionalDirectories)
         if (typeof record.workDir === 'string') {
           latestWorkDir = normalizeDriveRootPathForPlatform(record.workDir)
         }
@@ -4711,6 +4942,7 @@ export class SessionService {
 
     const workDir = latestWorkDir || latestCwd || this.desanitizePath(path.basename(path.dirname(filePath))) || process.cwd()
     const launchInfo: SessionLaunchInfo = {
+      additionalDirectories,
       filePath: filePath,
       projectDir: path.basename(path.dirname(filePath)),
       workDir,
@@ -4729,7 +4961,7 @@ export class SessionService {
     for (const modelUsage of models.values()) {
       // Resolve against the runtime that recorded the usage, falling back to the session's
       // latest runtime for a model whose hint predates the transcript's metadata entries.
-      modelUsage.contextWindow = await this.getTranscriptContextWindow(
+      modelUsage.contextWindow = await this.getSessionModelContextWindow(
         sessionId,
         modelUsage.model,
         modelRuntimeHints.get(modelUsage.model) ?? launchInfo,
@@ -4799,6 +5031,7 @@ export class SessionService {
     const status = indexed ? this.localIndexGateway.getPublicStatus() : null
     const degradedPlan = indexed ? null : this.getDegradedListPlan()
     return JSON.stringify([scope, this.sessionListCacheGeneration,
+      readSessionArchives(scope).revision,
       indexed && (status?.state === 'ready' || status?.state === 'building')
         ? status.lastUpdatedAt
         : degradedPlan
@@ -4874,11 +5107,19 @@ export class SessionService {
   }
 
   /** List all sessions, optionally filtered by physical project path. */
-  async listSessions(options?: {
-    project?: string
-    limit?: number
-    offset?: number
-  }): Promise<{ sessions: SessionListItem[]; total: number }> {
+  async listSessions(options?: SessionListOptions): Promise<{ sessions: SessionListItem[]; total: number }> {
+    const scope = this.getConfigDir()
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const archiveRevision = readSessionArchives(scope).revision
+      const result = await this.listSessionsOnce(options)
+      // A storage switch belongs to subsequent requests. Repeating this scan
+      // after a switch would replace its original scope with another config's sessions.
+      if (scope !== this.getConfigDir() || archiveRevision === readSessionArchives(scope).revision) return result
+    }
+    throw new ApiError(409, 'Session archives changed during loading; retry', 'SESSION_LIST_CHANGED')
+  }
+
+  private async listSessionsOnce(options?: SessionListOptions): Promise<{ sessions: SessionListItem[]; total: number }> {
     this.syncSharedMutationEpoch()
     const routingMutationEpoch = getSharedSessionMutationState(this.localIndexGateway).epoch
     const hasInvalidPagination = [options?.limit, options?.offset]
@@ -4927,11 +5168,52 @@ export class SessionService {
     return await this.tryListSessionsFromIndex(options) ?? this.listSessionsFromFiles(options)
   }
 
-  private async listSessionsFromFiles(options?: {
-    project?: string
-    limit?: number
-    offset?: number
-  }): Promise<{ sessions: SessionListItem[]; total: number }> {
+  private readArchiveFilteredIndexPage(options: SessionListOptions): { sessions: IndexedSessionRow[]; total: number } {
+    const archiveIds = readSessionArchives(this.getConfigDir()).ids
+    if (archiveIds.size === 0) return options.archived
+      ? { sessions: [], total: 0 }
+      : this.localIndexGateway.listSessions(options)
+    const offset = options.offset ?? 0
+    const limit = options.limit ?? 50
+    const sessions: IndexedSessionRow[] = []
+    let total = 0
+    // Filter cheap index metadata before paginating. Only the returned page is
+    // hydrated; archiving cannot turn a 20-row request into a transcript scan.
+    for (let pageOffset = 0; ; pageOffset += 500) {
+      const page = this.localIndexGateway.listSessions({ project: options.project, offset: pageOffset, limit: 500 })
+      for (const row of page.sessions) {
+        if (archiveIds.has(row.id) !== Boolean(options.archived)) continue
+        if (total >= offset && sessions.length < limit) sessions.push(row)
+        total += 1
+      }
+      if (page.sessions.length === 0 || pageOffset + page.sessions.length >= page.total) break
+    }
+    return { sessions, total }
+  }
+
+  isSessionArchived(sessionId: string): boolean {
+    return readSessionArchives(this.getConfigDir()).ids.has(sessionId)
+  }
+
+  listArchivedSessionIds(): string[] {
+    return [...readSessionArchives(this.getConfigDir()).ids]
+  }
+
+  async setSessionArchived(sessionId: string, archived: boolean, assertIdle: () => void = () => {}): Promise<void> {
+    const scope = this.getConfigDir()
+    await withSessionArchiveLock(scope, async () => {
+      const found = await this.findSessionFile(sessionId)
+      if (!found) throw ApiError.notFound(`Session not found: ${sessionId}`)
+      if (scope !== this.getConfigDir()) throw ApiError.conflict('Session storage changed; retry')
+      // No asynchronous boundary between the final check and the atomic state
+      // write. Cleanup cannot remove the file checked under the same lock.
+      if (archived) assertIdle()
+      writeSessionArchive(scope, sessionId, archived)
+      this.invalidateSessionListCache()
+    })
+  }
+
+  private async listSessionsFromFiles(options?: SessionListOptions): Promise<{ sessions: SessionListItem[]; total: number }> {
     this.syncSharedMutationEpoch()
     const scope = this.getConfigDir()
     this.prepareSessionListCaches(scope)
@@ -4967,14 +5249,10 @@ export class SessionService {
     }
   }
 
-  private async tryListSessionsFromIndex(options?: {
-    project?: string
-    limit?: number
-    offset?: number
-  }, requireReady = false): Promise<{ sessions: SessionListItem[]; total: number } | null> {
+  private async tryListSessionsFromIndex(options?: SessionListOptions, requireReady = false): Promise<{ sessions: SessionListItem[]; total: number } | null> {
     const indexedMutationEpoch = getSharedSessionMutationState(this.localIndexGateway).epoch
     try {
-      const indexedPage = this.localIndexGateway.listSessions({
+      const indexedPage = this.readArchiveFilteredIndexPage({
         ...(options?.project
           ? {
               project: this.sanitizePath(
@@ -4984,6 +5262,7 @@ export class SessionService {
           : {}),
         ...(options?.limit !== undefined ? { limit: options.limit } : {}),
         ...(options?.offset !== undefined ? { offset: options.offset } : {}),
+        archived: options?.archived,
       })
       if (!this.indexStatusRemainsUsable()) {
         this.markIndexReadFailure()
@@ -5049,7 +5328,7 @@ export class SessionService {
    * in the index's own order before paginating.
    */
   private async tryListSessionsFromDegradedIndex(
-    options: { project?: string; limit?: number; offset?: number } | undefined,
+    options: SessionListOptions | undefined,
     plan: DegradedListPlan,
   ): Promise<{ sessions: SessionListItem[]; total: number } | null> {
     const mutationEpoch = getSharedSessionMutationState(this.localIndexGateway).epoch
@@ -5075,7 +5354,9 @@ export class SessionService {
       }
       rows.push(...await this.readExcludedTranscriptRows(plan, scope, project))
       if (rows.length === 0) return null
-      rows.sort(compareIndexedListRows)
+      const archiveIds = readSessionArchives(scope).ids
+      const visibleRows = rows.filter(row => archiveIds.has(row.id) === Boolean(options?.archived))
+      visibleRows.sort(compareIndexedListRows)
 
       // Same defaults as the index and file lists.
       const offset = options?.offset ?? 0
@@ -5083,17 +5364,17 @@ export class SessionService {
       const sessions: SessionListItem[] = []
       const pathExists = this.createCachedPathExists()
       const projectsRoot = await fs.realpath(this.getProjectsDir())
-      for (const row of rows.slice(offset, offset + limit)) {
+      for (const row of visibleRows.slice(offset, offset + limit)) {
         try {
           await this.validateIndexedTranscriptPath(row.transcriptPath, row.projectPath, row.id, projectsRoot)
-          sessions.push(await this.hydrateIndexedSession(row, pathExists))
+          sessions.push(await this.hydrateIndexedSession(row, pathExists, Boolean(options?.archived)))
         } catch {
           // Drop a single stale/unreadable row, like the healthy index list.
         }
       }
       if (mutationEpoch !== getSharedSessionMutationState(this.localIndexGateway).epoch) return null
-      if (sessions.length === 0) return null
-      return { sessions, total: rows.length }
+      if (sessions.length === 0 && visibleRows.length > 0) return null
+      return { sessions, total: visibleRows.length }
     } catch {
       this.markIndexReadFailure()
       return null
@@ -5148,6 +5429,7 @@ export class SessionService {
   private async hydrateIndexedSession(
     row: IndexedSessionRow,
     pathExists = (targetPath: string | null) => this.pathExists(targetPath),
+    archived = this.isSessionArchived(row.id),
   ): Promise<SessionListItem> {
     const workDir = row.workDir
     const projectRoot = await this.resolveProjectRootFromSessionMetadata({
@@ -5165,6 +5447,7 @@ export class SessionService {
     })
     return {
       id: row.id,
+      ...(archived ? { archived: true } : {}),
       title: row.title,
       createdAt: row.createdAt,
       modifiedAt: row.modifiedAt,
@@ -5266,17 +5549,15 @@ export class SessionService {
   }
 
   private async loadSessionList(
-    options: {
-      project?: string
-      limit?: number
-      offset?: number
-    } | undefined,
+    options: SessionListOptions | undefined,
     cacheKey: string,
     cacheGeneration: number,
     sharedMutationEpoch: number,
     scope: string,
   ): Promise<{ sessions: SessionListItem[]; total: number }> {
-    const sessionFiles = await this.discoverSessionFiles(options?.project, scope)
+    const archiveIds = readSessionArchives(scope).ids
+    const sessionFiles = (await this.discoverSessionFiles(options?.project, scope))
+      .filter(file => archiveIds.has(file.sessionId) === Boolean(options?.archived))
     if (!options?.project && this.activeSessionListCacheScope === scope) {
       const discoveredPaths = new Set(sessionFiles.map(file => file.filePath))
       for (const filePath of this.sessionListSummaryCache.keys()) {
@@ -5347,6 +5628,7 @@ export class SessionService {
 
         items.push({
           id: sessionId,
+          ...(archiveIds.has(sessionId) ? { archived: true } : {}),
           title: summary.title,
           createdAt: summary.createdAt,
           modifiedAt: summary.modifiedAt,
@@ -5458,6 +5740,7 @@ export class SessionService {
     return {
       id: sessionId,
       title,
+      ...(this.isSessionArchived(sessionId) ? { archived: true } : {}),
       createdAt,
       modifiedAt: this.resolveTranscriptModifiedAtFromEntries(entries) ?? stat.mtime.toISOString(),
       messageCount: messages.length,
@@ -5756,57 +6039,6 @@ export class SessionService {
    * Read only the addressed Agent call and result. Ordinary transcript bodies are
    * parsed one bounded record at a time and never retained by card lookup.
    */
-  async getSubagentRunLookup(sessionId: string, toolRef: string, agentId?: string): Promise<SubagentTranscript> {
-    const found = await this.findSessionFile(sessionId)
-    if (!found) throw ApiError.notFound(`Session not found: ${sessionId}`)
-    const filePath = agentId ? this.subagentTranscriptPath(found.projectDir, sessionId, agentId) : found.filePath
-    const leaf = toolRef.slice(toolRef.lastIndexOf('/') + 1)
-    const ids = new Set([toolRef, leaf])
-    const stat = await fs.stat(filePath, { bigint: true }).catch(error => {
-      if (isENOENT(error)) return null
-      throw error
-    })
-    if (!stat) return { messages: [], taskNotifications: [], historyComplete: true }
-    const version = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`
-    const key = JSON.stringify([filePath, toolRef])
-    const cached = this.subagentLookupCache.get(key)
-    if (cached?.version === version) return cached.transcript
-    return withHistoryReadBudget(undefined, async () => {
-      const entries: RawEntry[] = []
-      const taskNotifications: SessionTaskNotification[] = []
-      let bytes = 0
-      let incomplete = false
-        const scan = await streamBoundedHistory(filePath, raw => {
-        const entry = raw as RawEntry
-        const message = raw.message as { role?: string; content?: unknown } | undefined
-        // The lookup already filters to this run's tool ids, so notification
-        // records cannot leak here; no suppression state is needed.
-        const content = Array.isArray(message?.content) ? message.content.filter((block: any) =>
-          block?.type === 'tool_use' ? ids.has(block.id) : block?.type === 'tool_result' && ids.has(block.tool_use_id)) : []
-        const notices = this.taskNotificationsFromEntries([entry]).filter(notice => ids.has(notice.toolUseId))
-        const selected = content.length
-          ? displayPreview({ ...entry, message: { ...message, content } }) : undefined
-        if (selected?.bodyTruncated) incomplete = true
-        const selectedBytes = (selected ? Buffer.byteLength(JSON.stringify(selected)) : 0) +
-          (notices.length ? Buffer.byteLength(JSON.stringify(notices)) : 0)
-        if (bytes + selectedBytes > 2 * 1024 * 1024 || entries.length + taskNotifications.length + (selected ? 1 : 0) + notices.length > 2048) {
-          incomplete = true
-          return
-        }
-        bytes += selectedBytes
-        if (selected) entries.push(selected as RawEntry)
-        taskNotifications.push(...notices)
-      }, undefined, { maxRecordBytes: HISTORY_SEMANTIC_RECORD_BYTES })
-      // A skipped record may be unrelated to this Agent. Preserve the evidence
-      // we did read without claiming that absence proves a missing run.
-      const transcript = { messages: this.entriesToMessages(entries), taskNotifications, historyComplete: !incomplete && scan.omittedRecords === 0 }
-      this.subagentLookupCache.delete(key)
-      this.subagentLookupCache.set(key, { version, transcript })
-      while (this.subagentLookupCache.size > 4) this.subagentLookupCache.delete(this.subagentLookupCache.keys().next().value!)
-      return transcript
-    }, 'metadata')
-  }
-
 
   async getSessionMessagesWithEvidence(
     sessionId: string,
@@ -5859,6 +6091,62 @@ export class SessionService {
     agentId: string,
   ): Promise<MessageEntry[]> {
     return (await this.getSubagentTranscript(sessionId, agentId)).messages
+  }
+
+  /** Read only the addressed Agent call and result. Ordinary transcript bodies
+   * are parsed one bounded record at a time and never retained by card lookup. */
+  async getSubagentRunLookup(sessionId: string, toolRef: string, agentId?: string): Promise<SubagentTranscript> {
+    const found = await this.findSessionFile(sessionId)
+    if (!found) throw ApiError.notFound(`Session not found: ${sessionId}`)
+    const filePath = agentId ? this.subagentTranscriptPath(found.projectDir, sessionId, agentId) : found.filePath
+    const leaf = toolRef.slice(toolRef.lastIndexOf('/') + 1)
+    const ids = new Set([toolRef, leaf])
+    const stat = await fs.stat(filePath, { bigint: true }).catch(error => {
+      if (error.code === 'ENOENT') return null
+      throw error
+    })
+    if (!stat) return { messages: [], taskNotifications: [], historyComplete: true }
+    const version = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`
+    const key = JSON.stringify([filePath, toolRef])
+    const cached = this.subagentLookupCache.get(key)
+    if (cached?.version === version) return cached.transcript
+    return withHistoryReadBudget(undefined, async () => {
+      const entries: RawEntry[] = []
+      const taskNotifications = new Map<string, SessionTaskNotification>()
+      let bytes = 0
+      let incomplete = false
+      const scan = await streamBoundedHistory(filePath, raw => {
+        const entry = raw as RawEntry
+        const message = raw.message as { role?: string; content?: unknown } | undefined
+        const content = Array.isArray(message?.content) ? message.content.filter((block: any) =>
+          block?.type === 'tool_use' ? ids.has(block.id) : block?.type === 'tool_result' && ids.has(block.tool_use_id)) : []
+        const notices = this.taskNotificationsFromEntries([entry]).filter(notice => ids.has(notice.toolUseId))
+        const selected = content.length
+          ? displayPreview({ ...entry, message: { ...message, content } }) : undefined
+        if (selected?.bodyTruncated) incomplete = true
+        const selectedBytes = (selected ? Buffer.byteLength(JSON.stringify(selected)) : 0) +
+          (notices.length ? Buffer.byteLength(JSON.stringify(notices)) : 0)
+        if (bytes + selectedBytes > 2 * 1024 * 1024 || entries.length + taskNotifications.size + (selected ? 1 : 0) + notices.length > 2048) {
+          incomplete = true
+          return
+        }
+        bytes += selectedBytes
+        if (selected) entries.push(selected as RawEntry)
+        // A terminal event can appear as the desktop's persisted notification
+        // and again when the CLI queues/drains it. Match full-history replay's
+        // owner/tool identity so these copies do not look like competing runs.
+        for (const notice of notices) {
+          taskNotifications.set(sessionTaskNotificationIdentity(notice), notice)
+        }
+      }, undefined, { maxRecordBytes: HISTORY_SEMANTIC_RECORD_BYTES })
+      // A skipped record may be unrelated to this Agent. Preserve the evidence
+      // we did read without claiming that absence proves a missing run.
+      const transcript = { messages: this.entriesToMessages(entries), taskNotifications: [...taskNotifications.values()], historyComplete: !incomplete && scan.omittedRecords === 0 }
+      this.subagentLookupCache.delete(key)
+      this.subagentLookupCache.set(key, { version, transcript })
+      while (this.subagentLookupCache.size > 4) this.subagentLookupCache.delete(this.subagentLookupCache.keys().next().value!)
+      return transcript
+    }, 'metadata')
   }
 
   async getSubagentTranscript(
@@ -5923,6 +6211,22 @@ export class SessionService {
       if (length > 64 * 1024) throw new ApiError(413, 'Agent metadata exceeds its viewing budget', 'SUBAGENT_METADATA_LIMIT')
       return JSON.parse(buffer.subarray(0, length).toString('utf8')) as Record<string, unknown>
     } finally { await handle.close() }
+  }
+
+  /**
+   * A subagent's launch metadata sidecar. What it carries only describes the
+   * run, so an absent, unreadable or oversized sidecar reads as none rather
+   * than failing the run view.
+   */
+  async getSubagentMetadata(sessionId: string, agentId: string): Promise<Record<string, unknown> | null> {
+    const found = await this.findSessionFile(sessionId)
+    if (!found) return null
+    const transcriptPath = this.subagentTranscriptPath(found.projectDir, sessionId, agentId)
+    try {
+      return await this.readSubagentMetadata(transcriptPath.replace(/\.jsonl$/, '.meta.json'))
+    } catch {
+      return null
+    }
   }
 
   /**
@@ -6128,7 +6432,9 @@ export class SessionService {
       sessionId,
     )
     const absWorkDir = preparedWorkspace.workDir
-    registerFilesystemAccessRoot(absWorkDir)
+    const { additionalDirectories: configuredDirectories } = await new DesktopUiPreferencesService().getProjectDirectories(absWorkDir)
+    const additionalDirectories = await validateProjectAdditionalDirectories(absWorkDir, configuredDirectories)
+    registerCanonicalFilesystemAccessRoot(absWorkDir)
     console.log(
       `[SessionService] createSession: requested workDir=${JSON.stringify(
         workDir,
@@ -6162,6 +6468,7 @@ export class SessionService {
     const metaEntry = {
       type: 'session-meta',
       isMeta: true,
+      additionalDirectories,
       workDir: absWorkDir,
       agentProfile,
       repository: preparedWorkspace.repository,
@@ -6172,7 +6479,7 @@ export class SessionService {
     }
 
     if (!persist || !this.shouldPersistSession()) this.memoryLaunchInfo.set(this.memorySessionKey(sessionId), {
-      filePath, projectDir: sanitized, workDir: absWorkDir,
+      filePath, projectDir: sanitized, workDir: absWorkDir, additionalDirectories,
       repository: preparedWorkspace.repository, transcriptMessageCount: 0,
       customTitle: null,
       agentProfile,
@@ -6386,168 +6693,6 @@ export class SessionService {
     return (await this.getMetadataProjection(found.filePath, found.projectDir)).customTitle
   }
 
-  /**
-   * One bounded fold over a transcript that answers launch metadata, the list
-   * summary and the custom title at once (re-ported from upstream).
-   *
-   * `findSessionFile` deliberately avoids parsing a transcript, so the readers
-   * that need metadata cannot lean on a whole-file read: they stream the file
-   * through `streamBoundedHistory` with the semantic record budget and stop
-   * when a single scalar value would blow the fixed metadata envelope. The fold
-   * is cached by source version so a sidebar poll, a title lookup and a picker
-   * query share one pass instead of three full reads.
-   */
-  private async getMetadataProjection(filePath: string, projectDir: string): Promise<{
-    summary: SessionListSummary
-    launchInfo: SessionLaunchInfo
-    customTitle: string | null
-    complete: boolean
-  }> {
-    const stat = await fs.stat(filePath, { bigint: true })
-    const signature = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`
-    const key = `${this.getConfigDir()}\0${filePath}`
-    const cached = this.metadataProjectionCache.get(key)
-    if (cached?.signature === signature) {
-      this.metadataProjectionCache.delete(key)
-      this.metadataProjectionCache.set(key, cached)
-      return cached
-    }
-    const requestKey = `${key}\0${signature}`
-    const pending = this.metadataProjectionRequests.get(requestKey)
-    if (pending) return pending
-    const request = withHistoryReadBudget(undefined, async () => {
-      const makeState = () => ({
-        workDir: undefined as string | undefined, cwd: undefined as string | undefined,
-        repository: undefined as PreparedSessionWorkspace['repository'] | undefined,
-        worktreeSession: undefined as PersistedWorktreeSession | null | undefined,
-        agentProfile: 'standard' as 'standard' | 'lean',
-        permissionMode: undefined as string | undefined,
-        prePlanPermissionMode: undefined as string | undefined,
-        runtimeProviderId: undefined as string | null | undefined,
-        runtimeModelId: undefined as string | undefined, effortLevel: undefined as string | undefined,
-        thinkingEnabled: undefined as boolean | undefined,
-        openAIFastMode: undefined as boolean | undefined,
-        providerTransition: undefined as SessionProviderTransition | undefined,
-        customTitle: null as string | null, nonemptyCustomTitle: null as string | null,
-        goalTitle: null as string | null, aiTitle: null as string | null, firstUserTitle: null as string | null,
-        createdAt: null as string | null, modifiedAt: null as string | null,
-        count: 0, launchCount: 0, isTeamWorker: false,
-      })
-      const launch = makeState()
-      const summary = makeState()
-      const apply = (state: ReturnType<typeof makeState>, entry: RawEntry) => {
-        if (!state.createdAt && entry.timestamp) state.createdAt = entry.timestamp
-        if ((entry.type === 'user' || entry.type === 'assistant') && entry.message?.role) {
-          state.count++
-          if (!entry.isMeta) state.modifiedAt = this.latestTimestamp(state.modifiedAt, entry.timestamp)
-        }
-        state.launchCount += this.countTranscriptMessages([entry])
-        if (typeof entry.cwd === 'string' && entry.cwd.trim()) state.cwd = normalizeDriveRootPathForPlatform(entry.cwd)
-        const record = entry as Record<string, unknown>
-        if (record.entrypoint === 'claude-desktop-team-worker') state.isTeamWorker = true
-        if (entry.type === 'session-meta') {
-          if (entry.agentProfile === 'standard' || entry.agentProfile === 'lean') state.agentProfile = entry.agentProfile
-          if (typeof record.workDir === 'string') state.workDir = normalizeDriveRootPathForPlatform(record.workDir)
-          state.permissionMode = this.resolvePermissionModeFromEntries([entry]) ?? state.permissionMode
-          // The fork persists the mode to restore on leaving plan mode, with
-          // `null` acting as a tombstone once it has been restored. A tombstone
-          // must clear the folded value, so it cannot go through the `??` form:
-          // the resolver reports "cleared" and "never set" both as `undefined`.
-          if (record.prePlanPermissionMode === null) state.prePlanPermissionMode = undefined
-          else state.prePlanPermissionMode = this.resolvePrePlanPermissionModeFromEntries([entry]) ?? state.prePlanPermissionMode
-          if (record.runtimeProviderId === null || typeof record.runtimeProviderId === 'string') state.runtimeProviderId = record.runtimeProviderId as string | null
-          if (typeof record.runtimeModelId === 'string') state.runtimeModelId = record.runtimeModelId
-          if (typeof record.effortLevel === 'string' && VALID_SESSION_EFFORT_LEVELS.has(record.effortLevel)) state.effortLevel = record.effortLevel
-          else if (
-            (record.runtimeProviderId === null || typeof record.runtimeProviderId === 'string') &&
-            typeof record.runtimeModelId === 'string' && record.runtimeModelId.length > 0
-          ) {
-            // A complete runtime selection replaces the previous one, including
-            // its effort override; historical partial metadata stays a patch.
-            state.effortLevel = undefined
-          }
-          if (typeof record.thinkingEnabled === 'boolean') state.thinkingEnabled = record.thinkingEnabled
-          if (typeof record.openAIFastMode === 'boolean') state.openAIFastMode = record.openAIFastMode
-          if (record.providerTransition && typeof record.providerTransition === 'object') {
-            const transition = record.providerTransition as Record<string, unknown>
-            if (typeof transition.sourceSessionId === 'string' && typeof transition.selectionHash === 'string') {
-              state.providerTransition = { sourceSessionId: transition.sourceSessionId, selectionHash: transition.selectionHash }
-            }
-          }
-        }
-        state.repository = this.resolveRepositoryFromEntries([entry]) ?? state.repository
-        const worktree = this.resolveWorktreeSessionFromEntries([entry])
-        if (worktree !== undefined) state.worktreeSession = worktree
-        if (entry.type === 'custom-title') {
-          if (typeof entry.customTitle === 'string') state.customTitle = entry.customTitle
-          if (typeof entry.customTitle === 'string' && entry.customTitle.trim()) state.nonemptyCustomTitle = entry.customTitle
-        }
-        state.goalTitle ??= extractGoalCreationTitle(entry)
-        if (entry.type === 'ai-title' && entry.aiTitle) state.aiTitle = cleanSessionTitleSource(String(entry.aiTitle)) || state.aiTitle
-        if (!state.firstUserTitle && entry.type === 'user' && !entry.isMeta && entry.message?.role === 'user') state.firstUserTitle = extractTranscriptUserTitle(entry.message.content)
-        // Metadata has a separate fixed bound even when a file contains only
-        // a handful of maliciously large scalar values or repository fields.
-        if (Buffer.byteLength(JSON.stringify(state)) > 128 * 1024) throw new ApiError(413, 'Session metadata exceeds its resource budget', 'SESSION_METADATA_TOO_LARGE')
-      }
-      // #1373: project oversized records instead of skipping them. A transcript
-      // whose only turn is a large tool_use/tool_result (a screenshot, a big
-      // Edit) used to fold as empty, so the session read as a placeholder and
-      // would not open. streamSessionMetadata parses each over-budget line down
-      // to the small structural envelope the fold needs.
-      const scan = await streamSessionMetadata(filePath, (entry, completeLine) => {
-        apply(launch, entry as RawEntry)
-        if (completeLine) apply(summary, entry as RawEntry)
-      })
-      const shared = (state: typeof summary) => ({
-        agentProfile: state.agentProfile,
-        ...(state.permissionMode ? { permissionMode: state.permissionMode } : {}),
-        ...(state.prePlanPermissionMode ? { prePlanPermissionMode: state.prePlanPermissionMode } : {}),
-        ...(state.runtimeProviderId !== undefined ? { runtimeProviderId: state.runtimeProviderId } : {}),
-        ...(state.runtimeModelId ? { runtimeModelId: state.runtimeModelId } : {}),
-        ...(state.effortLevel ? { effortLevel: state.effortLevel } : {}),
-        ...(state.thinkingEnabled !== undefined ? { thinkingEnabled: state.thinkingEnabled } : {}),
-        ...(state.openAIFastMode !== undefined ? { openAIFastMode: state.openAIFastMode } : {}),
-        ...(state.providerTransition ? { providerTransition: state.providerTransition } : {}),
-        ...(state.repository ? { repository: state.repository } : {}),
-        ...(state.worktreeSession !== undefined ? { worktreeSession: state.worktreeSession } : {}),
-      })
-      const result = {
-        summary: {
-          title: summary.customTitle || summary.goalTitle || summary.aiTitle || summary.firstUserTitle || 'Untitled Session',
-          createdAt: summary.createdAt ?? stat.birthtime.toISOString(),
-          modifiedAt: summary.modifiedAt ?? stat.mtime.toISOString(),
-          messageCount: summary.count,
-          ...(summary.isTeamWorker ? { isTeamWorker: true } : {}),
-          workDir: summary.workDir || summary.cwd || this.desanitizePath(projectDir),
-          ...shared(summary),
-        },
-        launchInfo: {
-          filePath, projectDir,
-          workDir: (launch.workDir !== undefined ? launch.workDir : launch.cwd ?? this.desanitizePath(projectDir)) || process.cwd(),
-          customTitle: launch.customTitle,
-          transcriptMessageCount: launch.launchCount,
-          ...shared(launch),
-        },
-        customTitle: launch.nonemptyCustomTitle,
-        // Whether the fold saw every record. `streamSessionMetadata` projects
-        // records above the semantic read limit rather than loading them whole
-        // (a base64 screenshot inflates by 4/3, so a ~6MB image is already past
-        // the line budget); a record it could not parse is counted in
-        // `omittedRecords` instead. Informational only: callers must not refuse
-        // to work when this is false, since the launch fields fold from
-        // whichever records were readable. The real guard against metadata being
-        // swamped by oversized *scalars* is the 128KB envelope check above,
-        // which still throws.
-        complete: scan.omittedRecords === 0,
-      }
-      this.metadataProjectionCache.delete(key)
-      this.metadataProjectionCache.set(key, { signature: scan.sourceVersion, ...result })
-      while (this.metadataProjectionCache.size > 32) this.metadataProjectionCache.delete(this.metadataProjectionCache.keys().next().value!)
-      return result
-    }, 'metadata')
-    this.metadataProjectionRequests.set(requestKey, request)
-    try { return await request } finally { this.metadataProjectionRequests.delete(requestKey) }
-  }
 
   /**
    * Get the actual working directory for a session.
@@ -6568,6 +6713,43 @@ export class SessionService {
     return projection.launchInfo.workDir
   }
 
+  /**
+   * Directory a resumed CLI has to start in. `--resume <id>` only looks in the
+   * project folder of the CLI's startup directory, but a CLI that entered a
+   * worktree mid-session (EnterWorktree) keeps writing to the folder it started
+   * in while system/init, and so workDir, reports the worktree. Starting from a
+   * directory the transcript recorded that maps to its folder lets the CLI find
+   * the conversation and re-enter the worktree from its worktree-state record.
+   */
+  async resolveResumeLaunchDir(sessionId: string, workDir: string): Promise<string> {
+    const found = await this.findSessionFile(sessionId)
+    const transcript = found ? await statFileIdentity(found.filePath) : null
+    if (!found || !transcript) return workDir
+    // Compare file identity rather than folder names: case-insensitive volumes
+    // can spell the same folder differently.
+    const holdsTranscript = async (directory: string) => {
+      const resolved = await fs.realpath(directory).catch(() => null)
+      if (!resolved) return false
+      const folder = this.sanitizePath(normalizeDriveRootPathForPlatform(resolved.normalize('NFC')))
+      return isSameFileIdentity(transcript, await statFileIdentity(path.join(this.getProjectsDir(), folder, `${sessionId}.jsonl`)))
+    }
+    if (await holdsTranscript(workDir)) return workDir
+
+    const recorded = new Set<string>()
+    await this.streamJsonlFile(found.filePath, (entry) => {
+      const record = entry as Record<string, unknown>
+      if (typeof record.cwd === 'string') recorded.add(record.cwd)
+      if (entry.type === 'session-meta' && typeof record.workDir === 'string') recorded.add(record.workDir)
+    }).catch((error) => {
+      // Oversized records are still read past; keep the directories seen.
+      console.warn(`[SessionService] resolveResumeLaunchDir: transcript scan for ${sessionId} incomplete:`, error)
+    })
+    for (const directory of recorded) {
+      if (directory !== workDir && await holdsTranscript(directory)) return directory
+    }
+    return workDir
+  }
+
   async getSessionMessageCwd(
     sessionId: string,
     messageId: string,
@@ -6584,6 +6766,13 @@ export class SessionService {
     return typeof entry?.cwd === 'string' && entry.cwd.trim() ? entry.cwd : null
   }
 
+  async getSessionStatusMetadata(sessionId: string): Promise<Pick<SessionMetadataProjection, 'launchInfo' | 'transcriptMetadata'> | null> {
+    const found = await this.findSessionFile(sessionId)
+    if (!found) return null
+    const { launchInfo, transcriptMetadata } = await this.getMetadataProjection(found.filePath, found.projectDir)
+    return { launchInfo, transcriptMetadata }
+  }
+
   /**
    * Inspect how a session should be launched.
    * Placeholder desktop-created sessions have zero transcript messages.
@@ -6591,11 +6780,11 @@ export class SessionService {
   async getSessionLaunchInfo(sessionId: string): Promise<SessionLaunchInfo | null> {
     if (isSideChatId(sessionId)) {
       const side = getSideChat(sessionId)
-      return side && !side.closed ? { ...side.launchInfo } : null
+      return side && !side.closed ? { ...side.launchInfo, additionalDirectories: [...(side.launchInfo.additionalDirectories ?? [])] } : null
     }
     const memory = this.memoryLaunchInfo.get(this.memorySessionKey(sessionId))
     const found = await this.findSessionFile(sessionId)
-    if (!found) return memory ? { ...memory, transcriptMessageCount: 0 } : null
+    if (!found) return memory ? { ...memory, additionalDirectories: [...(memory.additionalDirectories ?? [])], transcriptMessageCount: 0 } : null
 
     const projection = await this.getMetadataProjection(found.filePath, found.projectDir)
     // Same reasoning as getSessionWorkDir: an oversized record (typically an
@@ -6603,7 +6792,7 @@ export class SessionService {
     // launch metadata is unusable. Throwing here failed every user message in
     // the session, because sending one needs this call.
     const projected = projection.launchInfo
-    return { ...projected, ...memory, transcriptMessageCount: projected.transcriptMessageCount }
+    return { ...projected, ...memory, additionalDirectories: [...(memory?.additionalDirectories ?? projected.additionalDirectories ?? [])], transcriptMessageCount: projected.transcriptMessageCount }
   }
 
   async deleteSessionFile(sessionId: string): Promise<void> {
@@ -6785,17 +6974,14 @@ export class SessionService {
 
   async appendSessionMetadata(
     sessionId: string,
-    metadata: {
-      workDir: string
-      customTitle?: string | null
-      repository?: PreparedSessionWorkspace['repository']
-      permissionMode?: string
-      prePlanPermissionMode?: string | null
-      runtimeProviderId?: string | null
-      runtimeModelId?: string
-      effortLevel?: string
-      openAIFastMode?: boolean
-    }
+    metadata: SessionMetadataPatch,
+  ): Promise<void> {
+    return this.withSessionMetadataMutation(sessionId, () => this.appendSessionMetadataUnlocked(sessionId, metadata))
+  }
+
+  private async appendSessionMetadataUnlocked(
+    sessionId: string,
+    metadata: SessionMetadataPatch,
   ): Promise<void> {
     if (isSideChatId(sessionId)) {
       const side = getSideChat(sessionId)
@@ -6809,6 +6995,7 @@ export class SessionService {
     }
     const persist = this.shouldPersistSession()
     const storedInfo = await this.getSessionLaunchInfo(sessionId)
+    let additionalDirectories = normalizeAdditionalDirectories(metadata.additionalDirectories ?? storedInfo?.additionalDirectories)
     if (storedInfo?.agentProfile === 'lean' && metadata.permissionMode === 'plan') throw new Error('Plan mode is unavailable in lean sessions. Choose another permission mode.')
     if (storedInfo) this.knownSessionKeys.add(this.memorySessionKey(sessionId))
     const workDir = normalizeDriveRootPathForPlatform(metadata.workDir)
@@ -6822,6 +7009,7 @@ export class SessionService {
       const projectDir = this.sanitizePath(normalizedWorkDir)
       this.memoryLaunchInfo.set(this.memorySessionKey(sessionId), {
         ...previousInfo,
+        additionalDirectories,
         workDir: normalizedWorkDir, projectDir,
         filePath: path.join(this.getProjectsDir(), projectDir, `${sessionId}.jsonl`),
         ...(metadata.repository ? { repository: metadata.repository } : {}),
@@ -6868,10 +7056,33 @@ export class SessionService {
       }
     }
 
+    // The CLI can create its worktree transcript before system/init arrives.
+    // That conversation wins file selection, but its launch snapshot still lives
+    // in the placeholder until this write transfers it before placeholder cleanup.
+    const target = matches.find((match) => match.filePath === targetFilePath)
+    const targetDirectories = target
+      ? (await this.getMetadataProjection(target.filePath, target.projectDir)).launchInfo.additionalDirectories
+      : undefined
+    let scopeNeedsTransfer = metadata.additionalDirectories !== undefined && targetDirectories === undefined
+    if (metadata.additionalDirectories === undefined) {
+      if (targetDirectories !== undefined) {
+        additionalDirectories = [...targetDirectories]
+      } else {
+        for (const match of matches) {
+          const candidate = (await this.getMetadataProjection(match.filePath, match.projectDir)).launchInfo.additionalDirectories
+          if (candidate !== undefined) {
+            additionalDirectories = [...candidate]
+            scopeNeedsTransfer = true
+            break
+          }
+        }
+      }
+    }
+
     // Startup names the directory the session was launched from, so a collaboration title
     // can land on that placeholder. Once the conversation lives in another transcript, keep
     // the title with the file that survives placeholder cleanup instead of letting the only
-    // copy be deleted. Re-ported from upstream.
+    // copy be deleted.
     let customTitle = metadata.customTitle ?? null
     if (!customTitle) {
       const target = matches.find((match) => match.filePath === targetFilePath)
@@ -6890,9 +7101,10 @@ export class SessionService {
       }
     }
 
-    if (!customTitle && !this.memoryLaunchInfo.has(this.memorySessionKey(sessionId))) {
+    if (!scopeNeedsTransfer && !customTitle && !this.memoryLaunchInfo.has(this.memorySessionKey(sessionId))) {
       if (this.metadataMatchesLaunchInfo(previousInfo, {
         ...metadata,
+        additionalDirectories,
         workDir: normalizedWorkDir,
         repository,
       })) {
@@ -6906,6 +7118,7 @@ export class SessionService {
       type: 'session-meta',
       isMeta: true,
       workDir: normalizedWorkDir,
+      additionalDirectories,
       agentProfile: storedInfo?.agentProfile ?? 'standard',
       repository,
       ...(metadata.permissionMode && VALID_SESSION_PERMISSION_MODES.has(metadata.permissionMode)
@@ -6939,6 +7152,13 @@ export class SessionService {
   }
 
   async deletePlaceholderSessionFiles(
+    sessionId: string,
+    keepWorkDir: string,
+  ): Promise<number> {
+    return this.withSessionMetadataMutation(sessionId, () => this.deletePlaceholderSessionFilesUnlocked(sessionId, keepWorkDir))
+  }
+
+  private async deletePlaceholderSessionFilesUnlocked(
     sessionId: string,
     keepWorkDir: string,
   ): Promise<number> {
@@ -7005,6 +7225,25 @@ export class SessionService {
         .slice(0, startIndex)
         .map((message) => message.id),
     )
+    // The visible messages are not the whole chain: entries the history view
+    // hides (isMeta skill prompts, the "No response requested." sentinel a
+    // resumed CLI writes) still sit in the parentUuid chain. Dropping them
+    // strands every later message, and --resume then loses all history above
+    // the gap. Keep everything the rewind target was built on.
+    const entriesByUuid = new Map(
+      entries.flatMap((entry) => typeof entry.uuid === 'string' ? [[entry.uuid, entry] as const] : []),
+    )
+    const parentOf = (entry: RawEntry | undefined) =>
+      entry && entriesByUuid.get(entry.parentUuid ?? entry.logicalParentUuid ?? '')
+    const visited = new Set<string>()
+    for (
+      let ancestor = parentOf(entriesByUuid.get(startMessageId));
+      ancestor?.uuid && !visited.has(ancestor.uuid);
+      ancestor = parentOf(ancestor)
+    ) {
+      visited.add(ancestor.uuid)
+      remainingMessageIds.add(ancestor.uuid)
+    }
 
     if (removedMessageIds.length === 0) {
       return { removedCount: 0, removedMessageIds: [] }
@@ -7349,6 +7588,11 @@ export class SessionService {
     }
 
     for (const entry of entries) {
+      // Overlapping transcript writes can leave repeated UUIDs on disk. The
+      // latest record already owns parent resolution above; project it once
+      // too, so history cannot create duplicate desktop message/row identities.
+      if (typeof entry.uuid === 'string' && entry.uuid && entriesByUuid.get(entry.uuid) !== entry) continue
+
       const goalLocalCommandMessage = this.goalLocalCommandEntryToMessage(entry)
       if (goalLocalCommandMessage) {
         messages.push(goalLocalCommandMessage)
@@ -7358,15 +7602,21 @@ export class SessionService {
       // Only process transcript entries (user / assistant / system with messages)
       if (!entry.message?.role) continue
 
-      // Skip meta entries (CLI internal bookkeeping). Collaboration deliveries are
-      // the exception: the isMeta prompt carries a real cross-session message that
-      // must render as an ordinary user-position bubble.
+      // Checked before the isMeta skip: the batch of settled agents is isMeta.
+      const backgroundContinue = this.backgroundContinueEntryToMessage(entry)
+      if (backgroundContinue) {
+        messages.push(backgroundContinue)
+        continue
+      }
+
+      // Skip meta entries (CLI internal bookkeeping). Collaboration deliveries
+      // are the exception: the isMeta prompt carries a real cross-session
+      // message that must render as an ordinary user-position bubble.
       if (entry.isMeta && !parseSessionCollaborationEnvelope(entry.message.content)) continue
 
-      // The queued notification turn is plumbing and is hidden here; what the
-      // assistant does in response is ordinary conversation, so it is never
-      // dropped with it. Hiding the whole run that followed the notification
-      // lost real work.
+      // Anything else hidden here is system plumbing. What the assistant does in
+      // response to a projected notification is ordinary conversation, so it is
+      // never dropped with it.
       if (this.shouldHideTranscriptEntry(entry)) continue
 
       // Skip non-transcript entry types

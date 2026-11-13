@@ -112,6 +112,7 @@ describe('feature quality contract', () => {
   })
 
   test('keeps desktop native CI aligned with Electron packaging', () => {
+    const packageJson = JSON.parse(readFileSync('package.json', 'utf8'))
     const prQuality = readFileSync('.github/workflows/pr-quality.yml', 'utf8')
     const buildSidecars = readFileSync('desktop/scripts/build-sidecars.ts', 'utf8')
 
@@ -120,6 +121,9 @@ describe('feature quality contract', () => {
     expect(prQuality.indexOf('run: bun run prepare:cloudflared')).toBeLessThan(
       prQuality.indexOf('run: bun run check:native'),
     )
+    expect(prQuality).toContain('cargo +stable fetch --locked --manifest-path native/agent-desktop/Cargo.toml')
+    expect(packageJson.scripts?.['check:native']).toContain('check:agent-desktop')
+    expect(prQuality).not.toContain('cargo tauri')
     expect(prQuality).not.toContain('dtolnay/rust-toolchain')
     expect(prQuality).not.toContain('swatinem/rust-cache')
     expect(prQuality).not.toContain('libwebkit2gtk')

@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  buildAdaptersCoverageCommand,
   buildRootCoverageCommand,
   collectChangedLines,
   collectServerTestFiles,
@@ -26,18 +27,35 @@ import {
 } from './coverage'
 
 describe('coverage gate helpers', () => {
-  test('builds the isolated root coverage command with the transcript classifier enabled', () => {
-    expect(buildRootCoverageCommand()).toEqual([
+  test('collects isolated root coverage with the transcript classifier and an explicit target-root preload', () => {
+    const root = join(tmpdir(), 'cc-haha-coverage-command-fixture')
+    expect(buildRootCoverageCommand('/tmp/coverage', ['src/example.test.ts'], root)).toEqual([
       'bun',
       '--no-env-file',
       '--feature=TRANSCRIPT_CLASSIFIER',
       '--feature=VERIFICATION_AGENT',
       '--feature=FORK_SUBAGENT',
       'test',
-      '--max-concurrency=1',
+      '--isolate',
+      '--preload',
+      resolve(root, 'preload.ts'),
       '--timeout=20000',
       '--coverage',
       '--coverage-reporter=lcov',
+    ])
+  })
+
+  test('collects isolated adapters coverage with the existing reporters and output directory', () => {
+    expect(buildAdaptersCoverageCommand('/tmp/coverage')).toEqual([
+      'bun',
+      '--no-env-file',
+      'test',
+      '--isolate',
+      '--coverage',
+      '--coverage-reporter=lcov',
+      '--coverage-reporter=text',
+      '--coverage-dir',
+      '/tmp/coverage/adapters',
     ])
   })
 

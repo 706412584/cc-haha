@@ -35,6 +35,8 @@ import {
   triggerFastModeCooldown,
 } from '../../utils/fastMode.js'
 import { isNonCustomOpusModel } from '../../utils/model/model.js'
+import { getRequestProviderRoute, readProviderEnv } from '../../utils/model/providerEnvScope.js'
+import { INVALID_PROVIDER_KEY_HEADER } from '../../shared/providerCredentialError.js'
 import { disableKeepAlive } from '../../utils/proxy.js'
 import { sleep } from '../../utils/sleep.js'
 import type { ThinkingConfig } from '../../utils/thinking.js'
@@ -48,21 +50,40 @@ import {
 } from '../rateLimitMocking.js'
 import {
   isContextOverflowErrorText,
+  isProviderUsageLimitError,
   REPEATED_529_ERROR_MESSAGE,
 } from './errors.js'
 import {
   extractConnectionErrorDetails,
   hasAPIErrorType,
 } from './errorUtils.js'
+import { isLocalProtocolProxy } from './outputBudget.js'
 import { StreamEndedEarlyError } from './streamFallback.js'
 import { StreamWatchdogTimeoutError } from './streamWatchdog.js'
 import { isOpenAIPolicyError } from '../openaiAuth/policyError.js'
 
 const abortError = () => new APIUserAbortError()
 
+function isInvalidSavedProviderKeyError(error: unknown): boolean {
+  if (!(error instanceof APIError) || error.status !== 401 ||
+    error.headers?.get(INVALID_PROVIDER_KEY_HEADER) !== 'true' ||
+    readProviderEnv('ANTHROPIC_API_KEY') !== 'proxy-managed' ||
+    (!getRequestProviderRoute() && !isEnvTruthy(process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST))) return false
+  try {
+    const url = new URL(readProviderEnv('ANTHROPIC_BASE_URL') ?? '')
+    const pathname = url.pathname.replace(/\/+$/, '') || '/'
+    return url.protocol === 'http:' && url.hostname === '127.0.0.1' &&
+      !url.username && !url.password && !url.search && !url.hash &&
+      (pathname === '/proxy' || /^\/proxy\/providers\/[^/]+$/.test(pathname))
+  } catch {
+    return false
+  }
+}
+
 const DEFAULT_MAX_RETRIES = 10
 const FLOOR_OUTPUT_TOKENS = 3000
 const MAX_529_RETRIES = 3
+const LOCAL_SERVICE_REFUSED_MAX_RETRIES = 2
 export const BASE_DELAY_MS = 500
 
 /**
@@ -162,11 +183,36 @@ function isStaleConnectionError(error: unknown): boolean {
   return details?.code === 'ECONNRESET' || details?.code === 'EPIPE'
 }
 
+const CONNECTION_REFUSED_CODES = new Set(['ECONNREFUSED', 'ConnectionRefused'])
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
+
+/**
+ * A service on this machine (Ollama, LM Studio, a Magpie gateway) that refuses
+ * the connection is not running. Our own `/proxy` stays out: it fronts a remote
+ * upstream and keeps the normal retries.
+ */
+export function isLocalServiceRefused(
+  error: unknown,
+  baseUrl = readProviderEnv('ANTHROPIC_BASE_URL'),
+): boolean {
+  if (!(error instanceof APIConnectionError)) return false
+  const code = extractConnectionErrorDetails(error)?.code
+  if (!code || !CONNECTION_REFUSED_CODES.has(code)) return false
+  if (!baseUrl || isLocalProtocolProxy(baseUrl)) return false
+  try {
+    return LOOPBACK_HOSTS.has(new URL(baseUrl).hostname)
+  } catch {
+    return false
+  }
+}
+
 export interface RetryContext {
   maxTokensOverride?: number
   model: string
   thinkingConfig: ThinkingConfig
   fastMode?: boolean
+  /** Set once the request is re-sent with its images replaced. */
+  withoutImages?: boolean
 }
 
 /**
@@ -199,6 +245,12 @@ interface RetryOptions {
    * regardless of which request mode hit the overload.
    */
   initialConsecutive529Errors?: number
+  /**
+   * Whether a failure may be the provider refusing image input. If so, the
+   * request is re-sent once, immediately, with `withoutImages` set; the
+   * operation decides what that removes.
+   */
+  shouldRetryWithoutImages?: (error: unknown) => boolean
 }
 
 export class CannotRetryError extends Error {
@@ -300,6 +352,10 @@ export function isRetryableStreamError(error: unknown): boolean {
   )) return true
 
   const message = error instanceof Error ? error.message : String(error)
+  if (!message) return false
+  // An overflow reported inside the stream is still an overflow: re-sending
+  // the same request cannot succeed, compaction can.
+  if (isContextOverflowErrorText(message)) return false
   // Some providers surface a mid-stream disconnect as a plain Error carrying
   // the serialized body rather than a parsed APIError (so hasAPIErrorType
   // misses it). Match the two transient shapes seen in the wild: Grok's
@@ -373,10 +429,16 @@ export function isProxyStreamTransportError(error: unknown): boolean {
 
 /**
  * The upstream rejected the request inside the stream. Unlike a broken stream,
- * re-sending it without streaming only gets the same answer.
+ * re-sending it without streaming only gets the same answer. A context
+ * overflow is such a rejection whatever event type carries it: the local proxy
+ * relays an OpenAI `data: {"error":...}` chunk as an api_error.
  */
 export function isStreamRequestRejection(error: unknown): boolean {
-  return streamErrorEventType(error) === 'invalid_request_error'
+  const type = streamErrorEventType(error)
+  return (
+    type === 'invalid_request_error' ||
+    (type !== undefined && isContextOverflowErrorText(errorMessage(error)))
+  )
 }
 
 /**
@@ -611,9 +673,9 @@ export async function* withRetry<T>(
 
       return await operation(client, attempt, retryContext)
     } catch (error) {
-      // Policy rejection is final even when a gateway labels it 401/429/5xx.
-      // Stop before auth refresh, fast-mode changes or persistent/model fallback.
-      if (isOpenAIPolicyError(error)) {
+      // Policy, exhausted plan/balance and explicitly invalid saved keys are
+      // final. Stop before auth refresh, fast-mode changes or model fallback.
+      if (isOpenAIPolicyError(error) || isProviderUsageLimitError(error) || isInvalidSavedProviderKeyError(error)) {
         throw new CannotRetryError(error, retryContext)
       }
       lastError = error
@@ -677,6 +739,14 @@ export async function* withRetry<T>(
         continue
       }
 
+      if (
+        !retryContext.withoutImages &&
+        options.shouldRetryWithoutImages?.(error)
+      ) {
+        retryContext.withoutImages = true
+        continue
+      }
+
       // Non-foreground sources bail immediately on 529 — no retry amplification
       // during capacity cascades. User never sees these fail.
       if (is529Error(error) && !shouldRetry529(options.querySource)) {
@@ -737,6 +807,15 @@ export async function* withRetry<T>(
         !hasApiAttemptsLeft(options.apiAttemptBudget)
       ) {
         throw new CannotRetryError(error, retryContext, attempt - 1)
+      }
+
+      // Backing off for minutes only hides that a local service is closed;
+      // a couple of quick tries are enough for a momentary blip.
+      if (
+        attempt > LOCAL_SERVICE_REFUSED_MAX_RETRIES &&
+        isLocalServiceRefused(error)
+      ) {
+        throw new CannotRetryError(error, retryContext)
       }
 
       // AWS/GCP errors aren't always APIError, but can be retried
@@ -1117,6 +1196,13 @@ function shouldRetry(error: APIError): boolean {
     return true
   }
 
+  // A context overflow replays the same oversized prompt on every attempt,
+  // whatever status a gateway wraps it in (a 401 in #1162, a 500 from relays).
+  // Fail fast so the overflow surfaces and compaction can react instead.
+  if (error.status !== 429 && isContextOverflowErrorText(error.message)) {
+    return false
+  }
+
   // Note this is not a standard header.
   const shouldRetryHeader = error.headers?.get('x-should-retry')
 
@@ -1160,12 +1246,6 @@ function shouldRetry(error: APIError): boolean {
   // Clear API key cache on 401 and allow retry.
   // OAuth token handling is done in the main retry loop via handleOAuth401Error.
   if (error.status === 401) {
-    // Some gateways wrap context-overflow rejections in a 401 (#1162).
-    // Retrying just replays the same oversized prompt — fail fast so the
-    // overflow surfaces and compaction can react instead.
-    if (isContextOverflowErrorText(error.message)) {
-      return false
-    }
     clearApiKeyHelperCache()
     return true
   }

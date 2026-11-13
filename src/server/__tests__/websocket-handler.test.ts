@@ -40,6 +40,7 @@ import * as teleportApi from '../../utils/teleport/api.js'
 import { resetSettingsCache, setSessionSettingsCache } from '../../utils/settings/settingsCache.js'
 import { clearGrokModelCatalogCache, getGrokModelCatalog } from '../../services/grokAuth/modelCatalog.js'
 import { hahaGrokOAuthService } from '../services/hahaGrokOAuthService.js'
+import { createResumableSocketHandler } from '../ws/resumableStreams.js'
 
 function makeClientSocket(sessionId: string, clientKind: 'full' | 'pet' = 'full') {
   const sent: string[] = []
@@ -101,6 +102,142 @@ function mockSavedDeepSeekProvider(): void {
 async function flushMicrotasks(count = 12): Promise<void> {
   for (let index = 0; index < count; index++) await Promise.resolve()
 }
+
+describe('WebSocket ordered attachment admission', () => {
+  afterEach(() => {
+    __resetWebSocketHandlerStateForTests()
+    resetSettingsCache()
+    mock.restore()
+  })
+
+  for (const pendingStage of ['startup', 'attachment materialization'] as const) {
+    it(`preserves a video and following text while ${pendingStage} is pending`, async () => {
+      const sessionId = `wechat-video-admission-${crypto.randomUUID()}`
+      const ws = makeClientSocket(sessionId)
+      let release!: () => void
+      const pending = new Promise<void>(resolve => { release = resolve })
+      let runtimeReady = pendingStage !== 'startup'
+      if (!runtimeReady) __registerPendingSessionStartupForTests(sessionId, pending.then(() => { runtimeReady = true }))
+      spyOn(conversationService, 'hasSession').mockImplementation(() => runtimeReady)
+      spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+      spyOn(conversationService, 'onOutput').mockImplementation(() => {})
+      spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+      spyOn(sessionService, 'getCustomTitle').mockResolvedValue('Existing title')
+      const committed: Array<{ content: string; attachments: unknown }> = []
+      const send = spyOn(conversationService, 'sendMessage').mockImplementation(async (_id, content, attachments, options) => {
+        if (attachments && pendingStage === 'attachment materialization') await pending
+        if (options?.canSend && !options.canSend()) return false
+        committed.push({ content, attachments })
+        options?.onCommitted?.()
+        return true
+      })
+      const attachments = [{ type: 'file', name: 'phone.mp4', path: '/tmp/phone.mp4', mimeType: 'video/mp4' }]
+      handleWebSocket.open(ws)
+      handleWebSocket.message(ws, JSON.stringify({ type: 'user_message', content: 'Uploaded video', attachments }))
+      await flushMicrotasks(40)
+      handleWebSocket.message(ws, JSON.stringify({ type: 'user_message', content: 'Extract audio from the video above' }))
+      await flushMicrotasks(40)
+      expect(committed).toEqual([])
+      release()
+      await flushMicrotasks(100)
+      expect(send).toHaveBeenCalledTimes(2)
+      expect(committed).toEqual([
+        { content: 'Uploaded video', attachments },
+        { content: 'Extract audio from the video above', attachments: undefined },
+      ])
+    })
+  }
+
+  it('discards queued attachment follow-ups on Stop and allows a new input', async () => {
+    const sessionId = `wechat-video-stop-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    let release!: () => void
+    let runtimeReady = false
+    const pending = new Promise<void>(resolve => { release = () => { runtimeReady = true; resolve() } })
+    __registerPendingSessionStartupForTests(sessionId, pending)
+    spyOn(conversationService, 'hasSession').mockImplementation(() => runtimeReady)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'onOutput').mockImplementation(() => {})
+    spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+    spyOn(conversationService, 'sendInterrupt').mockReturnValue(true)
+    spyOn(sessionService, 'getCustomTitle').mockResolvedValue('Existing title')
+    const send = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
+    handleWebSocket.open(ws)
+    handleWebSocket.message(ws, JSON.stringify({ type: 'user_message', content: 'Uploaded video' }))
+    await flushMicrotasks(30)
+    handleWebSocket.message(ws, JSON.stringify({ type: 'user_message', content: 'Discard this queued follow-up' }))
+    handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+    release()
+    await flushMicrotasks(60)
+    expect(send).not.toHaveBeenCalled()
+    handleWebSocket.message(ws, JSON.stringify({ type: 'user_message', content: 'Fresh request after Stop' }))
+    await flushMicrotasks(100)
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0]?.[1]).toBe('Fresh request after Stop')
+  })
+
+  it('cancels queued admissions on session cleanup without blocking a replacement connection', async () => {
+    const sessionId = `wechat-video-cleanup-${crypto.randomUUID()}`
+    const previous = makeClientSocket(sessionId)
+    const replacement = makeClientSocket(sessionId)
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'onOutput').mockImplementation(() => {})
+    spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+    spyOn(sessionService, 'getCustomTitle').mockResolvedValue('Existing title')
+    const committed: string[] = []
+    const send = spyOn(conversationService, 'sendMessage').mockImplementation(async (_id, content, _attachments, options) => {
+      if (content === 'Old video') await pending
+      if (options?.canSend && !options.canSend()) return false
+      committed.push(content)
+      options?.onCommitted?.()
+      return true
+    })
+    handleWebSocket.open(previous)
+    handleWebSocket.message(previous, JSON.stringify({ type: 'user_message', content: 'Old video' }))
+    await flushMicrotasks(40)
+    handleWebSocket.message(previous, JSON.stringify({ type: 'user_message', content: 'Old follow-up' }))
+    expect(closeSessionConnection(sessionId)).toBe(true)
+    handleWebSocket.open(replacement)
+    handleWebSocket.message(replacement, JSON.stringify({ type: 'user_message', content: 'New request' }))
+    await flushMicrotasks(100)
+    expect(committed).toEqual(['New request'])
+    release()
+    await flushMicrotasks(100)
+    expect(send).toHaveBeenCalledTimes(2)
+    expect(committed).toEqual(['New request'])
+  })
+
+  it('does not block a different session behind video admission', async () => {
+    const waitingId = `wechat-video-waiting-${crypto.randomUUID()}`
+    const otherId = `wechat-video-independent-${crypto.randomUUID()}`
+    const waiting = makeClientSocket(waitingId)
+    const other = makeClientSocket(otherId)
+    let release!: () => void
+    let runtimeReady = false
+    const pending = new Promise<void>(resolve => { release = () => { runtimeReady = true; resolve() } })
+    __registerPendingSessionStartupForTests(waitingId, pending)
+    spyOn(conversationService, 'hasSession').mockImplementation(id => id !== waitingId || runtimeReady)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'onOutput').mockImplementation(() => {})
+    spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+    spyOn(sessionService, 'getCustomTitle').mockResolvedValue('Existing title')
+    const send = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
+    handleWebSocket.open(waiting)
+    handleWebSocket.open(other)
+    handleWebSocket.message(waiting, JSON.stringify({ type: 'user_message', content: 'Pending video' }))
+    handleWebSocket.message(waiting, JSON.stringify({ type: 'user_message', content: 'Follow-up' }))
+    handleWebSocket.message(other, JSON.stringify({ type: 'user_message', content: 'Independent message' }))
+    await flushMicrotasks(100)
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0]?.[0]).toBe(otherId)
+    release()
+    await flushMicrotasks(100)
+    expect(send.mock.calls.map(call => call[1])).toEqual(['Independent message', 'Pending video', 'Follow-up'])
+  })
+})
 
 describe('WebSocket Grok catalog runtime selection', () => {
   afterEach(() => {
@@ -6783,5 +6920,86 @@ describe('prewarm idle timer active-turn guard (issue #865 follow-up)', () => {
     fire()
 
     expect(stopSession).toHaveBeenCalledWith(sessionId)
+  })
+})
+
+describe('resumable streams over the real session handler', () => {
+  const STREAM = 'RRRRRRRRRRRRRRRRRRRRRR'
+  afterEach(() => {
+    __resetWebSocketHandlerStateForTests()
+    __resetDisconnectGraceMsForTests()
+    mock.restore()
+  })
+
+  function withOutput() {
+    const callbacks = new Set<(cliMsg: any) => void>()
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'onOutput').mockImplementation((_id, callback) => { callbacks.add(callback) })
+    spyOn(conversationService, 'removeOutputCallback').mockImplementation((_id, callback) => { callbacks.delete(callback) })
+    spyOn(sessionService, 'getCustomTitle').mockResolvedValue(null)
+    return callbacks
+  }
+  const frames = (ws: { sent: string[] }) => ws.sent.map(text => JSON.parse(text) as Record<string, unknown>)
+
+  it('a turn that finishes while the phone is away is replayed once on return, without reopening the session', async () => {
+    const sessionId = `resume-${crypto.randomUUID()}`
+    const callbacks = withOutput()
+    const stopSession = spyOn(conversationService, 'stopSession').mockImplementation(() => {})
+    __setDisconnectGraceMsForTests(1)
+    const sockets = createResumableSocketHandler(handleWebSocket, { epoch: 'test-epoch' })
+    const first = makeClientSocket(sessionId)
+    Object.assign(first.data, { resume: { streamId: STREAM, ack: 0 } })
+    sockets.open(first)
+    await flushMicrotasks()
+    const seen = frames(first).filter(frame => typeof frame.seq === 'number').length
+    sockets.close(first, 1006, '')
+    expect(getActiveSessionIds()).toContain(sessionId)
+    for (const callback of [...callbacks]) {
+      callback({ type: 'result', subtype: 'success', result: 'done', usage: { input_tokens: 1, output_tokens: 1 } })
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(stopSession).not.toHaveBeenCalled()
+
+    const second = makeClientSocket(sessionId)
+    Object.assign(second.data, { resume: { streamId: STREAM, ack: seen, epoch: 'test-epoch' } })
+    sockets.open(second)
+    const replayed = frames(second)
+    expect(replayed[0]).toMatchObject({ type: 'stream_attached', resumed: true, next: seen + 1 })
+    expect(replayed.filter(frame => frame.type === 'message_complete')).toHaveLength(1)
+    // The handler was not reopened: no second `connected` or permission snapshot.
+    expect(replayed.some(frame => frame.type === 'connected')).toBe(false)
+    expect(replayed.slice(1).every(frame => typeof frame.seq === 'number' && frame.seq > seen)).toBe(true)
+  })
+
+  it('a resume the server cannot honor is refused without opening a session connection', async () => {
+    const sessionId = `refused-${crypto.randomUUID()}`
+    withOutput()
+    const sockets = createResumableSocketHandler(handleWebSocket, { epoch: 'test-epoch' })
+    const ws = makeClientSocket(sessionId)
+    Object.assign(ws.data, { resume: { streamId: STREAM, ack: 3, epoch: 'test-epoch' } })
+    sockets.open(ws)
+    await flushMicrotasks()
+    expect(frames(ws)).toEqual([{ type: 'stream_attached', v: 1, stream: STREAM, epoch: 'test-epoch', resumed: false, reason: 'expired', cack: 0, next: 1, last: 0 }])
+    expect(ws.close).toHaveBeenCalledWith(4001, 'Stream not resumable')
+    expect(getActiveSessionIds()).not.toContain(sessionId)
+    sockets.close(ws, 4001, 'Stream not resumable')
+    expect(getActiveSessionIds()).not.toContain(sessionId)
+  })
+
+  it('a socket that does not ask for a stream behaves exactly as before', async () => {
+    const sessionId = `legacy-${crypto.randomUUID()}`
+    withOutput()
+    const sockets = createResumableSocketHandler(handleWebSocket, { epoch: 'test-epoch' })
+    const plain = makeClientSocket(sessionId)
+    const direct = makeClientSocket(`${sessionId}-direct`)
+    sockets.open(plain)
+    handleWebSocket.open(direct)
+    await flushMicrotasks()
+    const strip = (ws: { sent: string[] }) => ws.sent.map(text => text.replaceAll(`${sessionId}-direct`, sessionId))
+    expect(plain.sent).toEqual(strip(direct))
+    expect(plain.sent.some(text => text.includes('"seq"'))).toBe(false)
+    sockets.close(plain, 1006, '')
+    expect(getActiveSessionIds()).not.toContain(sessionId)
   })
 })

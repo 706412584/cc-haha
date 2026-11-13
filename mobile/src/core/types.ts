@@ -17,6 +17,12 @@ export type Host = Readonly<{
   name: string
   url: string
   auth: 'lan' | 'remote'
+  /**
+   * The H5 page's own computer (never stored). The browser already loaded the
+   * page from this origin, so its cookie or loopback authentication can be used
+   * without going through the native access-token or device-pairing form.
+   */
+  page?: true
 }>
 export type RuntimeConfig = {
   providerId: string | null
@@ -69,6 +75,10 @@ export type HistoryPage = {
     scannedBytes: number
     omittedOversizedEntries: number
     contentTruncated?: boolean
+    /** 新电脑才给：从这一页末尾往后只读新增记录的游标。 */
+    tailCursor?: string
+    /** false：这次往后读到了页上限，后面还有新增记录。 */
+    tailComplete?: boolean
   }
 }
 export type PairRequest = { id: string; claimSecret: string }

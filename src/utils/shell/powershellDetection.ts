@@ -5,6 +5,13 @@ import type { Platform } from '../platform.js'
 import { which } from '../which.js'
 
 export const POWERSHELL_PATH_OVERRIDE_ENV = 'CLAUDE_CODE_POWERSHELL_PATH'
+const WINDOWS_DEFAULT_PWSH_PATH = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe'
+function windowsPowerShellSystemPath(): string {
+  return pathWin32.join(
+    process.env.SystemRoot ?? 'C:\\Windows',
+    'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe',
+  )
+}
 
 async function probePath(p: string): Promise<string | null> {
   try {
@@ -67,10 +74,35 @@ async function resolveWindowsPowerShellFallbackPath(
 
   const pathProbe = deps.probePath ?? probePath
 
-  const fallbackPath = basename === 'pwsh'
-    ? windowsPwshPath(deps.env ?? process.env)
-    : windowsPowerShellPath(deps.env ?? process.env)
-  return fallbackPath ? pathProbe(fallbackPath) : null
+  if (basename === 'pwsh') {
+    // PowerShell Core may be invokable via Windows shell/app aliases while
+    // absent from the sidecar PATH. Ask pwsh where it actually lives.
+    const psHome = await (deps.readWindowsPwshHome ?? readWindowsPwshHome)()
+    if (psHome) {
+      const resolvedFromHome = await pathProbe(
+        pathWin32.join(psHome, 'pwsh.exe'),
+      )
+      if (resolvedFromHome) {
+        return resolvedFromHome
+      }
+    }
+  }
+
+  // Fork: also honor a user-custom Program Files location before falling back
+  // to the hard-coded default path.
+  if (basename === 'pwsh') {
+    const fromEnv = windowsPwshPath(deps.env ?? process.env)
+    if (fromEnv) {
+      const probed = await pathProbe(fromEnv)
+      if (probed) return probed
+    }
+  }
+
+  return pathProbe(
+    basename === 'pwsh'
+      ? WINDOWS_DEFAULT_PWSH_PATH
+      : windowsPowerShellSystemPath(),
+  )
 }
 
 export async function resolvePowerShellPathOverride(
@@ -115,13 +147,10 @@ export async function resolvePowerShellPathOverride(
  * via a symlink chain like /usr/bin/pwsh → /snap/bin/pwsh — probe known
  * apt/rpm install locations instead: the snap launcher can hang in
  * subprocesses while snapd initializes confinement, but the underlying
- * binary at /opt/microsoft/powershell/7/pwsh is reliable. On
- * Windows also probes known system install paths because packaged apps may
- * inherit a reduced PATH. On macOS, PATH is sufficient.
+ * binary at /opt/microsoft/powershell/7/pwsh is reliable. Windows also
+ * checks the standard install locations when the sidecar PATH omits them.
  */
-export async function findPowerShell(
-  deps: PowerShellDetectionDeps = {},
-): Promise<string | null> {
+export async function findPowerShell(deps: PowerShellDetectionDeps = {}): Promise<string | null> {
   const overridePath = await resolvePowerShellPathOverride(
     deps.powershellPathOverride === undefined
       ? process.env[POWERSHELL_PATH_OVERRIDE_ENV]
@@ -132,14 +161,14 @@ export async function findPowerShell(
     return overridePath
   }
 
-  const commandLookup = deps.which ?? which
+  const lookup = deps.which ?? which
+  const probe = deps.probePath ?? probePath
   const platform = (deps.getPlatform ?? getPlatform)()
-  if (platform === 'windows') {
-    return (await resolveWindowsPowerShellFallbackPath('pwsh', deps))
-      ?? resolveWindowsPowerShellFallbackPath('powershell', deps)
-  }
-
-  const pwshPath = await commandLookup('pwsh')
+  // Fork: try the richer Windows fallback (ProgramFiles env, pwsh home, default paths)
+  // before the upstream hard-coded default; it covers the sidecar PATH-omission case
+  // the same way but also honors user-custom install locations.
+  const pwshPath = await lookup('pwsh') ??
+    (platform === 'windows' ? (await resolveWindowsPowerShellFallbackPath('pwsh', deps)) ?? await probe(WINDOWS_DEFAULT_PWSH_PATH) : null)
   if (pwshPath) {
     // Snap launcher hangs in subprocesses. Prefer the direct binary.
     // Check both the resolved PATH entry and its symlink target: on
@@ -149,8 +178,8 @@ export async function findPowerShell(
       const resolved = await realpath(pwshPath).catch(() => pwshPath)
       if (pwshPath.startsWith('/snap/') || resolved.startsWith('/snap/')) {
         const direct =
-          (await probePath('/opt/microsoft/powershell/7/pwsh')) ??
-          (await probePath('/usr/bin/pwsh'))
+          (await probe('/opt/microsoft/powershell/7/pwsh')) ??
+          (await probe('/usr/bin/pwsh'))
         if (direct) {
           const directResolved = await realpath(direct).catch(() => direct)
           if (
@@ -165,12 +194,8 @@ export async function findPowerShell(
     return pwshPath
   }
 
-  const powershellPath = await commandLookup('powershell')
-  if (powershellPath) {
-    return powershellPath
-  }
-
-  return null
+  return await lookup('powershell') ??
+    (platform === 'windows' ? (await resolveWindowsPowerShellFallbackPath('powershell', deps)) ?? await probe(windowsPowerShellSystemPath()) : null)
 }
 
 let cachedPowerShellPath: Promise<string | null> | null = null

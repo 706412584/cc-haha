@@ -1,5 +1,6 @@
 import { feature } from 'bun:bundle'
 import { getAgentModelSetting } from './builtInAgentOverrides.js'
+import { runWithAgentProviderRoute, withAgentProviderRoute } from '../../utils/model/providerEnvScope.js'
 import type { UUID } from 'crypto'
 import { randomUUID } from 'crypto'
 import uniqBy from 'lodash-es/uniqBy.js'
@@ -44,6 +45,7 @@ import type {
 } from '../../types/message.js'
 import { createAttachmentMessage } from '../../utils/attachments.js'
 import { filterAgentProfileTools, getAgentProfile, isAgentProfileMcpEnabled } from '../../utils/agentProfile.js'
+import { convertEffortValueToLevel, type EffortLevel } from '../../utils/effort.js'
 import { AbortError } from '../../utils/errors.js'
 import { getDisplayPath } from '../../utils/file.js'
 import {
@@ -104,6 +106,13 @@ export function resolveSubagentEffortValue(
   parentEffort: AgentDefinition['effort'],
 ): AgentDefinition['effort'] {
   return agentEffort ?? parentEffort
+}
+
+/** The effort a run's metadata sidecar records; `null` leaves it to the model. */
+export function recordedSubagentEffort(
+  effort: AgentDefinition['effort'],
+): EffortLevel | null {
+  return effort === undefined ? null : convertEffortValueToLevel(effort)
 }
 
 export function resolvePersistedAgentType(
@@ -469,7 +478,18 @@ export async function* runAgent({
   const rootSetAppState =
     toolUseContext.setAppStateForTasks ?? toolUseContext.setAppState
 
-  const resolvedAgentModel = getAgentModel(
+  // A pinned provider owns the model: the saved choice wins over tool-call
+  // aliases and CLAUDE_CODE_SUBAGENT_MODEL, which name the session's slots.
+  // Loaded on demand: the route reaches the provider proxy, whose module
+  // graph imports this one.
+  const providerRoute = agentDefinition.provider
+    ? await (await import('../../utils/model/agentProviderRoute.js')).resolveAgentProviderRoute({
+        agentType: agentDefinition.agentType,
+        providerId: agentDefinition.provider,
+        model: agentDefinition.model,
+      })
+    : undefined
+  const resolvedAgentModel = providerRoute?.model ?? getAgentModel(
     getAgentModelSetting(agentDefinition, toolUseContext.options.mainLoopModel),
     toolUseContext.options.mainLoopModel,
     model,
@@ -906,13 +926,14 @@ export async function* runAgent({
 
   // Expose cache-safe params for background summarization (prompt cache sharing)
   if (onCacheSafeParams) {
-    onCacheSafeParams({
+    // Summaries it schedules reuse this Agent's model, so they keep its route.
+    runWithAgentProviderRoute(providerRoute, () => onCacheSafeParams({
       systemPrompt: agentSystemPrompt,
       userContext: resolvedUserContext,
       systemContext: resolvedSystemContext,
       toolUseContext: agentToolUseContext,
       forkContextMessages: initialMessages,
-    })
+    }))
   }
 
   // Record initial messages before the query loop starts, plus the agentType
@@ -940,6 +961,9 @@ export async function* runAgent({
       agentDefinition.agentType,
     ),
     ...(model && { model }),
+    effort: recordedSubagentEffort(
+      resolveSubagentEffortValue(agentDefinition.effort, appState.effortValue),
+    ),
     ...(worktreePath && { worktreePath }),
     ...(description && { description }),
     ...(spawningToolUseId && { toolUseId: spawningToolUseId }),
@@ -979,7 +1003,7 @@ export async function* runAgent({
   }
 
   try {
-    for await (const message of query({
+    for await (const message of withAgentProviderRoute(providerRoute, query({
       messages: initialMessages,
       systemPrompt: agentSystemPrompt,
       userContext: resolvedUserContext,
@@ -988,7 +1012,7 @@ export async function* runAgent({
       toolUseContext: agentToolUseContext,
       querySource,
       maxTurns: maxTurns ?? agentDefinition.maxTurns,
-    })) {
+    }))) {
       onQueryProgress?.()
       stallDetector.notify(Date.now())
       if (

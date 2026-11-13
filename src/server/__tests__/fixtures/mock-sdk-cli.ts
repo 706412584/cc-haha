@@ -48,6 +48,7 @@ const startupStdout = process.env.MOCK_SDK_STARTUP_STDOUT || ''
 const startupArgsLog = process.env.MOCK_SDK_STARTUP_ARGS_LOG || ''
 const exitBeforeSdkMs = Number(process.env.MOCK_SDK_EXIT_BEFORE_SDK_MS || '0')
 const permissionModeBehavior = process.env.MOCK_SDK_PERMISSION_MODE_BEHAVIOR || 'confirm'
+let promptSuggestionsEnabled = false
 const resumeTranscriptPath = process.env.MOCK_SDK_RESUME_TRANSCRIPT_PATH
 const resumeUpstreamUrl = process.env.MOCK_SDK_RESUME_UPSTREAM_URL
 let initSent = false
@@ -374,6 +375,10 @@ async function drainCollaboration() {
       record.status = 'consumed'
       emit(ws, { type: 'system', subtype: 'session_message_receipt', message_id: input.message_id, source_uuid: collaborationUuid(input.message_id), status: 'consumed', duplicate: false, session_id: sessionId, uuid: crypto.randomUUID() })
       emit(ws, { type: 'stream_event', event: { type: 'message_start' }, session_id: sessionId })
+      // The same explicit stream gate also holds independent-session turns.
+      if (input.text.startsWith('MOCK_RECONNECT_GATE ')) {
+        await new Promise<void>(resolve => { releaseReconnectStream = resolve })
+      }
       if (streamDelayMs > 0) await delay(streamDelayMs)
       if (epoch !== collaborationEpoch) break
       const reply = `Echo: ${input.text}`
@@ -477,6 +482,9 @@ ws.addEventListener('message', (event) => {
       }
 
       if (parsed.type === 'user') {
+        if (process.env.MOCK_SDK_PROMPT_SUGGESTIONS_LOG) {
+          await appendFile(process.env.MOCK_SDK_PROMPT_SUGGESTIONS_LOG, `${JSON.stringify({ sessionId, userMessageSynthetic: parsed.isSynthetic === true })}\n`)
+        }
         auditTeamWorker('release')
         sendInit()
         if (await handleGuideReplay(parsed)) continue
@@ -620,6 +628,9 @@ ws.addEventListener('message', (event) => {
           usage: { input_tokens: 3, output_tokens: 2 },
           session_id: sessionId,
         })
+        if (promptSuggestionsEnabled) {
+          emit(ws, { type: 'prompt_suggestion', suggestion: `Next after ${text}`, uuid: crypto.randomUUID(), session_id: sessionId })
+        }
         } finally { normalRunning = false; void drainCollaboration() }
       }
 
@@ -638,6 +649,14 @@ ws.addEventListener('message', (event) => {
         }
       }
 
+      if (parsed.type === 'control_request' && parsed.request?.subtype === 'set_prompt_suggestions') {
+        promptSuggestionsEnabled = parsed.request.enabled === true
+        if (process.env.MOCK_SDK_PROMPT_SUGGESTIONS_LOG) {
+          await appendFile(process.env.MOCK_SDK_PROMPT_SUGGESTIONS_LOG, `${JSON.stringify({ sessionId, enabled: promptSuggestionsEnabled })}\n`)
+        }
+        emit(ws, { type: 'control_response', response: { subtype: 'success', request_id: parsed.request_id, response: {} }, session_id: sessionId })
+        continue
+      }
       if (parsed.type === 'control_request' && ['set_model', 'team_runtime_snapshot', 'team_runtime_ended'].includes(parsed.request?.subtype)) {
         emit(ws, { type: 'control_response', response: { subtype: 'success', request_id: parsed.request_id, response: {} }, session_id: sessionId })
         continue

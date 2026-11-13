@@ -24,6 +24,7 @@ export type SessionListItem = {
   /** Server-owned, immutable after creation; absent legacy values mean standard. */
   agentProfile?: AgentProfile
   id: string
+  archived?: boolean
   title: string
   createdAt: string
   modifiedAt: string
@@ -62,6 +63,9 @@ export type MessageEntry = {
   id: string
   type: 'user' | 'assistant' | 'system' | 'tool_use' | 'tool_result'
   content: unknown
+  isApiErrorMessage?: boolean
+  error?: string
+  businessErrorCode?: string
   toolUseResult?: unknown
   timestamp: string
   model?: string

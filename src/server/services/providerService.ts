@@ -12,6 +12,7 @@ import * as os from 'os'
 import { ApiError } from '../middleware/errorHandler.js'
 import { buildOpenaiEndpoint } from '../proxy/openaiEndpoint.js'
 import { normalizeAnthropicBaseUrl } from '../../services/api/anthropicBaseUrl.js'
+import { getOpenAIModelCatalogEntry } from '../../services/openaiAuth/models.js'
 import { readRecoverableJsonFile } from './recoverableJsonFile.js'
 import { writeJsonFileAtomic } from '../storage/atomicWrite.js'
 import { ManagedSettingsService } from './managedSettingsService.js'
@@ -44,6 +45,14 @@ import {
   CLAUDE_OFFICIAL_DEFAULT_MODELS,
 } from './claudeOfficialRuntime.js'
 import { SettingsService } from './settingsService.js'
+import {
+  fetchMagpieModels,
+  isMagpieProvider,
+  magpieModelLimits,
+  probeMagpie,
+  type MagpieModel,
+  type MagpieStatus,
+} from './magpieGateway.js'
 import { hahaGrokOAuthService } from './hahaGrokOAuthService.js'
 import {
   CURRENT_PROVIDER_INDEX_SCHEMA_VERSION,
@@ -111,6 +120,7 @@ const DEFAULT_INDEX: ProvidersIndex = {
   providers: [],
   providerOrder: [...BUILT_IN_PROVIDER_IDS],
   officialProviderModels: {},
+  officialProviderContextWindows: {},
 }
 
 function isPermutation(candidateIds: string[], expectedIds: string[]): boolean {
@@ -166,6 +176,7 @@ function buildSavedProvider(input: CreateProviderInput): SavedProvider {
     ...(input.model1mSupport !== undefined && { model1mSupport: input.model1mSupport }),
     ...(input.autoCompactWindow !== undefined && { autoCompactWindow: input.autoCompactWindow }),
     ...(input.modelContextWindows !== undefined && { modelContextWindows: input.modelContextWindows }),
+    ...(input.modelMaxOutputTokens !== undefined && { modelMaxOutputTokens: input.modelMaxOutputTokens }),
     toolSearchEnabled: input.toolSearchEnabled ?? false,
     ...(input.disableExperimentalBetas === true && { disableExperimentalBetas: true }),
     ...(input.supportsNestedToolResultMedia !== undefined && { supportsNestedToolResultMedia: input.supportsNestedToolResultMedia }),
@@ -252,11 +263,21 @@ export class ProviderService {
     return this.readSettings()
   }
 
-  async updateManagedSettings(settings: Record<string, unknown>): Promise<void> {
-    await this.managedSettingsService.updateSettings((current) => ({
-      settings: Object.assign({}, current, settings),
-      result: undefined,
-    }))
+  async updateManagedSettings(settings: Record<string, unknown>, expectedActiveProviderId?: string): Promise<void> {
+    await this.managedSettingsService.updateSettings(async (current) => {
+      // Check after earlier settings writes finish: another client may have
+      // switched the default while this editor still showed the old provider.
+      if (expectedActiveProviderId !== undefined) {
+        const index = await this.readIndex()
+        if (index.activeId !== expectedActiveProviderId) {
+          throw new ApiError(409, 'The default provider changed. Review it before saving again.', 'PROVIDER_SETTINGS_OWNER_CHANGED')
+        }
+      }
+      return {
+        settings: Object.assign({}, current, settings),
+        result: undefined,
+      }
+    })
   }
 
   // --- CRUD ---
@@ -273,10 +294,7 @@ export class ProviderService {
   async getProvider(id: string): Promise<SavedProvider> {
     const index = await this.readIndex()
     if (isOpenAIOfficialProviderId(id)) {
-      return {
-        ...OPENAI_OFFICIAL_PROVIDER,
-        models: this.resolveOfficialProviderModels(index, OPENAI_OFFICIAL_PROVIDER_ID),
-      }
+      return this.resolveOpenAIOfficialProvider(index)
     }
     if (isGrokOfficialProviderId(id)) {
       return {
@@ -294,6 +312,21 @@ export class ProviderService {
     const provider = index.providers.find((p) => p.id === id)
     if (!provider) throw ApiError.notFound(`Provider not found: ${id}`)
     return provider
+  }
+
+  /** The built-in ChatGPT provider as saved: the user's model mapping and window overrides over its defaults. */
+  private resolveOpenAIOfficialProvider(
+    index: ProvidersIndex,
+    models?: ModelMapping,
+  ): SavedProvider {
+    return {
+      ...OPENAI_OFFICIAL_PROVIDER,
+      models: models ?? this.resolveOfficialProviderModels(index, OPENAI_OFFICIAL_PROVIDER_ID),
+      modelContextWindows: {
+        ...OPENAI_OFFICIAL_PROVIDER.modelContextWindows,
+        ...index.officialProviderContextWindows[OPENAI_OFFICIAL_PROVIDER_ID],
+      },
+    }
   }
 
   private resolveOfficialProviderModels(
@@ -316,12 +349,30 @@ export class ProviderService {
     return this.resolveOfficialProviderModels(index, id)
   }
 
+  /** The user's per-model context-window overrides for a built-in provider; empty when none are set. */
+  async getOfficialProviderContextWindows(id: string): Promise<Record<string, number>> {
+    if (!isBuiltInProviderId(id)) {
+      throw ApiError.notFound(`Official provider not found: ${id}`)
+    }
+    const index = await this.readIndex()
+    return { ...index.officialProviderContextWindows[id] }
+  }
+
+  /**
+   * `options.modelContextWindows` replaces the provider's window overrides
+   * (`{}` clears them); leaving it out keeps what is saved.
+   */
   async updateOfficialProviderModels(
     id: string,
     models: ModelMapping,
+    options?: { modelContextWindows?: Record<string, number> },
   ): Promise<ModelMapping> {
     if (!isBuiltInProviderId(id)) {
       throw ApiError.notFound(`Official provider not found: ${id}`)
+    }
+    const contextWindows = options?.modelContextWindows
+    if (contextWindows !== undefined) {
+      this.assertOfficialContextWindows(id, contextWindows)
     }
 
     const index = await this.readIndex()
@@ -329,6 +380,12 @@ export class ProviderService {
     index.officialProviderModels = {
       ...index.officialProviderModels,
       [id]: normalized,
+    }
+    if (contextWindows !== undefined) {
+      const { [id]: _replaced, ...others } = index.officialProviderContextWindows
+      index.officialProviderContextWindows = Object.keys(contextWindows).length > 0
+        ? { ...others, [id]: contextWindows }
+        : others
     }
     await this.writeIndex(index)
 
@@ -341,7 +398,7 @@ export class ProviderService {
 
     if (index.activeId === id) {
       const provider = id === OPENAI_OFFICIAL_PROVIDER_ID
-        ? { ...OPENAI_OFFICIAL_PROVIDER, models: normalized }
+        ? this.resolveOpenAIOfficialProvider(index, normalized)
         : id === DEEPSEEK_ACCOUNT_PROVIDER_ID
           ? { ...DEEPSEEK_ACCOUNT_PROVIDER, models: normalized }
           : { ...GROK_OFFICIAL_PROVIDER, models: normalized }
@@ -350,6 +407,26 @@ export class ProviderService {
     }
 
     return normalized
+  }
+
+  /**
+   * Only ChatGPT Official runs on windows the user can set (the other built-in
+   * providers take theirs from their own catalogs), and no model may be set
+   * above what its catalog allows.
+   */
+  private assertOfficialContextWindows(id: string, windows: Record<string, number>): void {
+    if (Object.keys(windows).length === 0) return
+    if (id !== OPENAI_OFFICIAL_PROVIDER_ID) {
+      throw ApiError.badRequest('Context window overrides are only supported for ChatGPT Official')
+    }
+    for (const [model, window] of Object.entries(windows)) {
+      const max = getOpenAIModelCatalogEntry(model)?.maxContextWindow
+      if (max !== undefined && window > max) {
+        throw ApiError.badRequest(
+          `${model}: context window ${window} is above the limit of ${max}`,
+        )
+      }
+    }
   }
 
   async addProvider(input: CreateProviderInput): Promise<SavedProvider> {
@@ -413,6 +490,7 @@ export class ProviderService {
       ...(input.model1mSupport !== undefined && input.model1mSupport !== null && { model1mSupport: input.model1mSupport }),
       ...(typeof input.autoCompactWindow === 'number' && { autoCompactWindow: input.autoCompactWindow }),
       ...(input.modelContextWindows !== undefined && input.modelContextWindows !== null && { modelContextWindows: input.modelContextWindows }),
+      ...(input.modelMaxOutputTokens !== undefined && input.modelMaxOutputTokens !== null && { modelMaxOutputTokens: input.modelMaxOutputTokens }),
       ...(input.toolSearchEnabled !== undefined && { toolSearchEnabled: input.toolSearchEnabled }),
       ...(input.supportsNestedToolResultMedia !== undefined && { supportsNestedToolResultMedia: input.supportsNestedToolResultMedia }),
       ...(input.requestCompatibility !== undefined && input.requestCompatibility !== null && { requestCompatibility: input.requestCompatibility }),
@@ -446,6 +524,10 @@ export class ProviderService {
     // and forces a CLI restart even when the (providerId, modelId, effort)
     // tuple is unchanged. See SavedProviderSchema.revision docstring.
     updated.revision = (existing.revision ?? 0) + 1
+
+    if (input.modelMaxOutputTokens === null) {
+      delete updated.modelMaxOutputTokens
+    }
     if (input.requestCompatibility === null) {
       delete updated.requestCompatibility
     }
@@ -568,10 +650,7 @@ export class ProviderService {
   async activateProvider(id: string): Promise<void> {
     const index = await this.readIndex()
     const provider = isOpenAIOfficialProviderId(id)
-      ? {
-          ...OPENAI_OFFICIAL_PROVIDER,
-          models: this.resolveOfficialProviderModels(index, OPENAI_OFFICIAL_PROVIDER_ID),
-        }
+      ? this.resolveOpenAIOfficialProvider(index)
       : isGrokOfficialProviderId(id)
         ? {
             ...GROK_OFFICIAL_PROVIDER,
@@ -600,6 +679,56 @@ export class ProviderService {
     } else {
       await this.syncToSettings(provider)
     }
+  }
+
+  // --- Magpie (local gateway) ---
+
+  /**
+   * Magpie as this computer runs it now, with its catalog. Saved Magpie
+   * providers follow it: a moved port and each model's window and reply limit
+   * are written back to them, so every session, settings sync and Agent route
+   * built from the saved provider sees the same limits.
+   */
+  async getMagpieState(options?: { force?: boolean }): Promise<{ status: MagpieStatus; models: MagpieModel[] | null }> {
+    const status = await probeMagpie()
+    const models = status.running ? await fetchMagpieModels(status.baseUrl, { force: options?.force }) : null
+    if (status.running) await this.syncMagpieProviders(status.baseUrl, models)
+    return { status, models }
+  }
+
+  /** Before a Magpie session starts, so it launches with the current catalog's limits. */
+  async refreshMagpieProvider(id: string | null | undefined): Promise<void> {
+    const index = await this.readIndex()
+    const provider = index.providers.find((candidate) => candidate.id === (id ?? index.activeId))
+    if (!isMagpieProvider(provider)) return
+    try {
+      await this.getMagpieState()
+    } catch {
+      // Not running: the session reports that itself; the last limits stay.
+    }
+  }
+
+  private async syncMagpieProviders(baseUrl: string, models: MagpieModel[] | null): Promise<void> {
+    const index = await this.readIndex()
+    const limits = models ? magpieModelLimits(models) : null
+    const changed: SavedProvider[] = []
+    index.providers = index.providers.map((provider) => {
+      if (!isMagpieProvider(provider)) return provider
+      const next: SavedProvider = { ...provider, baseUrl }
+      if (limits) {
+        delete next.modelContextWindows
+        delete next.modelMaxOutputTokens
+        if (Object.keys(limits.modelContextWindows).length) next.modelContextWindows = limits.modelContextWindows
+        if (Object.keys(limits.modelMaxOutputTokens).length) next.modelMaxOutputTokens = limits.modelMaxOutputTokens
+      }
+      if (JSON.stringify(next) === JSON.stringify(provider)) return provider
+      changed.push(next)
+      return next
+    })
+    if (!changed.length) return
+    await this.writeIndex(index)
+    const active = changed.find((provider) => provider.id === index.activeId)
+    if (active) await this.syncToSettings(active)
   }
 
   async activateOfficial(): Promise<void> {

@@ -90,6 +90,11 @@ export const ModelContextWindowsSchema = z.record(
   z.string().min(1),
   z.number().int().min(16000).max(10000000),
 )
+/** Per-model reply limits, keyed like `modelContextWindows` (a gateway's catalog). */
+export const ModelMaxOutputTokensSchema = z.record(
+  z.string().min(1),
+  z.number().int().min(1024).max(10000000),
+)
 export const ToolSearchEnabledSchema = z.boolean()
 export const DisableExperimentalBetasSchema = z.boolean()
 export const SupportsNestedToolResultMediaSchema = z.boolean()
@@ -154,6 +159,7 @@ export const SavedProviderSchema = z.object({
   model1mSupport: Model1mSupportSchema.optional(),
   autoCompactWindow: AutoCompactWindowSchema.optional(),
   modelContextWindows: ModelContextWindowsSchema.optional(),
+  modelMaxOutputTokens: ModelMaxOutputTokensSchema.optional(),
   toolSearchEnabled: ToolSearchEnabledSchema.optional(),
   disableExperimentalBetas: DisableExperimentalBetasSchema.optional(),
   supportsNestedToolResultMedia: SupportsNestedToolResultMediaSchema.optional(),
@@ -200,12 +206,23 @@ export const SavedProviderSchema = z.object({
   revision: z.number().int().nonnegative().optional(),
 })
 
+/**
+ * A built-in OAuth provider has no saved record, so a user's per-model window
+ * override lives beside its model mapping, keyed by provider id then model id.
+ * Absent on older indexes, which read as "no overrides".
+ */
+export const OfficialProviderContextWindowsSchema = z.record(
+  z.string(),
+  ModelContextWindowsSchema,
+)
+
 export const ProvidersIndexSchema = z.object({
   schemaVersion: z.number().int().positive().optional(),
   activeId: z.string().nullable(),
   providers: z.array(SavedProviderSchema),
   providerOrder: z.array(z.string()).default([]),
   officialProviderModels: OfficialProviderModelsSchema.default({}),
+  officialProviderContextWindows: OfficialProviderContextWindowsSchema.default({}),
 })
 
 export const CreateProviderSchema = z.object({
@@ -220,6 +237,7 @@ export const CreateProviderSchema = z.object({
   model1mSupport: Model1mSupportSchema.optional(),
   autoCompactWindow: AutoCompactWindowSchema.optional(),
   modelContextWindows: ModelContextWindowsSchema.optional(),
+  modelMaxOutputTokens: ModelMaxOutputTokensSchema.optional(),
   toolSearchEnabled: ToolSearchEnabledSchema.optional(),
   disableExperimentalBetas: DisableExperimentalBetasSchema.optional(),
   supportsNestedToolResultMedia: SupportsNestedToolResultMediaSchema.optional(),
@@ -240,6 +258,7 @@ export const UpdateProviderSchema = z.object({
   model1mSupport: Model1mSupportSchema.nullable().optional(),
   autoCompactWindow: AutoCompactWindowSchema.nullable().optional(),
   modelContextWindows: ModelContextWindowsSchema.nullable().optional(),
+  modelMaxOutputTokens: ModelMaxOutputTokensSchema.nullable().optional(),
   toolSearchEnabled: ToolSearchEnabledSchema.optional(),
   disableExperimentalBetas: DisableExperimentalBetasSchema.optional(),
   supportsNestedToolResultMedia: SupportsNestedToolResultMediaSchema.optional(),
