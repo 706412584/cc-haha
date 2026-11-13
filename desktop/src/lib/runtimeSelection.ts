@@ -25,7 +25,6 @@ import {
   type ModelReasoningProviderKind,
 } from '../../../src/shared/modelReasoning'
 import { BUNDLED_PROVIDER_PRESETS, getBundledPresetReasoningProviderKind } from '../config/providerPresets'
-import type { ReasoningEffortLevel } from '../types/settings'
 
 const PROVIDER_MODEL_SLOTS = ['main', 'haiku', 'sonnet', 'opus', 'fable'] as const
 

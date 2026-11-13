@@ -45,7 +45,6 @@ export type McpUpsertPayload = {
   config: McpEditableConfig
 }
 
-<<<<<<< HEAD
 /** Single tool advertised by a connected MCP server. Mirrors backend's `RawMcpToolInfo`. */
 export type McpToolInfo = {
   /** Unqualified tool name (`navigate_page`). */

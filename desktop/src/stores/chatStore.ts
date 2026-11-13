@@ -32,7 +32,6 @@ import { deriveSessionTitle, isPlaceholderSessionTitle } from '../lib/sessionTit
 import { formatBytes } from '../lib/formatBytes'
 import { checkUserMessageBudget } from '../lib/userMessageBudget'
 import { t } from '../i18n'
-import { deriveSessionTitle, isPlaceholderSessionTitle } from '../lib/sessionTitle'
 import {
   VISUAL_SELECTION_BATCH_PROMPT_HEADER,
   VISUAL_SELECTION_PROMPT_FOOTER,
@@ -4055,10 +4054,11 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       subagentTab?.sourceSessionId && subagentTab.subagentToolUseId,
     )
     const isDirectAgentSession = isMemberSession || isSubagentSession
+    const serverAttachments = stripPreviewUrlsFromAttachments(attachments)
     const outgoing: ClientMessage = {
       type: 'user_message',
       content,
-      attachments,
+      attachments: serverAttachments,
       ...(options?.sessionReferences?.length ? { sessionReferences: options.sessionReferences } : {}),
     }
     if (!isDirectAgentSession) {
@@ -4074,7 +4074,6 @@ export const useChatStore = create<ChatStore>((setState, get) => {
         ? ''
         : options?.displayContent?.trim() || content.trim()
     const modelFacingContent = buildModelContent(content, attachments)
-    const serverAttachments = stripPreviewUrlsFromAttachments(attachments)
     const visibleAttachments = options?.displayAttachments ?? attachments
     const uiAttachments: UIAttachment[] | undefined =
       visibleAttachments && visibleAttachments.length > 0
@@ -4533,7 +4532,6 @@ export const useChatStore = create<ChatStore>((setState, get) => {
             activeToolUseId: null,
             activeToolName: null,
             activeThinkingId: null,
-            chatState: 'idle',
             pendingPermission: null,
             pendingPermissions: {},
             pendingComputerUsePermission: null,

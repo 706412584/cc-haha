@@ -117,33 +117,6 @@ const DROPDOWN_GAP = 8
 const VIEWPORT_MARGIN = 16
 const DROPDOWN_MAX_HEIGHT = 420
 const DROPDOWN_MIN_HEIGHT = 180
-const PROVIDER_PRESETS_BY_ID = new Map(
-  BUNDLED_PROVIDER_PRESETS.map(preset => [preset.id, preset]),
-)
-
-const PROVIDER_PRESET_DEFAULT_ENVS = new Map(
-  BUNDLED_PROVIDER_PRESETS.map(preset => [preset.id, preset.defaultEnv ?? {}]),
-)
-
-function getProviderModelCapabilityOverride(
-  provider: SavedProvider,
-  modelId: string,
-): string | undefined {
-  // The preset's own default models matter when a slot is remapped: without them
-  // a stale capability table would describe the model the slot used to hold.
-  const preset = PROVIDER_PRESETS_BY_ID.get(provider.presetId)
-  return getModelReasoningCapabilityOverride(
-    modelId,
-    {
-      ...provider.models,
-      haiku: resolveProviderSlotModelId(provider, 'haiku'),
-      sonnet: resolveProviderSlotModelId(provider, 'sonnet'),
-      opus: resolveProviderSlotModelId(provider, 'opus'),
-    },
-    preset?.defaultEnv ?? PROVIDER_PRESET_DEFAULT_ENVS.get(provider.presetId) ?? {},
-    preset?.defaultModels,
-  )
-}
 
 function officialChoices(
   providerId: string | null,

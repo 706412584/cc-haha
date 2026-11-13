@@ -297,7 +297,6 @@ export class ElectronServerRuntime {
   private systemProxyBridgeUrl: string | null = null
   private server: ActiveServer | null = null
   private adapters: SidecarChild[] = []
-<<<<<<< HEAD
   private tunnel: { instance: TunnelProviderInstance, mode: H5TunnelMode } | null = null
   private tunnelState: TunnelStatus = { status: 'idle', url: null, mode: null, error: null, provider: null, download: null }
   private tunnelGeneration = 0
@@ -1322,7 +1321,6 @@ export class ElectronServerRuntime {
           this.deps.killSidecar(child)
           break
         }
-<<<<<<< HEAD
         this.captureLogs(
           child,
           `claude-adapters:${label}`,

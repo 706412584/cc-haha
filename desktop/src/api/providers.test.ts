@@ -98,8 +98,6 @@ vi.mock('./client', async (importOriginal) => {
   }
 })
 
-import { providersApi } from './providers'
-
 describe('providersApi.authStatus', () => {
   afterEach(() => {
     vi.clearAllMocks()
