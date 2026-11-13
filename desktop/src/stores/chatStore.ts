@@ -1189,6 +1189,12 @@ export function __resetHistoryLoadStateForTesting(): void {
   historyLoadsInFlight.clear()
   historyReloadGenerations.clear()
   historyLoadAbortRetries.clear()
+  // Cross-test contamination: a `stop_generation` from a prior test latches the
+  // session id here, and the next test's stream_retry path then short-circuits
+  // at `case 'streaming_fallback'` and silently keeps the failed attempt's tool
+  // calls alive. Clear the latch with the rest of the history bookkeeping.
+  stoppedTurns.clear()
+  taskBarBeforeAttemptBySession.clear()
 }
 
 /** @internal — apply buffered `thinking` events now instead of waiting out the
