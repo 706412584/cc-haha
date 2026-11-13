@@ -27,6 +27,7 @@ import { useProviderCompatStore } from './providerCompatStore'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import { notifyDesktop } from '../lib/desktopNotifications'
 import { createAsyncRefreshCoalescer } from '../lib/asyncRefreshCoalescer'
+import { messageSnippet, traceSession } from '../lib/sessionTrace'
 import { t } from '../i18n'
 import { deriveSessionTitle, isPlaceholderSessionTitle } from '../lib/sessionTitle'
 import {
@@ -3481,6 +3482,15 @@ async function loadOlderHistoryPage(
       const known = new Set(current.messages.flatMap(strongHistoryMessageIdentities))
       const older = result.messages.filter(message => !strongHistoryMessageIdentities(message).some(identity => known.has(identity)))
       const messages = older.length ? [...older, ...current.messages] : current.messages
+      // TEMP probe: paging prepend is the one path that puts rows above the
+      // current head. Record what arrived and what the new head became.
+      if (older.length) {
+        traceSession('history.prepend', sessionId, {
+          added: older.length,
+          head: messageSnippet(messages[0]),
+          headId: (messages[0] as { id?: string } | undefined)?.id,
+        })
+      }
       const page = result.page && current.historyPage
         ? { ...current.historyPage, nextCursor: result.page.nextCursor, hasMore: result.page.hasMore,
             historyComplete: result.page.historyComplete && current.historyPage.previousCursor == null,
@@ -3521,6 +3531,19 @@ export const useChatStore = create<ChatStore>((setState, get) => {
     setState((previous) => {
       const patch = typeof update === 'function' ? update(previous) : update
       if (patch === previous || !patch.sessions) return patch
+      // TEMP probe: every session write lands here. Records only sessions whose
+      // `messages` array identity changed, with the resulting head row, so a
+      // foreign row cannot appear without a trace entry naming its session.
+      for (const [traceId, traceSessionState] of Object.entries(patch.sessions)) {
+        const previousMessages = previous.sessions[traceId]?.messages
+        if (traceSessionState.messages === previousMessages) continue
+        traceSession('set.messages', traceId, {
+          from: previousMessages?.length ?? -1,
+          to: traceSessionState.messages.length,
+          head: messageSnippet(traceSessionState.messages[0]),
+          headId: (traceSessionState.messages[0] as { id?: string } | undefined)?.id,
+        })
+      }
       let sessions = patch.sessions
       const sessionCount = Math.max(1, Object.keys(sessions).length)
       const budget = Math.min(2 * 1024 * 1024, Math.floor(16 * 1024 * 1024 / sessionCount))
@@ -3829,6 +3852,12 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       }))
     })
     wsManager.onMessage(sessionId, (msg) => {
+      // TEMP probe: the socket that delivered this message. Pure stream deltas
+      // are skipped — they fire hundreds of times a second and would evict the
+      // structural entries this trace exists to keep.
+      if (msg.type !== 'content_delta' && msg.type !== 'content_start' && msg.type !== 'thinking') {
+        traceSession('ws.message', sessionId, { type: msg.type })
+      }
       if (msg.type === 'connected') {
         set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, () => ({
           connectionState: 'connected',
@@ -4582,6 +4611,14 @@ export const useChatStore = create<ChatStore>((setState, get) => {
           controller.signal,
         )
         durableHistoryRows.set(sessionId, new WeakSet(uiMessages))
+        // TEMP probe: what the cold history fetch returned for this session,
+        // before it is merged into the store.
+        traceSession('history.fetched', sessionId, {
+          rows: uiMessages.length,
+          complete: historyComplete,
+          head: messageSnippet(uiMessages[0]),
+          headId: (uiMessages[0] as { id?: string } | undefined)?.id,
+        })
         let historyApplied = false
         set((state) => {
           if (!isCurrentHistoryLifecycle(sessionId, lifecycleGeneration)) return state
@@ -6621,6 +6658,13 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       }
 
       case 'user_message_replay': {
+        // TEMP probe: the only path that legitimately injects a foreign row —
+        // a cross-session delivery. `collaboration.sourceSessionId` names the
+        // sender, so this line proves whether the screenshot came from here.
+        traceSession('collaboration.replay', sessionId, {
+          sourceSessionId: msg.collaboration?.sourceSessionId,
+          text: msg.content.replace(/\s+/g, ' ').slice(0, 60),
+        })
         update((session) => {
           const pendingText = `${session.streamingText}${consumePendingDelta(sessionId)}`
           const baseMessages = pendingText.trim()

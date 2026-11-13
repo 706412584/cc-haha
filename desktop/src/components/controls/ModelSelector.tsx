@@ -439,7 +439,8 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
     stopEscapePropagation: true,
   })
 
-  const updateDropdownPosition = useCallback(() => {
+  const updateDropdownPosition = useCallback((event?: Event) => {
+    if (event?.target instanceof Node && dropdownRef.current?.contains(event.target)) return
     const anchor = ref.current
     if (!anchor) return
 
@@ -460,13 +461,23 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
     )
     const maxHeight = Math.min(DROPDOWN_MAX_HEIGHT, availableHeight)
 
-    setDropdownPosition({
+    const nextPosition = {
       top: placeBelow ? rect.bottom + DROPDOWN_GAP : undefined,
       bottom: placeBelow ? undefined : (viewportHeight - rect.top + DROPDOWN_GAP),
       left,
       width,
       maxHeight,
-    })
+    }
+    setDropdownPosition((current) => (
+      current &&
+      current.top === nextPosition.top &&
+      current.bottom === nextPosition.bottom &&
+      current.left === nextPosition.left &&
+      current.width === nextPosition.width &&
+      current.maxHeight === nextPosition.maxHeight
+        ? current
+        : nextPosition
+    ))
   }, [])
 
   useLayoutEffect(() => {

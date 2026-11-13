@@ -1690,6 +1690,41 @@ describe('ModelSelector', () => {
     expect(dropdown.textContent).toContain('Provider A')
   })
 
+  it('does not measure the dropdown trigger when scrolling the dropdown itself', async () => {
+    useSettingsStore.setState({ locale: 'en', availableModels: MODELS, currentModel: MODELS[0] })
+    useProviderStore.setState({
+      providers: [{
+        id: 'provider-a', presetId: 'custom', name: 'Provider A', apiKey: 'fixture',
+        baseUrl: 'http://127.0.0.1:9999', apiFormat: 'anthropic',
+        models: { main: 'provider-main', haiku: 'provider-haiku', sonnet: '', opus: '' },
+      }],
+      activeId: 'provider-a', hasLoadedProviders: true, isLoading: false,
+    })
+    render(<ModelSelector runtimeKey="session-scroll" />)
+    const trigger = screen.getByRole('button', { name: /provider-main/i })
+    let triggerBottom = 150
+    const getBoundingClientRect = vi.fn(() => ({
+      top: triggerBottom - 30, right: 520, bottom: triggerBottom, left: 240, width: 280, height: 30,
+      x: 240, y: triggerBottom - 30, toJSON: () => {},
+    }))
+    Object.defineProperty(trigger.parentElement, 'getBoundingClientRect', {
+      configurable: true,
+      value: getBoundingClientRect,
+    })
+
+    await clickByRole(/provider-main/i)
+    const dropdown = screen.getByTestId('model-selector-dropdown')
+    getBoundingClientRect.mockClear()
+    fireEvent.scroll(dropdown.querySelector('.overflow-y-auto')!)
+
+    expect(getBoundingClientRect).not.toHaveBeenCalled()
+
+    triggerBottom = 180
+    fireEvent.scroll(window)
+    expect(getBoundingClientRect).toHaveBeenCalledTimes(1)
+    expect(dropdown.style.top).toBe('188px')
+  })
+
   it('portals the dropdown outside clipping containers and positions it below the trigger', async () => {
     useSettingsStore.setState({
       locale: 'en',

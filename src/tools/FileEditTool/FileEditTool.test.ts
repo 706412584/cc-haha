@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ToolUseContext } from '../../Tool.js'
@@ -78,5 +78,56 @@ describe('FileEditTool indentation matching', () => {
     expect(await readFile(filePath, 'utf8')).toBe(
       '\t\t中文目标：新值\n\t相邻内容\n',
     )
+  })
+})
+
+describe('FileEditTool staleness guard', () => {
+  // A Read stores `offset: 1` for a whole-file read, so the content fallback in
+  // the guard must treat "no line limit" as a full read. Otherwise any external
+  // mtime touch (antivirus, an editor, a second session) fails an edit whose
+  // bytes never changed.
+  test('allows an edit when only the mtime moved but the content is unchanged', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cc-haha-stale-'))
+    temporaryDirectories.push(root)
+    const filePath = join(root, 'stale.txt')
+    await writeFile(filePath, 'alpha\nbeta\ngamma\n', 'utf8')
+
+    const context = makeToolUseContext()
+    await FileReadTool.call({ file_path: filePath }, context)
+
+    // Touch the mtime without touching the bytes.
+    const future = new Date(Date.now() + 5_000)
+    await utimes(filePath, future, future)
+
+    const input = {
+      file_path: filePath,
+      old_string: 'beta',
+      new_string: 'delta',
+    }
+    await expect(FileEditTool.validateInput(input, context)).resolves.toEqual({
+      result: true,
+      meta: { actualOldString: 'beta' },
+    })
+  })
+
+  test('still blocks the edit when the content changed under the read', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cc-haha-stale-'))
+    temporaryDirectories.push(root)
+    const filePath = join(root, 'stale.txt')
+    await writeFile(filePath, 'alpha\nbeta\ngamma\n', 'utf8')
+
+    const context = makeToolUseContext()
+    await FileReadTool.call({ file_path: filePath }, context)
+
+    const future = new Date(Date.now() + 5_000)
+    await writeFile(filePath, 'alpha\nCHANGED\ngamma\n', 'utf8')
+    await utimes(filePath, future, future)
+
+    const result = await FileEditTool.validateInput(
+      { file_path: filePath, old_string: 'beta', new_string: 'delta' },
+      context,
+    )
+    expect(result.result).toBe(false)
+    expect(result.message).toContain('modified since read')
   })
 })
