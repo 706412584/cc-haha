@@ -342,6 +342,12 @@ export function isRetryableStreamError(error: unknown): boolean {
     const details = extractConnectionErrorDetails(error)
     return !details?.isSSLError
   }
+  // An overflow reported inside the stream is still an overflow: re-sending
+  // the same request cannot succeed, compaction can. Check BEFORE the
+  // hasAPIErrorType match below — a relay-wrapped overflow usually arrives
+  // with type "api_error" and would otherwise be misclassified as retryable.
+  const earlyMessage = error instanceof Error ? error.message : String(error)
+  if (earlyMessage && isContextOverflowErrorText(earlyMessage)) return false
   if (hasAPIErrorType(
     error,
     'api_error',
@@ -351,11 +357,8 @@ export function isRetryableStreamError(error: unknown): boolean {
     'get_channel_failed',
   )) return true
 
-  const message = error instanceof Error ? error.message : String(error)
+  const message = earlyMessage
   if (!message) return false
-  // An overflow reported inside the stream is still an overflow: re-sending
-  // the same request cannot succeed, compaction can.
-  if (isContextOverflowErrorText(message)) return false
   // Some providers surface a mid-stream disconnect as a plain Error carrying
   // the serialized body rather than a parsed APIError (so hasAPIErrorType
   // misses it). Match the two transient shapes seen in the wild: Grok's
@@ -1183,6 +1186,16 @@ function shouldRetry(error: APIError): boolean {
     return true
   }
 
+  // A context overflow replays the same oversized prompt on every attempt,
+  // whatever status a gateway wraps it in (a 401 in #1162, a 500 from relays).
+  // Fail fast so the overflow surfaces and compaction can react instead. This
+  // must run before the generic 5xx api_error retry below: a relay that wraps
+  // the provider's overflow in a 500 would otherwise burn every retry on a
+  // request that only compaction can fix.
+  if (error.status !== 429 && isContextOverflowErrorText(error.message)) {
+    return false
+  }
+
   // Some relay/proxy providers wrap transient upstream failures in an api_error
   // body (e.g. "Upstream request failed"). These arrive with a 5xx HTTP status
   // so they skip the statusless isRetryableStreamError branch above.
@@ -1194,13 +1207,6 @@ function shouldRetry(error: APIError): boolean {
   // Check for max tokens context overflow errors that we can handle
   if (parseMaxTokensContextOverflowError(error)) {
     return true
-  }
-
-  // A context overflow replays the same oversized prompt on every attempt,
-  // whatever status a gateway wraps it in (a 401 in #1162, a 500 from relays).
-  // Fail fast so the overflow surfaces and compaction can react instead.
-  if (error.status !== 429 && isContextOverflowErrorText(error.message)) {
-    return false
   }
 
   // Note this is not a standard header.
