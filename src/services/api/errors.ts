@@ -442,7 +442,7 @@ export function getImageUnsupportedErrorMessage(): string {
     ? 'This model does not support images. Continue with text, or switch to a vision-capable model and send the image again.'
     : 'This model does not support images. Double press esc to go back, switch to a vision-capable model, or continue with text.'
 }
-// Used only by the request-context fallback in buildAssistantMessageFromError,
+// Used only by the request-context fallback in getAssistantMessageFromError,
 // where the error text was not a recognised image-rejection wording. Unlike
 // getImageUnsupportedErrorMessage, this does not assert the model's capability:
 // a 400 that happens to land on an image-carrying request may be unrelated to
@@ -793,6 +793,24 @@ export function extractUnknownErrorFormat(value: unknown): string | undefined {
 // type: only text is allowed for this model").
 export function errorTextImpliesMediaRejection(message: string): boolean {
   const raw = message.toLowerCase()
+  // A schema / deserialization rejection ("unknown variant X, expected one of
+  // 'text', 'image', ...") names a block the provider cannot parse, not a model
+  // that cannot see images. The refusal here is about a *shape*, not a
+  // capability: stripping the image would just move the failure to the next
+  // unsupported block. Upstream #1801 calls these out explicitly; skip them.
+  if (/unknown variant/.test(raw) && /expected one of/.test(raw)) return false
+  // Upstream #1801's IMAGE_CONTENT_PROBLEM: an error about a *particular*
+  // image (its format, size, a transient processing failure) is not a "this
+  // model cannot see images" signal. The model would still accept a different
+  // image, so the error must surface in the provider's own words and the
+  // history must not be stripped.
+  const IMAGE_CONTENT_PROBLEM = new RegExp([
+    String.raw`\bmime\b`, String.raw`\bformats?\b`, String.raw`\bgif\b`, 'animated', 'image type',
+    'multiple images', 'too many images', 'number of images',
+    'too large', 'exceed', String.raw`\bsize\b`, 'dimension', 'resolution', 'pixel',
+    'corrupt', 'decod', 'base64', 'download', 'fetch', 'could not process', 'unable to process', 'region',
+  ].join('|'), 'i')
+  if (IMAGE_CONTENT_PROBLEM.test(raw)) return false
   // Content-block / schema rejections: the provider rejects a non-text block
   // type without naming it.
   if (
@@ -818,9 +836,12 @@ export function errorTextImpliesMediaRejection(message: string): boolean {
   }
   // A media/attachment noun paired with a rejection verb. The noun is required
   // so unrelated 400s ("invalid request", "unsupported format") do not match.
+  // "invalid" alone is too broad: every 400 body carries "invalid_request_error",
+  // so it would match any 400 on an image-carrying request. Require an explicit
+  // refusal verb instead.
   const mediaNoun = /(?:image|vision|multimodal|multi-modal|modality|media|document|pdf)/
   const rejectionVerb =
-    /(?:not support|unsupported|not allowed|not permitted|disallow|forbidden|invalid|reject|unexpected|unknown variant|not one of|only)/
+    /(?:not support|unsupported|not allowed|not permitted|disallow|forbidden|reject|unexpected|not one of|only)/
   return mediaNoun.test(raw) && rejectionVerb.test(raw)
 }
 
@@ -1525,7 +1546,7 @@ export function getAssistantMessageFromError(
   })
 }
 
-export function getAssistantMessageFromError(
+export function getAssistantMessageFromErrorWithRetryCount(
   error: unknown,
   model: string,
   options?: {
@@ -1535,7 +1556,7 @@ export function getAssistantMessageFromError(
     requestId?: string
   },
 ): AssistantMessage {
-  const message = buildAssistantMessageFromError(error, model, options)
+  const message = getAssistantMessageFromError(error, model, options)
   if (options?.retryCount !== undefined) {
     message.message.content = message.message.content.map(block =>
       block.type === 'text'

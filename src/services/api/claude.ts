@@ -281,6 +281,7 @@ import { CLIENT_REQUEST_ID_HEADER, getAnthropicClient } from "./client.js";
 import {
   CUSTOM_OFF_SWITCH_MESSAGE,
   getAssistantMessageFromError,
+  getAssistantMessageFromErrorWithRetryCount,
   getErrorMessageIfRefusal,
 } from "./errors.js";
 import {
@@ -3735,7 +3736,7 @@ async function* queryModel(
         }
 
         yield* assistantCommitBuffer.flush();
-        yield getAssistantMessageFromError(error, errorModel, {
+        yield getAssistantMessageFromErrorWithRetryCount(error, errorModel, {
           messages,
           messagesForAPI,
           ...(fallbackError instanceof CannotRetryError && {
@@ -3798,7 +3799,7 @@ async function* queryModel(
       }
 
       yield* assistantCommitBuffer.flush();
-      yield getAssistantMessageFromError(error, errorModel, {
+      yield getAssistantMessageFromErrorWithRetryCount(error, errorModel, {
         messages,
         messagesForAPI,
         ...(errorFromRetry instanceof CannotRetryError && {

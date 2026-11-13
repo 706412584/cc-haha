@@ -92,7 +92,6 @@ describe('image unsupported API errors', () => {
     const notAboutImageInput = [
       // DeepSeek refusing a Gemini signature block left in history (#52072b78).
       [422, 'Failed to deserialize the JSON body into the target type: messages[2].content: unknown variant `redacted_thinking`, expected one of `text`, `image`, `document`, `thinking`, `tool_use`, `tool_result` at line 1 column 9210'],
-      [400, 'unsupported content block type: only text is allowed for this model'],
       [400, 'Could not process image'],
       [400, 'unsupported image format: image/heic'],
     ] as const
@@ -116,14 +115,6 @@ describe('image unsupported API errors', () => {
     // An overflow that happened to carry images is an overflow, not a refusal
     // of image input: compaction is what frees room for it.
     const overflow = 'Invalid request: Your request exceeded model token limit: 262144 (requested: 270000)'
-    const msg = getAssistantMessageFromError(
-      new APIError(400, { type: 'error', error: { type: 'invalid_request_error', message: overflow } }, overflow, undefined),
-      'deepseek-flash',
-      { messagesForAPI: messagesForAPI as never },
-    )
-    // An overflow that happened to carry images is an overflow, not a refusal
-    // of image input: compaction is what frees room for it.
-    const overflow = 'Invalid request: Your request exceeded model token limit: 262144 (requested: 270000)'
     const overflowMsg = getAssistantMessageFromError(
       new APIError(400, { type: 'error', error: { type: 'invalid_request_error', message: overflow } }, overflow, undefined),
       'deepseek-flash',
@@ -138,7 +129,17 @@ describe('image unsupported API errors', () => {
       },
     ]
 
-    const msg = getAssistantMessageFromError(error, 'deepseek-v4-pro', {
+    // Fork: the request-context fallback must not fire when the failed request
+    // carried no images — a 400 with image-rejection wording on a text-only
+    // request is a generic 400, not an image refusal.
+    const noImageMessage = 'unsupported content block type: only text is allowed for this model'
+    const noImageError = new APIError(
+      400,
+      { type: 'error', error: { type: 'invalid_request_error', message: noImageMessage } },
+      noImageMessage,
+      undefined,
+    )
+    const msg = getAssistantMessageFromError(noImageError, 'deepseek-v4-pro', {
       messagesForAPI: plainMessages as never,
     })
 
