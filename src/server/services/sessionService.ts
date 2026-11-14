@@ -2612,6 +2612,8 @@ export class SessionService {
         prePlanPermissionMode: undefined as string | undefined,
         runtimeProviderId: undefined as string | null | undefined,
         runtimeModelId: undefined as string | undefined, effortLevel: undefined as string | undefined,
+        providerTransition: undefined as SessionProviderTransition | undefined,
+        thinkingEnabled: undefined as boolean | undefined,
         openAIFastMode: undefined as boolean | undefined,
         customTitle: null as string | null, nonemptyCustomTitle: null as string | null,
         goalTitle: null as string | null, aiTitle: null as string | null, firstUserTitle: null as string | null,
@@ -2646,7 +2648,26 @@ export class SessionService {
           }
           if (record.runtimeProviderId === null || typeof record.runtimeProviderId === 'string') state.runtimeProviderId = record.runtimeProviderId as string | null
           if (typeof record.runtimeModelId === 'string') state.runtimeModelId = record.runtimeModelId
+          // Provider-transition provenance: createProviderTransitionSession
+          // writes it so a retried request can prove it is the same one. The
+          // projection must read it back or every retry looks like a conflict.
+          if (
+            record.providerTransition &&
+            typeof record.providerTransition === 'object'
+          ) {
+            const transition = record.providerTransition as Record<string, unknown>
+            if (
+              typeof transition.sourceSessionId === 'string' &&
+              typeof transition.selectionHash === 'string'
+            ) {
+              state.providerTransition = {
+                sourceSessionId: transition.sourceSessionId,
+                selectionHash: transition.selectionHash,
+              }
+            }
+          }
           state.effortLevel = resolveSessionEffortLevel(record, state.effortLevel)
+          if (typeof record.thinkingEnabled === 'boolean') state.thinkingEnabled = record.thinkingEnabled
           if (typeof record.openAIFastMode === 'boolean') state.openAIFastMode = record.openAIFastMode
         }
         state.repository = this.resolveRepositoryFromEntries([entry]) ?? state.repository
@@ -2679,6 +2700,8 @@ export class SessionService {
         ...(state.runtimeProviderId !== undefined ? { runtimeProviderId: state.runtimeProviderId } : {}),
         ...(state.runtimeModelId ? { runtimeModelId: state.runtimeModelId } : {}),
         ...(state.effortLevel ? { effortLevel: state.effortLevel } : {}),
+        ...(state.providerTransition ? { providerTransition: state.providerTransition } : {}),
+        ...(state.thinkingEnabled !== undefined ? { thinkingEnabled: state.thinkingEnabled } : {}),
         ...(state.openAIFastMode !== undefined ? { openAIFastMode: state.openAIFastMode } : {}),
         ...(state.repository ? { repository: state.repository } : {}),
         ...(state.worktreeSession !== undefined ? { worktreeSession: state.worktreeSession } : {}),

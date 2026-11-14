@@ -64,7 +64,6 @@ afterEach(() => {
     if (value === undefined) delete process.env[key]
     else process.env[key] = value
   })
-  get3PModelCapabilityOverride.cache.clear?.()
   rmSync(configDir, { recursive: true, force: true })
 })
 

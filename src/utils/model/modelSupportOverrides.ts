@@ -2,7 +2,6 @@ import { MODEL_REASONING_CAPABILITY_TIERS } from '../../shared/modelReasoning.js
 import { normalizeModelContextKey } from './modelContextWindows.js'
 import { getAPIProvider, isFirstPartyAnthropicBaseUrl } from './providers.js'
 import { getProviderRouteForModel } from './providerEnvScope.js'
-import memoize from 'lodash-es/memoize.js'
 
 export type ModelCapabilityOverride =
   | 'effort'
@@ -50,26 +49,29 @@ function readCapabilityOverride(
   return undefined
 }
 
-const getSessionCapabilityOverride = memoize(
-  (model: string, capability: ModelCapabilityOverride): boolean | undefined => {
-    if (getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
-      return undefined
-    }
-    return readCapabilityOverride(model, capability, process.env)
-  },
-  (model, capability) => `${normalizeModelContextKey(model)}:${capability}`,
-)
+// Not memoized: provider switches rewrite the capability env vars in-process,
+// and a cache keyed only on the model id would keep the previous provider's
+// answer for the same model after a switch. Reading a few env vars is cheap.
+const getSessionCapabilityOverride = (
+  model: string,
+  capability: ModelCapabilityOverride,
+): boolean | undefined => {
+  if (getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
+    return undefined
+  }
+  return readCapabilityOverride(model, capability, process.env)
+}
 
 /**
  * An Agent routed to another saved provider reads that provider's declared
- * capabilities for its model; the session's memoized answers stay untouched.
+ * capabilities for its model; the session's answers come from process.env.
  */
-export const get3PModelCapabilityOverride = Object.assign(
-  (model: string, capability: ModelCapabilityOverride): boolean | undefined => {
-    const route = getProviderRouteForModel(model)
-    return route
-      ? readCapabilityOverride(model, capability, route.env)
-      : getSessionCapabilityOverride(model, capability)
-  },
-  { cache: getSessionCapabilityOverride.cache },
-)
+export function get3PModelCapabilityOverride(
+  model: string,
+  capability: ModelCapabilityOverride,
+): boolean | undefined {
+  const route = getProviderRouteForModel(model)
+  return route
+    ? readCapabilityOverride(model, capability, route.env)
+    : getSessionCapabilityOverride(model, capability)
+}

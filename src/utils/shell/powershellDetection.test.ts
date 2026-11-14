@@ -282,6 +282,7 @@ describe('PowerShell detection override', () => {
       getPlatform: () => 'windows',
       powershellPathOverride: null,
       probePath: async path => path,
+      readWindowsPwshHome: async () => null,
       which: async () => null,
     })
 

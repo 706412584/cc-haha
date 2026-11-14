@@ -1486,6 +1486,12 @@ async function handleUserMessage(
   // paths can release both activeUserTurns and sessionActivityCoordinator.
   // Without this, /clear never calls endUserTurn and blocks later admissions.
   activeUserTurns.set(sessionId, activeTurn)
+  // Transfer the IM power lease to the session the moment synchronous admission
+  // owns the work. This must happen before the first await so a caller can
+  // observe the transfer right after message() returns (the lease must not keep
+  // the desktop awake through asynchronous startup).
+  releaseAcceptedPowerLease(ws, message.powerActivityLeaseId)
+  nonAgentStopRequestedSessions.delete(sessionId)
 
   if (desktopSlashCommand?.commandName === 'clear') {
     // Enqueue clear on the runtime-transition lane, then release the user-turn
@@ -1518,8 +1524,6 @@ async function handleUserMessage(
     sessionStopRequested.has(sessionId) || agentStopRequestedSessions.has(sessionId)
   activeTurn.admissionPending = !collaboration
   activeUserTurns.set(sessionId, activeTurn)
-  releaseAcceptedPowerLease(ws, message.powerActivityLeaseId)
-  nonAgentStopRequestedSessions.delete(sessionId)
   clearBackgroundTaskDisconnectCeiling(sessionId)
 
   const content = await resolveSessionReferenceContext(message.content, message.sessionReferences,

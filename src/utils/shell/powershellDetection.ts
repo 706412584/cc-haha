@@ -6,12 +6,13 @@ import type { Platform } from '../platform.js'
 import { which } from '../which.js'
 
 export const POWERSHELL_PATH_OVERRIDE_ENV = 'CLAUDE_CODE_POWERSHELL_PATH'
-const WINDOWS_DEFAULT_PWSH_PATH = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe'
-function windowsPowerShellSystemPath(): string {
-  return pathWin32.join(
-    process.env.SystemRoot ?? 'C:\\Windows',
-    'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe',
-  )
+function windowsPowerShellSystemPath(env: NodeJS.ProcessEnv = process.env): string | null {
+  const systemRoot = env.SystemRoot?.trim()
+    || env.SYSTEMROOT?.trim()
+    || env.WINDIR?.trim()
+  return systemRoot
+    ? pathWin32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    : null
 }
 
 async function probePath(p: string): Promise<string | null> {
@@ -112,21 +113,16 @@ async function resolveWindowsPowerShellFallbackPath(
     }
   }
 
-  // Fork: also honor a user-custom Program Files location before falling back
-  // to the hard-coded default path.
-  if (basename === 'pwsh') {
-    const fromEnv = windowsPwshPath(deps.env ?? process.env)
-    if (fromEnv) {
-      const probed = await pathProbe(fromEnv)
-      if (probed) return probed
-    }
-  }
-
-  return pathProbe(
-    basename === 'pwsh'
-      ? WINDOWS_DEFAULT_PWSH_PATH
-      : windowsPowerShellSystemPath(),
-  )
+  // Fork: derive the install location from the environment rather than
+  // guessing a hard-coded default. A packaged app can run with an unusual
+  // ProgramFiles/SystemRoot, and probing `C:\Program Files\...` when the
+  // environment doesn't point there can return a false positive. When the
+  // environment names no such directory, there is nothing trustworthy to
+  // probe and we return null (the caller falls back to `which`).
+  const fallbackPath = basename === 'pwsh'
+    ? windowsPwshPath(deps.env ?? process.env)
+    : windowsPowerShellSystemPath(deps.env ?? process.env)
+  return fallbackPath ? pathProbe(fallbackPath) : null
 }
 
 export async function resolvePowerShellPathOverride(
@@ -188,11 +184,12 @@ export async function findPowerShell(deps: PowerShellDetectionDeps = {}): Promis
   const lookup = deps.which ?? which
   const probe = deps.probePath ?? probePath
   const platform = (deps.getPlatform ?? getPlatform)()
-  // Fork: try the richer Windows fallback (ProgramFiles env, pwsh home, default paths)
-  // before the upstream hard-coded default; it covers the sidecar PATH-omission case
-  // the same way but also honors user-custom install locations.
+  // Fork: probe the environment-derived Windows install location (ProgramFiles
+  // and the pwsh-home probe) before giving up; this covers the sidecar
+  // PATH-omission case while honoring user-custom install locations. When the
+  // environment names no such directory, there is nothing trustworthy to probe.
   const pwshPath = await lookup('pwsh') ??
-    (platform === 'windows' ? (await resolveWindowsPowerShellFallbackPath('pwsh', deps)) ?? await probe(WINDOWS_DEFAULT_PWSH_PATH) : null)
+    (platform === 'windows' ? await resolveWindowsPowerShellFallbackPath('pwsh', deps) : null)
   if (pwshPath) {
     // Snap launcher hangs in subprocesses. Prefer the direct binary.
     // Check both the resolved PATH entry and its symlink target: on
@@ -219,7 +216,7 @@ export async function findPowerShell(deps: PowerShellDetectionDeps = {}): Promis
   }
 
   return await lookup('powershell') ??
-    (platform === 'windows' ? (await resolveWindowsPowerShellFallbackPath('powershell', deps)) ?? await probe(windowsPowerShellSystemPath()) : null)
+    (platform === 'windows' ? await resolveWindowsPowerShellFallbackPath('powershell', deps) : null)
 }
 
 let cachedPowerShellPath: Promise<string | null> | null = null
