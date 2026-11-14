@@ -15,7 +15,7 @@ The service is provided by [SignPath.io](https://about.signpath.io) and the [Sig
 
 ## Signing scope
 
-Signing is limited to the Windows desktop application, project-owned sidecars, and final x64 and ARM64 NSIS installers built from source owned by this project in [NanmiCoder/cc-haha](https://github.com/706412584/cc-haha).
+Signing is limited to the Windows desktop application, project-owned sidecars, and final x64 and ARM64 NSIS installers built from source owned by this project in [706412584/cc-haha](https://github.com/706412584/cc-haha).
 
 Release packages may include third-party or upstream open-source components distributed under their respective licenses. Those components may be bundled unchanged, but they will not be signed as binaries owned by cc-haha. The certificate will not be used for other projects, personal builds, debug builds, or files of unknown origin.
 

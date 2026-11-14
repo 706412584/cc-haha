@@ -15,7 +15,7 @@ Free code signing provided by SignPath.io, certificate by SignPath Foundation.
 
 ## 签名范围
 
-签名仅用于本项目拥有并从 [NanmiCoder/cc-haha](https://github.com/706412584/cc-haha) 源码构建的 Windows 桌面程序、项目自有 sidecar，以及最终的 x64 和 ARM64 NSIS 安装包。
+签名仅用于本项目拥有并从 [706412584/cc-haha](https://github.com/706412584/cc-haha) 源码构建的 Windows 桌面程序、项目自有 sidecar，以及最终的 x64 和 ARM64 NSIS 安装包。
 
 发布包可能包含在各自许可证下分发的第三方或上游开源组件。这些组件可以原样打包，但不会以 cc-haha 自有二进制的身份签名。证书不会用于其他项目、个人构建、调试构建或来源不明的文件。
 

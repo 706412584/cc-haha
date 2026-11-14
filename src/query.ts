@@ -15,6 +15,11 @@ import {
   type AutoCompactTrackingState,
 } from './services/compact/autoCompact.js'
 import { buildPostCompactMessages } from './services/compact/compact.js'
+// Fork: the external build compiles out the upstream REACTIVE_COMPACT
+// experiment, but fork keeps reactive compact always available as the
+// prompt-too-long recovery path (see services/compact/reactiveCompact.ts and
+// f42fd0905). Import it unconditionally so `reactiveCompact` is never null.
+import * as reactiveCompact from './services/compact/reactiveCompact.js'
 import {
   canRecoverFromPromptTooLong,
   compactAfterPromptTooLong,
@@ -26,9 +31,6 @@ import { rememberProviderContextLimit } from './utils/context.js'
 /* eslint-disable @typescript-eslint/no-require-imports */
 const contextCollapse = feature('CONTEXT_COLLAPSE')
   ? (require('./services/contextCollapse/index.js') as typeof import('./services/contextCollapse/index.js'))
-  : null
-const reactiveCompact = feature('REACTIVE_COMPACT')
-  ? (require('./services/compact/reactiveCompact.js') as typeof import('./services/compact/reactiveCompact.js'))
   : null
 /* eslint-enable @typescript-eslint/no-require-imports */
 import {
@@ -1302,18 +1304,21 @@ async function* queryLoop(
           continue
         }
 
-        // No recovery — surface the withheld error and exit. Do NOT fall
-        // through to stop hooks: the model never produced a valid response,
-        // so hooks have nothing meaningful to evaluate. Running stop hooks
-        // on prompt-too-long creates a death spiral: error → hook blocking
-        // → retry → error → … (the hook injects more tokens each cycle).
-        yield lastMessage
-        void executeStopFailureHooks(lastMessage, toolUseContext)
-        return { reason: isWithheldMedia ? 'image_error' : 'prompt_too_long' }
-      } else if (feature('CONTEXT_COLLAPSE') && isWithheld413) {
-        // reactiveCompact compiled out but contextCollapse withheld and
-        // couldn't recover (staged queue empty/stale). Surface. Same
-        // early-return rationale — don't fall through to stop hooks.
+        // reactiveCompact compiled in but did not recover (recursion guard,
+        // already attempted, abort, or compaction failed). In the fork,
+        // reactiveCompact is always present, so fall through to the provider
+        // prompt-too-long recovery below when it is enabled — that path learns
+        // the provider's real context limit and is the more complete recovery.
+        // Only surface here when no further recovery is available.
+        if (!promptTooLongRecoveryEnabled) {
+          yield lastMessage
+          void executeStopFailureHooks(lastMessage, toolUseContext)
+          return { reason: isWithheldMedia ? 'image_error' : 'prompt_too_long' }
+        }
+      } else if (feature('CONTEXT_COLLAPSE') && isWithheld413 && !promptTooLongRecoveryEnabled) {
+        // reactiveCompact compiled out, contextCollapse withheld but couldn't
+        // recover (staged queue empty/stale), and no provider recovery applies.
+        // Surface rather than fall through to stop hooks.
         yield lastMessage
         void executeStopFailureHooks(lastMessage, toolUseContext)
         return { reason: 'prompt_too_long' }
