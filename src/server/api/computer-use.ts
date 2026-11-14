@@ -4,10 +4,6 @@
 
 import { homedir } from 'os'
 import { join } from 'path'
-import { access, readFile, mkdir, writeFile, rm } from 'fs/promises'
-import { createHash } from 'crypto'
-import path from 'path'
-import { fileURLToPath } from 'url'
 import { isPythonVersionAtLeast } from './computer-use-python.js'
 import { normalizeIconSize, readAppIconPng } from '../services/macAppIcon.js'
 import { listInstalledMacApps } from './macInstalledApps.js'

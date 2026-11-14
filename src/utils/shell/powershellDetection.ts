@@ -1,3 +1,4 @@
+import { execFile } from 'child_process'
 import { realpath, stat } from 'fs/promises'
 import { win32 as pathWin32 } from 'path'
 import { getPlatform } from '../platform.js'
@@ -39,11 +40,34 @@ function hasPathSeparator(candidate: string): boolean {
   return candidate.includes('/') || candidate.includes('\\')
 }
 
+async function readWindowsPwshHome(): Promise<string | null> {
+  return new Promise(resolve => {
+    execFile(
+      'cmd.exe',
+      ['/C', 'pwsh', '-NoProfile', '-Command', '$PSHOME'],
+      {
+        maxBuffer: 8192,
+        timeout: 3000,
+        windowsHide: true,
+      },
+      (error, stdout) => {
+        if (error) {
+          resolve(null)
+          return
+        }
+        const trimmed = stdout.toString().trim()
+        resolve(trimmed || null)
+      },
+    )
+  })
+}
+
 type PowerShellDetectionDeps = {
   env?: NodeJS.ProcessEnv
   getPlatform?: () => Platform
   powershellPathOverride?: string | null
   probePath?: (p: string) => Promise<string | null>
+  readWindowsPwshHome?: () => Promise<string | null>
   which?: (command: string) => Promise<string | null>
 }
 

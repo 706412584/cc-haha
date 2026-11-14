@@ -40,18 +40,28 @@ export const ThinkingBlock = memo(function ThinkingBlock({
     [displayContent, isActive],
   )
 
-  // Auto-collapse when thinking finishes (isActive transitions from true to false)
+  // Auto-collapse when thinking finishes (isActive transitions from true to
+  // false), but only if the block wasn't explicitly expanded (by user click
+  // or by the auto-expand-on-active effect below).
+  const userExpandedRef = useRef(false)
+  const prevActiveForCollapseRef = useRef(false)
   useEffect(() => {
-    if (!isActive && thinkingAutoCollapse) {
+    if (prevActiveForCollapseRef.current && !isActive && thinkingAutoCollapse && !userExpandedRef.current) {
       setExpanded(false)
     }
+    prevActiveForCollapseRef.current = isActive
   }, [isActive, thinkingAutoCollapse])
 
-  // Force expand while actively thinking so user can see the stream
+  // Force expand on mount when actively thinking so user can see the stream.
+  // Only run once — subsequent isActive transitions should not override a
+  // user's manual toggle.
+  const mountedRef = useRef(false)
   useEffect(() => {
-    if (isActive) {
+    if (!mountedRef.current && isActive) {
+      userExpandedRef.current = true
       setExpanded(true)
     }
+    mountedRef.current = true
   }, [isActive])
 
   // Pinning the view to the newest reasoning reads `scrollHeight`, which forces
@@ -93,7 +103,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({
         type="button"
         data-chat-disclosure="true"
         data-thinking-row="true"
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => { userExpandedRef.current = true; setExpanded(!expanded) }}
         aria-expanded={expanded}
         className="-mx-2 flex h-7 w-[calc(100%+1rem)] min-w-0 items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[13px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] focus:outline-none focus-visible:shadow-[var(--shadow-focus-ring)]"
       >

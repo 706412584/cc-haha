@@ -5,7 +5,7 @@ export type FeatureId = 'teams' | 'computer-use' | 'models' | 'workbench' | 'ski
 // Same targets as desktop/src/pages/settings/mobileAppLinks.ts: every desktop release carries the APK,
 // and iPhone installs go through the public TestFlight group.
 export const MOBILE_LINKS = {
-  android: 'https://github.com/NanmiCoder/cc-haha/releases/latest',
+  android: 'https://github.com/706412584/cc-haha/releases/latest',
   testFlight: 'https://testflight.apple.com/join/Nd49JrWZ'
 }
 

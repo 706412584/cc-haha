@@ -97,7 +97,7 @@ describe('ThinkingBlock', () => {
     const settled = Array.from({ length: 4 }, (_, index) => paragraph(index + 1)).join('\n\n')
     const before = `${settled}\n\nStill thinking about`
     const { container, rerender } = render(<ThinkingBlock content={before} isActive />)
-    fireEvent.click(screen.getByRole('button'))
+    // isActive auto-expands on mount — no click needed (clicking would toggle it closed).
     const body = container.querySelector('[data-thinking-content="expanded"]')!
     const segmentsBefore = Array.from(body.querySelectorAll('.markdown-prose'))
     expect(segmentsBefore.length).toBeGreaterThan(1)
@@ -118,7 +118,7 @@ describe('ThinkingBlock', () => {
     const paragraph = (index: number) => `Paragraph ${index}: ${'reasoning about the request '.repeat(40)}`.trim()
     const content = `${Array.from({ length: 4 }, (_, index) => paragraph(index + 1)).join('\n\n')}\n\nDone.`
     const { container, rerender } = render(<ThinkingBlock content={content} isActive />)
-    fireEvent.click(screen.getByRole('button'))
+    // isActive auto-expands on mount — no click needed.
     expect(container.querySelectorAll('.markdown-prose').length).toBeGreaterThan(1)
     expect(container.querySelector('.thinking-cursor')).not.toBeNull()
 

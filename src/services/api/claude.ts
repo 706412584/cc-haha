@@ -1636,16 +1636,11 @@ async function* queryModel(
     options.model,
   );
   queryCheckpoint("query_message_normalization_end");
-  if (
-    hasAnthropicCompatibleThirdPartyConfig() &&
-    !modelUsesBoundThinking(options.model)
-  ) {
-    // Third-party relays 400 on replayed encrypted thinking blocks. Models
-    // that use bound thinking (fable-5-1) are exempt: their thinking blocks
-    // carry a drop_block binding so providers implementing the protocol can
-    // safely replay them, and the API contract keeps signatures in history.
-    messagesForAPI = stripSignatureBlocks(messagesForAPI);
-  }
+  // stripSignatureBlocksAfterModelChange (above) already strips thinking from
+  // other models. No additional blanket strip is needed here — same-model
+  // thinking must survive for reasoning continuity, even on third-party relays.
+  // Relays that reject replayed thinking blocks are handled by the proxy layer
+  // (thinking passthrough) and the error-classification path.
 
   // Model-specific post-processing: strip tool-search-specific fields if the
   // selected model doesn't support tool search.

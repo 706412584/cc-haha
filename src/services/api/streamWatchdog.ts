@@ -343,7 +343,11 @@ class StreamWatchdogState {
    */
   msUntilThinkingQuietWindow(quietWindowMs: number): number {
     const last = this.snapshotValue.lastThinkingAt
-    if (last === undefined) return 0
+    // No thinking delta yet — the full budget applies from stream start.
+    // This prevents the timer from firing immediately for streams that open
+    // a thinking block but haven't produced any thinking_delta events yet
+    // (e.g. replay cassettes, signature-only gateways).
+    if (last === undefined) return quietWindowMs
     const elapsed = performance.now() - last
     return Math.max(0, quietWindowMs - elapsed)
   }

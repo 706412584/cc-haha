@@ -10,9 +10,8 @@ const paragraph = 'Long reasoning: ' + 'reasoning about the request '.repeat(100
 afterEach(cleanup)
 
 function renderActive(content: string) {
-  const result = render(<ThinkingBlock content={content} isActive />)
-  fireEvent.click(screen.getByRole('button', { name: /思考中|Thinking/ }))
-  return result
+  // isActive auto-expands on mount — no click needed (clicking would toggle it closed).
+  return render(<ThinkingBlock content={content} isActive />)
 }
 
 describe('ThinkingBlock streaming Markdown regressions', () => {

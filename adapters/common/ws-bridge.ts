@@ -362,14 +362,10 @@ export class WsBridge {
       return
     }
 
-    // Keep a temporary error sink after detaching the session listeners so a
-    // close-time transport error cannot surface as an unhandled EventEmitter
-    // error.
-    const swallowTeardownError = () => {}
-    ws.on('error', swallowTeardownError)
-    ws.once('close', () => {
-      ws.removeListener('error', swallowTeardownError)
-    })
+    // Keep a permanent no-op error sink after detaching the session listeners
+    // so a close-time transport error cannot surface as an unhandled
+    // EventEmitter error, even after the close event fires.
+    ws.on('error', () => {})
     if (terminate) ws.terminate()
     else ws.close(code, reason)
   }

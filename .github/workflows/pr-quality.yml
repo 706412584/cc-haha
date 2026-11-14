@@ -375,7 +375,7 @@ jobs:
         working-directory: desktop
         run: bun run prepare:cloudflared
       - name: Setup native Computer Use Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: rustup toolchain install stable --profile minimal && rustup default stable
       - name: Prepare native Computer Use dependencies
         run: cargo +stable fetch --locked --manifest-path native/agent-desktop/Cargo.toml
       - name: Run desktop native checks
