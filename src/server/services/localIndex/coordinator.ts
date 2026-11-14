@@ -1371,8 +1371,9 @@ export function createLocalIndexCoordinator(
       const hasCommittedRows = activeIndex.countSources() > 0
       servableSnapshot = hasCommittedRows
       status = initialBuildingStatus(mode, persisted, hasCommittedRows)
-      log(`ready to reconcile (${existingSources.length} indexed sources)`)
-      logPendingParserRebuild(existingSources)
+      const startupSources = activeIndex.listSources()
+      log(`ready to reconcile (${startupSources.length} indexed sources)`)
+      logPendingParserRebuild(startupSources)
       if (outstandingReconciliationFailures() > 0) {
         status = {
           ...status,
