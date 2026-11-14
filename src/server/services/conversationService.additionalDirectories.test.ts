@@ -8,6 +8,7 @@ import { DesktopUiPreferencesService } from './desktopUiPreferencesService.js'
 import { SessionService, sessionService as sharedSessionService } from './sessionService.js'
 import { sanitizePath } from '../../utils/sessionStoragePortable.js'
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
+import { normalizePathForConfigKey } from '../../utils/path.js'
 import { resetTerminalShellEnvironmentCacheForTests } from '../../utils/terminalShellEnvironment.js'
 import { __resetWebSocketHandlerStateForTests, translateCliMessage } from '../ws/handler.js'
 
@@ -60,7 +61,9 @@ function additionalDirectories(capture: LaunchCapture): string[] {
 }
 
 async function directories(...names: string[]): Promise<string[]> {
-  const paths = names.map(name => join(root, name))
+  const paths = names.map(name => process.platform === 'win32'
+    ? normalizePathForConfigKey(join(root, name))
+    : join(root, name))
   for (const directory of paths) await mkdir(directory, { recursive: true })
   return paths
 }
