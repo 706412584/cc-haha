@@ -113,6 +113,11 @@ type BackgroundIndexStartupOptions = {
   signal?: AbortSignal
 }
 
+// How long the full-text search index waits for the session-list projection to
+// finish its cold-start build before it starts anyway (upstream priority gate).
+const SEARCH_INDEX_PRIMARY_WAIT_MS = 30_000
+const SEARCH_INDEX_PRIMARY_POLL_MS = 50
+
 /** Give the session-list projection first access to cold-start I/O. */
 export async function startBackgroundIndexesInPriorityOrder(
   options: BackgroundIndexStartupOptions = {},
