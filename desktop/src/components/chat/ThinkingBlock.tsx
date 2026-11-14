@@ -53,12 +53,12 @@ export const ThinkingBlock = memo(function ThinkingBlock({
   }, [isActive, thinkingAutoCollapse])
 
   // Force expand on mount when actively thinking so user can see the stream.
-  // Only run once — subsequent isActive transitions should not override a
-  // user's manual toggle.
+  // This is a view convenience, not a user choice: it must NOT set
+  // userExpandedRef, or the auto-collapse below would never fold a block the
+  // user never touched. Only an explicit click marks the block as user-opened.
   const mountedRef = useRef(false)
   useEffect(() => {
     if (!mountedRef.current && isActive) {
-      userExpandedRef.current = true
       setExpanded(true)
     }
     mountedRef.current = true

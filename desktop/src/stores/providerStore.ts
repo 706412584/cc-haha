@@ -231,9 +231,11 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
     if (activeId === provider.id && input.models !== undefined) {
       const mainModelId = provider.models.main.trim()
       if (mainModelId && previousMainModelId !== undefined && mainModelId !== previousMainModelId) {
+        // Optimistic: set the model locally without a full settings reload. The
+        // provider update already carries the new mapping, and a reload here
+        // throws away the picker state the user just chose.
         const settings = useSettingsStore.getState()
         await settings.setModel(mainModelId)
-        await settings.fetchAll()
       }
     }
     refreshSessionsForProvider(provider, activeId)

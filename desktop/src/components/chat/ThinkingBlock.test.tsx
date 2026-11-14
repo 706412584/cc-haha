@@ -41,7 +41,7 @@ describe('ThinkingBlock', () => {
 
   afterEach(() => {
     cleanup()
-    useSettingsStore.setState({ locale: 'zh' })
+    useSettingsStore.setState({ locale: 'zh', thinkingAutoCollapse: true })
   })
 
   it('shows the in-progress label while thinking is active', () => {
@@ -115,6 +115,10 @@ describe('ThinkingBlock', () => {
   })
 
   it('renders the finished block whole again', () => {
+    // This case pins the finished rendering, not the auto-collapse: keep the
+    // block open across the active→done transition so its whole body is on
+    // screen. Auto-collapse itself is covered by chatBlocks.test.
+    useSettingsStore.setState({ thinkingAutoCollapse: false })
     const paragraph = (index: number) => `Paragraph ${index}: ${'reasoning about the request '.repeat(40)}`.trim()
     const content = `${Array.from({ length: 4 }, (_, index) => paragraph(index + 1)).join('\n\n')}\n\nDone.`
     const { container, rerender } = render(<ThinkingBlock content={content} isActive />)
