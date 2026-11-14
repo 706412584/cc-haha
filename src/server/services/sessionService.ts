@@ -335,7 +335,6 @@ export type MessageEntry = {
   isApiErrorMessage?: boolean
   error?: string
   businessErrorCode?: string
-  bodyTruncated?: boolean
   toolUseResult?: unknown
   timestamp: string
   model?: string
@@ -1042,8 +1041,6 @@ export class SessionService {
   private syncIndexedSessionTitle(sessionId: string, title: string): void {
     this.localIndexGateway.updateSessionTitle?.(sessionId, title)
   }
-
-  private readonly historyRecoveryCache = new Map<string, SessionHistoryRecovery>()
 
   private readonly pendingTaskNotificationWrites = new Map<
     string,
