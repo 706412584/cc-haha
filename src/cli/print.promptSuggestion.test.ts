@@ -174,6 +174,15 @@ async function startLiveCli(
   const listeners = new Set<() => void>()
   void (async () => {
     const decoder = new TextDecoder()
+    const errReader = child.stderr.getReader()
+    for (;;) {
+      const { value: chunk, done } = await errReader.read()
+      if (done) break
+      process.stderr.write(decoder.decode(chunk, { stream: true }))
+    }
+  })()
+  void (async () => {
+    const decoder = new TextDecoder()
     const reader = child.stdout.getReader()
     let buffer = ''
     for (;;) {

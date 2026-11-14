@@ -95,6 +95,7 @@ export function takeSdkSuggestionContext(
     cacheSafeParamsAtTurnStart: CacheSafeParams | null
   },
 ): CacheSafeParams | null {
+  console.error(`DIAG takeCtx enabled=${turn.enabled} userStarted=${turn.userStartedTurn} held=${turn.resultHeld} deferred=${state.deferredUntilAgentsSettle} hasParams=${!!turn.cacheSafeParams} sameAsStart=${turn.cacheSafeParams===turn.cacheSafeParamsAtTurnStart}`)
   if (!turn.enabled) return null
   if (!turn.userStartedTurn && !state.deferredUntilAgentsSettle) return null
   if (turn.resultHeld) {

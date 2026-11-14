@@ -148,6 +148,7 @@ export async function tryGenerateSuggestion(
   promptId: PromptVariant
   generationRequestId: string | null
 } | null> {
+  console.error(`DIAG tryGenerate entered source=${source} msgs=${messages.length}`)
   if (abortController.signal.aborted) {
     logSuggestionSuppressed('aborted', undefined, undefined, source)
     return null
