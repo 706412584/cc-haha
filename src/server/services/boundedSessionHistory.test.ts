@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile, appendFile, open, rename } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import sharp from 'sharp'
-import { readBoundedHistoryPage, streamBoundedHistory, withHistoryReadBudget, HISTORY_SCAN_BYTES, HISTORY_FULL_SCAN_BYTES, HISTORY_RECORD_BYTES, HISTORY_SEMANTIC_RECORD_BYTES, HISTORY_PAGE_BYTES, HISTORY_PAGE_ROWS } from './boundedSessionHistory.js'
+import { readBoundedHistoryPage, streamBoundedHistory, withHistoryReadBudget, HISTORY_SCAN_BYTES, HISTORY_FULL_SCAN_BYTES, HISTORY_RECORD_BYTES, HISTORY_SEMANTIC_RECORD_BYTES, HISTORY_RETAINED_RECORD_BYTES, HISTORY_PAGE_BYTES, HISTORY_PAGE_ROWS } from './boundedSessionHistory.js'
 import { measureEntryWithMediaRefs } from './toolImageMedia.js'
 
 let directory: string
@@ -495,8 +495,11 @@ describe('follow cursor', () => {
   test('an oversized record still being written is skipped across follows and counted once', async () => {
     await writeFile(file, row('a'))
     const latest = await readBoundedHistoryPage(file)
-    const big = row('big', 'y'.repeat(HISTORY_SEMANTIC_RECORD_BYTES + 1024))
-    await appendFile(file, big.slice(0, HISTORY_SEMANTIC_RECORD_BYTES + 512))
+    // Fork: the oversized threshold is HISTORY_RETAINED_RECORD_BYTES (12MiB),
+    // not HISTORY_SEMANTIC_RECORD_BYTES (8MiB). A record between the two is
+    // retained (slimmed), not omitted, so the test must exceed the retained cap.
+    const big = row('big', 'y'.repeat(HISTORY_RETAINED_RECORD_BYTES + 1024))
+    await appendFile(file, big.slice(0, HISTORY_RETAINED_RECORD_BYTES + 512))
     const partial = await readBoundedHistoryPage(file, { cursor: latest.page.tailCursor! })
     expect(partial.entries).toEqual([])
     expect(partial.page.omittedOversizedEntries).toBe(1)
