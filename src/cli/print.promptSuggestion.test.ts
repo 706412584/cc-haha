@@ -312,7 +312,7 @@ test('a turn that waits for a background agent gets one suggestion after the fin
       { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 4 } },
       { type: 'message_stop' },
     ]), { headers: { 'content-type': 'text/event-stream' } })
-  }, ['--dangerously-skip-permissions'])
+  }, ['--bare', '--dangerously-skip-permissions'])
   try {
     cli.write(control('enable', { subtype: 'set_prompt_suggestions', enabled: true }))
     cli.write(userMessage('KICKOFF 在后台跑一个助手'))
