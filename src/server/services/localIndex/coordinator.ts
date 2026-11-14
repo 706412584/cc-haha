@@ -1459,6 +1459,9 @@ export function createLocalIndexCoordinator(
         databasePath = undefined
       }
       started = false
+      // A raw startup failure is otherwise swallowed into a bare code; log the
+      // message once so the host's bounded server log names the real cause.
+      log(`start failed: ${error instanceof Error ? error.message : String(error)}`)
       markDegraded(stableDatabaseError(error), 'LOCAL_INDEX_START_FAILED')
     }
   }
