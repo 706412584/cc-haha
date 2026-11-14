@@ -10,9 +10,21 @@ export type ProjectDirectories = { projectKey: string; mainDirectory: string; ad
 
 /** Missing legacy fields grant no extra access. Do not resolve against the server cwd. */
 export function normalizeAdditionalDirectories(value: unknown): string[] {
-  return Array.isArray(value)
-    ? [...new Set(value.filter((item): item is string => typeof item === 'string' && path.isAbsolute(item) && !item.includes('\0')))]
-    : []
+  if (!Array.isArray(value)) return []
+  // Windows paths arrive with mixed separators (C:\foo vs C:/foo). Dedup by the
+  // normalized identity but keep the caller's original string for display —
+  // rewriting the separator would break tests and any UI that compares paths
+  // by literal string equality.
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string' || !path.isAbsolute(item) || item.includes('\0')) continue
+    const key = getPlatform() === 'windows' ? normalizePathForConfigKey(item) : item
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(item)
+  }
+  return out
 }
 
 export function normalizeProjectAdditionalDirectories(value: unknown): ProjectAdditionalDirectories {

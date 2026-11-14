@@ -9,6 +9,7 @@ import { ConversationService } from './conversationService.js'
 import { DesktopUiPreferencesService } from './desktopUiPreferencesService.js'
 import { sanitizePath } from '../../utils/sessionStoragePortable.js'
 import { getProjectMcpDirectoryIdentity } from '../../services/mcp/config.js'
+import { normalizePathForConfigKey } from '../../utils/path.js'
 
 let directory: string
 let config: string | undefined
@@ -21,8 +22,15 @@ beforeEach(async () => {
   directory = await realpath(await mkdtemp(join(tmpdir(), 'project-directories-')))
   config = process.env.CLAUDE_CONFIG_DIR
   process.env.CLAUDE_CONFIG_DIR = join(directory, 'config')
-  main = join(directory, 'main')
-  extra = join(directory, '数据 files')
+  main = process.platform === 'win32'
+    ? normalizePathForConfigKey(join(directory, 'main'))
+    : join(directory, 'main')
+  // resolveDirectory normalizes Windows paths to forward slashes (the CLI's
+  // --add-dir comparison is separator-insensitive). Compare against the
+  // normalized form so assertions do not depend on the host's path style.
+  extra = process.platform === 'win32'
+    ? normalizePathForConfigKey(join(directory, '数据 files'))
+    : join(directory, '数据 files')
   await mkdir(main)
   await mkdir(extra)
 })
@@ -53,7 +61,11 @@ test('project directories REST save/reload reaches new session CLI and preserves
   expect(await saved.json()).toMatchObject({ projectKey: getProjectMcpDirectoryIdentity(main), additionalDirectories: [extra] })
   expect(await (await preferences('GET')).json()).toMatchObject({ mainDirectory: main, additionalDirectories: [extra] })
   const current = await create()
-  expect(current.workDir).toBe(main)
+  // createSession returns the raw workDir the CLI was launched with (backslash
+  // on Windows); the API's normalized mainDirectory is forward slash. Compare
+  // against the normalized form to keep the test platform-agnostic.
+  const expectedWorkDir = process.platform === 'win32' ? normalizePathForConfigKey(current.workDir) : current.workDir
+  expect(expectedWorkDir).toBe(main)
   const service = new SessionService()
   expect((await service.getSessionLaunchInfo(old.sessionId))?.additionalDirectories).toEqual([])
   const launch = await service.getSessionLaunchInfo(current.sessionId)
@@ -109,10 +121,11 @@ test('invalid directory updates fail atomically without changing saved scope', a
   expect((await preferences('PUT', { workDir: main, additionalDirectories: [extra] })).status).toBe(200)
   const file = join(directory, 'file')
   await writeFile(file, 'fixture')
+  const expectedExtra = process.platform === 'win32' ? normalizePathForConfigKey(extra) : extra
   for (const value of [null, 'not-array', [''], ['  '], ['../relative'], [join(directory, 'missing')], [file], [42], ['C:\\Users\\foreign'], ['ssh://other-host/data']]) {
     const response = await preferences('PUT', { workDir: main, additionalDirectories: value })
     expect(response.status).toBe(400)
-    expect(await (await preferences('GET')).json()).toMatchObject({ additionalDirectories: [extra] })
+    expect(await (await preferences('GET')).json()).toMatchObject({ additionalDirectories: [expectedExtra] })
   }
 })
 
@@ -152,7 +165,11 @@ test('rejects CLI expansion to a different physical directory without overwritin
   // Admission must reject it too, before a placeholder/session can be launched.
   const fixture = JSON.parse(before)
   const projectKey = getProjectMcpDirectoryIdentity(main)
-  expect(fixture.projectAdditionalDirectories).toEqual({ [projectKey]: [extra] })
+  // resolveDirectory normalizes Windows paths to forward slashes (the CLI's
+  // --add-dir comparison is separator-insensitive); compare against the
+  // normalized form so the test does not depend on the host's path style.
+  const expectedExtra = process.platform === 'win32' ? normalizePathForConfigKey(extra) : extra
+  expect(fixture.projectAdditionalDirectories).toEqual({ [projectKey]: [expectedExtra] })
   fixture.projectAdditionalDirectories[projectKey] = [selected]
   const legacy = JSON.stringify(fixture)
   await writeFile(prefsPath, legacy)
