@@ -5316,20 +5316,26 @@ export class SessionService {
         : null
       // Drop a single stale or unreadable row rather than abandoning the whole page and
       // scanning every transcript: one bad row must not cost the index route its win.
-      const sessions: SessionListItem[] = []
-      for (const row of indexedPage.sessions) {
-        try {
-          await this.validateIndexedTranscriptPath(
-            row.transcriptPath,
-            row.projectPath,
-            row.id,
-            projectsRoot!,
-          )
-          sessions.push(await this.hydrateIndexedSession(row, pathExists, this.isSessionArchived(row.id)))
-        } catch {
-          // Dropped below by omission.
-        }
-      }
+      // Hydrate concurrently: each row triggers several awaited fs calls (realpath,
+      // stat, pathExists) that were previously serialized per row, so a 50-row page
+      // paid 150-200 sequential disk hits. pathExists is already a Promise-caching
+      // memoizer built for concurrent use, and per-row try/catch preserves the
+      // drop-one-row semantics. Promise.all preserves the index page's order.
+      const sessions = (await Promise.all(
+        indexedPage.sessions.map(async (row): Promise<SessionListItem | null> => {
+          try {
+            await this.validateIndexedTranscriptPath(
+              row.transcriptPath,
+              row.projectPath,
+              row.id,
+              projectsRoot!,
+            )
+            return await this.hydrateIndexedSession(row, pathExists, this.isSessionArchived(row.id))
+          } catch {
+            return null
+          }
+        }),
+      )).filter((session): session is SessionListItem => session !== null)
       if (
         indexedMutationEpoch !== getSharedSessionMutationState(this.localIndexGateway).epoch
       ) {
