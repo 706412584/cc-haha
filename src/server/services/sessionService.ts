@@ -285,6 +285,7 @@ type SessionMetadataPatch = {
   additionalDirectories?: string[]
   repository?: PreparedSessionWorkspace['repository']
   permissionMode?: string
+  prePlanPermissionMode?: string | null
   runtimeProviderId?: string | null
   runtimeModelId?: string
   effortLevel?: string
