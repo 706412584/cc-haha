@@ -2609,6 +2609,7 @@ export class SessionService {
         worktreeSession: undefined as PersistedWorktreeSession | null | undefined,
         agentProfile: 'standard' as 'standard' | 'lean',
         permissionMode: undefined as string | undefined,
+        prePlanPermissionMode: undefined as string | undefined,
         runtimeProviderId: undefined as string | null | undefined,
         runtimeModelId: undefined as string | undefined, effortLevel: undefined as string | undefined,
         openAIFastMode: undefined as boolean | undefined,
@@ -2635,6 +2636,14 @@ export class SessionService {
           if (entry.agentProfile === 'standard' || entry.agentProfile === 'lean') state.agentProfile = entry.agentProfile
           if (typeof record.workDir === 'string') state.workDir = normalizeDriveRootPathForPlatform(record.workDir)
           state.permissionMode = this.resolvePermissionModeFromEntries([entry]) ?? state.permissionMode
+          // Fork §F: persist the pre-plan permission mode across reloads. The
+          // upstream #1851 mid-turn switch writes it into session-meta, but the
+          // projection below never read it back out, so a resume lost the mode.
+          // Distinguish "field absent" (keep the previous value) from "explicit
+          // null" (clear it) — `?? oldValue` alone would never clear.
+          if (record.prePlanPermissionMode !== undefined) {
+            state.prePlanPermissionMode = this.resolvePrePlanPermissionModeFromEntries([entry])
+          }
           if (record.runtimeProviderId === null || typeof record.runtimeProviderId === 'string') state.runtimeProviderId = record.runtimeProviderId as string | null
           if (typeof record.runtimeModelId === 'string') state.runtimeModelId = record.runtimeModelId
           state.effortLevel = resolveSessionEffortLevel(record, state.effortLevel)
@@ -2666,6 +2675,7 @@ export class SessionService {
         ...(state.additionalDirectories !== undefined ? { additionalDirectories: state.additionalDirectories } : {}),
         agentProfile: state.agentProfile,
         ...(state.permissionMode ? { permissionMode: state.permissionMode } : {}),
+        ...(state.prePlanPermissionMode ? { prePlanPermissionMode: state.prePlanPermissionMode } : {}),
         ...(state.runtimeProviderId !== undefined ? { runtimeProviderId: state.runtimeProviderId } : {}),
         ...(state.runtimeModelId ? { runtimeModelId: state.runtimeModelId } : {}),
         ...(state.effortLevel ? { effortLevel: state.effortLevel } : {}),

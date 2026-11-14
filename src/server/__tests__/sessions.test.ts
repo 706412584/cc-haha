@@ -2684,8 +2684,10 @@ describe('SessionService', () => {
 
     expect(ids).toContain(startId)
     expect(ids).toContain(startAssistantId)
-    // Only the queued notification record itself is plumbing...
-    expect(ids).not.toContain(notificationId)
+    // Upstream #1674: the queued notification is projected as a
+    // background_continue status message (not hidden), so its id IS present —
+    // but as a system message, not as a task-notification XML turn.
+    expect(ids).toContain(notificationId)
     // ...while the acknowledgement and the tool call that resumes work are all
     // real conversation and must be kept.
     expect(ids).toContain(ackThinkingId)
@@ -3683,8 +3685,12 @@ describe('SessionService', () => {
 
     await expect(createRepositoryBranch(workDir, { name: 'a'.repeat(201) }))
       .rejects.toMatchObject({ code: 'REPOSITORY_BRANCH_NAME_INVALID' })
-    await expect(createRepositoryBranch(workDir, { name: 'a'.repeat(200) }))
-      .resolves.toMatchObject({ branch: 'a'.repeat(200) })
+    // Windows MAX_PATH (260) makes .git/refs/heads/<200-char>.lock exceed the
+    // filesystem limit, so git itself rejects the create even though the name
+    // passes check-ref-format. The validation cap is 200, but the OS caps lower.
+    const viableLength = process.platform === 'win32' ? 150 : 200
+    await expect(createRepositoryBranch(workDir, { name: 'a'.repeat(viableLength) }))
+      .resolves.toMatchObject({ branch: 'a'.repeat(viableLength) })
   })
 
   it('should not let a flag-shaped base branch reach git as an option', async () => {
