@@ -19,6 +19,12 @@ export async function compressDataUrl(dataUrl: string, maxEdge = 1568, quality =
   if (!dataUrl.startsWith('data:')) return dataUrl
   if (dataUrl.startsWith('data:image/gif')) return dataUrl
 
+  // A runtime without a usable canvas 2D context (jsdom, some headless shells)
+  // cannot decode or re-encode an image at all. Return the original bytes
+  // immediately instead of waiting out the decode timeout — the wait only makes
+  // the drop interaction (and its preview) stall for no benefit.
+  if (!document.createElement('canvas').getContext('2d')) return dataUrl
+
   const img = new Image()
   // A headless runtime (jsdom, some test/CI browsers) can leave Image decoding
   // pending forever, which would hang the drop interaction. Treat a slow decode
