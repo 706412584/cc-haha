@@ -675,6 +675,15 @@ export async function openComputerUseSettings(
     : { ok: false, message: result.stderr || `Failed to run ${command.cmd}` }
 }
 
+/**
+ * True only on macOS AND when the native `cu-helper` can be launched from its
+ * canonical installation. This also verifies/install-repairs the packaged
+ * helper instead of reporting a nested app-bundle binary as healthy.
+ */
+function isCuHelperAvailableForServer(): boolean {
+  return process.platform === 'darwin' && resolveLaunchableCuHelperBinary() !== null
+}
+
 async function listInstalledApps(): Promise<{ bundleId: string; displayName: string; path: string }[]> {
   // macOS: enumerate the application roots directly. This needs neither a
   // Python venv nor a running helper, so the app picker populates on a cold
