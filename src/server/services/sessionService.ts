@@ -5333,7 +5333,7 @@ export class SessionService {
             row.id,
             projectsRoot!,
           )
-          sessions.push(await this.hydrateIndexedSessionForList(row, pathExists))
+          sessions.push(await this.hydrateIndexedSession(row, pathExists, this.isSessionArchived(row.id)))
         } catch {
           // Dropped below by omission.
         }
@@ -5411,51 +5411,6 @@ export class SessionService {
     } catch {
       this.markIndexReadFailure()
       return null
-    }
-  }
-
-  private async hydrateIndexedSessionForList(
-    row: IndexedSessionRow,
-    pathExists: (targetPath: string | null) => Promise<boolean>,
-  ): Promise<SessionListItem> {
-    const workDir = row.workDir
-    const projectRoot = row.worktreeSession?.originalCwd ||
-      row.repository?.repoRoot ||
-      workDir ||
-      this.desanitizePath(row.projectPath)
-    const { workDirExists, workspaceState } = await this.resolveWorkspaceAvailability({
-      workDir,
-      projectRoot,
-      worktreeSession: row.worktreeSession,
-      repository: row.repository,
-      pathExists,
-    })
-    return {
-      id: row.id,
-      title: row.title,
-      createdAt: row.createdAt,
-      modifiedAt: row.modifiedAt,
-      messageCount: row.messageCount,
-      projectPath: row.projectPath,
-      filePath: row.transcriptPath,
-      projectRoot,
-      workDir,
-      workDirExists,
-      workspaceState,
-      // compareSessionLists compares agentProfile (upstream v0.7.5 added it to the
-      // field list), and the file side always reports a default, so the list
-      // hydrator must report it too or every shadow comparison mismatches.
-      agentProfile: row.agentProfile ?? 'standard',
-      permissionMode: row.permissionMode,
-      ...(row.runtimeProviderId !== undefined
-        ? { runtimeProviderId: row.runtimeProviderId }
-        : {}),
-      ...(row.runtimeModelId ? { runtimeModelId: row.runtimeModelId } : {}),
-      ...(row.effortLevel ? { effortLevel: row.effortLevel } : {}),
-      ...(row.thinkingEnabled !== undefined
-        ? { thinkingEnabled: row.thinkingEnabled }
-        : {}),
-      ...(row.openAIFastMode !== undefined ? { openAIFastMode: row.openAIFastMode } : {}),
     }
   }
 
