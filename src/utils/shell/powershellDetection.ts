@@ -6,12 +6,26 @@ import type { Platform } from '../platform.js'
 import { which } from '../which.js'
 
 export const POWERSHELL_PATH_OVERRIDE_ENV = 'CLAUDE_CODE_POWERSHELL_PATH'
-function windowsPowerShellSystemPath(env: NodeJS.ProcessEnv = process.env): string | null {
-  const systemRoot = env.SystemRoot?.trim()
-    || env.SYSTEMROOT?.trim()
-    || env.WINDIR?.trim()
-  return systemRoot
-    ? pathWin32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+/**
+ * The conventional Windows PowerShell 5.1 path.
+ *
+ * When the caller supplies an explicit environment (including an empty one) and
+ * it names no system root, return null: the fork must not guess a fixed
+ * `C:\Windows` path the caller's world does not describe. Only when no
+ * environment is supplied — the production default, `process.env` — do we fall
+ * back to the conventional `C:\Windows` root, which is what a packaged Windows
+ * sidecar assumes even when a stripped process env omits SystemRoot.
+ */
+function windowsPowerShellSystemPath(
+  env: NodeJS.ProcessEnv | undefined,
+): string | null {
+  const source = env ?? process.env
+  const systemRoot = source.SystemRoot?.trim()
+    || source.SYSTEMROOT?.trim()
+    || source.WINDIR?.trim()
+  const root = systemRoot ?? (env === undefined ? 'C:\\Windows' : undefined)
+  return root
+    ? pathWin32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
     : null
 }
 
@@ -121,7 +135,7 @@ async function resolveWindowsPowerShellFallbackPath(
   // probe and we return null (the caller falls back to `which`).
   const fallbackPath = basename === 'pwsh'
     ? windowsPwshPath(deps.env ?? process.env)
-    : windowsPowerShellSystemPath(deps.env ?? process.env)
+    : windowsPowerShellSystemPath(deps.env)
   return fallbackPath ? pathProbe(fallbackPath) : null
 }
 
