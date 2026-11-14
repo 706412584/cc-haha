@@ -229,15 +229,29 @@ function endlessThinkingResponse(model: string): Response {
   })
   let sentInitialEvents = false
   let cancelled = false
+  // Emit a few thinking deltas, then go silent. The stream watchdog's quiet
+  // window treats this as a stall: the last thinking event ages past the
+  // fast-fail budget with no new activity, and there is still no text or
+  // tool call. Without the silence the stream would look like a healthy
+  // long think (which the watchdog now correctly leaves alone).
+  let deltasSent = 0
 
   return new Response(new ReadableStream({
     async pull(controller) {
-      if (sentInitialEvents) await Bun.sleep(10)
       if (cancelled) return
+      if (deltasSent >= 3) {
+        // Stay open but go silent. Each pull sleeps briefly then returns,
+        // so the consumer keeps iterating while the watchdog's quiet window
+        // elapses with no new activity and the timer fires.
+        await Bun.sleep(50)
+        return
+      }
+      if (sentInitialEvents) await Bun.sleep(10)
       controller.enqueue(new TextEncoder().encode(
         sentInitialEvents ? thinkingEvent : initialEvents,
       ))
       sentInitialEvents = true
+      deltasSent += 1
     },
     cancel() {
       cancelled = true

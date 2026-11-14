@@ -53,9 +53,15 @@ export function resolveStreamMaxDurationMs(
 // user waits out the full 600s overall cap to learn the turn failed.
 // Deliberately NOT scaled by "请求超时": that is the knob users raise for slow
 // models, and scaling would hand back the very wait this cap removes. A preset
-// or user who genuinely needs >5min of pure thinking sets
+// or user who genuinely needs >20min of pure thinking sets
 // CLAUDE_STREAM_MAX_THINKING_DURATION_MS explicitly (cleanEnv wins).
-export const DEFAULT_STREAM_MAX_THINKING_DURATION_MS = 300_000
+// Raised from 300s to 1200s: reasoning models on `max` effort routinely need
+// 5–15 minutes of continuous thinking before producing their first token of
+// user-visible text. The fast-fail only fires when the stream goes quiet
+// (see isThinkingOnlyStall's recent-delta check), so a longer ceiling does
+// not stall a healthy long think, it only stops the stall-shaped relays that
+// keep spewing thinking deltas without ever producing text.
+export const DEFAULT_STREAM_MAX_THINKING_DURATION_MS = 1_200_000
 
 // Inactivity budget for one tool call's JSON arguments. The model emits them a
 // complete key/value at a time, so a long `content` string produces no event

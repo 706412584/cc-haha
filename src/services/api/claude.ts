@@ -2631,43 +2631,57 @@ async function* queryModel(
     // that produced text or started a tool call, so slow-but-healthy reasoning
     // is unaffected.
     if (streamWatchdogEnabled && STREAM_MAX_THINKING_DURATION_MS > 0) {
-      streamMaxThinkingDurationTimer = setTimeout(() => {
-        if (!streamWatchdogState.isThinkingOnlyStall()) {
-          return;
-        }
-        streamIdleAborted = true;
-        streamAbortReason = "thinking_duration";
-        streamWatchdogFiredAt = performance.now();
-        streamWatchdogTimeoutError = streamWatchdogState.createTimeoutError(
-          "thinking_duration",
-          STREAM_MAX_THINKING_DURATION_MS,
-        );
-        logForDebugging(
-          `Streaming thinking-only duration exceeded: ${streamWatchdogTimeoutError.message}, aborting stream`,
-          { level: "error" },
-        );
-        logForDiagnosticsNoPII(
-          "error",
-          "cli_streaming_thinking_duration_exceeded",
-          {
-            ...streamWatchdogTimeoutError.toDiagnosticData(),
-          },
-        );
-        logEvent("tengu_streaming_thinking_duration_timeout", {
-          model:
-            options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          request_id: (streamRequestId ??
-            "unknown") as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          timeout_ms: STREAM_MAX_THINKING_DURATION_MS,
-          reason:
-            streamWatchdogTimeoutError.reason as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          phase:
-            streamWatchdogTimeoutError.phase as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          thinking_delta_count:
-            streamWatchdogTimeoutError.streamSnapshot.thinkingDeltaCount,
-        });
-        releaseStreamResources();
-      }, STREAM_MAX_THINKING_DURATION_MS);
+      const armThinkingDurationTimer = () => {
+        // Re-arm so the next wake-up lands at or past the quiet window. Without
+        // this the armed-once timer can fire early (Node's setTimeout is not
+        // exact) and the quiet-window check skips the stall entirely — a stream
+        // that then goes silent would never be caught.
+        const delay = Math.max(
+          1,
+          streamWatchdogState.msUntilThinkingQuietWindow(STREAM_MAX_THINKING_DURATION_MS),
+        )
+        streamMaxThinkingDurationTimer = setTimeout(() => {
+          if (!streamWatchdogState.isThinkingOnlyStall(STREAM_MAX_THINKING_DURATION_MS)) {
+            // Quiet window has not elapsed yet: thinking is still actively
+            // producing deltas. Re-arm so we re-check after the window closes.
+            armThinkingDurationTimer()
+            return;
+          }
+          streamIdleAborted = true;
+          streamAbortReason = "thinking_duration";
+          streamWatchdogFiredAt = performance.now();
+          streamWatchdogTimeoutError = streamWatchdogState.createTimeoutError(
+            "thinking_duration",
+            STREAM_MAX_THINKING_DURATION_MS,
+          );
+          logForDebugging(
+            `Streaming thinking-only duration exceeded: ${streamWatchdogTimeoutError.message}, aborting stream`,
+            { level: "error" },
+          );
+          logForDiagnosticsNoPII(
+            "error",
+            "cli_streaming_thinking_duration_exceeded",
+            {
+              ...streamWatchdogTimeoutError.toDiagnosticData(),
+            },
+          );
+          logEvent("tengu_streaming_thinking_duration_timeout", {
+            model:
+              options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+            request_id: (streamRequestId ??
+              "unknown") as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+            timeout_ms: STREAM_MAX_THINKING_DURATION_MS,
+            reason:
+              streamWatchdogTimeoutError.reason as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+            phase:
+              streamWatchdogTimeoutError.phase as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+            thinking_delta_count:
+              streamWatchdogTimeoutError.streamSnapshot.thinkingDeltaCount,
+          });
+          releaseStreamResources();
+        }, delay);
+      }
+      armThinkingDurationTimer();
     }
 
     startSessionActivity("api_call");
