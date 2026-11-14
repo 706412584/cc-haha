@@ -79,10 +79,9 @@ import type {
 } from './localIndex/types.js'
 import { localIndexCoordinator } from './localIndex/coordinator.js'
 import { readSessionEntriesByLocator } from './localIndex/sessionEntries.js'
-// Upstream modules the merge brought in; the fork service calls into them for the
-// bounded history reads and recovery snapshots the desktop API expects.
-import { readHistoryContexts } from './sessionHistoryContext.js'
-import { recoverBoundedSessionHistory, type SessionHistoryRecovery } from './sessionHistoryRecovery.js'
+// Upstream modules the merge brought in (imported above); the fork service calls
+// into them for the bounded history reads and recovery snapshots the desktop API
+// expects.
 import { streamSessionMetadata } from './sessionMetadataReader.js'
 import {
   HISTORY_SEMANTIC_RECORD_BYTES,
@@ -93,8 +92,6 @@ import {
   withHistoryReadBudget,
   type HistoryPageInfo,
 } from './boundedSessionHistory.js'
-import { parseSessionCollaborationEnvelope } from '../../utils/sessionCollaborationEnvelope.js'
-import { splitSessionReferenceContext } from './sessionReferenceContext.js'
 import type {
   IndexedSessionRow,
   IndexedSessionSearchCandidate,
@@ -119,9 +116,6 @@ import {
   type ProjectHistoryRow,
   type ProjectSessionPreviews,
 } from './projectSessionHistory.js'
-import { getSideChat, isSideChatId, sideChatSummary } from './sideChatRegistry.js'
-import { isShutdownTeamPrompt } from '../../utils/swarm/teamShutdownPrompt.js'
-import { isTeamLeadNotice } from '../../utils/swarm/teamLeadNotice.js'
 
 // ============================================================================
 // Types
