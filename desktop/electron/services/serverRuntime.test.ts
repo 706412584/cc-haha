@@ -1372,7 +1372,10 @@ describe('ElectronServerRuntime', () => {
 
   it('relays WeChat session expiry only from the current adapter generation', async () => {
     const fetchFn = vi.fn(async () => new Response('{}', { status: 200 })) as FetchMock
-    const runtime = createRuntime({ fetchFn })
+    // The WeChat invalidate call goes through deps.fetch (the adapter control
+    // channel), so stub it separately; fetchFn stays reserved for the tunnel /
+    // adapter-status calls this test counts.
+    const runtime = createRuntime({ fetchFn, fetch: async () => new Response('{}', { status: 200 }) })
     await runtime.startServer()
     await waitForCallCount(fetchFn, 1)
     fetchFn.mockClear()
@@ -1403,6 +1406,15 @@ describe('ElectronServerRuntime', () => {
       }),
     )
 
+    // A real kill makes a sidecar exit; the restart waits for that exit before
+    // it spawns replacements. Drive the fake children's exit so the wait does
+    // not stall until its 5s timeout.
+    for (const child of sidecarMocks.adapterChildren) {
+      child.kill.mockImplementation(() => {
+        child.exitCode = 0
+        child.emit('exit', 0, null)
+      })
+    }
     await runtime.restartAdaptersSidecars()
     await waitForCallCount(fetchFn, 2)
     fetchFn.mockClear()
