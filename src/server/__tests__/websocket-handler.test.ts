@@ -6489,6 +6489,9 @@ describe('WebSocket handler session isolation', () => {
           rejectFirst = reject
         })
       }
+      // Second call also stays pending — the second admission is serialized
+      // behind the first via enqueueUserAdmission, so it must not proceed
+      // until the first one settles.
       return new Promise(() => {})
     })
 
@@ -6499,27 +6502,29 @@ describe('WebSocket handler session isolation', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(customTitleCalls).toBe(1)
 
+    // The second message is queued by enqueueUserAdmission — it must NOT
+    // trigger a second getCustomTitle call while the first admission is
+    // still in flight.
     handleWebSocket.message(ws, JSON.stringify({
       type: 'user_message',
       content: 'newer turn',
     }))
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(customTitleCalls).toBe(1)
-    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
-      type: 'error',
-      message: 'A user turn is already active for this session. Retry after it completes.',
-      code: 'SESSION_TURN_ACTIVE',
-      retryable: true,
-    })
+    expect(customTitleCalls).toBe(1) // still 1 — queued, not started
 
+    // Reject the first admission → error surfaces, queue releases the second.
     rejectFirst(new Error('older metadata request failed'))
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    // Flush enough for the first turn's cleanup and the queued second turn to start.
+    await flushMicrotasks(100)
 
+    // The second turn also hangs on getCustomTitle (pending promise), so the
+    // session is still running, not idle. This confirms the second turn was
+    // admitted after the first one failed.
     ws.sent.length = 0
     handleWebSocket.message(ws, JSON.stringify({ type: 'sync_state' }))
     expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
       type: 'session_state',
-      turnState: 'idle',
+      turnState: 'running',
       activeBackgroundTaskIds: [],
     })
   })

@@ -1135,64 +1135,73 @@ export const handleWebSocket = {
           const isClearCommand =
             incomingSlashCommand?.commandName === 'clear' &&
             !incomingSlashCommand.args.trim()
-          if (!sessionActivityCoordinator.tryBeginUserTurn(ws.data.sessionId)) {
-            // /clear must interrupt an in-flight admission (e.g. turn waiting on
-            // CLI startup). Cancel the existing token, then re-acquire so clear
-            // still serializes through the coordinator.
-            if (isClearCommand) {
-              const existingTurn = activeUserTurns.get(ws.data.sessionId)
-              if (existingTurn) {
-                existingTurn.cancelled = true
-                existingTurn.stopped = true
-                existingTurn.removeCompletionCallback?.()
-                existingTurn.removeTitleCallback?.()
-                clearActiveUserTurn(ws.data.sessionId, existingTurn)
-              } else {
-                sessionActivityCoordinator.endUserTurn(ws.data.sessionId)
-              }
-              if (!sessionActivityCoordinator.tryBeginUserTurn(ws.data.sessionId)) {
-                sendMessage(ws, {
-                  type: 'error',
-                  message: 'A user turn is already active for this session. Retry after it completes.',
-                  code: 'SESSION_TURN_ACTIVE',
-                  retryable: true,
-                })
-                break
-              }
-            } else {
-              const existingTurn = activeUserTurns.get(ws.data.sessionId)
-              if (existingTurn?.messageSent && conversationService.hasSession(ws.data.sessionId)) {
-                void conversationService
-                  .sendMessage(ws.data.sessionId, message.content, message.attachments)
-                  .then((sent) => {
-                    if (sent) return
+          // /clear bypasses the admission queue so it can interrupt a stalled turn.
+          // All other messages serialize through enqueueUserAdmission so a video
+          // and its follow-up text arrive in order.
+          const admission = isClearCommand
+            ? (() => {
+                if (!sessionActivityCoordinator.tryBeginUserTurn(ws.data.sessionId)) {
+                  const existingTurn = activeUserTurns.get(ws.data.sessionId)
+                  if (existingTurn) {
+                    existingTurn.cancelled = true
+                    existingTurn.stopped = true
+                    existingTurn.removeCompletionCallback?.()
+                    existingTurn.removeTitleCallback?.()
+                    clearActiveUserTurn(ws.data.sessionId, existingTurn)
+                  } else {
+                    sessionActivityCoordinator.endUserTurn(ws.data.sessionId)
+                  }
+                  if (!sessionActivityCoordinator.tryBeginUserTurn(ws.data.sessionId)) {
                     sendMessage(ws, {
                       type: 'error',
-                      message: 'CLI process is not running. The session may have ended or the process crashed.',
-                      code: 'CLI_NOT_RUNNING',
-                    })
-                  })
-                  .catch((err) => {
-                    console.error(`[WS] Mid-turn user message inject failed:`, err)
-                    sendMessage(ws, {
-                      type: 'error',
-                      message: 'The follow-up message could not be delivered. Please retry.',
-                      code: 'USER_TURN_INJECT_FAILED',
+                      message: 'A user turn is already active for this session. Retry after it completes.',
+                      code: 'SESSION_TURN_ACTIVE',
                       retryable: true,
                     })
+                    return Promise.resolve()
+                  }
+                }
+                return handleUserMessage(ws, message, activeTurn)
+              })()
+            : enqueueUserAdmission(ws.data.sessionId, () => {
+                // Fork: mid-turn inject when the CLI already has an active turn
+                // with a running session — the follow-up is delivered into the
+                // live CLI rather than starting a second turn.
+                if (!sessionActivityCoordinator.tryBeginUserTurn(ws.data.sessionId)) {
+                  const existingTurn = activeUserTurns.get(ws.data.sessionId)
+                  if (existingTurn?.messageSent && conversationService.hasSession(ws.data.sessionId)) {
+                    return conversationService
+                      .sendMessage(ws.data.sessionId, message.content, message.attachments)
+                      .then((sent) => {
+                        if (!sent) {
+                          sendMessage(ws, {
+                            type: 'error',
+                            message: 'CLI process is not running. The session may have ended or the process crashed.',
+                            code: 'CLI_NOT_RUNNING',
+                          })
+                        }
+                      })
+                      .catch((err) => {
+                        console.error(`[WS] Mid-turn user message inject failed:`, err)
+                        sendMessage(ws, {
+                          type: 'error',
+                          message: 'The follow-up message could not be delivered. Please retry.',
+                          code: 'USER_TURN_INJECT_FAILED',
+                          retryable: true,
+                        })
+                      })
+                  }
+                  sendMessage(ws, {
+                    type: 'error',
+                    message: 'A user turn is already active for this session. Retry after it completes.',
+                    code: 'SESSION_TURN_ACTIVE',
+                    retryable: true,
                   })
-                break
-              }
-              sendMessage(ws, {
-                type: 'error',
-                message: 'A user turn is already active for this session. Retry after it completes.',
-                code: 'SESSION_TURN_ACTIVE',
-                retryable: true,
+                  return Promise.resolve()
+                }
+                return handleUserMessage(ws, message, activeTurn)
               })
-              break
-            }
-          }
-          migrationMaintenance.track(handleUserMessage(ws, message, activeTurn)).catch((err) => {
+          migrationMaintenance.track(admission).catch((err) => {
             const sessionId = ws.data.sessionId
             void diagnosticsService.recordEvent({
               type: 'ws_user_message_failed',

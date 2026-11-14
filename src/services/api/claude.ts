@@ -24,7 +24,6 @@ import type { Stream } from "@anthropic-ai/sdk/streaming.mjs";
 import { randomUUID } from "crypto";
 import {
   getAPIProvider,
-  hasAnthropicCompatibleThirdPartyConfig,
   isFirstPartyAnthropicBaseUrl,
 } from "src/utils/model/providers.js";
 import {
@@ -88,7 +87,6 @@ import {
   normalizeMessagesForAPI,
   stripAdvisorBlocks,
   stripCallerFieldFromAssistantMessage,
-  stripSignatureBlocks,
   stripSignatureBlocksAfterModelChange,
   stripToolReferenceBlocksFromUserMessage,
 } from "../../utils/messages.js";

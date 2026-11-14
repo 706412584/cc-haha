@@ -433,7 +433,7 @@ export function mergeLcovRecords(records: LcovRecord[]): LcovRecord[] {
   return [...merged.values()]
 }
 
-export function buildRootCoverageCommand(rootDir = ROOT_DIR) {
+export function buildRootCoverageCommand(outputDir: string, serverFiles: string[], rootDir = ROOT_DIR) {
   return [
     'bun',
     '--no-env-file',
@@ -1018,7 +1018,7 @@ export async function runCoverageGate(options: {
   const rootCoverageDir = join(outputDir, 'root-server')
   const rootPartsDir = join(rootCoverageDir, 'parts')
   mkdirSync(rootPartsDir, { recursive: true })
-  const rootCommand = buildRootCoverageCommand(rootDir)
+  const rootCommand = buildRootCoverageCommand(outputDir, serverFiles, rootDir)
   const rootLogPath = join(rootCoverageDir, 'coverage.log')
   const rootStarted = Date.now()
   let nextFileIndex = 0
