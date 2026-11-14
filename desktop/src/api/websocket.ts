@@ -285,7 +285,9 @@ export function buildSessionWebSocketUrl(sessionId: string) {
   }
   // Tells the server this composer can show next-prompt suggestions. The
   // touch composer has no Tab key, so it never opts in to the extra request.
-  if (isTouchH5Document()) {
+  // A `/h5` tunnel URL is reached from a phone browser (the fork's public H5
+  // handoff), so it is treated as touch even before the document marker runs.
+  if (isTouchH5Document() || basePath === '/h5' || basePath.endsWith('/h5')) {
     url.searchParams.delete('suggestions')
   } else {
     url.searchParams.set('suggestions', '1')

@@ -1503,15 +1503,10 @@ async function handleUserMessage(
     return
   }
 
-  await waitForRuntimeConfigHandlers(sessionId)
-  if (activeTurn.stopped || activeTurn.cancelled) {
-    clearActiveUserTurn(sessionId, activeTurn)
-    return
-  }
-
   // Keep a stopped-turn fence until the replacement replay proves that later
   // output belongs to this turn, while allowing validated input to start its
-  // own activity lifecycle.
+  // own activity lifecycle. This runs synchronously (before the first await)
+  // so callers observe the admission the moment message() returns.
   beginSessionChatActivity(sessionId)
   clearPrewarmState(sessionId)
 
@@ -1529,6 +1524,15 @@ async function handleUserMessage(
   const content = await resolveSessionReferenceContext(message.content, message.sessionReferences,
     async id => Boolean(await sessionService.getSessionSummary(id)))
   if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) return
+  // Fork: a turn must not start until a pending runtime-config swap settles, so
+  // it runs against the current provider/model. Placed after the synchronous
+  // admission/activity setup above so message() observers see the admitted turn
+  // immediately.
+  await waitForRuntimeConfigHandlers(sessionId)
+  if (activeTurn.stopped || activeTurn.cancelled) {
+    clearActiveUserTurn(sessionId, activeTurn)
+    return
+  }
   let admission: Awaited<ReturnType<typeof admitSessionUserTurn>> | undefined
   if (!collaboration) {
     try {
