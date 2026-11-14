@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, render } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import { Marked } from 'marked'
 import { ThinkingBlock } from '@/components/chat/ThinkingBlock'
