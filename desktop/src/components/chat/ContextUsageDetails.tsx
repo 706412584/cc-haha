@@ -38,6 +38,8 @@ export type ContextUsageDetailsProps = {
   categories: ContextCategory[]
   sessionStats?: ContextUsageSessionStats | null
   updatedAtLabel?: string
+  /** "Compacts automatically at about …", when the session reports its threshold. */
+  autoCompactLabel?: string
   estimate?: boolean
   status: ContextUsageDetailsStatus
   /** Renders the manual "Compact context" action when provided (Code Council fork feature). */
@@ -202,12 +204,13 @@ function ReadyBody({
   categories,
   sessionStats,
   updatedAtLabel,
+  autoCompactLabel,
   labels,
 }: {
   variant: 'popover' | 'sheet'
 } & Pick<
   ContextUsageDetailsProps,
-  'remainingLabel' | 'usedTokens' | 'maxTokens' | 'categories' | 'sessionStats' | 'updatedAtLabel' | 'labels'
+  'remainingLabel' | 'usedTokens' | 'maxTokens' | 'categories' | 'sessionStats' | 'updatedAtLabel' | 'autoCompactLabel' | 'labels'
 >) {
   const density = variant === 'sheet' ? 'comfortable' : 'compact'
   const [breakdownOpen, setBreakdownOpen] = useState(false)
@@ -243,6 +246,11 @@ function ReadyBody({
           </>
         )}
       </div>
+      {autoCompactLabel && (
+        <div className="mt-1 text-xs tabular-nums text-[var(--color-text-secondary)]" data-testid="context-auto-compact">
+          {autoCompactLabel}
+        </div>
+      )}
 
       {sessionStats && (
         <SessionStatGrid stats={sessionStats} labels={labels} density={density} />
@@ -292,6 +300,7 @@ export function ContextUsageDetails({
   categories,
   sessionStats,
   updatedAtLabel,
+  autoCompactLabel,
   estimate = false,
   status,
   onCompact,
@@ -343,6 +352,7 @@ export function ContextUsageDetails({
       categories={categories}
       sessionStats={sessionStats}
       updatedAtLabel={updatedAtLabel}
+      autoCompactLabel={autoCompactLabel}
       labels={labels}
     />
   ) : (

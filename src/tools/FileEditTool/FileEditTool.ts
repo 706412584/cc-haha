@@ -294,9 +294,15 @@ export const FileEditTool = buildTool({
         // Timestamp indicates modification, but on Windows timestamps can change
         // without content changes (cloud sync, antivirus, etc.). For full reads,
         // compare content as a fallback to avoid false positives.
-        const isFullRead =
-          readTimestamp.offset === undefined &&
-          readTimestamp.limit === undefined
+        //
+        // A "full read" is one not limited to a line range. Read records its
+        // default `offset` of 1 for a whole-file read, so requiring
+        // `offset === undefined` here made the content fallback dead for the
+        // ordinary Read→Edit case: any mtime touch (antivirus, an editor, a
+        // second session in the same worktree) then failed the edit even though
+        // the bytes were unchanged. The content comparison below still gates it,
+        // so a partial read never matches and keeps failing as before.
+        const isFullRead = readTimestamp.limit === undefined
         if (isFullRead && fileContent === readTimestamp.content) {
           // Content unchanged, safe to proceed
         } else {
@@ -461,11 +467,10 @@ export const FileEditTool = buildTool({
       if (!lastRead || lastWriteTime > lastRead.timestamp) {
         // Timestamp indicates modification, but on Windows timestamps can change
         // without content changes (cloud sync, antivirus, etc.). For full reads,
-        // compare content as a fallback to avoid false positives.
-        const isFullRead =
-          lastRead &&
-          lastRead.offset === undefined &&
-          lastRead.limit === undefined
+        // compare content as a fallback to avoid false positives. A full read is
+        // one not limited to a line range; Read stores `offset: 1` for a whole
+        // file, so `offset === undefined` must not gate this (see validateInput).
+        const isFullRead = !!lastRead && lastRead.limit === undefined
         const contentUnchanged =
           isFullRead && originalFileContents === lastRead.content
         if (!contentUnchanged) {

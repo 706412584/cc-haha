@@ -229,15 +229,29 @@ function endlessThinkingResponse(model: string): Response {
   })
   let sentInitialEvents = false
   let cancelled = false
+  // Emit a few thinking deltas, then go silent. The stream watchdog's quiet
+  // window treats this as a stall: the last thinking event ages past the
+  // fast-fail budget with no new activity, and there is still no text or
+  // tool call. Without the silence the stream would look like a healthy
+  // long think (which the watchdog now correctly leaves alone).
+  let deltasSent = 0
 
   return new Response(new ReadableStream({
     async pull(controller) {
-      if (sentInitialEvents) await Bun.sleep(10)
       if (cancelled) return
+      if (deltasSent >= 3) {
+        // Stay open but go silent. Each pull sleeps briefly then returns,
+        // so the consumer keeps iterating while the watchdog's quiet window
+        // elapses with no new activity and the timer fires.
+        await Bun.sleep(50)
+        return
+      }
+      if (sentInitialEvents) await Bun.sleep(10)
       controller.enqueue(new TextEncoder().encode(
         sentInitialEvents ? thinkingEvent : initialEvents,
       ))
       sentInitialEvents = true
+      deltasSent += 1
     },
     cancel() {
       cancelled = true
@@ -1061,12 +1075,15 @@ test('normalizes a disabled parent thinking mode to adaptive for Fable', async (
   expect(requests[0]?.thinking).not.toEqual({ type: 'disabled' })
 }, 10_000)
 
-for (const [disableBetas, disableAdaptive] of [[false, false], [true, false], [false, true]]) {
-  test(`keeps Fable 5.1 replay usable after a system change (disable betas: ${disableBetas}, adaptive: ${disableAdaptive})`, async () => {
+for (const [fableModel, disableBetas, disableAdaptive] of [
+  ['claude-fable-5-1', false, false], ['claude-fable-5-1', true, false], ['claude-fable-5-1', false, true],
+  ['claude-fable-5-2', false, false], ['claude-fable-5-2', true, false], ['claude-fable-5-2', false, true],
+] as const) {
+  test(`keeps ${fableModel} replay usable after a system change (disable betas: ${disableBetas}, adaptive: ${disableAdaptive})`, async () => {
     let originalSystem: string | undefined
     let responseIndex = 0
     const { content, requests, requestHeaders } = await captureQueryRequest({
-      model: 'claude-fable-5-1',
+      model: fableModel,
       configureCapabilityOverrides: false,
       continuationSystemPrompts: [[], ['Additional working directories: /tmp/project-two']],
       env: {
@@ -1094,7 +1111,7 @@ for (const [disableBetas, disableAdaptive] of [[false, false], [true, false], [f
     expect(content).toContainEqual({ type: 'text', text: 'OK' })
     expect(requests).toHaveLength(3)
     for (let index = 0; index < requests.length; index++) {
-      expect(requests[index]?.model).toBe('claude-fable-5-1')
+      expect(requests[index]?.model).toBe(fableModel)
       expect(requests[index]?.thinking).toEqual({
         type: 'adaptive', block_binding: { prefix_mismatch_behavior: 'drop_block' },
       })
@@ -1631,6 +1648,7 @@ for (const [model, expectedThinking] of [
   ['claude-opus-5-5', { type: 'adaptive' }],
   ['claude-sonnet-5-5', { type: 'adaptive' }],
   ['claude-haiku-5-5', { type: 'adaptive' }],
+  ['claude-fable-5-2', { type: 'adaptive' }],
   ['claude-fable-5-1', { type: 'adaptive' }],
   ['claude-opus-5', { type: 'adaptive' }],
   ['claude-sonnet-5', { type: 'adaptive' }],

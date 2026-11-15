@@ -21,6 +21,7 @@ type InspectOptions = {
   arch?: PackageSmokeArch
   artifactsDir?: string
   requireMacosGatekeeper?: boolean
+  requireMacosComputerUseSigning?: boolean
   maxLinuxGlibc?: string
   packageKind?: PackageKind
   allowMissingCuHelper?: boolean
@@ -34,6 +35,7 @@ export type PackageSmokeArgs = {
   arch?: PackageSmokeArch
   artifactsDir?: string
   requireMacosGatekeeper?: boolean
+  requireMacosComputerUseSigning?: boolean
   maxLinuxGlibc?: string
   packageKind?: PackageKind
   allowMissingCuHelper?: boolean
@@ -77,7 +79,7 @@ type PackageSmokeCommandOptions = {
 type PackageSmokeCommandRunner = (command: string, args: string[], options?: PackageSmokeCommandOptions) => PackageSmokeCommandResult
 
 function usage() {
-  return 'Usage: bun run test:package-smoke --platform <macos|windows|linux> [--arch <x64|arm64>] [--package-kind <auto|dir|release>] [--artifacts-dir <path>] [--require-macos-gatekeeper] [--max-linux-glibc <major.minor>]'
+  return 'Usage: bun run test:package-smoke --platform <macos|windows|linux> [--arch <x64|arm64>] [--package-kind <auto|dir|release>] [--artifacts-dir <path>] [--require-macos-gatekeeper] [--require-macos-computer-use-signing] [--max-linux-glibc <major.minor>]'
 }
 
 function readArgValue(argv: string[], index: number, flag: string) {
@@ -96,6 +98,7 @@ export function parsePackageSmokeArgs(argv: string[]): PackageSmokeArgs {
   // Env override: some CI wrappers do not forward trailing CLI flags to
   // `bun run` scripts reliably; the workflow sets the env form instead.
   const allowMissingCuHelper = process.env.PACKAGE_SMOKE_ALLOW_MISSING_CU_HELPER === '1'
+  let requireMacosComputerUseSigning = false
   let maxLinuxGlibc: string | undefined
   let packageKind: PackageKind = 'auto'
 
@@ -145,6 +148,11 @@ export function parsePackageSmokeArgs(argv: string[]): PackageSmokeArgs {
       continue
     }
 
+    if (arg === '--require-macos-computer-use-signing') {
+      requireMacosComputerUseSigning = true
+      continue
+    }
+
     if (arg === '--max-linux-glibc') {
       const value = readArgValue(argv, index, arg)
       if (!/^\d+\.\d+$/.test(value)) {
@@ -165,6 +173,7 @@ export function parsePackageSmokeArgs(argv: string[]): PackageSmokeArgs {
     arch,
     artifactsDir,
     requireMacosGatekeeper,
+    requireMacosComputerUseSigning,
     maxLinuxGlibc,
     packageKind,
     allowMissingCuHelper,
@@ -229,6 +238,23 @@ function addBundledRipgrepLicenseChecks(
       `${platformLabel} ripgrep license (${fileName})`,
       join(licensesDir, fileName),
     )
+  }
+}
+
+function addNativeDesktopRuntimeChecks(
+  report: PackageSmokeReport,
+  rootDir: string,
+  sidecarDir: string,
+  platform: 'Windows' | 'Linux',
+) {
+  const binary = platform === 'Windows' ? 'agent-desktop.exe' : 'agent-desktop'
+  addPresenceCheck(report, rootDir, `${platform} native Computer Use binary`, join(sidecarDir, binary))
+  addPresenceCheck(report, rootDir, `${platform} native Computer Use manifest`, join(sidecarDir, 'agent-desktop-manifest.json'))
+  if (platform === 'Linux') {
+    addPresenceCheck(report, rootDir, 'Linux native Computer Use clipboard owner', join(sidecarDir, 'agent-desktop-linux-clipboard-owner'))
+  }
+  for (const file of ['LICENSE', 'NOTICE', 'THIRD-PARTY-NOTICES', 'UPSTREAM.json', 'PATCHES.md']) {
+    addPresenceCheck(report, rootDir, `${platform} native Computer Use license (${file})`, join(sidecarDir, 'agent-desktop-licenses', file))
   }
 }
 
@@ -1034,6 +1060,9 @@ function inspectMacosArtifacts(rootDir: string, report: PackageSmokeReport, opti
   addPresenceCheck(report, rootDir, 'macOS app executable', hostExecutable)
   addPresenceCheck(report, rootDir, 'macOS app.asar', join(resourcesDir, 'app.asar'))
   addPresenceCheck(report, rootDir, 'macOS unpacked H5 shell', join(unpackedDir, 'dist', 'index.html'))
+  // Phones get the phone app the desktop build exports into dist/m (mobile/scripts/export-h5.ts).
+  addPresenceCheck(report, rootDir, 'macOS phone H5 app', join(unpackedDir, 'dist', 'm', 'index.html'))
+  addPresenceCheck(report, rootDir, 'macOS phone H5 marker', join(unpackedDir, 'dist', 'm', 'h5.json'))
   addInstalledUpdateMetadataCheck(
     report,
     rootDir,
@@ -1129,20 +1158,22 @@ function inspectMacosArtifacts(rootDir: string, report: PackageSmokeReport, opti
   }
 
   report.notes.push('No GUI launch was attempted. Matching macOS helper architectures also run an input-free resource probe from a disposable copy of the final package.')
+  // Notarized releases imply the signing chain; signed-but-unnotarized
+  // development builds ask for it alone.
+  if ((options.requireMacosGatekeeper || options.requireMacosComputerUseSigning) && report.arch) {
+    const targetTriple = report.arch === 'arm64'
+      ? 'aarch64-apple-darwin'
+      : 'x86_64-apple-darwin'
+    addMacosComputerUseAttestationCheck(
+      report,
+      rootDir,
+      appBundle,
+      join(sidecarDir, `claude-sidecar-${targetTriple}`),
+      helperApp,
+      options.commandRunner ?? defaultCommandRunner,
+    )
+  }
   if (options.requireMacosGatekeeper) {
-    if (report.arch) {
-      const targetTriple = report.arch === 'arm64'
-        ? 'aarch64-apple-darwin'
-        : 'x86_64-apple-darwin'
-      addMacosComputerUseAttestationCheck(
-        report,
-        rootDir,
-        appBundle,
-        join(sidecarDir, `claude-sidecar-${targetTriple}`),
-        helperApp,
-        options.commandRunner ?? defaultCommandRunner,
-      )
-    }
     addMacosGatekeeperCheck(report, rootDir, appBundle, options.commandRunner)
   } else if (report.hostPlatform === 'macos') {
     report.notes.push('macOS Gatekeeper launch approval was not assessed. Add --require-macos-gatekeeper for release-readiness launch policy checks.')
@@ -1269,6 +1300,7 @@ function inspectWindowsArtifacts(rootDir: string, report: PackageSmokeReport, op
       sidecarDir,
     )
     addBundledRipgrepLicenseChecks(report, rootDir, sidecarDir, 'Windows')
+    addNativeDesktopRuntimeChecks(report, rootDir, sidecarDir, 'Windows')
     addMatchCheck(
       report,
       rootDir,
@@ -1452,6 +1484,7 @@ function inspectLinuxArtifacts(rootDir: string, report: PackageSmokeReport, opti
       sidecarDir,
     )
     addBundledRipgrepLicenseChecks(report, rootDir, sidecarDir, 'Linux')
+    addNativeDesktopRuntimeChecks(report, rootDir, sidecarDir, 'Linux')
     addMatchCheck(
       report,
       rootDir,

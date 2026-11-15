@@ -43,6 +43,8 @@ export const browserHost: DesktopHost = {
     async start() { return unsupported('Public access management') },
     async stop() { return unsupported('Public access management') },
     async setAutoStart() { return unsupported('Public access management') },
+    async setP2PEnabled() { return unsupported('Public access management') },
+    async setKeepAwake() { return unsupported('Public access management') },
   },
   kind: 'browser',
   isDesktop: false,
@@ -86,6 +88,10 @@ export const browserHost: DesktopHost = {
     },
   },
   power: {
+    async getIdleActionState() { return unsupported('Power actions') },
+    async configureIdleAction() { return unsupported('Power actions') },
+    async cancelIdleAction() { return unsupported('Power actions') },
+    async onIdleActionState() { return noopUnlisten },
     async setPreventSleepWhileRunning() {
       unsupported('Preventing system sleep')
     },

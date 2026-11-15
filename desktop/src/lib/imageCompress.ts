@@ -10,12 +10,31 @@ export function planResize(w: number, h: number, maxEdge: number): { width: numb
  * GIFs pass through unchanged (would lose animation).
  * Small images (≤ maxEdge both sides) still re-encode to reduce payload.
  */
+// Real browsers decode a pasted image in well under this. The bound exists only
+// so an environment that never fires Image.onload/onerror (headless, jsdom)
+// falls back to the original bytes instead of stalling the drop interaction.
+const DECODE_TIMEOUT_MS = 600
+
 export async function compressDataUrl(dataUrl: string, maxEdge = 1568, quality = 0.85): Promise<string> {
   if (!dataUrl.startsWith('data:')) return dataUrl
   if (dataUrl.startsWith('data:image/gif')) return dataUrl
 
+  // A runtime without a usable canvas 2D context (jsdom, some headless shells)
+  // cannot decode or re-encode an image at all. Return the original bytes
+  // immediately instead of waiting out the decode timeout — the wait only makes
+  // the drop interaction (and its preview) stall for no benefit.
+  if (!document.createElement('canvas').getContext('2d')) return dataUrl
+
   const img = new Image()
-  await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('load')); img.src = dataUrl })
+  // A headless runtime (jsdom, some test/CI browsers) can leave Image decoding
+  // pending forever, which would hang the drop interaction. Treat a slow decode
+  // as "cannot compress" and keep the original bytes.
+  await new Promise<void>((res, rej) => {
+    const timer = setTimeout(() => rej(new Error('decode timeout')), DECODE_TIMEOUT_MS)
+    img.onload = () => { clearTimeout(timer); res() }
+    img.onerror = () => { clearTimeout(timer); rej(new Error('load')) }
+    img.src = dataUrl
+  }).catch(() => { throw new Error('decode failed') })
   const { width, height } = planResize(img.naturalWidth, img.naturalHeight, maxEdge)
   const canvas = document.createElement('canvas')
   canvas.width = width; canvas.height = height

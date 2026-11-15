@@ -1,6 +1,7 @@
 import { MODEL_REASONING_CAPABILITY_TIERS } from '../../shared/modelReasoning.js'
 import { normalizeModelContextKey } from './modelContextWindows.js'
 import { getAPIProvider, isFirstPartyAnthropicBaseUrl } from './providers.js'
+import { getProviderRouteForModel } from './providerEnvScope.js'
 
 export type ModelCapabilityOverride =
   | 'effort'
@@ -28,17 +29,15 @@ const CAPABILITY_TIERS = [
   ...MODEL_REASONING_CAPABILITY_TIERS,
 ] as const
 
-export function get3PModelCapabilityOverride(
+function readCapabilityOverride(
   model: string,
   capability: ModelCapabilityOverride,
+  env: Readonly<Record<string, string | undefined>>,
 ): boolean | undefined {
-  if (getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
-    return undefined
-  }
   const normalizedModel = normalizeModelContextKey(model)
   for (const tier of CAPABILITY_TIERS) {
-    const pinned = process.env[tier.modelEnvVar]
-    const capabilities = process.env[tier.capabilitiesEnvVar]
+    const pinned = env[tier.modelEnvVar]
+    const capabilities = env[tier.capabilitiesEnvVar]
     if (!pinned || capabilities === undefined) continue
     if (normalizedModel !== normalizeModelContextKey(pinned)) continue
     return capabilities
@@ -48,4 +47,31 @@ export function get3PModelCapabilityOverride(
       .includes(capability)
   }
   return undefined
+}
+
+// Not memoized: provider switches rewrite the capability env vars in-process,
+// and a cache keyed only on the model id would keep the previous provider's
+// answer for the same model after a switch. Reading a few env vars is cheap.
+const getSessionCapabilityOverride = (
+  model: string,
+  capability: ModelCapabilityOverride,
+): boolean | undefined => {
+  if (getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
+    return undefined
+  }
+  return readCapabilityOverride(model, capability, process.env)
+}
+
+/**
+ * An Agent routed to another saved provider reads that provider's declared
+ * capabilities for its model; the session's answers come from process.env.
+ */
+export function get3PModelCapabilityOverride(
+  model: string,
+  capability: ModelCapabilityOverride,
+): boolean | undefined {
+  const route = getProviderRouteForModel(model)
+  return route
+    ? readCapabilityOverride(model, capability, route.env)
+    : getSessionCapabilityOverride(model, capability)
 }

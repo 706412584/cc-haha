@@ -41,7 +41,7 @@ describe('ThinkingBlock', () => {
 
   afterEach(() => {
     cleanup()
-    useSettingsStore.setState({ locale: 'zh' })
+    useSettingsStore.setState({ locale: 'zh', thinkingAutoCollapse: true })
   })
 
   it('shows the in-progress label while thinking is active', () => {
@@ -87,6 +87,52 @@ describe('ThinkingBlock', () => {
     // Hidden but kept, so the row does not reflow when it opens.
     expect(preview).toHaveClass('invisible')
     expect(container.querySelector('[data-thinking-content="expanded"]')).toHaveClass('border-l')
+  })
+
+  it('leaves settled segments untouched while an expanded block streams', () => {
+    // One renderer over the whole text re-parsed all of it on every delta, so a
+    // long deliberation starved the paste or keystroke that arrived during it
+    // (#1508). The settled segments must keep their DOM; only the tail changes.
+    const paragraph = (index: number) => `Paragraph ${index}: ${'reasoning about the request '.repeat(40)}`.trim()
+    const settled = Array.from({ length: 4 }, (_, index) => paragraph(index + 1)).join('\n\n')
+    const before = `${settled}\n\nStill thinking about`
+    const { container, rerender } = render(<ThinkingBlock content={before} isActive />)
+    // isActive auto-expands on mount — no click needed (clicking would toggle it closed).
+    const body = container.querySelector('[data-thinking-content="expanded"]')!
+    const segmentsBefore = Array.from(body.querySelectorAll('.markdown-prose'))
+    expect(segmentsBefore.length).toBeGreaterThan(1)
+    const settledHtmlBefore = segmentsBefore.slice(0, -1).map((segment) => segment.innerHTML)
+
+    rerender(<ThinkingBlock content={`${before} the retry path`} isActive />)
+
+    const segmentsAfter = Array.from(body.querySelectorAll('.markdown-prose'))
+    expect(segmentsAfter).toHaveLength(segmentsBefore.length)
+    segmentsBefore.slice(0, -1).forEach((segment, index) => expect(segmentsAfter[index]).toBe(segment))
+    expect(segmentsAfter.slice(0, -1).map((segment) => segment.innerHTML)).toEqual(settledHtmlBefore)
+    expect(segmentsAfter.at(-1)).toHaveTextContent('Still thinking about the retry path')
+    expect(body.textContent).toContain(paragraph(1))
+    expect(body.textContent).toContain(paragraph(4))
+  })
+
+  it('renders the finished block whole again', () => {
+    // This case pins the finished rendering, not the auto-collapse: keep the
+    // block open across the active→done transition so its whole body is on
+    // screen. Auto-collapse itself is covered by chatBlocks.test.
+    useSettingsStore.setState({ thinkingAutoCollapse: false })
+    const paragraph = (index: number) => `Paragraph ${index}: ${'reasoning about the request '.repeat(40)}`.trim()
+    const content = `${Array.from({ length: 4 }, (_, index) => paragraph(index + 1)).join('\n\n')}\n\nDone.`
+    const { container, rerender } = render(<ThinkingBlock content={content} isActive />)
+    // isActive auto-expands on mount — no click needed.
+    expect(container.querySelectorAll('.markdown-prose').length).toBeGreaterThan(1)
+    expect(container.querySelector('.thinking-cursor')).not.toBeNull()
+
+    rerender(<ThinkingBlock content={content} isActive={false} />)
+
+    const bodies = container.querySelectorAll('.markdown-prose')
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).toHaveClass('thinking-markdown')
+    expect(bodies[0]).toHaveTextContent('Done.')
+    expect(container.querySelector('.thinking-cursor')).toBeNull()
   })
 
   it('keeps the expanded state across a virtualized row unmount and remount', () => {

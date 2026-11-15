@@ -3,6 +3,7 @@ import { ScheduledTaskCard } from '@/components/tasks/ScheduledTaskCard'
 import { ScheduledTaskTrigger } from '@/components/tasks/ScheduledTaskTrigger'
 import { parseScheduledTaskResult } from '@/lib/scheduledTask'
 import { openSideChat } from '@/lib/workspace/openSideChat'
+import { messageSnippet, traceLayoutMetric, traceSession } from '@/lib/sessionTrace'
 import { ConversationImageGalleryContext } from '@/components/chat/conversationImageGallery'
 import { resolveConversationImages } from '@/components/chat/conversationImages'
 import { getServerBaseUrl } from '@/lib/desktopRuntime'
@@ -37,6 +38,7 @@ import {
 import type { ActivityStep } from './activityGroupModel'
 import { ToolResultBlock } from './ToolResultBlock'
 import { PermissionDialog } from './PermissionDialog'
+import { MagpieConnectionHint, isCliApiErrorText } from './MagpieConnectionHint'
 import { AskUserQuestion } from './AskUserQuestion'
 import { RenderItemBoundary } from './RenderItemBoundary'
 import { StreamingIndicator } from './StreamingIndicator'
@@ -1769,6 +1771,10 @@ export function isRenderItemFullyVisibleInChatScroller(renderItem: HTMLElement) 
 
 type SessionScrollAnchor = {
   itemKey: string
+  // The row's position in the committed list. A provider can reuse one response
+  // id across consecutive rows, so the key alone is not a unique locator; the
+  // index names the row the reader was on even when a key collision exists.
+  renderIndex: number
   // CSS pixels relative to the scroller, including a partially clipped row.
   offset: number
 }
@@ -1867,6 +1873,7 @@ function rememberSessionScroll(sessionId: string, element: HTMLElement, wasAtBot
     wasAtBottom,
     anchor: firstVisibleRow ? {
       itemKey: firstVisibleRow.dataset.chatRenderItemKey!,
+      renderIndex: Number(firstVisibleRow.dataset.chatRenderItemIndex ?? -1),
       offset: firstVisibleRow.getBoundingClientRect().top - containerTop,
     } : undefined,
   })
@@ -1900,8 +1907,37 @@ function getRenderItemKey(item: RenderItem) {
   return item.message.id
 }
 
+/**
+ * Make the item keys unique without disturbing the keys that already are.
+ *
+ * A provider that reuses one response id across consecutive transcript records
+ * (the same id on a thinking block and the tool_use that follows it) leaves
+ * `${id}-block-0` on two different rows. A non-unique key breaks React (two
+ * children share a key), and `buildVirtualTranscriptWindow`'s
+ * `itemKeys.indexOf(anchor.itemKey)` then resolves the viewport anchor to the
+ * first of the colliding rows instead of the one the reader was on.
+ *
+ * Only repeats are suffixed (`${key}\u0000${seen}`), so a transcript whose ids
+ * are already unique produces byte-identical keys and keeps its height cache,
+ * disclosure memory and navigation highlights across this change.
+ */
+export function buildUniqueRenderItemKeys(renderItems: RenderItem[]): string[] {
+  const seen = new Map<string, number>()
+  return renderItems.map((item) => {
+    const key = getRenderItemKey(item)
+    const count = seen.get(key)
+    if (count === undefined) {
+      seen.set(key, 1)
+      return key
+    }
+    seen.set(key, count + 1)
+    return `${key}\u0000${count}`
+  })
+}
+
 function findConversationMatches(
   renderItems: RenderItem[],
+  itemKeys: string[],
   streamingText: string,
   query: string,
 ): ConversationFindMatch[] {
@@ -1919,7 +1955,7 @@ function findConversationMatches(
     while (offset !== -1 && matches.length < MAX_CONVERSATION_FIND_MATCHES) {
       matches.push({
         renderIndex,
-        renderItemKey: getRenderItemKey(item),
+        renderItemKey: itemKeys[renderIndex] ?? getRenderItemKey(item),
         occurrenceIndex,
         query,
       })
@@ -2372,7 +2408,15 @@ function buildVirtualTranscriptWindow(
 
   const viewportHeight = viewport.viewportHeight || VIRTUAL_DEFAULT_VIEWPORT_HEIGHT
   const maxScrollTop = Math.max(0, totalHeight - viewportHeight)
-  const anchorIndex = anchor ? itemKeys.indexOf(anchor.itemKey) : -1
+  // Locate the row by position first: a reused provider id can make two rows
+  // share a key, and `indexOf` would resolve to the first of them. The index is
+  // only trusted while it still points at the saved key, so a list that changed
+  // shape (a page prepended) falls back to the key lookup.
+  const anchorIndex = anchor
+    ? (anchor.renderIndex >= 0 && itemKeys[anchor.renderIndex] === anchor.itemKey
+        ? anchor.renderIndex
+        : itemKeys.indexOf(anchor.itemKey))
+    : -1
   // Keep the saved row mounted even if its async content is temporarily shorter
   // than the saved intra-row offset. DOM alignment below owns the final pixels.
   const anchorTop = anchorIndex >= 0
@@ -2448,16 +2492,20 @@ function VirtualSpacer({ height, position }: { height: number; position: 'top' |
 }
 
 const MeasuredRenderItem = memo(function MeasuredRenderItem({
+  sessionId,
   itemKey,
   onHeightChange,
   highlighted,
   railPosition,
+  itemIndex,
   children,
 }: {
+  sessionId?: string | null
   itemKey: string
   onHeightChange: (itemKey: string, height: number, initial?: boolean) => void
   highlighted: boolean
   railPosition: TurnRailPosition
+  itemIndex: number
   children: ReactNode
 }) {
   const itemRef = useRef<HTMLDivElement>(null)
@@ -2470,6 +2518,8 @@ const MeasuredRenderItem = memo(function MeasuredRenderItem({
     if (initialHeight > 0) onHeightChange(itemKey, initialHeight, true)
     if (typeof ResizeObserver === 'undefined') return undefined
     const observer = new ResizeObserver((entries) => {
+      traceLayoutMetric(sessionId, 'rowObserverCallbacks')
+      traceLayoutMetric(sessionId, 'rowObserverEntries', entries.length)
       const entry = entries[0]
       if (!entry) return
       // Border box, not `contentRect`: the rail's padding is the gap between
@@ -2489,13 +2539,14 @@ const MeasuredRenderItem = memo(function MeasuredRenderItem({
     })
     observer.observe(node)
     return () => observer.disconnect()
-  }, [itemKey, onHeightChange])
+  }, [itemKey, onHeightChange, sessionId])
 
   return (
     <div
       ref={itemRef}
       data-virtual-message-item={itemKey}
       data-chat-render-item-key={itemKey}
+      data-chat-render-item-index={itemIndex}
       data-turn-rail={railPosition}
       className={`${CHAT_RENDER_ITEM_CLASS} ${turnRailClass(railPosition)} ${highlighted ? 'chat-render-item--navigation-target' : ''}`}
     >
@@ -2628,6 +2679,7 @@ export function MessageList({
   const lastAutoScrollAtRef = useRef(0)
   const lastContentResizeFollowHeightRef = useRef<number | null>(null)
   const shouldAutoScrollRef = useRef(true)
+  const restoringBottomRef = useRef(false)
   const restoringScrollAnchorRef = useRef<SessionScrollAnchor | null>(null)
   const isProgrammaticScrollingRef = useRef(false)
   const ignoreProgrammaticScrollUntilRef = useRef(0)
@@ -2714,6 +2766,7 @@ export function MessageList({
     if (!messageList) return
 
     const updateWidth = (width: number) => {
+      traceLayoutMetric(resolvedSessionId, 'listWidthObserverCallbacks')
       const roundedWidth = Math.round(width)
       if (roundedWidth <= 0) return
       setMessageListWidth((current) => current === roundedWidth ? current : roundedWidth)
@@ -2728,7 +2781,7 @@ export function MessageList({
     })
     observer.observe(messageList)
     return () => observer.disconnect()
-  }, [])
+  }, [resolvedSessionId])
 
   const syncVirtualViewportFromContainer = useCallback((container: HTMLElement) => {
     const nextScrollTop = container.scrollTop
@@ -2749,6 +2802,7 @@ export function MessageList({
 
   const scrollToBottom = useCallback(() => {
     restoringScrollAnchorRef.current = null
+    restoringBottomRef.current = true
     shouldAutoScrollRef.current = true
     isProgrammaticScrollingRef.current = true
     ignoreProgrammaticScrollUntilRef.current = performance.now() + 250
@@ -2811,6 +2865,16 @@ export function MessageList({
     })
   }, [resolvedSessionId])
 
+  const releaseBottomRestoration = useCallback(() => {
+    restoringBottomRef.current = false
+    // A reader action can arrive between ResizeObserver and its queued frame.
+    // Cancel only idle restoration; live output keeps its existing follow rules.
+    if (!shouldFollowContentResize && liveFollowFrameRef.current !== null) {
+      cancelAnimationFrame(liveFollowFrameRef.current)
+      liveFollowFrameRef.current = null
+    }
+  }, [shouldFollowContentResize])
+
   const flushMeasuredHeightVersion = useCallback(() => {
     setMeasuredItemsVersion((version) => version + 1)
   }, [])
@@ -2824,10 +2888,11 @@ export function MessageList({
     ) return
 
     virtualItemHeights.set(itemKey, measuredHeight)
+    traceLayoutMetric(resolvedSessionId, 'heightCacheChanges')
     // A row changing height while the reader follows the tail moves the bottom.
     // Re-pin whatever caused it (a permission card, a reloaded transcript
     // measuring in after the reply, a tool result settling), not only live
-    // output: the content-resize follow below is off once the chat is idle.
+    // output: content-resize follow is otherwise off in idle reading sessions.
     // Growth the reader just asked for by opening a block stays theirs (#1177).
     if (shouldAutoScrollRef.current && performance.now() >= disclosureLayoutUntilRef.current) {
       requestLiveFollow()
@@ -2835,9 +2900,17 @@ export function MessageList({
 
     // Mount measurements commit before paint; observer measurements must update
     // offsets and restore the reading anchor in the same frame as the new height.
-    if (initial) flushMeasuredHeightVersion()
-    else flushSync(flushMeasuredHeightVersion)
-  }, [flushMeasuredHeightVersion, requestLiveFollow, virtualItemHeights])
+    if (initial) {
+      flushMeasuredHeightVersion()
+    } else {
+      const startedAt = performance.now()
+      flushSync(flushMeasuredHeightVersion)
+      const duration = performance.now() - startedAt
+      traceLayoutMetric(resolvedSessionId, 'flushSyncCount')
+      traceLayoutMetric(resolvedSessionId, 'flushSyncTotalMs', duration)
+      traceLayoutMetric(resolvedSessionId, 'flushSyncMaxMs', duration)
+    }
+  }, [flushMeasuredHeightVersion, requestLiveFollow, resolvedSessionId, virtualItemHeights])
 
   const updateAutoScrollState = useCallback(() => {
     // Ignore scroll events triggered by our own programmatic scrolling to
@@ -2868,12 +2941,13 @@ export function MessageList({
     }
     syncVirtualViewportFromContainer(container)
     const isAtBottom = isNearScrollBottom(container)
-    const isPermissionLayoutShift =
-      hasPendingPermissionCard &&
+    const isFollowingLayoutShift =
       shouldAutoScrollRef.current &&
       !isAtBottom &&
-      performance.now() >= userScrollIntentUntilRef.current
-    if (isPermissionLayoutShift) return
+      (restoringBottomRef.current || (
+        hasPendingPermissionCard && performance.now() >= userScrollIntentUntilRef.current
+      ))
+    if (isFollowingLayoutShift) return
 
     shouldAutoScrollRef.current = isAtBottom
     setIsAwayFromLatest(!isAtBottom)
@@ -2899,6 +2973,7 @@ export function MessageList({
     const target = event.target
     if (!(target instanceof Element) || !target.closest(CHAT_DISCLOSURE_SELECTOR)) return
 
+    releaseBottomRestoration()
     restoringScrollAnchorRef.current = null
     disclosureLayoutUntilRef.current = performance.now() + DISCLOSURE_FOLLOW_SUPPRESS_MS
 
@@ -2917,12 +2992,13 @@ export function MessageList({
       setIsAwayFromLatest(!atBottom)
       syncVirtualViewportFromContainer(container)
     })
-  }, [syncVirtualViewportFromContainer])
+  }, [releaseBottomRestoration, syncVirtualViewportFromContainer])
 
   const markUserScrollIntent = useCallback(() => {
+    releaseBottomRestoration()
     restoringScrollAnchorRef.current = null
     userScrollIntentUntilRef.current = performance.now() + USER_SCROLL_INTENT_WINDOW_MS
-  }, [])
+  }, [releaseBottomRestoration])
 
   const handleWheelScrollIntent = useCallback((event: { deltaY: number }) => {
     markUserScrollIntent()
@@ -2955,8 +3031,19 @@ export function MessageList({
   useLayoutEffect(() => {
     if (lastSessionIdRef.current !== resolvedSessionId) {
       const snapshot = resolvedSessionId ? sessionScrollSnapshots.get(resolvedSessionId) : undefined
+      // TEMP probe: the tab switch itself. Pairs with the `set.messages` trace
+      // to tell a stale render surface apart from rows written to the wrong
+      // session's array.
+      traceSession('list.switch', resolvedSessionId, {
+        from: lastSessionIdRef.current,
+        rows: messages.length,
+        head: messageSnippet(messages[0]),
+        restoredScrollTop: snapshot?.scrollTop,
+        hasAnchor: Boolean(snapshot?.anchor),
+      })
       restoringScrollAnchorRef.current = snapshot?.wasAtBottom ? null : snapshot?.anchor ?? null
       shouldAutoScrollRef.current = snapshot?.wasAtBottom ?? true
+      restoringBottomRef.current = shouldAutoScrollRef.current
       lastSessionIdRef.current = resolvedSessionId
       setProgrammaticNavigationItemId(null)
       if (resolvedSessionId) getHeightsForSession(resolvedSessionId, appearanceSignature)
@@ -3061,6 +3148,7 @@ export function MessageList({
     if (!content || typeof ResizeObserver === 'undefined') return
 
     const observer = new ResizeObserver((entries) => {
+      traceLayoutMetric(resolvedSessionId, 'contentObserverCallbacks')
       const nextHeight = entries[0]?.contentRect.height
       if (typeof nextHeight === 'number' && Number.isFinite(nextHeight)) {
         const previousFollowHeight = lastContentResizeFollowHeightRef.current
@@ -3072,7 +3160,16 @@ export function MessageList({
         }
         lastContentResizeFollowHeightRef.current = nextHeight
       }
-      if (!shouldFollowContentResize) return
+      if (restoringScrollAnchorRef.current) {
+        // Non-virtual rows can settle after the switch's layout effect too.
+        // Reapply the saved reading anchor before paint, as measured rows do.
+        flushSync(flushMeasuredHeightVersion)
+        return
+      }
+      // Short lists have no measured-row callback. Keep a restored tail pinned
+      // through late layout, until the reader interacts with the transcript.
+      // Idle disclosures can fetch more content long after their click frame.
+      if (!shouldFollowContentResize && !restoringBottomRef.current) return
       if (!shouldAutoScrollRef.current) return
       // The reader just opened something: the growth is theirs, not the model's.
       if (performance.now() < disclosureLayoutUntilRef.current) return
@@ -3081,7 +3178,7 @@ export function MessageList({
     observer.observe(content)
 
     return () => observer.disconnect()
-  }, [requestLiveFollow, shouldFollowContentResize])
+  }, [flushMeasuredHeightVersion, requestLiveFollow, shouldFollowContentResize])
 
   // Touch-H5 only: the visual-viewport fit (touchH5.ts) shrinks the scroll
   // container when the soft keyboard opens. If the user was reading the tail,
@@ -3093,6 +3190,7 @@ export function MessageList({
     if (!container || typeof ResizeObserver === 'undefined') return
 
     const observer = new ResizeObserver(() => {
+      traceLayoutMetric(resolvedSessionId, 'touchViewportObserverCallbacks')
       if (!shouldAutoScrollRef.current) return
       requestLiveFollow()
     })
@@ -3179,9 +3277,16 @@ export function MessageList({
     || chatState === 'tool_executing'
     || (chatState === 'thinking' && !activeThinkingId)
   const renderItemKeys = useMemo(
-    () => renderItems.map(getRenderItemKey),
+    () => buildUniqueRenderItemKeys(renderItems),
     [renderItems],
   )
+  // Keys are positional. A tool call or user row is located in the current list
+  // by the committed key array rather than recomputing a bare id, which would
+  // ignore the uniqueness suffix. `renderItems` and `renderItemKeys` are built
+  // from the same commit, so the index is valid while measuring. These run as
+  // plain closures so the key array never becomes a memo dependency.
+  const renderItemKeyAt = (item: RenderItem, index: number) =>
+    renderItemKeys[index] ?? getRenderItemKey(item)
   const committedGroupKeys = useRef<{ sessionId: string | null | undefined; byTool: Map<string, string> }>({ sessionId: resolvedSessionId, byTool: new Map() })
   const groupMountKeys = useMemo(() => {
     const previous = committedGroupKeys.current.sessionId === resolvedSessionId
@@ -3265,12 +3370,12 @@ export function MessageList({
       ? [{
           message: item.message,
           renderIndex,
-          renderItemKey: getRenderItemKey(item),
+          renderItemKey: renderItemKeys[renderIndex] ?? getRenderItemKey(item),
         }]
       : [])
 
     return buildConversationNavigationItems(sources)
-  }, [renderItems])
+  }, [renderItems, renderItemKeys])
   const scrollAnchor = lastSessionIdRef.current !== resolvedSessionId
     ? (resolvedSessionId ? sessionScrollSnapshots.get(resolvedSessionId)?.anchor : null)
     : restoringScrollAnchorRef.current
@@ -3848,6 +3953,8 @@ export function MessageList({
   navigateToConversationFindMatchRef.current = navigateToConversationFindMatch
   const conversationFindRenderItemsRef = useRef(renderItems)
   conversationFindRenderItemsRef.current = renderItems
+  const conversationFindItemKeysRef = useRef(renderItemKeys)
+  conversationFindItemKeysRef.current = renderItemKeys
   const conversationFindStreamingTextRef = useRef(streamingText)
   conversationFindStreamingTextRef.current = streamingText
   const conversationFindControllerRef = useRef<ConversationFindController | null>(null)
@@ -3869,7 +3976,7 @@ export function MessageList({
         const items = conversationFindRenderItemsRef.current
         const { index, toolUseId } = findChatRenderTarget(items, trajectoryNav.target)
         if (index < 0) return
-        const key = getRenderItemKey(items[index]!)
+        const key = conversationFindItemKeysRef.current[index] ?? getRenderItemKey(items[index]!)
         handleNavigateToConversationItemRef.current(
           { id: key, renderItemKey: key, renderIndex: index, turnNumber: 0, preview: '', attachmentCount: 0 },
           { toolUseId },
@@ -3886,6 +3993,7 @@ export function MessageList({
       search(query, preferredIndex = 0) {
         const matches = findConversationMatches(
           conversationFindRenderItemsRef.current,
+          conversationFindItemKeysRef.current,
           conversationFindStreamingTextRef.current,
           query,
         )
@@ -4029,8 +4137,8 @@ export function MessageList({
 
 
   /** Only the item a jump landed on hears about it, so other memoized items keep their props. */
-  const navigationToolUseIdFor = (item: RenderItem): string | undefined => (
-    highlightedNavigationToolUseId !== null && highlightedNavigationItemKey === getRenderItemKey(item)
+  const navigationToolUseIdFor = (item: RenderItem, index: number): string | undefined => (
+    highlightedNavigationToolUseId !== null && highlightedNavigationItemKey === renderItemKeyAt(item, index)
       ? highlightedNavigationToolUseId
       : undefined
   )
@@ -4062,8 +4170,8 @@ export function MessageList({
               // instant — which is why this, and not `isStreaming`, decides
               // whether a run stands open.
               isLive={chatState !== 'idle' && index === renderItems.length - 1 && !hasTrailingStreamingItem}
-              disclosureKey={getRenderItemKey(item)}
-              revealToolUseId={navigationToolUseIdFor(item)}
+              disclosureKey={renderItemKeys[index] ?? getRenderItemKey(item)}
+              revealToolUseId={navigationToolUseIdFor(item, index)}
               activityPresentation={mobileLayout ? 'sheet' : 'inline'}
             />
           ) : item.kind === 'team_card' ? (
@@ -4116,7 +4224,7 @@ export function MessageList({
               decisionsInComposer={decisionsInComposer}
               navigationHighlighted={
                 item.message.type === 'tool_use' &&
-                navigationToolUseIdFor(item) === item.message.toolUseId
+                navigationToolUseIdFor(item, index) === item.message.toolUseId
               }
             />
           )}
@@ -4199,6 +4307,12 @@ export function MessageList({
         className={`${CHAT_SCROLL_AREA_CLASS} h-full overflow-y-auto ${chatScrollPaddingClass}`}
       >
         <div
+          // A malformed/replayed history can contain duplicate row identities.
+          // React can leave those rows outside its tracked child list; replace
+          // the transcript as a unit on session changes so none can follow the
+          // user into another session. Keep the scroller outside this boundary
+          // so its outgoing scroll snapshot is still captured before the swap.
+          key={resolvedSessionId}
           ref={scrollContentRef}
           // The reading measure holds whether or not a right-hand panel is
           // open — `compact` only tightens padding. Dropping to `max-w-full`
@@ -4229,7 +4343,7 @@ export function MessageList({
           ) : null}
 
           {virtualTranscriptWindow.items.map(({ item, index }) => {
-            const itemKey = getRenderItemKey(item)
+            const itemKey = renderItemKeys[index] ?? getRenderItemKey(item)
             const mountKey = groupMountKeys.keys.get(itemKey) ?? itemKey
             const content = renderTranscriptItem(item, index)
             const railPosition = turnRailPositions[index] ?? 'none'
@@ -4240,7 +4354,9 @@ export function MessageList({
             return virtualTranscriptWindow.enabled ? (
               <MeasuredRenderItem
                 key={mountKey}
+                sessionId={resolvedSessionId}
                 itemKey={itemKey}
+                itemIndex={index}
                 onHeightChange={handleVirtualItemHeightChange}
                 highlighted={highlightedNavigationItemKey === itemKey}
                 railPosition={railPosition}
@@ -4251,6 +4367,7 @@ export function MessageList({
               <div
                 key={mountKey}
                 data-chat-render-item-key={itemKey}
+                data-chat-render-item-index={index}
                 data-turn-rail={railPosition}
                 className={`${CHAT_RENDER_ITEM_CLASS} ${paintContained ? 'chat-render-item--cv ' : ''}${turnRailClass(railPosition)} ${highlightedNavigationItemKey === itemKey ? 'chat-render-item--navigation-target' : ''}`}
               >
@@ -4462,6 +4579,9 @@ export const MessageBlock = memo(function MessageBlock({
             isTurnOutputOwner={isTurnOutputOwner}
             turnCompletion={turnCompletion}
           />
+          {isCliApiErrorText(message.content) && (
+            <MagpieConnectionHint sessionId={sessionId} errorText={message.content} />
+          )}
         </SelectableChatMessage>
       )
     case 'thinking':
@@ -4555,6 +4675,7 @@ export const MessageBlock = memo(function MessageBlock({
               {message.message}
             </div>
           )}
+          <MagpieConnectionHint sessionId={sessionId} errorText={message.message} />
         </div>
       )
     }

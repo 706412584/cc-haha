@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash, createHmac } from 'node:crypto'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { createResumableSocketHandler } from './ws/resumableStreams.js'
 import { PublicAccessServer, isPublicBusinessPathAllowed, migratePublicAccessStore } from './publicAccess.js'
 import { handleVoiceApi } from './api/voice.js'
+import { fakeProviderRecord, fakeTargets } from './services/voice/__tests__/fakeCorrection.js'
 import { FakeProvider, makeWav, memoryPreferencesStore } from './services/voice/__tests__/fakeProvider.js'
 import { VoiceServiceError } from './services/voice/errors.js'
 import { VoiceProviderRegistry } from './services/voice/registry.js'
@@ -17,7 +20,8 @@ function fixture(
   handleApiRequest: (request: Request, url: URL) => Promise<Response> =
     async () => Response.json({ ok: true, env: { API_KEY: 'fake-provider-secret' }, language: 'en' }),
   origin = 'https://fixture.trycloudflare.com',
-  connectivity: { resolveProxy?: () => Promise<{ proxyUrl: string | null }>, verifyGateway?: (origin: string, gatewayId: string) => Promise<boolean> } = {},
+  connectivity: Pick<ConstructorParameters<typeof PublicAccessServer>[0], 'resolveProxy' | 'verifyGateway' | 'onOriginChanged' | 'networkInterfaces'> = {},
+  sockets: Pick<ConstructorParameters<typeof PublicAccessServer>[0], 'websocket' | 'terminateDeviceStreams'> = {} as never,
 ) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'remote-access-test-'))
   const oldToken = process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
@@ -31,6 +35,7 @@ function fixture(
     handleApiRequest,
     handleStatic: async () => new Response('<html>fixture</html>'),
     websocket: { message: (_ws, payload) => { messages.push(payload) } },
+    ...sockets,
   })
   service.enable(origin)
   const base = `http://127.0.0.1:${service.status().port}`
@@ -66,6 +71,41 @@ function fixture(
   })
   return { service, storePath, base, control, remote, pair, pairNative, native, messages, advance: (ms: number) => { clock += ms } }
 }
+
+describe('pairing outlives the listener', () => {
+  test('a stopped listener makes a device inactive but still paired; revoking or expiry ends the pairing', async () => {
+    const remote = fixture()
+    const { claim } = await remote.pairNative()
+    // Paired up front: a new listener after enable() has a port the fixture does not know.
+    const second = await remote.pairNative()
+    expect([remote.service.isDeviceActive(claim.deviceId), remote.service.isDevicePaired(claim.deviceId)]).toEqual([true, true])
+    // cloudflared restarts: the desktop stops the listener until the tunnel is back.
+    remote.service.disable()
+    expect([remote.service.isDeviceActive(claim.deviceId), remote.service.isDevicePaired(claim.deviceId)]).toEqual([false, true])
+    remote.service.enable('https://fixture.trycloudflare.com')
+    expect(remote.service.isDeviceActive(claim.deviceId)).toBe(true)
+    await remote.control('revoke', { id: claim.deviceId })
+    expect(remote.service.isDevicePaired(claim.deviceId)).toBe(false)
+    expect(remote.service.isDevicePaired(second.claim.deviceId)).toBe(true)
+    remote.advance(31 * 24 * 60 * 60_000)
+    expect(remote.service.isDevicePaired(second.claim.deviceId)).toBe(false)
+  })
+
+  test('before the listener ever starts, pairing is read from disk without creating the store', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'remote-access-paired-'))
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+    const storePath = path.join(dir, 'devices.json')
+    const service = (now = 1000) => new PublicAccessServer({ storePath, now: () => now, serverPort: () => 3456, handleApiRequest: async () => new Response(), handleStatic: async () => null, websocket: { message() {} } })
+    expect(service().isDevicePaired('phone')).toBe(false)
+    expect(existsSync(storePath)).toBe(false)
+    writeFileSync(storePath, JSON.stringify({ version: 1, devices: [{ id: 'phone', name: 'Phone', createdAt: 1, expiresAt: 5000, tokenHash: 'a'.repeat(64) }] }))
+    expect(service().isDevicePaired('phone')).toBe(true)
+    expect(service(6000).isDevicePaired('phone')).toBe(false)
+    // A store from a newer version is not evidence that the pairing is gone.
+    writeFileSync(storePath, JSON.stringify({ version: 9, devices: [] }))
+    expect(service().isDevicePaired('phone')).toBe(true)
+  })
+})
 
 describe('public transport boundary', () => {
   test('Cloudflare origin retains application pairing, revocation and origin checks behind loopback proxy', async () => {
@@ -511,6 +551,10 @@ test('push route allowlist refuses extra segments and unsupported methods', () =
   expect(allowed('/api/sessions/mobile-push/test', 'POST')).toBe(true)
   expect(allowed('/api/sessions/mobile-push/test', 'GET')).toBe(false)
   expect(allowed('/api/sessions/mobile-push/test', 'PUT')).toBe(false)
+  // The Android foreground service's long poll for alerts held by this computer.
+  expect(allowed('/api/sessions/mobile-push/pull', 'POST')).toBe(true)
+  expect(allowed('/api/sessions/mobile-push/pull', 'GET')).toBe(false)
+  expect(allowed('/api/sessions/mobile-push/pull/extra', 'POST')).toBe(false)
   expect(allowed('/api/sessions/mobile-push/id', 'POST')).toBe(false)
   expect(allowed('/api/sessions/mobile-push/test/extra', 'POST')).toBe(false)
 })
@@ -678,11 +722,26 @@ test('paired browsers keep the full agent view while connectors stay projected',
 })
 
 describe('paired phone voice input', () => {
+  const DESKTOP_ONLY_VOICE_ROUTES: Array<[string, string]> = [
+    ['/api/voice/correct', 'POST'],
+    ['/api/voice/correct', 'GET'],
+    ['/api/voice/vocabulary', 'GET'],
+    ['/api/voice/vocabulary/terms', 'POST'],
+    ['/api/voice/vocabulary/terms', 'PUT'],
+    ['/api/voice/vocabulary/terms?term=Codex', 'DELETE'],
+    ['/api/voice/vocabulary/suggestions/dismiss', 'POST'],
+    ['/api/voice/vocabulary/history/sources', 'GET'],
+    ['/api/voice/vocabulary/history/suggest', 'POST'],
+  ]
+
   function voiceFixture(provider: SpeechProvider) {
     const preferences = memoryPreferencesStore({ language: 'zh' })
     const service = new VoiceService({
       registry: new VoiceProviderRegistry().register(provider),
       preferences,
+      // The catalog resolves correction targets; keep it off the real provider index.
+      correctionTargets: fakeTargets({ defaultProvider: fakeProviderRecord('fixture-provider') }),
+      completeText: async () => ({ ok: true, text: 'never reached from a phone' }),
     })
     const calls: string[] = []
     const f = fixture(async (request, url) => {
@@ -719,6 +778,8 @@ describe('paired phone voice input', () => {
       ['/api/voice/transcribe?downloadSource=mirror', 'POST'],
       ['/api/voice/transcribe?provider=one&provider=two', 'POST'],
       ['/api/voice/transcribe?language=zh&language=en', 'POST'],
+      // AI correction, the vocabulary and history scanning are desktop-only.
+      ...DESKTOP_ONLY_VOICE_ROUTES,
     ]) expect(allowed(route!, method!)).toBe(false)
   })
 
@@ -764,6 +825,7 @@ describe('paired phone voice input', () => {
       ['/api/voice/providers/sensevoice-local/prepare', 'POST'],
       ['/api/voice/providers/sensevoice-local/cancel', 'POST'],
       ['/api/voice/providers/sensevoice-local/assets', 'DELETE'],
+      ...DESKTOP_ONLY_VOICE_ROUTES,
     ]) expect((await f.native(route!, claim.token, { method })).status).toBe(403)
     expect(f.calls).toHaveLength(beforeBlocked)
     expect(provider.prepareCalls).toBe(0)
@@ -846,4 +908,175 @@ describe('paired phone voice input', () => {
       controller.abort()
     }
   }, 5000)
+})
+
+describe('resumable session streams through the gateway', () => {
+  const STREAM = 'GGGGGGGGGGGGGGGGGGGGGG'
+  function streamFixture() {
+    const opened: unknown[] = []
+    const closed: number[] = []
+    const inner = {
+      open(ws: { send(text: string): unknown }) { opened.push(ws); ws.send('{"type":"connected"}') },
+      message() {},
+      close(_ws: unknown, code: number) { closed.push(code) },
+    }
+    const handler = createResumableSocketHandler(inner as never, { epoch: 'gateway-epoch' })
+    const f = fixture(undefined, undefined, undefined, {
+      websocket: handler as never,
+      terminateDeviceStreams: id => handler.terminateIdentity(id),
+    })
+    return { f, opened, closed, handler }
+  }
+  async function connect(base: string, token: string, query: string) {
+    const ws = new WebSocket(base.replace('http:', 'ws:') + `/ws/fixture?${query}`, { headers: { Origin: 'https://fixture.trycloudflare.com', Authorization: `Bearer ${token}` } })
+    cleanups.push(() => ws.close())
+    const frames: Record<string, unknown>[] = []
+    ws.onmessage = event => frames.push(JSON.parse(String(event.data)))
+    await new Promise<void>((resolve, reject) => { ws.onopen = () => resolve(); ws.onerror = reject })
+    await Bun.sleep(10)
+    return { ws, frames }
+  }
+  const closedCode = (ws: WebSocket) => new Promise<number>(resolve => {
+    if (ws.readyState === WebSocket.CLOSED) resolve(-1)
+    ws.onclose = event => resolve(event.code)
+  })
+
+  test('revoking a device ends its streams, including one whose socket is already gone', async () => {
+    const { f, closed, handler } = streamFixture()
+    const { claim, pending } = await f.pairNative()
+    const { ws, frames } = await connect(f.base, claim.token, `stream=${STREAM}`)
+    expect(frames[0]).toMatchObject({ type: 'stream_attached', resumed: false })
+    const gone = closedCode(ws)
+    ws.close()
+    await gone
+    await Bun.sleep(10)
+    expect(closed).toEqual([])
+    expect(handler.streamCount).toBe(1)
+    await f.control('revoke', { id: pending.id })
+    expect(closed).toEqual([1008])
+    expect(handler.streamCount).toBe(0)
+  })
+
+  test('a resume the server cannot honor is refused on that socket, without opening a session', async () => {
+    const { f, opened, handler } = streamFixture()
+    const { claim } = await f.pairNative()
+    const ws = new WebSocket(f.base.replace('http:', 'ws:') + `/ws/fixture?stream=${STREAM}&ack=3&epoch=gateway-epoch`, { headers: { Origin: 'https://fixture.trycloudflare.com', Authorization: `Bearer ${claim.token}` } })
+    cleanups.push(() => ws.close())
+    const frames: Record<string, unknown>[] = []
+    ws.onmessage = event => frames.push(JSON.parse(String(event.data)))
+    const closed = await new Promise<{ code: number; reason: string }>(resolve => { ws.onclose = event => resolve({ code: event.code, reason: event.reason }) })
+    expect(closed).toEqual({ code: 4001, reason: 'Stream not resumable' })
+    expect(frames).toEqual([{ type: 'stream_attached', v: 1, stream: STREAM, epoch: 'gateway-epoch', resumed: false, reason: 'expired', cack: 0, next: 1, last: 0 }])
+    expect(opened).toHaveLength(0)
+    expect(handler.streamCount).toBe(0)
+  })
+
+  test('a tunnel restart keeps the stream resumable; a user disable ends it', async () => {
+    const { f, opened, closed, handler } = streamFixture()
+    const { claim } = await f.pairNative()
+    const first = await connect(f.base, claim.token, `stream=${STREAM}`)
+    const port = f.service.status().port!
+    const restarted = closedCode(first.ws)
+    await f.control('disable', { reason: 'restart' })
+    expect(await restarted).toBe(1012)
+    await Bun.sleep(10)
+    expect(closed).toEqual([])
+    f.service.enable('https://fixture.trycloudflare.com', port)
+    const second = await connect(f.base, claim.token, `stream=${STREAM}&ack=1&epoch=gateway-epoch`)
+    expect(second.frames[0]).toMatchObject({ type: 'stream_attached', resumed: true, next: 2 })
+    expect(opened).toHaveLength(1)
+    const ended = closedCode(second.ws)
+    await f.control('disable')
+    expect(await ended).toBe(1012)
+    await Bun.sleep(10)
+    expect(closed).toEqual([1012])
+    expect(handler.streamCount).toBe(0)
+  })
+})
+
+describe('a changed public address reaches paired phones', () => {
+  const sha256 = (value: string) => createHash('sha256').update(value).digest('hex')
+  const macFor = (token: string, message: string) => createHmac('sha256', sha256(token)).update(message).digest('base64url')
+  /** A non-loopback address of this machine: requests to it arrive like a phone's on the LAN. */
+  const lanAddress = Object.values(os.networkInterfaces()).flat().find(entry => entry?.family === 'IPv4' && !entry.internal)?.address
+  const bareServer = (storePath: string, onOriginChanged: ConstructorParameters<typeof PublicAccessServer>[0]['onOriginChanged']) => new PublicAccessServer({
+    storePath, serverPort: () => 3456, onOriginChanged,
+    handleApiRequest: async () => Response.json({}), handleStatic: async () => null,
+    websocket: { message: () => {} },
+  })
+
+  test('a paired phone learns where to find the gateway on its local network', async () => {
+    const remote = fixture(undefined, undefined, {
+      networkInterfaces: () => ({
+        lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true } as os.NetworkInterfaceInfo],
+        en0: [
+          { address: '192.168.1.5', family: 'IPv4', internal: false } as os.NetworkInterfaceInfo,
+          { address: 'fe80::1', family: 'IPv6', internal: false } as os.NetworkInterfaceInfo,
+        ],
+        utun4: [{ address: '100.101.1.2', family: 'IPv4', internal: false } as os.NetworkInterfaceInfo],
+        en1: [{ address: '203.0.113.9', family: 'IPv4', internal: false } as os.NetworkInterfaceInfo],
+      }),
+    })
+    const { claim } = await remote.pairNative()
+    const response = await remote.native('/api/public-access/locator', claim.token)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ port: remote.service.status().port! + 1, addresses: ['192.168.1.5', '100.101.1.2'] })
+    expect((await remote.remote('/api/public-access/locator')).status).toBe(401)
+  })
+
+  test.skipIf(!lanAddress)('from the LAN only the signed address lookup answers, never the gateway', async () => {
+    const remote = fixture()
+    const { claim } = await remote.pairNative()
+    const lan = `http://${lanAddress}:${remote.service.status().port! + 1}`
+    const nonce = 'n'.repeat(22)
+    const id = sha256(sha256(claim.token))
+    const located = await fetch(`${lan}/api/public-access/locate?id=${id}&nonce=${nonce}`)
+    expect(located.status).toBe(200)
+    const body = await located.json() as { url: string, mac: string }
+    expect(body).toEqual({ url: 'https://fixture.trycloudflare.com', mac: macFor(claim.token, `cc-haha-locate\n${nonce}\nhttps://fixture.trycloudflare.com`) })
+    expect((await fetch(`${lan}/api/public-access/locate?id=${'0'.repeat(64)}&nonce=${nonce}`)).status).toBe(404)
+    expect((await fetch(`${lan}/api/public-access/locate?id=${id}&nonce=short`)).status).toBe(400)
+    // The credential opens nothing else from the LAN.
+    for (const route of ['/health', '/api/public-access/session', '/api/public-access/locator', '/api/sessions']) {
+      const response = await fetch(`${lan}${route}`, { headers: { Origin: 'https://fixture.trycloudflare.com', Authorization: `Bearer ${claim.token}` } })
+      expect([route, response.status]).toEqual([route, 404])
+    }
+    // The gateway itself is never reachable from the LAN; loopback (Cloudflare's connector) still is.
+    await expect(fetch(`http://${lanAddress}:${remote.service.status().port}/health`)).rejects.toThrow()
+    expect((await remote.native('/api/public-access/session', claim.token)).status).toBe(200)
+    remote.service.disable()
+    await expect(fetch(`${lan}/api/public-access/locate?id=${id}&nonce=${nonce}`)).rejects.toThrow()
+  })
+
+  test('a new address is announced once, signed per pairing, and remembered across restarts', async () => {
+    const changes: Array<{ url: string, previous: string, sign: (deviceId: string) => string | undefined }> = []
+    const remote = fixture(undefined, 'https://first-name.trycloudflare.com', { onOriginChanged: change => { changes.push(change) } })
+    const { claim } = await remote.pairNative()
+    expect(changes).toEqual([])
+    await remote.control('origin', { publicUrl: 'https://second-name.trycloudflare.com' }, 'PUT')
+    await remote.control('origin', { publicUrl: 'https://second-name.trycloudflare.com' }, 'PUT')
+    expect(changes.map(({ url, previous }) => ({ url, previous }))).toEqual([{ url: 'https://second-name.trycloudflare.com', previous: 'https://first-name.trycloudflare.com' }])
+    expect(changes[0]!.sign(claim.deviceId)).toBe(macFor(claim.token, 'cc-haha-host-url\nhttps://second-name.trycloudflare.com'))
+    expect(changes[0]!.sign('not-a-device')).toBeUndefined()
+
+    const restarted = bareServer(remote.storePath, change => { changes.push(change) })
+    restarted.enable('https://second-name.trycloudflare.com')
+    restarted.disable()
+    expect(changes).toHaveLength(1)
+  })
+
+  test('a store written before addresses were remembered announces nothing on its first address', () => {
+    const changes: unknown[] = []
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'remote-access-legacy-'))
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+    const storePath = path.join(dir, 'devices.json')
+    writeFileSync(storePath, JSON.stringify({ version: 1, devices: [{ id: 'old', name: 'Old phone', createdAt: 1, expiresAt: Date.now() + 60_000, tokenHash: 'a'.repeat(64) }] }))
+    const service = bareServer(storePath, change => { changes.push(change) })
+    service.enable('https://first-name.trycloudflare.com')
+    service.disable()
+    expect(changes).toEqual([])
+    const stored = JSON.parse(readFileSync(storePath, 'utf8')) as { devices: Array<{ id: string }>, lastPublicUrl: string }
+    expect(stored.devices.map(device => device.id)).toEqual(['old'])
+    expect(stored.lastPublicUrl).toBe('https://first-name.trycloudflare.com')
+  })
 })

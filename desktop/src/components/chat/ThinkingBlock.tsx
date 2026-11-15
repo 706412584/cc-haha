@@ -4,6 +4,11 @@ import { Brain, ChevronRight } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
+import {
+  EMPTY_STREAMING_MARKDOWN_SEGMENTS,
+  splitStreamingMarkdown,
+  type StreamingMarkdownSegments,
+} from '../../lib/streamingMarkdownSegments'
 
 // The whole chat tree re-renders on every streamed delta, so this block has to
 // bail out on identical props the way its siblings (AssistantMessage,
@@ -35,18 +40,28 @@ export const ThinkingBlock = memo(function ThinkingBlock({
     [displayContent, isActive],
   )
 
-  // Auto-collapse when thinking finishes (isActive transitions from true to false)
+  // Auto-collapse when thinking finishes (isActive transitions from true to
+  // false), but only if the block wasn't explicitly expanded (by user click
+  // or by the auto-expand-on-active effect below).
+  const userExpandedRef = useRef(false)
+  const prevActiveForCollapseRef = useRef(false)
   useEffect(() => {
-    if (!isActive && thinkingAutoCollapse) {
+    if (prevActiveForCollapseRef.current && !isActive && thinkingAutoCollapse && !userExpandedRef.current) {
       setExpanded(false)
     }
+    prevActiveForCollapseRef.current = isActive
   }, [isActive, thinkingAutoCollapse])
 
-  // Force expand while actively thinking so user can see the stream
+  // Force expand on mount when actively thinking so user can see the stream.
+  // This is a view convenience, not a user choice: it must NOT set
+  // userExpandedRef, or the auto-collapse below would never fold a block the
+  // user never touched. Only an explicit click marks the block as user-opened.
+  const mountedRef = useRef(false)
   useEffect(() => {
-    if (isActive) {
+    if (!mountedRef.current && isActive) {
       setExpanded(true)
     }
+    mountedRef.current = true
   }, [isActive])
 
   // Pinning the view to the newest reasoning reads `scrollHeight`, which forces
@@ -88,7 +103,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({
         type="button"
         data-chat-disclosure="true"
         data-thinking-row="true"
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => { userExpandedRef.current = true; setExpanded(!expanded) }}
         aria-expanded={expanded}
         className="-mx-2 flex h-7 w-[calc(100%+1rem)] min-w-0 items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[13px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] focus:outline-none focus-visible:shadow-[var(--shadow-focus-ring)]"
       >
@@ -123,41 +138,63 @@ export const ThinkingBlock = memo(function ThinkingBlock({
           data-thinking-content="expanded"
           className="relative mb-1.5 ml-[7px] mt-1 max-h-[300px] overflow-y-auto border-l border-[var(--color-outline)] py-0.5 pl-[15px] text-[var(--color-text-secondary)]"
         >
-          {/* While the block streams, `cache={false}` sends every delta through
-              a full `marked.parse` + sanitize + innerHTML swap of the entire
-              accumulated text — the dominant main-thread cost of a fast model's
-              thinking. Plain pre-wrapped text costs nothing and matches the
-              settled block on plain prose: same font size, same leading-5, so a
-              run of sentences does not move when the stream ends.
-
-              Markdown constructs do give up something for the duration: a
-              heading is literal `##`, a fence is literal backticks, and blank
-              lines between paragraphs are one empty line here (~20px) rather
-              than the compact `prose-p:my-1` gap (~8px). So a thinking block
-              that is still open when the stream ends reflows a little. Making
-              the streaming branch parse paragraphs too would put per-delta work
-              back on the path this changed to remove, for a shift that happens
-              once per block — and with `thinkingAutoCollapse` on (the default)
-              the block closes at that moment anyway and there is nothing to
-              reflow. */}
           {isActive ? (
-            <div className="thinking-stream text-xs leading-5 text-[var(--color-text-secondary)]">
-              {displayContent}
-              <span className="thinking-cursor" />
-            </div>
+            <StreamingThinkingMarkdown content={displayContent} />
           ) : (
             <MarkdownRenderer
               content={displayContent}
               variant="compact"
-              cache
               className="thinking-markdown chat-reading-markdown text-[var(--color-text-secondary)]"
             />
           )}
+          {isActive && <span className="thinking-cursor" />}
         </div>
       )}
     </div>
   )
 })
+
+const STREAMING_SEGMENT_CLASS = 'thinking-markdown thinking-markdown-segment chat-reading-markdown text-[var(--color-text-secondary)]'
+
+/**
+ * The body while it streams: the settled segments are rendered once and left
+ * alone, only the tail is parsed again on each delta. One renderer over the
+ * whole text re-parsed all of it on every delta, and a long deliberation left
+ * the renderer thread with nothing for the paste or keystroke that arrived
+ * during it (#1508). Once the block settles it is rendered whole again, so the
+ * finished row is the same as it always was.
+ */
+function StreamingThinkingMarkdown({ content }: { content: string }) {
+  const previous = useRef<StreamingMarkdownSegments>(EMPTY_STREAMING_MARKDOWN_SEGMENTS)
+  const segments = useMemo(() => {
+    const next = splitStreamingMarkdown(content, previous.current)
+    previous.current = next
+    return next
+  }, [content])
+
+  return (
+    <div className="thinking-markdown-live" data-thinking-segments={segments.settled.length}>
+      {segments.settled.map((segment, index) => (
+        <MarkdownRenderer
+          key={index}
+          content={segment}
+          variant="compact"
+          cache={false}
+          streaming
+          className={STREAMING_SEGMENT_CLASS}
+        />
+      ))}
+      <MarkdownRenderer
+        key="live"
+        content={segments.live}
+        variant="compact"
+        cache={false}
+        streaming
+        className={STREAMING_SEGMENT_CLASS}
+      />
+    </div>
+  )
+}
 
 const THINKING_PREVIEW_MAX_CHARS = 160
 /** A short line ending in a colon is a heading for what comes after it. */
@@ -234,19 +271,20 @@ const thinkingStyles = `
   content: '';
   animation: thinking-dots 1.4s steps(1, end) infinite;
 }
-/* Plain-text streaming body: keep the source's newlines and wrap long lines.
-   Size/leading come from the caller's text-xs / leading-5, matching compact
-   Markdown prose. Markdown-specific spacing settles once when streaming ends. */
-.thinking-stream {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.thinking-markdown > :first-child,
-.thinking-markdown > :first-child > :first-child {
+.thinking-markdown:not(.thinking-markdown-segment) > :first-child,
+.thinking-markdown:not(.thinking-markdown-segment) > :first-child > :first-child {
   margin-top: 0;
 }
-.thinking-markdown > :last-child,
-.thinking-markdown > :last-child > :last-child {
+.thinking-markdown:not(.thinking-markdown-segment) > :last-child,
+.thinking-markdown:not(.thinking-markdown-segment) > :last-child > :last-child {
+  margin-bottom: 0;
+}
+.thinking-markdown-live > :first-child > :first-child,
+.thinking-markdown-live > :first-child > :first-child > :first-child {
+  margin-top: 0;
+}
+.thinking-markdown-live > :last-child > :last-child,
+.thinking-markdown-live > :last-child > :last-child > :last-child {
   margin-bottom: 0;
 }
 `

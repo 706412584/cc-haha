@@ -9,6 +9,7 @@ import type {
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import { AFK_MODE_BETA_HEADER } from 'src/constants/betas.js'
 import { BUSINESS_ERROR_CODES } from 'src/constants/businessErrors.js'
+import { inspectProviderUsageError, isProviderUsageLimitText } from 'src/shared/providerUsageLimit.js'
 import type { SDKAssistantMessageError } from 'src/entrypoints/agentSdkTypes.js'
 import type {
   AssistantMessage,
@@ -64,7 +65,10 @@ import {
   StreamEndedEarlyError,
 } from './streamFallback.js'
 import { StreamWatchdogTimeoutError } from './streamWatchdog.js'
-import { isUnsupportedImageInputErrorMessage } from './unsupportedImageInput.js'
+import {
+  isImageInputRefusalMessage,
+  isUnsupportedImageInputErrorMessage,
+} from './unsupportedImageInput.js'
 
 export { isUnsupportedImageInputErrorMessage }
 
@@ -152,25 +156,67 @@ export function isSerializedSizeOverflowText(text: string): boolean {
 
 const CONTEXT_OVERFLOW_PATTERNS: RegExp[] = [
   /prompt is too long/i,
-  /input is too long for requested model/i,
+  /input is too long for (?:the )?(?:requested|selected) model/i,
   /context_length_exceeded/i,
+  /model_context_window_exceeded/i,
   /maximum context length/i,
   /exceeds? the context window/i,
-  /context window exceeded/i,
+  /context window exceed(?:ed|s)/i,
   /supports only \d+\s*k?\s*(?:tokens?\s+of\s+)?context/i,
   // GLM relay channel hard cap (Zhipu bigmodel wording): "Input token
   // exceed the limit (request id: ...)". Deterministic overflow — same
   // transcript replays the same error, so it must flow into reactive
   // compact instead of surfacing as a raw 400 (#1162 family).
   /input token exceed/i,
-  // Zhipu standard API 400001: "Prompt exceeds max length. Please check
-  // the request body...". Some multi-channel relays randomly route here;
-  // compacting clears it the same way.
-  /prompt exceeds max length/i,
+  // Relays mostly forward the provider's own wording, and no code is shared
+  // across providers, so each one is listed by what it actually says.
+  /exceeded model token limit/i, // Moonshot Kimi
+  /range of input length should be/i, // Qwen / DashScope
+  /prompt (?:too long|exceeds max length|超长)/i, // Zhipu GLM 1261, Ollama
+  /OutofContextError|exceed max message tokens/i, // Volcengine Ark
+  /input token count.*exceeds the maximum/i, // Gemini
+  /input token count is \d+ but model only supports up to/i, // Gemini
+  /longer than the maximum model length/i, // vLLM
+  /maximum prompt length is \d+/i, // xAI
+  /exceeds the available context size/i, // llama.cpp
+  /`inputs` tokens \+ `max_new_tokens` must be <= \d+/i, // TGI
+  /requested input length \d+ exceeds maximum input length/i,
+  /exceeds (?:the )?maximum allowed input length/i,
+  /number of input tokens exceeds maximum length/i,
+  /tokens in request more than max tokens allowed/i,
+  /too large for the model'?s configured input limit/i,
+  /is longer than the model'?s context length/i,
+  /greater than the context length/i,
+  /context length is only \d+ tokens/i,
+  /prompt has [\d,]+ tokens?, but the configured context size is/i,
 ]
 
+// Wordings that share a phrase with an overflow but that compaction cannot
+// fix: the input already fits (an oversized max_tokens) or nothing is too long
+// (a token-rate limit).
+const NOT_CONTEXT_OVERFLOW_PATTERNS: RegExp[] = [
+  /'?max_tokens'? or '?max_completion_tokens'? is too large/i,
+  /max[_ ]tokens must be (?:less than|at most)/i,
+  /rate[ _-]?limit/i,
+  /too many requests/i,
+]
+
+// Python relays serialize JSON with ensure_ascii, so a Chinese error message
+// reaches us as `\u8d85\u957f` rather than the characters themselves — and
+// with its backslash escaped again for every JSON layer it was nested in (the
+// local proxy's envelope, the SDK's stringified body).
+function decodeJsonUnicodeEscapes(text: string): string {
+  return text.replace(/\\+u([0-9a-fA-F]{4})/g, (_, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16)),
+  )
+}
+
 export function isContextOverflowErrorText(text: string): boolean {
-  return CONTEXT_OVERFLOW_PATTERNS.some(pattern => pattern.test(text))
+  const decoded = decodeJsonUnicodeEscapes(text)
+  return (
+    CONTEXT_OVERFLOW_PATTERNS.some(pattern => pattern.test(decoded)) &&
+    !NOT_CONTEXT_OVERFLOW_PATTERNS.some(pattern => pattern.test(decoded))
+  )
 }
 
 export function isPromptTooLongMessage(msg: AssistantMessage): boolean {
@@ -186,6 +232,41 @@ export function isPromptTooLongMessage(msg: AssistantMessage): boolean {
       block.type === 'text' &&
       block.text.startsWith(PROMPT_TOO_LONG_ERROR_MESSAGE),
   )
+}
+
+// Where each provider's wording states the request size and the limit, as
+// capture-group indexes. `actual` is absent when only the limit is stated.
+const TOKEN_COUNT_FORMATS: Array<{
+  pattern: RegExp
+  actual?: number
+  limit: number
+}> = [
+  // Anthropic: "prompt is too long: 210000 tokens > 200000 maximum"
+  { pattern: /prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)/i, actual: 1, limit: 2 },
+  // OpenAI, DeepSeek, OpenRouter, vLLM
+  {
+    pattern: /maximum context length is\s+(\d+)\s+tokens?\.\s*(?:however,\s*)?(?:you requested(?: about)?|your messages resulted in|your prompt contains)\s+(\d+)\s+(?:input\s+)?tokens?\b/i,
+    actual: 2,
+    limit: 1,
+  },
+  // Moonshot Kimi
+  { pattern: /exceeded model token limit:\s*(\d+)\s*\(requested:\s*(\d+)\)/i, actual: 2, limit: 1 },
+  // Gemini
+  { pattern: /input token count \((\d+)\) exceeds the maximum number of tokens allowed \((\d+)\)/i, actual: 1, limit: 2 },
+  { pattern: /input token count is (\d+) but model only supports up to (\d+)/i, actual: 1, limit: 2 },
+  // vLLM
+  { pattern: /prompt \(length (\d+)\) is longer than the maximum model length of (\d+)/i, actual: 1, limit: 2 },
+  // xAI
+  { pattern: /maximum prompt length is (\d+) but the request contains (\d+) tokens/i, actual: 2, limit: 1 },
+  // Mistral
+  { pattern: /prompt contains (\d+) tokens.*?too large for model with (\d+) maximum context length/i, actual: 1, limit: 2 },
+  // Qwen / DashScope states only the limit.
+  { pattern: /range of input length should be \[\s*\d+\s*,\s*(\d+)\s*\]/i, limit: 1 },
+]
+
+function parseTokenCount(value: string | undefined): number | undefined {
+  const count = Number(value)
+  return Number.isSafeInteger(count) && count > 0 ? count : undefined
 }
 
 /**
@@ -212,29 +293,31 @@ export function isContextWindowExceededMessage(message: string): boolean {
 
 /**
  * Parse actual/limit token counts from a raw prompt-too-long API error
- * message in Anthropic or OpenAI-compatible format. Requested tokens include
- * the completion allowance so compaction also leaves room for the response.
- * The raw string may be wrapped in SDK prefixes or JSON envelopes, or
- * have different casing (Vertex), so this is intentionally lenient.
+ * message. Requested tokens include the completion allowance where the
+ * provider counts it, so compaction also leaves room for the response. The
+ * raw string may be wrapped in SDK prefixes or JSON envelopes, or have
+ * different casing (Vertex), so this is intentionally lenient. A wording that
+ * states only the limit yields the limit alone.
  */
 export function parsePromptTooLongTokenCounts(rawMessage: string): {
   actualTokens: number | undefined
   limitTokens: number | undefined
 } {
-  const anthropic = rawMessage.match(
-    /prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)/i,
-  )
-  const openAI = anthropic ? null : rawMessage.match(
-    /maximum context length is\s+(\d+)\s+tokens?\.\s*(?:however,\s*)you requested\s+(\d+)\s+tokens?\b/i,
-  )
-  const actualTokens = Number(anthropic?.[1] ?? openAI?.[2])
-  const limitTokens = Number(anthropic?.[2] ?? openAI?.[1])
-  const valid = Number.isSafeInteger(actualTokens) && actualTokens > 0 &&
-    Number.isSafeInteger(limitTokens) && limitTokens > 0
-  return {
-    actualTokens: valid ? actualTokens : undefined,
-    limitTokens: valid ? limitTokens : undefined,
+  for (const format of TOKEN_COUNT_FORMATS) {
+    const match = rawMessage.match(format.pattern)
+    if (!match) continue
+    const limitTokens = parseTokenCount(match[format.limit])
+    const actualTokens = format.actual === undefined
+      ? undefined
+      : parseTokenCount(match[format.actual])
+    const valid = limitTokens !== undefined &&
+      (format.actual === undefined || actualTokens !== undefined)
+    return {
+      actualTokens: valid ? actualTokens : undefined,
+      limitTokens: valid ? limitTokens : undefined,
+    }
   }
+  return { actualTokens: undefined, limitTokens: undefined }
 }
 
 /**
@@ -294,6 +377,30 @@ export function isMediaSizeErrorMessage(msg: AssistantMessage): boolean {
   )
 }
 export const CREDIT_BALANCE_TOO_LOW_ERROR_MESSAGE = 'Credit balance is too low'
+
+/**
+ * A 401/403 whose message says the provider's usage limit, quota or balance is
+ * exhausted. The credential works; reporting it as "Failed to authenticate" or
+ * sending the user to /login points at the wrong fix (e.g. Kimi Code #1208).
+ */
+export function isProviderUsageLimitAuthError(error: unknown): error is APIError {
+  return (
+    error instanceof APIError &&
+    (error.status === 401 || error.status === 403) &&
+    !inspectProviderUsageError(error.error ?? error.message).invalidCredential &&
+    isProviderUsageLimitText(error.message)
+  )
+}
+
+/** A durable plan/balance limit, not a short request or token rate limit. */
+export function isProviderUsageLimitError(error: unknown): error is APIError {
+  if (isProviderUsageLimitAuthError(error)) return true
+  if (!(error instanceof APIError) || error.status !== 429) return false
+
+  const result = inspectProviderUsageError(error.error ?? error.message)
+  return result.usageLimit && !result.invalidCredential
+}
+
 export const INVALID_API_KEY_ERROR_MESSAGE = 'Not logged in · Please run /login'
 export const INVALID_API_KEY_ERROR_MESSAGE_EXTERNAL =
   'Invalid API key · Fix external API key'
@@ -335,7 +442,7 @@ export function getImageUnsupportedErrorMessage(): string {
     ? 'This model does not support images. Continue with text, or switch to a vision-capable model and send the image again.'
     : 'This model does not support images. Double press esc to go back, switch to a vision-capable model, or continue with text.'
 }
-// Used only by the request-context fallback in buildAssistantMessageFromError,
+// Used only by the request-context fallback in getAssistantMessageFromError,
 // where the error text was not a recognised image-rejection wording. Unlike
 // getImageUnsupportedErrorMessage, this does not assert the model's capability:
 // a 400 that happens to land on an image-carrying request may be unrelated to
@@ -673,8 +780,7 @@ export function extractUnknownErrorFormat(value: unknown): string | undefined {
   return undefined
 }
 
-
-// Gate for the request-context fallback in buildAssistantMessageFromError.
+// Gate for the request-context fallback in getAssistantMessageFromError.
 // That fallback exists because some providers reject non-text media with
 // wording we cannot enumerate. But "the failed request carried an image" is not
 // evidence that the error was about the image: a generic 400 (bad parameter,
@@ -687,6 +793,24 @@ export function extractUnknownErrorFormat(value: unknown): string | undefined {
 // type: only text is allowed for this model").
 export function errorTextImpliesMediaRejection(message: string): boolean {
   const raw = message.toLowerCase()
+  // A schema / deserialization rejection ("unknown variant X, expected one of
+  // 'text', 'image', ...") names a block the provider cannot parse, not a model
+  // that cannot see images. The refusal here is about a *shape*, not a
+  // capability: stripping the image would just move the failure to the next
+  // unsupported block. Upstream #1801 calls these out explicitly; skip them.
+  if (/unknown variant/.test(raw) && /expected one of/.test(raw)) return false
+  // Upstream #1801's IMAGE_CONTENT_PROBLEM: an error about a *particular*
+  // image (its format, size, a transient processing failure) is not a "this
+  // model cannot see images" signal. The model would still accept a different
+  // image, so the error must surface in the provider's own words and the
+  // history must not be stripped.
+  const IMAGE_CONTENT_PROBLEM = new RegExp([
+    String.raw`\bmime\b`, String.raw`\bformats?\b`, String.raw`\bgif\b`, 'animated', 'image type',
+    'multiple images', 'too many images', 'number of images',
+    'too large', 'exceed', String.raw`\bsize\b`, 'dimension', 'resolution', 'pixel',
+    'corrupt', 'decod', 'base64', 'download', 'fetch', 'could not process', 'unable to process', 'region',
+  ].join('|'), 'i')
+  if (IMAGE_CONTENT_PROBLEM.test(raw)) return false
   // Content-block / schema rejections: the provider rejects a non-text block
   // type without naming it.
   if (
@@ -712,9 +836,12 @@ export function errorTextImpliesMediaRejection(message: string): boolean {
   }
   // A media/attachment noun paired with a rejection verb. The noun is required
   // so unrelated 400s ("invalid request", "unsupported format") do not match.
+  // "invalid" alone is too broad: every 400 body carries "invalid_request_error",
+  // so it would match any 400 on an image-carrying request. Require an explicit
+  // refusal verb instead.
   const mediaNoun = /(?:image|vision|multimodal|multi-modal|modality|media|document|pdf)/
   const rejectionVerb =
-    /(?:not support|unsupported|not allowed|not permitted|disallow|forbidden|invalid|reject|unexpected|unknown variant|not one of|only)/
+    /(?:not support|unsupported|not allowed|not permitted|disallow|forbidden|reject|unexpected|not one of|only)/
   return mediaNoun.test(raw) && rejectionVerb.test(raw)
 }
 
@@ -745,7 +872,7 @@ function messagesContainBlockOfType(messages: readonly unknown[], blockType: str
   return walk(messages)
 }
 
-function buildAssistantMessageFromError(
+export function getAssistantMessageFromError(
   error: unknown,
   model: string,
   options?: {
@@ -795,10 +922,14 @@ function buildAssistantMessageFromError(
   // Custom/Anthropic-compatible providers often reject image blocks with
   // provider-specific wording when the selected model is text-only. Convert it
   // to a known synthetic error so normalizeMessagesForAPI can strip the image
-  // from later turns instead of poisoning the whole session.
+  // from later turns instead of poisoning the whole session. Only an explicit
+  // refusal qualifies: a 400/422 that merely landed on a request carrying
+  // images (a malformed history block, a bad image, a schema error) surfaces
+  // in the provider's own words, so a vision model never gets told it cannot
+  // see images.
   if (
     error instanceof Error &&
-    isUnsupportedImageInputErrorMessage(error.message) &&
+    isImageInputRefusalMessage(error.message) &&
     (!(error instanceof APIError) || error.status === 400 || error.status === 422)
   ) {
     return createAssistantAPIErrorMessage({
@@ -834,6 +965,13 @@ function buildAssistantMessageFromError(
       content: `${API_ERROR_MESSAGE_PREFIX}: 中转服务商通道繁忙，请稍后重试`,
       error: 'server_error',
       errorDetails: error.message,
+    })
+  }
+
+  if (error instanceof APIError && error.status === 429 && isProviderUsageLimitError(error)) {
+    return createAssistantAPIErrorMessage({
+      error: 'billing_error',
+      content: `${API_ERROR_MESSAGE_PREFIX}: ${formatAPIErrorForDisplay(error)} · Check the provider's billing or wait for the quota to reset, or switch to another provider.`,
     })
   }
 
@@ -943,6 +1081,7 @@ function buildAssistantMessageFromError(
   const isPayloadTooLarge = error instanceof APIError && error.status === 413
   if (
     error instanceof Error &&
+    !(error instanceof APIError && error.status === 429) &&
     (isContextOverflowErrorText(error.message) ||
       (!isPayloadTooLarge && isSerializedSizeOverflowText(error.message)) ||
       isContextWindowExceededMessage(error.message))
@@ -1210,6 +1349,15 @@ function buildAssistantMessageFromError(
     }
   }
 
+  // A provider may mention the key in an exhausted-plan error; it is still a
+  // billing problem, not a reason to replace the key or initiate login.
+  if (isProviderUsageLimitAuthError(error)) {
+    return createAssistantAPIErrorMessage({
+      error: 'billing_error',
+      content: `${API_ERROR_MESSAGE_PREFIX}: ${formatAPIErrorForDisplay(error)}`,
+    })
+  }
+
   if (
     error instanceof Error &&
     error.message.toLowerCase().includes('x-api-key')
@@ -1398,7 +1546,7 @@ function buildAssistantMessageFromError(
   })
 }
 
-export function getAssistantMessageFromError(
+export function getAssistantMessageFromErrorWithRetryCount(
   error: unknown,
   model: string,
   options?: {
@@ -1408,7 +1556,7 @@ export function getAssistantMessageFromError(
     requestId?: string
   },
 ): AssistantMessage {
-  const message = buildAssistantMessageFromError(error, model, options)
+  const message = getAssistantMessageFromError(error, model, options)
   if (options?.retryCount !== undefined) {
     message.message.content = message.message.content.map(block =>
       block.type === 'text'
@@ -1479,6 +1627,8 @@ export function classifyAPIError(error: unknown): string {
   ) {
     return 'capacity_off_switch'
   }
+
+  if (isProviderUsageLimitError(error)) return 'provider_usage_limit'
 
   // Rate limiting
   if (error instanceof APIError && error.status === 429) {

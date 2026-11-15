@@ -1,3 +1,4 @@
+import { isIdlePowerSettings } from '../../src/lib/idlePower'
 import { PUBLIC_ACCESS_CONSENT_VERSION } from '../../src/lib/desktopHost/types'
 import { isPublicAccessConfiguration } from '../../src/lib/desktopHost/publicAccessConfiguration'
 import { ELECTRON_IPC_CHANNELS, type ElectronIpcChannel } from './channels'
@@ -341,6 +342,9 @@ const localePreference: Validator = value =>
 export const ELECTRON_IPC_VALIDATORS = {
   [ELECTRON_IPC_CHANNELS.appGetVersion]: noPayload,
   [ELECTRON_IPC_CHANNELS.powerSetPreventSleepWhileRunning]: booleanPayload,
+  [ELECTRON_IPC_CHANNELS.powerGetIdleActionState]: noPayload,
+  [ELECTRON_IPC_CHANNELS.powerConfigureIdleAction]: isIdlePowerSettings,
+  [ELECTRON_IPC_CHANNELS.powerCancelIdleAction]: noPayload,
   [ELECTRON_IPC_CHANNELS.appGetLocalePreference]: noPayload,
   [ELECTRON_IPC_CHANNELS.appSetLocalePreference]: localePreference,
   [ELECTRON_IPC_CHANNELS.appGetPreferredSystemLanguages]: noPayload,
@@ -353,6 +357,8 @@ export const ELECTRON_IPC_VALIDATORS = {
   [ELECTRON_IPC_CHANNELS.publicAccessStart]: value => value === PUBLIC_ACCESS_CONSENT_VERSION,
   [ELECTRON_IPC_CHANNELS.publicAccessStop]: noPayload,
   [ELECTRON_IPC_CHANNELS.publicAccessSetAutoStart]: booleanPayload,
+  [ELECTRON_IPC_CHANNELS.publicAccessSetP2PEnabled]: booleanPayload,
+  [ELECTRON_IPC_CHANNELS.publicAccessSetKeepAwake]: booleanPayload,
   [ELECTRON_IPC_CHANNELS.runtimeGetServerUrl]: noPayload,
   [ELECTRON_IPC_CHANNELS.runtimeGetLocalAccessToken]: noPayload,
   [ELECTRON_IPC_CHANNELS.runtimeGetPetAccessToken]: noPayload,
@@ -433,7 +439,7 @@ export const ELECTRON_IPC_VALIDATORS = {
   [ELECTRON_IPC_CHANNELS.migrationStart]: migrationIdentity,
   [ELECTRON_IPC_CHANNELS.migrationStatus]: noPayload,
   [ELECTRON_IPC_CHANNELS.migrationCancel]: migrationIdentity,
-  [ELECTRON_IPC_CHANNELS.adaptersRestartSidecar]: noPayload,
+  [ELECTRON_IPC_CHANNELS.adaptersRestartSidecar]: value => value === undefined || (isRecord(value) && hasOnlyKeys(value, ['target']) && value.target === 'wechat'),
   [ELECTRON_IPC_CHANNELS.tunnelStart]: tunnelStartPayload,
   [ELECTRON_IPC_CHANNELS.tunnelStop]: noPayload,
   [ELECTRON_IPC_CHANNELS.tunnelGetStatus]: noPayload,

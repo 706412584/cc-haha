@@ -9,15 +9,18 @@ import type { RuntimeSelection } from '../types/runtime'
 
 export type SessionsResponse = {
   sessions: SessionListItem[]
+  archivedSessionIds?: string[]
   total: number
   projects?: Array<{
     projectRoot: string
     total: number
+    archivedTotal?: number
   }>
   index?: LocalIndexStatus
 }
 export type ProjectSessionHistoryParams = {
   projectRoot: string
+  archived?: boolean
   limit?: number
   cursor?: string
   beforeModifiedAt?: string
@@ -250,6 +253,8 @@ export type SessionContextSnapshot = {
   maxTokens: number
   rawMaxTokens: number
   percentage: number
+  /** Where the live CLI compacts on its own (absent when auto-compact is off or for an estimate). */
+  autoCompactThreshold?: number
   gridRows: Array<Array<{
     color: string
     isFilled: boolean
@@ -302,6 +307,7 @@ export type SessionInspectionResponse = {
     version?: string
     cwd?: string
     model?: string
+    contextWindow?: number
     apiKeySource?: string
     outputStyle?: string
     tools?: string[]
@@ -518,6 +524,7 @@ export const sessionsApi = {
     offset?: number
     view?: 'sidebar'
     perProjectLimit?: number
+    archived?: boolean
   }, options?: ApiRequestOptions) {
     const query = new URLSearchParams()
     if (params?.project) query.set('project', params.project)
@@ -525,6 +532,7 @@ export const sessionsApi = {
     if (params?.offset) query.set('offset', String(params.offset))
     if (params?.view) query.set('view', params.view)
     if (params?.perProjectLimit) query.set('perProjectLimit', String(params.perProjectLimit))
+    if (params?.archived !== undefined) query.set('archived', String(params.archived))
     const qs = query.toString()
     return api.get<SessionsResponse>(`/api/sessions${qs ? `?${qs}` : ''}`, options)
   },
@@ -535,6 +543,7 @@ export const sessionsApi = {
     if (params.cursor) query.set('cursor', params.cursor)
     if (params.beforeModifiedAt) query.set('beforeModifiedAt', params.beforeModifiedAt)
     if (params.beforeId) query.set('beforeId', params.beforeId)
+    if (params.archived !== undefined) query.set('archived', String(params.archived))
     return api.get<ProjectSessionHistoryResponse>(`/api/sessions/project-history?${query.toString()}`, options)
   },
 
@@ -652,6 +661,10 @@ export const sessionsApi = {
     return api.post('/api/sessions/sync-indexes')
   },
 
+  setArchived(sessionId: string, archived: boolean) {
+    return api.patch<{ success: true; archived: boolean }>(`/api/sessions/${sessionId}/archive`, { archived })
+  },
+
   getRecentProjects(limit?: number, scan?: number) {
     const params = new URLSearchParams()
     if (typeof limit === 'number') params.set('limit', String(limit))
@@ -675,7 +688,13 @@ export const sessionsApi = {
     return api.get<{ commands: SlashCommandOption[] }>(`/api/sessions/${sessionId}/slash-commands`)
   },
 
-  getInspection(sessionId: string, options?: { includeContext?: boolean; timeout?: number; contextOnly?: boolean }) {
+  getInspection(sessionId: string, options?: {
+    includeContext?: boolean
+    timeout?: number
+    contextOnly?: boolean
+    statusOnly?: boolean
+    signal?: AbortSignal
+  }) {
     const query = new URLSearchParams()
     if (options?.includeContext !== undefined) {
       query.set('includeContext', options.includeContext ? '1' : '0')
@@ -683,9 +702,13 @@ export const sessionsApi = {
     if (options?.contextOnly) {
       query.set('contextOnly', '1')
     }
+    if (options?.statusOnly) {
+      query.set('statusOnly', '1')
+    }
     const suffix = query.size > 0 ? `?${query.toString()}` : ''
     return api.get<SessionInspectionResponse>(`/api/sessions/${sessionId}/inspection${suffix}`, {
       timeout: options?.timeout ?? (options?.includeContext ? 45_000 : 25_000),
+      signal: options?.signal,
     })
   },
 

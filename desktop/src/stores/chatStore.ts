@@ -8,7 +8,7 @@ import { create } from 'zustand'
 import { boundActivityText, CHAT_TERMINAL_ACTIVITY_MAX_PER_SESSION, CHAT_TERMINAL_ACTIVITY_MAX_TOTAL } from '../lib/chatHistoryBudget'
 import { wsManager } from '../api/websocket'
 import { sessionsApi, type SessionHistoryPage } from '../api/sessions'
-import { ApiResponseParseError } from '../api/client'
+import { ApiError, ApiResponseParseError } from '../api/client'
 import { subagentsApi } from '../api/subagents'
 import { useTeamPlanStore } from './teamPlanStore'
 import { useTeamStore } from './teamStore'
@@ -27,8 +27,11 @@ import { useProviderCompatStore } from './providerCompatStore'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import { notifyDesktop } from '../lib/desktopNotifications'
 import { createAsyncRefreshCoalescer } from '../lib/asyncRefreshCoalescer'
-import { t } from '../i18n'
+import { messageSnippet, traceSession } from '../lib/sessionTrace'
 import { deriveSessionTitle, isPlaceholderSessionTitle } from '../lib/sessionTitle'
+import { formatBytes } from '../lib/formatBytes'
+import { checkUserMessageBudget } from '../lib/userMessageBudget'
+import { t } from '../i18n'
 import {
   VISUAL_SELECTION_BATCH_PROMPT_HEADER,
   VISUAL_SELECTION_PROMPT_FOOTER,
@@ -50,6 +53,7 @@ import type {
   BackgroundAgentTask,
   BackgroundAgentTaskUsage,
   ChatState,
+  ClientMessage,
   CompactProgress,
   ComputerUsePermissionRequest,
   ComputerUsePermissionResponse,
@@ -81,6 +85,20 @@ function reconcileProviderRuntimeSelection(sessionId: string, selection: Runtime
     currentModelId: settings.currentModel?.id,
     defaultEffortLevel: settings.effortLevel,
   })
+}
+
+/**
+ * A member message the server turned down. A slash command the member's CLI
+ * may not run (`/clear`, `/model`) gets the desktop's own localized words,
+ * which point at `/compact` and the model picker; anything else keeps the
+ * server's message.
+ */
+function teamMemberMessageFailure(err: unknown): string {
+  const body = err instanceof ApiError ? err.body : undefined
+  if (body && typeof body === 'object' && (body as { error?: unknown }).error === 'MEMBER_COMMAND_UNSUPPORTED') {
+    return t('teams.memberCommandUnsupported')
+  }
+  return err instanceof Error ? err.message : String(err)
 }
 type ToolCall = Extract<UIMessage, { type: 'tool_use' }>
 type CompactSummaryMessage = Extract<UIMessage, { type: 'compact_summary' }>
@@ -241,6 +259,14 @@ export type PerSessionState = {
   pendingBackgroundTaskStopFailures?: Record<string, string>
   stopAllSubagentsRequested?: boolean
   awaitingReconnectSync?: boolean
+  /**
+   * Background tasks that ended since the model last started an attempt and
+   * whose result goes back to the model. An attempt that starts while the
+   * session is idle was not sent by anyone: these results reopened the model.
+   */
+  pendingBackgroundContinue?: BackgroundContinueTask[]
+  /** The notice shown for the current turn, withdrawn if a user turn replays. */
+  backgroundContinueNoticeId?: string
   /** A socket gap started before this history lifecycle finished hydration. */
   preHydrationSocketGapPending?: boolean
   historyBootstrapDisabled?: boolean
@@ -268,6 +294,11 @@ export type PerSessionState = {
   pendingRuntimeConfig?: PendingRuntimeConfig | null
   pendingProviderTransition?: ProviderTransitionRequired | null
   runtimeConfigError?: RuntimeConfigError | null
+  /**
+   * Predicted next prompt for the empty composer (`prompt_suggestion`). In
+   * memory only; cleared when the user sends or the next turn starts.
+   */
+  promptSuggestion?: string | null
 }
 
 const DEFAULT_SESSION_STATE: PerSessionState = {
@@ -320,6 +351,7 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   pendingRuntimeConfig: null,
   pendingProviderTransition: null,
   runtimeConfigError: null,
+  promptSuggestion: null,
 }
 
 export function createDefaultSessionState(): PerSessionState {
@@ -463,12 +495,16 @@ type ChatStore = {
    * off screen, so coming back to it redraws at once and only backfills.
    */
   disconnectSession: (sessionId: string, options?: { keepTranscript?: boolean }) => void
+  /**
+   * Returns `false` when the frame is over the server's input budget: nothing
+   * was sent and an error row explains why, so the caller keeps its draft.
+   */
   sendMessage: (
     sessionId: string,
     content: string,
     attachments?: AttachmentRef[],
     options?: { sessionReferences?: Array<{ sessionId: string }>; displayContent?: string; displayAttachments?: DisplayAttachmentRef[]; hideDisplayContent?: boolean },
-  ) => void
+  ) => boolean
   respondToPermission: (
     sessionId: string,
     requestId: string,
@@ -557,6 +593,7 @@ type ChatStore = {
   removeQueuedUserMessage: (sessionId: string, messageId: string) => void
   sendQueuedUserMessage: (sessionId: string, messageId: string) => void
   clearMessages: (sessionId: string) => void
+  dismissPromptSuggestion: (sessionId: string) => void
   handleServerMessage: (sessionId: string, msg: ServerMessage) => void
 }
 
@@ -798,6 +835,22 @@ function advanceAgentStreamRevision(sessionId: string): void {
       },
     },
   }))
+}
+
+/** Settle a durable terminal only if its read still describes this stream. */
+export function settleAgentRunSession(sessionId: string, requestedStreamRevision: number): void {
+  const session = useChatStore.getState().sessions[sessionId]
+  if (!session || (session.agentStreamRevision ?? 0) !== requestedStreamRevision) return
+
+  const streamId = activeAgentStreamIdBySession.get(sessionId)
+  if (streamId) retireAgentStream(sessionId, streamId)
+  activeAgentStreamIdBySession.delete(sessionId)
+  clearPendingToolInputDelta(sessionId)
+  clearPendingTaskToolUseIds(sessionId)
+  clearPendingToolParentUseIds(sessionId)
+  // Reuse the live idle boundary to drain buffered text, stop the elapsed
+  // timer, clear retry/fallback activity and settle the tab's running marker.
+  useChatStore.getState().handleServerMessage(sessionId, { type: 'status', state: 'idle' })
 }
 
 function dispatchAgentRunEvent(
@@ -1136,6 +1189,12 @@ export function __resetHistoryLoadStateForTesting(): void {
   historyLoadsInFlight.clear()
   historyReloadGenerations.clear()
   historyLoadAbortRetries.clear()
+  // Cross-test contamination: a `stop_generation` from a prior test latches the
+  // session id here, and the next test's stream_retry path then short-circuits
+  // at `case 'streaming_fallback'` and silently keeps the failed attempt's tool
+  // calls alive. Clear the latch with the rest of the history bookkeeping.
+  stoppedTurns.clear()
+  taskBarBeforeAttemptBySession.clear()
 }
 
 /** @internal — apply buffered `thinking` events now instead of waiting out the
@@ -2133,6 +2192,10 @@ function strongHistoryMessageIdentities(message: UIMessage): string[] {
     ]))
   }
 
+  if (message.type === 'error' && nonEmptyHistoryIdentityPart(message.transcriptMessageId)) {
+    identities.push(JSON.stringify(['transcript', 'error', message.transcriptMessageId!.trim()]))
+  }
+
   if (message.type === 'tool_use' || message.type === 'tool_result') {
     const toolUseId = nonEmptyHistoryIdentityPart(message.originalToolUseId) ??
       nonEmptyHistoryIdentityPart(message.toolUseId)
@@ -2149,6 +2212,11 @@ function strongHistoryMessageIdentities(message: UIMessage): string[] {
   if (message.type === 'background_task') {
     const taskId = nonEmptyHistoryIdentityPart(message.task.taskId)
     if (taskId) identities.push(`background-task:${taskId}`)
+  }
+
+  // The live notice and its transcript copy name the same finished tasks.
+  if (message.type === 'system' && message.backgroundContinueTaskIds?.length) {
+    identities.push(JSON.stringify(['background-continue', [...message.backgroundContinueTaskIds].sort()]))
   }
 
   if (message.type === 'permission_request') {
@@ -3481,6 +3549,15 @@ async function loadOlderHistoryPage(
       const known = new Set(current.messages.flatMap(strongHistoryMessageIdentities))
       const older = result.messages.filter(message => !strongHistoryMessageIdentities(message).some(identity => known.has(identity)))
       const messages = older.length ? [...older, ...current.messages] : current.messages
+      // TEMP probe: paging prepend is the one path that puts rows above the
+      // current head. Record what arrived and what the new head became.
+      if (older.length) {
+        traceSession('history.prepend', sessionId, {
+          added: older.length,
+          head: messageSnippet(messages[0]),
+          headId: (messages[0] as { id?: string } | undefined)?.id,
+        })
+      }
       const page = result.page && current.historyPage
         ? { ...current.historyPage, nextCursor: result.page.nextCursor, hasMore: result.page.hasMore,
             historyComplete: result.page.historyComplete && current.historyPage.previousCursor == null,
@@ -3521,6 +3598,19 @@ export const useChatStore = create<ChatStore>((setState, get) => {
     setState((previous) => {
       const patch = typeof update === 'function' ? update(previous) : update
       if (patch === previous || !patch.sessions) return patch
+      // TEMP probe: every session write lands here. Records only sessions whose
+      // `messages` array identity changed, with the resulting head row, so a
+      // foreign row cannot appear without a trace entry naming its session.
+      for (const [traceId, traceSessionState] of Object.entries(patch.sessions)) {
+        const previousMessages = previous.sessions[traceId]?.messages
+        if (traceSessionState.messages === previousMessages) continue
+        traceSession('set.messages', traceId, {
+          from: previousMessages?.length ?? -1,
+          to: traceSessionState.messages.length,
+          head: messageSnippet(traceSessionState.messages[0]),
+          headId: (traceSessionState.messages[0] as { id?: string } | undefined)?.id,
+        })
+      }
       let sessions = patch.sessions
       const sessionCount = Math.max(1, Object.keys(sessions).length)
       const budget = Math.min(2 * 1024 * 1024, Math.floor(16 * 1024 * 1024 / sessionCount))
@@ -3581,6 +3671,20 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       }
       return sessions === patch.sessions ? patch : { ...patch, sessions }
     })
+  }
+  const rejectOversizedMessage = (sessionId: string, message: ClientMessage): boolean => {
+    const budget = checkUserMessageBudget(message)
+    if (budget.ok) return false
+    set((state) => ({
+      sessions: updateSessionIn(state.sessions, sessionId, (session) => ({
+        messages: [...session.messages, {
+          id: nextId(), type: 'error',
+          message: t('chat.messageTooLarge', { size: formatBytes(budget.bytes), limit: formatBytes(budget.limit) }),
+          code: 'MESSAGE_TOO_LARGE', timestamp: Date.now(),
+        }],
+      })),
+    }))
+    return true
   }
   return ({
   applyBoundedUpdate: set,
@@ -3829,6 +3933,12 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       }))
     })
     wsManager.onMessage(sessionId, (msg) => {
+      // TEMP probe: the socket that delivered this message. Pure stream deltas
+      // are skipped — they fire hundreds of times a second and would evict the
+      // structural entries this trace exists to keep.
+      if (msg.type !== 'content_delta' && msg.type !== 'content_start' && msg.type !== 'thinking') {
+        traceSession('ws.message', sessionId, { type: msg.type })
+      }
       if (msg.type === 'connected') {
         set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, () => ({
           connectionState: 'connected',
@@ -3950,13 +4060,26 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       subagentTab?.sourceSessionId && subagentTab.subagentToolUseId,
     )
     const isDirectAgentSession = isMemberSession || isSubagentSession
+    const serverAttachments = stripPreviewUrlsFromAttachments(attachments)
+    const outgoing: ClientMessage = {
+      type: 'user_message',
+      content,
+      attachments: serverAttachments,
+      ...(options?.sessionReferences?.length ? { sessionReferences: options.sessionReferences } : {}),
+    }
+    if (!isDirectAgentSession) {
+      // The server closes the socket (1009) for a frame over its input budget
+      // and the client only reconnects, so the turn vanished without a trace:
+      // no bubble, no error. Refuse it before the optimistic row and the title
+      // update, and say why where the reply would have appeared.
+      if (rejectOversizedMessage(sessionId, outgoing)) return false
+    }
     const hideDisplayContent = !isDirectAgentSession && options?.hideDisplayContent === true
     const userFacingContent =
       hideDisplayContent
         ? ''
         : options?.displayContent?.trim() || content.trim()
     const modelFacingContent = buildModelContent(content, attachments)
-    const serverAttachments = stripPreviewUrlsFromAttachments(attachments)
     const visibleAttachments = options?.displayAttachments ?? attachments
     const uiAttachments: UIAttachment[] | undefined =
       visibleAttachments && visibleAttachments.length > 0
@@ -4043,7 +4166,10 @@ export const useChatStore = create<ChatStore>((setState, get) => {
             scheduledTaskTurn: false,
             historyPageLoading: false,
             chatState: 'thinking',
+            pendingBackgroundContinue: [],
+            backgroundContinueNoticeId: undefined,
             isPreparingTurn: false,
+            promptSuggestion: null,
             historyMutationEpoch: (session.historyMutationEpoch ?? 0) + 1,
             elapsedSeconds: 0,
             replaceHistoryOnCompletion: false,
@@ -4070,7 +4196,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
                 {
                   id: nextId(),
                   type: 'error',
-                  message: err instanceof Error ? err.message : String(err),
+                  message: teamMemberMessageFailure(err),
                   code: 'TEAM_MEMBER_MESSAGE_FAILED',
                   timestamp: Date.now(),
                 },
@@ -4078,7 +4204,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
             })),
           }))
         })
-      return
+      return true
     }
 
     if (
@@ -4117,7 +4243,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
           }),
         }))
       })
-      return
+      return true
     }
 
     // 方案3: count this as a real user turn so rapid re-compaction (thrash)
@@ -4159,7 +4285,8 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       wsManager.send(sessionId, { type: 'set_coordinator_mode', enabled: false })
       wsManager.send(sessionId, { type: 'set_pipeline_mode', flavor: 'normal' })
     }
-    wsManager.send(sessionId, { type: 'user_message', content, attachments: serverAttachments, ...(options?.sessionReferences?.length ? { sessionReferences: options.sessionReferences } : {}) })
+    wsManager.send(sessionId, outgoing)
+    return true
   },
 
   respondToPermission: (sessionId, requestId, allowed, options) => {
@@ -4298,8 +4425,9 @@ export const useChatStore = create<ChatStore>((setState, get) => {
   },
 
   setSessionPermissionMode: (sessionId, mode) => {
-    const session = get().sessions[sessionId]
-    if (!session || session.chatState !== 'idle') return
+    // Allowed mid-turn: the server applies it to the running CLI, so tool calls
+    // after the switch use the new mode without interrupting the turn.
+    if (!get().sessions[sessionId]) return
     wsManager.send(sessionId, { type: 'set_permission_mode', mode })
   },
 
@@ -4405,10 +4533,11 @@ export const useChatStore = create<ChatStore>((setState, get) => {
             messages: markPendingToolUseMessagesStopped(stoppedMessages),
             streamingText: '',
             streamingToolInput: '',
+            chatState: 'idle',
+            promptSuggestion: null,
             activeToolUseId: null,
             activeToolName: null,
             activeThinkingId: null,
-            chatState: 'idle',
             pendingPermission: null,
             pendingPermissions: {},
             pendingComputerUsePermission: null,
@@ -4582,6 +4711,14 @@ export const useChatStore = create<ChatStore>((setState, get) => {
           controller.signal,
         )
         durableHistoryRows.set(sessionId, new WeakSet(uiMessages))
+        // TEMP probe: what the cold history fetch returned for this session,
+        // before it is merged into the store.
+        traceSession('history.fetched', sessionId, {
+          rows: uiMessages.length,
+          complete: historyComplete,
+          head: messageSnippet(uiMessages[0]),
+          headId: (uiMessages[0] as { id?: string } | undefined)?.id,
+        })
         let historyApplied = false
         set((state) => {
           if (!isCurrentHistoryLifecycle(sessionId, lifecycleGeneration)) return state
@@ -5512,8 +5649,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
     if (!session || !queuedMessage) return
 
     if (session.chatState === 'idle') {
-      get().removeQueuedUserMessage(sessionId, messageId)
-      get().sendMessage(
+      const sent = get().sendMessage(
         sessionId,
         queuedMessage.content,
         queuedMessage.attachments,
@@ -5523,8 +5659,15 @@ export const useChatStore = create<ChatStore>((setState, get) => {
           displayAttachments: queuedMessage.displayAttachments,
         },
       )
+      if (sent) get().removeQueuedUserMessage(sessionId, messageId)
       return
     }
+
+    const outgoing: ClientMessage = {
+      type: 'user_message', content: queuedMessage.content, attachments: queuedMessage.attachments,
+      ...(queuedMessage.sessionReferences?.length ? { sessionReferences: queuedMessage.sessionReferences } : {}),
+    }
+    if (rejectOversizedMessage(sessionId, outgoing)) return
 
     const now = Date.now()
     // 队列消息把当前回合切成两段，缓冲的思考必须先落进第一段，不能跟着新回合走。
@@ -5545,12 +5688,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       }),
     }))
 
-    wsManager.send(sessionId, {
-      type: 'user_message',
-      content: queuedMessage.content,
-      attachments: queuedMessage.attachments,
-      ...(queuedMessage.sessionReferences?.length ? { sessionReferences: queuedMessage.sessionReferences } : {}),
-    })
+    wsManager.send(sessionId, outgoing)
   },
 
   clearMessages: (sessionId) => {
@@ -5580,7 +5718,15 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       streamingFallback: null,
       replaceHistoryOnCompletion: false,
       queuedUserMessages: [],
+      pendingBackgroundContinue: [],
+      backgroundContinueNoticeId: undefined,
+      promptSuggestion: null,
     })) }))
+  },
+
+  dismissPromptSuggestion: (sessionId) => {
+    if (!get().sessions[sessionId]?.promptSuggestion) return
+    set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, () => ({ promptSuggestion: null })) }))
   },
 
   handleServerMessage: (sessionId, msg) => {
@@ -5943,7 +6089,16 @@ export const useChatStore = create<ChatStore>((setState, get) => {
           } else {
             nextMessages = dropTailCompactingCompactSummary(nextMessages)
           }
+          // Results handed back mid-turn ride the next attempt of that turn.
+          // An attempt that starts while idle was opened by the results alone.
+          const continueTasks = msg.attemptStart ? session.pendingBackgroundContinue ?? [] : []
+          const notice = continueTasks.length > 0 && session.chatState === 'idle'
+            ? buildBackgroundContinueMessage(continueTasks, Date.now())
+            : null
+          if (notice) nextMessages = [...nextMessages, notice]
           return {
+            ...(continueTasks.length > 0 ? { pendingBackgroundContinue: [] } : {}),
+            ...(notice ? { backgroundContinueNoticeId: notice.id } : {}),
             chatState: preserveStreamingTurn ? 'streaming' : msg.state,
             statusVerb: msg.state === 'idle'
               ? ''
@@ -5952,6 +6107,8 @@ export const useChatStore = create<ChatStore>((setState, get) => {
                 : '',
             ...(msg.state === 'idle' ? { activeThinkingId: null } : {}),
             ...(msg.state === 'idle' ? { apiRetry: null, streamingFallback: null } : {}),
+            // Any new model activity makes the previous turn's prediction stale.
+            ...(msg.state !== 'idle' && session.promptSuggestion ? { promptSuggestion: null } : {}),
             ...(msg.attemptStart ? {
               streamAttemptStartIndex: session.messages.length,
               streamAttemptStartResponseChars: session.streamingResponseChars,
@@ -6593,6 +6750,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
           apiRetry: null,
           streamingFallback: null,
           replaceHistoryOnCompletion: false,
+          backgroundContinueNoticeId: undefined,
           historyMutationEpoch: (current.historyMutationEpoch ?? 0) + 1,
         }))
         useTabStore.getState().updateTabStatus(sessionId, hasRunningBackgroundAgents ? 'running' : 'idle')
@@ -6621,12 +6779,26 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       }
 
       case 'user_message_replay': {
+        // TEMP probe: the only path that legitimately injects a foreign row —
+        // a cross-session delivery. `collaboration.sourceSessionId` names the
+        // sender, so this line proves whether the screenshot came from here.
+        traceSession('collaboration.replay', sessionId, {
+          sourceSessionId: msg.collaboration?.sourceSessionId,
+          text: msg.content.replace(/\s+/g, ' ').slice(0, 60),
+        })
         update((session) => {
           const pendingText = `${session.streamingText}${consumePendingDelta(sessionId)}`
-          const baseMessages = pendingText.trim()
-            ? appendAssistantTextMessage(session.messages, pendingText, Date.now())
+          // Another client's prompt reaches this one only as the CLI's attempt
+          // and then this replay, so a notice shown for that attempt was wrong.
+          const withoutNotice = session.backgroundContinueNoticeId
+            ? session.messages.filter((message) => message.id !== session.backgroundContinueNoticeId)
             : session.messages
+          const baseMessages = pendingText.trim()
+            ? appendAssistantTextMessage(withoutNotice, pendingText, Date.now())
+            : withoutNotice
           return {
+            pendingBackgroundContinue: [],
+            backgroundContinueNoticeId: undefined,
             messages: appendReplayedUserMessage(baseMessages, msg.content, Date.now(), msg.sessionReferences, msg.collaboration, msg.scheduledTask),
             // A consumed human guide belongs to the existing scheduled turn;
             // only a new ordinary turn restores ordinary reply notifications.
@@ -6637,6 +6809,10 @@ export const useChatStore = create<ChatStore>((setState, get) => {
             replaceHistoryOnCompletion: false,
             stopAllSubagentsRequested: false,
             historyMutationEpoch: (session.historyMutationEpoch ?? 0) + 1,
+            // Another client (phone, IM, a second window) started a turn: only
+            // its own socket gets the thinking status, so drop the stale
+            // prediction here rather than at the first streamed event.
+            promptSuggestion: null,
           }
         })
         break
@@ -6656,6 +6832,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
           type: 'error',
           message: msg.message,
           code: msg.code,
+          ...(msg.transcriptMessageId ? { transcriptMessageId: msg.transcriptMessageId } : {}),
           ...(msg.businessErrorCode ? { businessErrorCode: msg.businessErrorCode } : {}),
           timestamp: Date.now(),
         }
@@ -6809,6 +6986,14 @@ export const useChatStore = create<ChatStore>((setState, get) => {
         break
       case 'task_update':
         break
+      case 'prompt_suggestion': {
+        const session = get().sessions[sessionId]
+        // A late prediction for a turn the user already moved past is stale.
+        if (!session || session.chatState !== 'idle' || session.queuedUserMessages?.length) break
+        if (session.promptSuggestion === msg.suggestion) break
+        update(() => ({ promptSuggestion: msg.suggestion }))
+        break
+      }
       case 'session_title_updated':
         useSessionStore.getState().updateSessionTitle(msg.sessionId, msg.title)
         useTabStore.getState().updateTabTitle(msg.sessionId, msg.title)
@@ -7103,6 +7288,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
         ) {
           const data = msg.data as Record<string, unknown>
           useWorkflowStore.getState().handleTaskEvent(sessionId, 'task_notification', data)
+          const ownedBySubagent = Boolean(readNonEmptyString(data, 'owner_agent_id', 'ownerAgentId'))
           const targets = taskEventTargets(sessionId, data)
           if (targets.length === 0) {
             bufferUnroutedOwnedTaskEvent(sessionId, 'task_notification', data)
@@ -7133,8 +7319,20 @@ export const useChatStore = create<ChatStore>((setState, get) => {
               const accepted = Boolean(task)
               const stoppingBackgroundTaskIds = { ...session.stoppingBackgroundTaskIds }
               delete stoppingBackgroundTaskIds[taskEvent.taskId]
+              // A task owned by a subagent reports to that subagent, not here.
+              const continuesModel = task && !ownedBySubagent &&
+                taskResultReachesModel(task, taskEvent.status)
               return {
                 ...buildBackgroundTaskSessionUpdate(session, backgroundAgentTasks, task, now),
+                ...(continuesModel
+                  ? {
+                      pendingBackgroundContinue: [
+                        ...(session.pendingBackgroundContinue ?? [])
+                          .filter((pending) => pending.taskId !== task.taskId),
+                        { taskId: task.taskId, summary: taskEvent.summary ?? task.description ?? '' },
+                      ],
+                    }
+                  : {}),
                 stoppingBackgroundTaskIds,
                 agentTaskNotifications: {
                   ...session.agentTaskNotifications,
@@ -7479,6 +7677,56 @@ function shouldHideCommandMetadataContent(content: unknown): boolean {
   if (textBlocks.length === 0) return false
   if (!textBlocks.some(hasCommandMetadataTag)) return false
   return getCommandMetadataDisplayText(content) === null
+}
+
+type BackgroundContinueTask = { taskId: string; summary: string }
+
+const BACKGROUND_CONTINUE_SUMMARY_LIMIT = 160
+
+/**
+ * Whether the CLI hands this terminal result back to the model. stopTask
+ * suppresses a stopped shell's notification and only emits the SDK bookend,
+ * so no turn follows it; a stopped agent still reports its partial result.
+ */
+function taskResultReachesModel(
+  task: BackgroundAgentTask,
+  status: BackgroundAgentTask['status'],
+): boolean {
+  if (status === 'completed' || status === 'failed') return true
+  return status === 'stopped' &&
+    (task.taskType === 'local_agent' || task.taskType === 'remote_agent')
+}
+
+function buildBackgroundContinueNotice(summaries: string[]): string {
+  const unique = [...new Set(summaries.map((summary) => {
+    const trimmed = summary.trim()
+    return trimmed.length > BACKGROUND_CONTINUE_SUMMARY_LIMIT
+      ? `${trimmed.slice(0, BACKGROUND_CONTINUE_SUMMARY_LIMIT)}…`
+      : trimmed
+  }).filter(Boolean))]
+  return unique.length > 0
+    ? t('chat.backgroundContinue', { summary: unique.join(' · ') })
+    : t('chat.backgroundContinueGeneric')
+}
+
+/**
+ * The line shown where a turn opened by background task results starts.
+ * Without it the reply looks like the model woke up on its own long after the
+ * chat went idle. The task ids match the live line to its transcript copy.
+ */
+function buildBackgroundContinueMessage(
+  tasks: BackgroundContinueTask[],
+  timestamp: number,
+  transcriptMessageId?: string,
+): Extract<UIMessage, { type: 'system' }> {
+  return {
+    id: transcriptMessageId ?? nextId(),
+    type: 'system',
+    content: buildBackgroundContinueNotice(tasks.map((task) => task.summary)),
+    backgroundContinueTaskIds: tasks.map((task) => task.taskId),
+    ...(transcriptMessageId ? { transcriptMessageId } : {}),
+    timestamp,
+  }
 }
 
 function isTaskNotificationContent(content: unknown): boolean {
@@ -9203,6 +9451,24 @@ export function mapHistoryMessagesToUiMessages(
       })
       continue
     }
+    if (
+      msg.type === 'system' &&
+      msg.content && typeof msg.content === 'object' &&
+      (msg.content as { subtype?: unknown }).subtype === 'background_continue'
+    ) {
+      // The server projects the <task-notification> prompt that opened this
+      // turn; its XML never reaches the UI.
+      const notifications = (msg.content as { notifications?: unknown }).notifications
+      const tasks = (Array.isArray(notifications) ? notifications : []).flatMap((item) => {
+        if (!item || typeof item !== 'object') return []
+        const { taskId, summary } = item as { taskId?: unknown; summary?: unknown }
+        return typeof taskId === 'string' && taskId
+          ? [{ taskId, summary: typeof summary === 'string' ? summary : '' }]
+          : []
+      })
+      uiMessages.push(buildBackgroundContinueMessage(tasks, timestamp, msg.id || undefined))
+      continue
+    }
     if (msg.type === 'system' && typeof msg.content === 'string') {
       if (msg.content.trim() === 'Conversation compacted' || msg.content.trim() === 'Context compacted') {
         const compactMessages = appendOrUpdateTailCompactSummary(
@@ -9296,6 +9562,27 @@ export function mapHistoryMessagesToUiMessages(
         ...(parsed.attachments ? { attachments: parsed.attachments } : {}),
         timestamp,
       })
+      continue
+    }
+    if (msg.type === 'assistant' && (msg.isApiErrorMessage || msg.error)) {
+      const message = typeof msg.content === 'string'
+        ? msg.content
+        : Array.isArray(msg.content)
+          ? msg.content.flatMap((block: unknown) => {
+              if (!block || typeof block !== 'object') return []
+              const value = block as { type?: unknown; text?: unknown }
+              return value.type === 'text' && typeof value.text === 'string' ? [value.text] : []
+            }).join('\n')
+          : ''
+      if (message.trim()) {
+        uiMessages.push({
+          id: msg.id || nextId(), type: 'error', message,
+          code: msg.error || 'API_ERROR',
+          ...(msg.id ? { transcriptMessageId: msg.id } : {}),
+          ...(msg.businessErrorCode ? { businessErrorCode: msg.businessErrorCode } : {}),
+          timestamp,
+        })
+      }
       continue
     }
     if (msg.type === 'assistant' && typeof msg.content === 'string') {

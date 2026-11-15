@@ -13,7 +13,6 @@ import * as path from 'node:path'
 import { WsBridge, type ServerMessage, type AttachmentRef } from '../common/ws-bridge.js'
 import { MessageDedup } from '../common/message-dedup.js'
 import { StreamingCard } from './streaming-card.js'
-import { enqueue } from '../common/chat-queue.js'
 import { loadConfig } from '../common/config.js'
 import {
   formatImHelp,
@@ -27,7 +26,7 @@ import {
   type PermissionDecision,
 } from '../common/permission.js'
 import { SessionStore } from '../common/session-store.js'
-import { syncImPermissionState } from '../common/permission-sync.js'
+import { deliverImPermissionPrompt, syncImPermissionState } from '../common/permission-sync.js'
 import { SessionSelectionController } from '../common/session-selection.js'
 import { type RecentProject } from '../common/http-client.js'
 import { createAdapterClient } from '../common/adapter-client.js'
@@ -76,7 +75,7 @@ const larkClient = new Lark.Client({
 const bridge = new WsBridge(config.serverUrl, 'feishu')
 const dedup = new MessageDedup()
 const sessionStore = new SessionStore()
-const { httpClient, defaultWorkDir } = createAdapterClient(config, config.feishu)
+const { httpClient, defaultWorkDir, enqueue } = createAdapterClient(config, config.feishu)
 
 // Attachment plumbing — shared by inbound (download) and outbound (upload) paths.
 const attachmentStore = new AttachmentStore()
@@ -835,25 +834,23 @@ async function handleServerMessage(chatId: string, msg: ServerMessage): Promise<
       break
 
     case 'permission_request': {
-      runtime.pendingPermissionCount += 1
-      runtime.state = 'permission_pending'
-      const pending = pendingPermissions.get(chatId) ?? new Set<string>()
-      pending.add(msg.requestId)
-      pendingPermissions.set(chatId, pending)
-      const stored = sessionStore.get(chatId)
-      const card = buildPermissionCard(
-        msg.toolName,
-        msg.input,
-        msg.requestId,
-        stored?.workDir,
-      )
-      const cardId = await sendCard(chatId, card)
-      if (!cardId) {
-        await sendText(
-          chatId,
-          `${formatPermissionRequest(msg.toolName, msg.input, msg.requestId)}\n\n${formatPermissionInstructions(msg.requestId)}`,
+      await deliverImPermissionPrompt(chatId, msg.requestId, runtime, pendingPermissions, async (isCurrent) => {
+        const stored = sessionStore.get(chatId)
+        const card = buildPermissionCard(
+          msg.toolName,
+          msg.input,
+          msg.requestId,
+          stored?.workDir,
         )
-      }
+        const cardId = await sendCard(chatId, card)
+        if (!cardId && isCurrent()) {
+          const messageId = await sendText(
+            chatId,
+            `${formatPermissionRequest(msg.toolName, msg.input, msg.requestId)}\n\n${formatPermissionInstructions(msg.requestId)}`,
+          )
+          if (!messageId) throw new Error('Failed to deliver Feishu permission prompt')
+        }
+      })
       break
     }
 
@@ -1184,6 +1181,9 @@ async function handleCardAction(data: any): Promise<any> {
   const action = event.action?.value?.action
   const chatId = event.context?.open_chat_id
   if (!chatId) return
+  if (!event.operator?.open_id || !isAllowedUser('feishu', event.operator.open_id)) {
+    return { toast: { type: 'warning', content: '未授权' } }
+  }
 
   if (action === 'permit') {
     const requestId = event.action?.value?.requestId

@@ -85,6 +85,7 @@ const CONTAINERS: Record<string, Classification> = {
   runtimeConfigResults: { kind: 'cleared' },
   observedTerminalTasks: { kind: 'cleared' },
   recentThinkingIncompatNotifications: { kind: 'cleared' },
+  userAdmissionQueues: { kind: 'cleared' },
 
   activeSessions: {
     kind: 'not-session-state',

@@ -13,9 +13,17 @@ import { browserHost } from '../lib/desktopHost/browserHost'
 import { h5AccessApi } from '../api/h5Access'
 import { settingsApi } from '../api/settings'
 
-const MOCK_DELETE_PROVIDER = vi.fn()
-const MOCK_GET_SETTINGS = vi.fn()
-const MOCK_UPDATE_SETTINGS = vi.fn()
+// Hoisted like the other mocks: a store that imports the providers API at load
+// time runs the module factory below before plain top-level consts exist.
+const { MOCK_DELETE_PROVIDER, MOCK_GET_SETTINGS, MOCK_UPDATE_SETTINGS, MOCK_MAGPIE } = vi.hoisted(() => ({
+  MOCK_DELETE_PROVIDER: vi.fn(),
+  MOCK_GET_SETTINGS: vi.fn(),
+  MOCK_UPDATE_SETTINGS: vi.fn(),
+  MOCK_MAGPIE: vi.fn().mockResolvedValue({
+    status: { installed: false, running: false, baseUrl: 'http://127.0.0.1:3425' },
+    models: null,
+  }),
+}))
 const desktopNotificationsMock = vi.hoisted(() => ({
   getDesktopNotificationPermission: vi.fn(),
   getDesktopNotificationPlatform: vi.fn(),
@@ -45,7 +53,7 @@ const providerStoreState = {
   hasLoadedProviders: true,
   presets: [] as ProviderPreset[],
   isLoading: false,
-  fetchProviders: vi.fn(),
+  fetchProviders: vi.fn().mockResolvedValue(undefined),
   deleteProvider: MOCK_DELETE_PROVIDER,
   activateProvider: vi.fn(),
   activateOfficial: vi.fn(),
@@ -86,13 +94,14 @@ vi.mock('../api/agents', () => ({
 }))
 
 vi.mock('../stores/providerStore', () => ({
-  useProviderStore: () => providerStoreState,
+  useProviderStore: Object.assign(() => providerStoreState, { getState: () => providerStoreState }),
 }))
 
 vi.mock('../api/providers', () => ({
   providersApi: {
     getSettings: MOCK_GET_SETTINGS,
     updateSettings: MOCK_UPDATE_SETTINGS,
+    magpie: MOCK_MAGPIE,
   },
 }))
 
@@ -236,7 +245,7 @@ describe('Settings > General tab', () => {
     providerStoreState.hasLoadedProviders = true
     providerStoreState.presets = []
     providerStoreState.isLoading = false
-    providerStoreState.fetchProviders = vi.fn()
+    providerStoreState.fetchProviders = vi.fn().mockResolvedValue(undefined)
     providerStoreState.activateProvider = vi.fn()
     providerStoreState.activateOfficial = vi.fn()
     providerStoreState.testProvider = vi.fn()
@@ -1622,6 +1631,78 @@ describe('Settings > General tab', () => {
     expect(screen.getByLabelText('Enable Auto-dream')).toBeChecked()
   })
 
+  it('keeps next-message suggestions off by default and explains the token cost before enabling them', async () => {
+    useSettingsStore.setState({ nextPromptSuggestionsEnabled: false })
+    const updateUser = vi.spyOn(settingsApi, 'updateUser').mockResolvedValue({ ok: true })
+    try {
+      render(<Settings />)
+      fireEvent.click(screen.getByText('General'))
+
+      const agentSection = screen.getByRole('heading', { name: 'Agent preferences' }).closest('section')!
+      const toggle = within(agentSection).getByRole('switch', { name: 'Next-message suggestions' })
+      expect(toggle).not.toBeChecked()
+
+      // Cancel leaves it off and saves nothing.
+      fireEvent.click(toggle)
+      let dialog = screen.getByRole('dialog', { name: 'Turn on next-message suggestions?' })
+      expect(within(dialog).getByText(/uses additional tokens on every turn/i)).toBeInTheDocument()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+      expect(screen.queryByRole('dialog', { name: 'Turn on next-message suggestions?' })).not.toBeInTheDocument()
+      expect(updateUser).not.toHaveBeenCalled()
+      expect(toggle).not.toBeChecked()
+
+      fireEvent.click(toggle)
+      dialog = screen.getByRole('dialog', { name: 'Turn on next-message suggestions?' })
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Turn on' }))
+      })
+      expect(updateUser).toHaveBeenCalledWith({ nextPromptSuggestionsEnabled: true })
+      expect(useSettingsStore.getState().nextPromptSuggestionsEnabled).toBe(true)
+      expect(within(agentSection).getByRole('switch', { name: 'Next-message suggestions' })).toBeChecked()
+
+      // Turning it off needs no confirmation.
+      await act(async () => {
+        fireEvent.click(within(agentSection).getByRole('switch', { name: 'Next-message suggestions' }))
+      })
+      expect(screen.queryByRole('dialog', { name: 'Turn on next-message suggestions?' })).not.toBeInTheDocument()
+      expect(updateUser).toHaveBeenLastCalledWith({ nextPromptSuggestionsEnabled: false })
+      expect(useSettingsStore.getState().nextPromptSuggestionsEnabled).toBe(false)
+    } finally {
+      updateUser.mockRestore()
+      useSettingsStore.setState({ nextPromptSuggestionsEnabled: false })
+    }
+  })
+
+  it('keeps next-message suggestions off and reports it when saving the choice fails', async () => {
+    useSettingsStore.setState({ nextPromptSuggestionsEnabled: false })
+    const updateUser = vi.spyOn(settingsApi, 'updateUser').mockRejectedValue(new Error('disk full'))
+    try {
+      render(<Settings />)
+      fireEvent.click(screen.getByText('General'))
+      const agentSection = screen.getByRole('heading', { name: 'Agent preferences' }).closest('section')!
+
+      fireEvent.click(within(agentSection).getByRole('switch', { name: 'Next-message suggestions' }))
+      const dialog = screen.getByRole('dialog', { name: 'Turn on next-message suggestions?' })
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Turn on' }))
+      })
+      expect(useSettingsStore.getState().nextPromptSuggestionsEnabled).toBe(false)
+      expect(within(agentSection).getByRole('switch', { name: 'Next-message suggestions' })).not.toBeChecked()
+      expect(useUIStore.getState().toasts.at(-1)).toMatchObject({ type: 'error' })
+
+      // Turning it off can fail too: the switch stays on and the user is told.
+      useSettingsStore.setState({ nextPromptSuggestionsEnabled: true })
+      await act(async () => {
+        fireEvent.click(within(agentSection).getByRole('switch', { name: 'Next-message suggestions' }))
+      })
+      expect(useSettingsStore.getState().nextPromptSuggestionsEnabled).toBe(true)
+      expect(useUIStore.getState().toasts.at(-1)).toMatchObject({ type: 'error' })
+    } finally {
+      updateUser.mockRestore()
+      useSettingsStore.setState({ nextPromptSuggestionsEnabled: false })
+    }
+  })
+
   it('lets the user disable Auto-dream without a confirmation dialog', async () => {
     useSettingsStore.setState({ autoDreamEnabled: true })
     render(<Settings />)
@@ -2515,6 +2596,7 @@ describe('Settings > Providers tab', () => {
     expect(card.className).toContain('shadow-[0_0_0_3px_var(--color-brand-soft)]')
     expect(card.className).not.toContain('border-[var(--color-border-focus)]')
     // Only the default card carries the accent.
+    fireEvent.click(screen.getByRole('tab', { name: /Official sign-in/ }))
     const other = screen.getByTestId('claude-official-provider')
     expect(other.className).not.toContain('border-[var(--color-primary-fixed-dim)]')
   })
@@ -2545,6 +2627,9 @@ describe('Settings > Providers tab', () => {
     providerStoreState.hasLoadedProviders = true
 
     render(<Settings />)
+    // A fresh install opens on API Key; Claude Official is only the fallback default.
+    expect(screen.queryByTestId('claude-official-login')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: /Official sign-in/ }))
 
     expect(screen.getByTestId('claude-official-login')).toBeInTheDocument()
   })
@@ -2575,15 +2660,17 @@ describe('Settings > Providers tab', () => {
     expect(screen.getByTestId('grok-official-login')).toBeInTheDocument()
   })
 
-  it('renders saved and official providers in the stored sortable order', () => {
+  const sortableRows = () => screen.getAllByRole('button', { name: 'Drag to reorder' })
+    .map((handle) => handle.closest('[data-testid]')?.getAttribute('data-testid'))
+
+  it('renders each tab in the stored sortable order', () => {
     providerStoreState.providerOrder = ['provider-1', 'openai-official', 'claude-official']
 
     render(<Settings />)
 
-    const rows = screen.getAllByRole('button', { name: 'Drag to reorder' })
-      .map((handle) => handle.closest('[data-testid]')?.getAttribute('data-testid'))
-    expect(rows).toEqual([
-      'provider-provider-1',
+    expect(sortableRows()).toEqual(['provider-provider-1'])
+    fireEvent.click(screen.getByRole('tab', { name: /Official sign-in/ }))
+    expect(sortableRows()).toEqual([
       'openai-official-provider',
       'claude-official-provider',
       'grok-official-provider',
@@ -2596,10 +2683,9 @@ describe('Settings > Providers tab', () => {
 
     render(<Settings />)
 
-    const rows = screen.getAllByRole('button', { name: 'Drag to reorder' })
-      .map((handle) => handle.closest('[data-testid]')?.getAttribute('data-testid'))
-    expect(rows).toEqual([
-      'provider-provider-1',
+    expect(sortableRows()).toEqual(['provider-provider-1'])
+    fireEvent.click(screen.getByRole('tab', { name: /Official sign-in/ }))
+    expect(sortableRows()).toEqual([
       'claude-official-provider',
       'openai-official-provider',
       'grok-official-provider',
@@ -3193,12 +3279,11 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: /Save|Add/i }))
 
     await waitFor(() => {
-      expect(MOCK_UPDATE_SETTINGS).toHaveBeenCalled()
+      expect(providerStoreState.createProvider).toHaveBeenCalled()
     })
-    const saved = MOCK_UPDATE_SETTINGS.mock.calls.at(-1)?.[0] as Record<string, unknown>
-    expect(saved).not.toHaveProperty('model')
-    expect(saved).not.toHaveProperty('modelContext')
-    expect(saved).toMatchObject({ futureSetting: true, env: expect.objectContaining({ EXISTING_ENV: '1' }) })
+    // A new provider is not the default yet, so its preview is not written over
+    // the settings the current default's sessions read (#1806).
+    expect(MOCK_UPDATE_SETTINGS).not.toHaveBeenCalled()
   })
 
   it('defaults Tool Search off with a visible toggle', async () => {
@@ -3378,12 +3463,9 @@ describe('Settings > Providers tab', () => {
         toolSearchEnabled: true,
       }))
     })
-    expect(MOCK_UPDATE_SETTINGS).toHaveBeenCalledWith(expect.objectContaining({
-      env: expect.objectContaining({
-        EXISTING_ENV: '1',
-        ENABLE_TOOL_SEARCH: 'true',
-      }),
-    }))
+    // The flag is saved on the provider; the server writes ENABLE_TOOL_SEARCH
+    // when it becomes the default, not when it is added (#1806).
+    expect(MOCK_UPDATE_SETTINGS).not.toHaveBeenCalled()
   })
 
   it('defaults experimental beta headers on and persists a provider disable', async () => {
@@ -3452,12 +3534,8 @@ describe('Settings > Providers tab', () => {
         disableExperimentalBetas: true,
       }))
     })
-    expect(MOCK_UPDATE_SETTINGS).toHaveBeenCalledWith(expect.objectContaining({
-      env: expect.objectContaining({
-        EXISTING_ENV: '1',
-        CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
-      }),
-    }))
+    // Saved on the provider; written to settings when it becomes the default (#1806).
+    expect(MOCK_UPDATE_SETTINGS).not.toHaveBeenCalled()
   })
 
   it('saves 1M model declarations for the main and role mappings', async () => {
@@ -3532,15 +3610,9 @@ describe('Settings > Providers tab', () => {
         },
       }))
     })
-    expect(MOCK_UPDATE_SETTINGS).toHaveBeenCalledWith(expect.objectContaining({
-      env: expect.objectContaining({
-        ANTHROPIC_MODEL: 'claude-sonnet-4-6[1m]',
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5',
-        ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-4-6[1m]',
-        ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-7',
-        CLAUDE_CODE_MODEL_CONTEXT_WINDOWS: '{"claude-sonnet-4-6":1000000}',
-      }),
-    }))
+    // The preview above shows the [1m] env the server writes once this provider
+    // is the default; adding it leaves the current default's settings alone (#1806).
+    expect(MOCK_UPDATE_SETTINGS).not.toHaveBeenCalled()
   })
 
   it('shows the API key link and promotional copy for a provider preset', () => {
@@ -3637,15 +3709,20 @@ describe('Settings > Providers tab', () => {
       .toHaveAttribute('placeholder', 'Same as main')
 
     fireEvent.click(within(dialog).getByRole('checkbox', { name: /1M support: fable/i }))
+    await waitFor(() => {
+      expect(dialog.querySelector('textarea')?.value).toContain('"ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5[1m]"')
+    })
     fireEvent.click(within(dialog).getByRole('button', { name: /Save|Add|保存|添加/i }))
 
     await waitFor(() => {
-      expect(MOCK_UPDATE_SETTINGS).toHaveBeenCalledWith(expect.objectContaining({
-        env: expect.objectContaining({
-          ANTHROPIC_DEFAULT_FABLE_MODEL: 'claude-fable-5[1m]',
-        }),
+      expect(providerStoreState.createProvider).toHaveBeenCalledWith(expect.objectContaining({
+        models: expect.objectContaining({ fable: 'claude-fable-5' }),
+        model1mSupport: expect.objectContaining({ fable: true }),
       }))
     })
+    // The server writes ANTHROPIC_DEFAULT_FABLE_MODEL once this provider is the
+    // default; adding it leaves the current default's settings alone (#1806).
+    expect(MOCK_UPDATE_SETTINGS).not.toHaveBeenCalled()
   })
 
   it('hides the API key by default and reveals it from the eye button', () => {

@@ -309,7 +309,7 @@ describe('ConversationService', () => {
       // timer too, and would otherwise wait out the full overall cap. The CLI
       // defaults this to 0 (disabled), so the desktop MUST inject it or the
       // fast-fail silently never arms.
-      expect(env.CLAUDE_STREAM_MAX_THINKING_DURATION_MS).toBe('300000')
+      expect(env.CLAUDE_STREAM_MAX_THINKING_DURATION_MS).toBe('1200000')
       // Tool JSON has its own inactivity budget. Progress resets it, while the
       // overall response cap still bounds a stream that trickles forever. It
       // follows the request timeout (default 30 min), not a fixed 120s: a long

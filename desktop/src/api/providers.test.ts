@@ -86,6 +86,7 @@ describe('providersApi.fetchModels', () => {
 })
 
 const apiGetMock = vi.hoisted(() => vi.fn())
+const apiPutMock = vi.hoisted(() => vi.fn())
 
 // Partial mock: keep the real module so the fetchModels tests above can use
 // setBaseUrl/getDefaultBaseUrl, and only intercept api.get for authStatus.
@@ -93,7 +94,7 @@ vi.mock('./client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./client')>()
   return {
     ...actual,
-    api: { ...actual.api, get: apiGetMock },
+    api: { ...actual.api, get: apiGetMock, put: apiPutMock },
   }
 })
 
@@ -115,5 +116,17 @@ describe('providersApi.authStatus', () => {
   it('encodes a saved provider id into the query', () => {
     providersApi.authStatus('team a/b&c')
     expect(apiGetMock).toHaveBeenCalledWith('/api/providers/auth-status?providerId=team%20a%2Fb%26c')
+  })
+
+  it('sends settings ownership as an encoded query, leaving the settings payload unchanged', () => {
+    const settings = { futureSetting: true }
+    providersApi.updateSettings(settings, 'team a/b&c')
+    expect(apiPutMock).toHaveBeenCalledWith('/api/providers/settings?expectedActiveProviderId=team%20a%2Fb%26c', settings)
+    expect(settings).toEqual({ futureSetting: true })
+  })
+
+  it('preserves the unconditional settings API for callers without an owner', () => {
+    providersApi.updateSettings({ futureSetting: true })
+    expect(apiPutMock).toHaveBeenCalledWith('/api/providers/settings', { futureSetting: true })
   })
 })

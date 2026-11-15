@@ -217,7 +217,7 @@ export type ServerMessage =
       retryDelayMs?: number
       errorMessage?: string
     }
-  | { type: 'error'; message: string; code: string; retryable?: boolean; businessErrorCode?: string }
+  | { type: 'error'; message: string; code: string; retryable?: boolean; businessErrorCode?: string; transcriptMessageId?: string }
   | { type: 'background_task_stop_failed'; taskId: string; message: string }
   | { type: 'background_task_stopped'; taskId: string }
   | { type: 'system_notification'; subtype: string; message?: string; data?: unknown }
@@ -244,6 +244,8 @@ export type ServerMessage =
       kind: 'thinking_incompatible'
       reason?: string
     }
+  /** Predicted next user prompt for the composer; sent after a turn ends. */
+  | { type: 'prompt_suggestion'; suggestion: string }
 
 export type CompactProgress = {
   /** Cumulative summary characters for the current compaction attempt; restarts from 0 on a CLI retry. */
@@ -454,7 +456,16 @@ export type UIMessage =
     }
   | { id: string; type: 'tool_result'; toolUseId: string; originalToolUseId?: string; content: unknown; isError: boolean; timestamp: number; parentToolUseId?: string }
   | { id: string; type: 'background_task'; task: BackgroundAgentTask; timestamp: number }
-  | { id: string; type: 'system'; content: string; generationStopped?: boolean; transcriptMessageId?: string; timestamp: number }
+  | {
+      id: string
+      type: 'system'
+      content: string
+      generationStopped?: boolean
+      /** Background tasks whose results started this turn without a user send. */
+      backgroundContinueTaskIds?: string[]
+      transcriptMessageId?: string
+      timestamp: number
+    }
   | {
       id: string
       type: 'compact_summary'
@@ -500,5 +511,5 @@ export type UIMessage =
       displayName?: string
       timestamp: number
     }
-  | { id: string; type: 'error'; message: string; code: string; businessErrorCode?: string; timestamp: number }
+  | { id: string; type: 'error'; message: string; code: string; businessErrorCode?: string; transcriptMessageId?: string; timestamp: number }
   | { id: string; type: 'task_summary'; tasks: TaskSummaryItem[]; timestamp: number }

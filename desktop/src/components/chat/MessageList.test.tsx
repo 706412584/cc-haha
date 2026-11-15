@@ -6,6 +6,7 @@ import {
   MessageList,
   buildRenderModel,
   buildTurnRailPositions,
+  buildUniqueRenderItemKeys,
   buildVirtualItemOffsets,
   estimateRenderItemHeight,
   getActiveConversationNavigationItemId,
@@ -22,6 +23,7 @@ import {
   type VirtualRenderItemMetric,
 } from './virtualHeightCache'
 import { setComposerText, stubRangeGeometry } from './composerTestUtils'
+import { resetSessionTrace, type SessionTraceEntry } from '../../lib/sessionTrace'
 import { relativizeWorkspacePath } from './CurrentTurnChangeCard'
 import { sessionsApi } from '../../api/sessions'
 import { ApiError } from '../../api/client'
@@ -329,6 +331,7 @@ async function expandChangedFileCards() {
 
 describe('MessageList nested tool calls', () => {
   beforeEach(() => {
+    resetSessionTrace()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     resetSessionScrollSnapshotsForTests()
@@ -753,6 +756,7 @@ describe('MessageList nested tool calls', () => {
     Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 500 })
     Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => scrollTop, set: (value) => { scrollTop = value } })
     await waitForProgrammaticScrollReset()
+    if (!following) fireEvent.wheel(scroller, { deltaY: -100 })
     fireEvent.scroll(scroller)
     const item = container.querySelector('[data-virtual-message-item]') as HTMLElement
     const observer = observers.find(o => o.targets.includes(item))!
@@ -763,6 +767,56 @@ describe('MessageList nested tool calls', () => {
     act(() => observer.callback([{ target: item, borderBoxSize: [{ blockSize: oldHeight + 600, inlineSize: 800 }], contentRect: { height: oldHeight + 600 } } as unknown as ResizeObserverEntry], {} as ResizeObserver))
     await waitForProgrammaticScrollReset()
     expect(scrollTop).toBe(following ? scrollHeight - 500 : 7000)
+    dropSession(sessionId)
+  })
+
+  it('records bounded per-frame virtual row observer and flushSync metrics', async () => {
+    const sessionId = 'layout-trace-metrics'
+    const observers: Array<{ callback: ResizeObserverCallback; targets: Element[] }> = []
+    class TestResizeObserver {
+      targets: Element[] = []
+      observe = (target: Element) => { this.targets.push(target) }
+      unobserve = vi.fn()
+      disconnect = vi.fn()
+      constructor(callback: ResizeObserverCallback) { observers.push({ callback, targets: this.targets }) }
+    }
+    vi.stubGlobal('ResizeObserver', TestResizeObserver)
+    dropSession(sessionId)
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: makeSessionState({
+          messages: Array.from({ length: 220 }, (_, index) => ({
+            id: `layout-trace-row-${index}`,
+            type: 'assistant_text' as const,
+            content: `layout trace line ${index}`,
+            timestamp: index,
+          })),
+        }),
+      },
+    })
+    const { container } = render(<MessageList sessionId={sessionId} />)
+    const item = container.querySelector<HTMLElement>('[data-virtual-message-item]')!
+    const observer = observers.find(({ targets }) => targets.includes(item))!
+    const before = getHeightsForSession(sessionId).get(item.dataset.virtualMessageItem!) ?? 112
+
+    act(() => {
+      observer.callback([
+        { target: item, borderBoxSize: [{ blockSize: before + 20, inlineSize: 800 }], contentRect: { height: before + 20 } },
+        { target: item, borderBoxSize: [{ blockSize: before + 21, inlineSize: 800 }], contentRect: { height: before + 21 } },
+      ] as unknown as ResizeObserverEntry[], {} as ResizeObserver)
+    })
+    const trace = window as typeof window & { __ccSessionTrace?: SessionTraceEntry[] }
+    await waitFor(() => expect(trace.__ccSessionTrace?.some((entry) => entry.kind === 'layout.frame')).toBe(true))
+
+    const frame = trace.__ccSessionTrace?.find((entry) => entry.kind === 'layout.frame' && entry.sessionId === sessionId)
+    expect(frame?.detail).toMatchObject({
+      rowObserverCallbacks: 1,
+      rowObserverEntries: 2,
+      heightCacheChanges: 1,
+      flushSyncCount: 1,
+    })
+    expect(typeof frame?.detail?.flushSyncTotalMs).toBe('number')
+    expect(typeof frame?.detail?.flushSyncMaxMs).toBe('number')
     dropSession(sessionId)
   })
 
@@ -1216,6 +1270,7 @@ describe('MessageList nested tool calls', () => {
       set: (value: number) => { scrollTop = value },
     })
 
+    fireEvent.pointerDown(scroller)
     fireEvent.scroll(scroller)
     expect(screen.getByRole('button', { name: /Turn 1 of 4: First prompt/ }).getAttribute('aria-current')).toBe('location')
 
@@ -4818,6 +4873,7 @@ describe('MessageList nested tool calls', () => {
     })
     await waitForProgrammaticScrollReset()
     await act(async () => {
+      if (!following) fireEvent.wheel(scroller, { deltaY: -100 })
       fireEvent.scroll(scroller)
     })
     expect(container.querySelector(`[data-virtual-message-item="live-${following ? 219 : 110}"]`)).not.toBeNull()
@@ -5607,7 +5663,7 @@ describe('MessageList nested tool calls', () => {
     expect(screen.queryByRole('button', { name: 'Latest' })).toBeNull()
   })
 
-  it('does not follow resize for stale permission state without a pending file permission', async () => {
+  it('keeps following the bottom with stale permission state and no pending file permission', async () => {
     let resizeCallback: ResizeObserverCallback | null = null
     class TestResizeObserver {
       observe = vi.fn()
@@ -5661,7 +5717,8 @@ describe('MessageList nested tool calls', () => {
       } as ResizeObserverEntry], {} as ResizeObserver)
     })
 
-    expect(scrollTop).toBe(600)
+    await waitForProgrammaticScrollReset()
+    expect(scrollTop).toBe(1000)
   })
 
   it('preserves upward wheel and keyboard intent while a pending file permission preview resizes', async () => {
@@ -5803,6 +5860,7 @@ describe('MessageList nested tool calls', () => {
     })
 
     scrollTop = 200
+    fireEvent.pointerDown(scroller)
     fireEvent.scroll(scroller)
     expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
 
@@ -5977,12 +6035,16 @@ describe('MessageList nested tool calls', () => {
       expect(resizeCallback).not.toBeNull()
     })
 
+    await waitForProgrammaticScrollReset()
+    fireEvent.pointerDown(scroller)
+    fireEvent.scroll(scroller)
     scrollIntoView.mockClear()
     scrollHeight = 1600
     act(() => {
       resizeCallback?.([], {} as ResizeObserver)
     })
 
+    await waitForProgrammaticScrollReset()
     expect(scrollIntoView).not.toHaveBeenCalled()
     expect(scrollTop).toBe(180)
   })
@@ -6059,21 +6121,26 @@ describe('MessageList nested tool calls', () => {
       expect(resizeCallback).not.toBeNull()
     })
 
+    await waitForProgrammaticScrollReset()
+    fireEvent.pointerDown(scroller)
+    fireEvent.scroll(scroller)
     scrollIntoView.mockClear()
     scrollHeight = 2100
     act(() => {
       resizeCallback?.([], {} as ResizeObserver)
     })
 
+    await waitForProgrammaticScrollReset()
     expect(scrollIntoView).not.toHaveBeenCalled()
     expect(scrollTop).toBe(260)
   })
 
-  it.each([['switch', true], ['remount', true], ['switch', false], ['remount', false]] as const)('restores the visible virtual row and pixel offset after %s (evicted=%s) and late measurements (#1704)', async (mode, evicted) => {
-    const sessionA = `viewport-anchor-${mode}-${evicted}`
+  it.each([['switch', true, true], ['remount', true, true], ['switch', false, true], ['remount', false, true], ['switch', false, false], ['remount', false, false]] as const)('restores the visible row and pixel offset after %s (evicted=%s, virtualized=%s) and late measurements (#1704, #1751)', async (mode, evicted, virtualized) => {
+    const sessionA = `viewport-anchor-${mode}-${evicted}-${virtualized}`
     const sessionB = `${sessionA}-other`
     dropSession(sessionA)
-    const messages: UIMessage[] = Array.from({ length: 180 }, (_, index) => ({
+    const anchorIndex = virtualized ? 80 : 12
+    const messages: UIMessage[] = Array.from({ length: virtualized ? 180 : 28 }, (_, index) => ({
       id: `anchor-row-${index}`, type: 'assistant_text', content: `Reply ${index}`, timestamp: index,
     }))
     // Model the DOM's spacer + mounted rows, independently of virtual offsets.
@@ -6126,18 +6193,19 @@ describe('MessageList nested tool calls', () => {
     }
     await waitForProgrammaticScrollReset()
     fireEvent.wheel(scroller(), { deltaY: -100 })
-    scroller().scrollTop = 16 + [...heights.values()].slice(0, 80).reduce((sum, height) => sum + height, 0) + 75.25
+    scroller().scrollTop = 16 + [...heights.values()].slice(0, anchorIndex).reduce((sum, height) => sum + height, 0) + 75.25
     fireEvent.scroll(scroller())
     let before = visibleAnchor()
-    expect(before).toEqual({ key: 'anchor-row-80', offset: -75.25 })
-    expect(view.container.querySelectorAll('[data-virtual-message-item]').length).toBeLessThan(180)
+    expect(before).toEqual({ key: `anchor-row-${anchorIndex}`, offset: -75.25 })
+    expect(Boolean(view.container.querySelector('[data-virtual-message-item]'))).toBe(virtualized)
+    expect(view.container.querySelectorAll('[data-chat-render-item-key]').length).toBeLessThanOrEqual(messages.length)
     const switchTo = (sessionId: string) => {
       if (mode === 'remount') { view.unmount(); view = render(<MessageList sessionId={sessionId} />) }
       else view.rerender(<MessageList sessionId={sessionId} />)
     }
     // Layout can land immediately before leaving, before its ResizeObserver or
     // native scroll event. The departure snapshot must read the outgoing DOM.
-    heights.set('anchor-row-79', heights.get('anchor-row-79')! + 44)
+    heights.set(`anchor-row-${anchorIndex - 1}`, heights.get(`anchor-row-${anchorIndex - 1}`)! + 44)
     before = visibleAnchor()
     switchTo(sessionB)
     // Scroll snapshots outlive the real height-cache LRU boundary.
@@ -6150,12 +6218,14 @@ describe('MessageList nested tool calls', () => {
     expect(Math.abs(visibleAnchor().offset - before.offset)).toBeLessThanOrEqual(1)
     // Async Markdown/image layout arrives after the old 250ms restore window.
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)) })
-    const rowAbove = [...scroller().querySelectorAll<HTMLElement>('[data-virtual-message-item]')]
+    const rowAbove = [...scroller().querySelectorAll<HTMLElement>('[data-chat-render-item-key]')]
       .find((row) => row.dataset.chatRenderItemKey !== before.key)!
     const grow = (row: HTMLElement) => {
       const height = rowHeight(row) + 240.5
       heights.set(row.dataset.chatRenderItemKey!, height)
-      act(() => observers.get(row)?.([{ target: row, borderBoxSize: [{ blockSize: height }], contentRect: { height } } as unknown as ResizeObserverEntry], {} as ResizeObserver))
+      const target = virtualized ? row : scroller().firstElementChild!
+      const observedHeight = virtualized ? height : scroller().scrollHeight
+      act(() => observers.get(target)?.([{ target, borderBoxSize: [{ blockSize: observedHeight }], contentRect: { height: observedHeight } } as unknown as ResizeObserverEntry], {} as ResizeObserver))
     }
     grow(rowAbove)
     expect(visibleAnchor().key).toBe(before.key)
@@ -6182,6 +6252,165 @@ describe('MessageList nested tool calls', () => {
     await waitForProgrammaticScrollReset()
     expect(scroller().scrollHeight - scroller().scrollTop - scroller().clientHeight).toBeLessThanOrEqual(1)
     dropSession(sessionA)
+  })
+
+  it.each([['latest', 300], ['switch', 300], ['latest', 600], ['switch', 600]] as const)('keeps the restored bottom when %s supersedes a %sms old gesture (#1751)', async (mode, elapsed) => {
+    let now = 1000
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    const observers = new Map<Element, ResizeObserverCallback>()
+    vi.stubGlobal('ResizeObserver', class {
+      targets: Element[] = []
+      constructor(private callback: ResizeObserverCallback) {}
+      observe(target: Element) { this.targets.push(target); observers.set(target, this.callback) }
+      disconnect() { this.targets.forEach(target => observers.delete(target)) }
+      unobserve(target: Element) { observers.delete(target) }
+    })
+    let height = 1000
+    const scrollTops = new WeakMap<HTMLElement, number>()
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(400)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(() => height)
+    vi.spyOn(HTMLElement.prototype, 'scrollTop', 'get').mockImplementation(function (this: HTMLElement) { return scrollTops.get(this) ?? 0 })
+    vi.spyOn(HTMLElement.prototype, 'scrollTop', 'set').mockImplementation(function (this: HTMLElement, value: number) { scrollTops.set(this, Math.max(0, Math.min(value, height - 400))) })
+    const sessionA = `restore-supersede-${mode}-${elapsed}`
+    const sessionB = `${sessionA}-other`
+    useChatStore.setState({ sessions: {
+      [sessionA]: makeSessionState({ messages: [{ id: 'restore-a', type: 'assistant_text', content: 'A', timestamp: 1 }] }),
+      [sessionB]: makeSessionState({ messages: [{ id: 'restore-b', type: 'assistant_text', content: 'B', timestamp: 1 }] }),
+    } })
+    const view = render(<MessageList sessionId={sessionA} />)
+    const scroller = () => view.container.querySelector<HTMLElement>('.chat-scroll-area')!
+    await waitForProgrammaticScrollReset()
+    if (mode === 'switch') {
+      view.rerender(<MessageList sessionId={sessionB} />)
+      await waitForProgrammaticScrollReset()
+    }
+    fireEvent.wheel(scroller(), { deltaY: -120 })
+    scroller().scrollTop = 100
+    fireEvent.scroll(scroller())
+    if (mode === 'latest') fireEvent.click(screen.getByRole('button', { name: 'Latest' }))
+    else view.rerender(<MessageList sessionId={sessionA} />)
+    await waitForProgrammaticScrollReset()
+    expect(scroller().scrollTop).toBe(600)
+    now += elapsed
+    // Late layout grows both above and below the viewport. Native anchoring
+    // adjusts scrollTop by 200 before the content observer sees total +600.
+    height += 600
+    scroller().scrollTop = 800
+    fireEvent.scroll(scroller())
+    const content = scroller().firstElementChild!
+    act(() => observers.get(content)?.([{ target: content, contentRect: { height } } as ResizeObserverEntry], {} as ResizeObserver))
+    await waitForProgrammaticScrollReset()
+    expect(scroller().scrollTop).toBe(1200)
+  })
+
+  it.each(['switch', 'remount'] as const)('keeps a 14-turn idle session at latest after %s and delayed content layout (#1751)', async (mode) => {
+    const sessionA = `short-tail-${mode}`
+    const sessionB = `${sessionA}-other`
+    const messages: UIMessage[] = Array.from({ length: 14 }, (_, index): UIMessage[] => [
+      { id: `short-user-${index}`, type: 'user_text', content: `Prompt ${index + 1}`, timestamp: index * 4 },
+      { id: `short-tool-${index}`, type: 'tool_use', toolUseId: `short-tool-${index}`, toolName: 'Bash', input: { command: 'pwd' }, timestamp: index * 4 + 1 },
+      { id: `short-result-${index}`, type: 'tool_result', toolUseId: `short-tool-${index}`, content: '/tmp/fixture', isError: false, timestamp: index * 4 + 2 },
+      { id: `short-reply-${index}`, type: 'assistant_text', content: `Reply ${index + 1}\n\n\`\`\`ts\nconst turn = ${index + 1}\n\`\`\``, timestamp: index * 4 + 3 },
+    ]).flat()
+    let contentHeight = 2800
+    const scrollTops = new WeakMap<HTMLElement, number>()
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(400)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.querySelector('[data-chat-render-item-key="short-user-0"]') ? contentHeight : 800
+    })
+    vi.spyOn(HTMLElement.prototype, 'scrollTop', 'get').mockImplementation(function (this: HTMLElement) { return scrollTops.get(this) ?? 0 })
+    vi.spyOn(HTMLElement.prototype, 'scrollTop', 'set').mockImplementation(function (this: HTMLElement, value: number) {
+      scrollTops.set(this, Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)))
+    })
+    const observers = new Map<Element, ResizeObserverCallback>()
+    vi.stubGlobal('ResizeObserver', class {
+      targets: Element[] = []
+      constructor(private callback: ResizeObserverCallback) {}
+      observe(target: Element) { this.targets.push(target); observers.set(target, this.callback) }
+      disconnect() { this.targets.forEach((target) => observers.delete(target)) }
+      unobserve(target: Element) { observers.delete(target) }
+    })
+    useChatStore.setState({ sessions: {
+      [sessionA]: makeSessionState({ messages }),
+      [sessionB]: makeSessionState({ messages: [{ id: 'other-row', type: 'assistant_text', content: 'Other conversation', timestamp: 1 }] }),
+    } })
+    let view = render(<MessageList sessionId={sessionA} />)
+    const scroller = () => view.container.querySelector<HTMLElement>('.chat-scroll-area')!
+    const switchTo = (sessionId: string) => {
+      if (mode === 'remount') { view.unmount(); view = render(<MessageList sessionId={sessionId} />) }
+      else view.rerender(<MessageList sessionId={sessionId} />)
+    }
+    const resizeContent = async (growth: number) => {
+      contentHeight += growth
+      const content = scroller().firstElementChild!
+      // Chromium may deliver a native anchoring/clamping scroll before the
+      // observer. Without a reader gesture this must not cancel restoration.
+      fireEvent.scroll(scroller())
+      act(() => observers.get(content)?.([{ target: content, contentRect: { height: contentHeight } } as ResizeObserverEntry], {} as ResizeObserver))
+      await waitForProgrammaticScrollReset()
+    }
+    await waitForProgrammaticScrollReset()
+    expect(view.container.querySelector('[data-virtual-message-item]')).toBeNull()
+    expect(scroller().scrollTop).toBe(2400)
+    fireEvent.scroll(scroller())
+    switchTo(sessionB)
+    fireEvent.pointerDown(scroller())
+    switchTo(sessionA)
+    await waitForProgrammaticScrollReset()
+    expect(scroller().scrollTop).toBe(2400)
+
+    // Syntax highlighting / tool results can settle after the 250ms restore
+    // guard, with the same message ids/count and no live model output.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)) })
+    await resizeContent(600)
+    expect(scroller().scrollTop).toBe(3000)
+    await resizeContent(400)
+    expect(scroller().scrollTop).toBe(3400)
+
+    // An upward gesture cancels even an already queued follow before onScroll.
+    const content = scroller().firstElementChild!
+    contentHeight += 300
+    act(() => {
+      observers.get(content)?.([{ target: content, contentRect: { height: contentHeight } } as ResizeObserverEntry], {} as ResizeObserver)
+      fireEvent.wheel(scroller(), { deltaY: -120 })
+    })
+    await waitForProgrammaticScrollReset()
+    expect(scroller().scrollTop).toBe(3400)
+    scroller().scrollTop = 1200
+    fireEvent.scroll(scroller())
+    switchTo(sessionB)
+    switchTo(sessionA)
+    await resizeContent(500)
+    expect(scroller().scrollTop).toBe(1200)
+    expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
+
+    // Returning while history loads must retain the saved bottom intent too.
+    fireEvent.click(screen.getByRole('button', { name: 'Latest' }))
+    await waitForProgrammaticScrollReset()
+    switchTo(sessionB)
+    act(() => useChatStore.setState((state) => ({ sessions: {
+      ...state.sessions, [sessionA]: makeSessionState({ historyStatus: 'loading', historyHydrated: false }),
+    } })))
+    switchTo(sessionA)
+    await waitForProgrammaticScrollReset()
+    act(() => useChatStore.setState((state) => ({ sessions: {
+      ...state.sessions, [sessionA]: makeSessionState({ messages }),
+    } })))
+    await waitForProgrammaticScrollReset()
+    await resizeContent(600)
+    expect(scroller().scrollTop).toBe(contentHeight - 400)
+
+    const beforeInspection = scroller().scrollTop
+    const restoredContent = scroller().firstElementChild!
+    contentHeight += 200
+    act(() => {
+      observers.get(restoredContent)?.([{ target: restoredContent, contentRect: { height: contentHeight } } as ResizeObserverEntry], {} as ResizeObserver)
+      fireEvent.pointerDown(restoredContent)
+    })
+    await waitForProgrammaticScrollReset()
+    expect(scroller().scrollTop).toBe(beforeInspection)
+    await resizeContent(400)
+    expect(scroller().scrollTop).toBe(beforeInspection)
   })
 
   it('restores a session scroll position when switching back to a tab', async () => {
@@ -6229,6 +6458,7 @@ describe('MessageList nested tool calls', () => {
     })
 
     await waitForProgrammaticScrollReset()
+    fireEvent.pointerDown(scroller)
     fireEvent.scroll(scroller)
     expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
 
@@ -6288,6 +6518,7 @@ describe('MessageList nested tool calls', () => {
     })
 
     await waitForProgrammaticScrollReset()
+    fireEvent.pointerDown(firstScroller)
     fireEvent.scroll(firstScroller)
     expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
     firstSession.unmount()
@@ -6397,6 +6628,7 @@ describe('MessageList nested tool calls', () => {
 
     scrollIntoView.mockClear()
     await waitForProgrammaticScrollReset()
+    fireEvent.pointerDown(scroller)
     fireEvent.scroll(scroller)
     fireEvent.click(screen.getByRole('button', { name: 'Latest' }))
 
@@ -6467,6 +6699,7 @@ describe('MessageList nested tool calls', () => {
 
     scrollIntoView.mockClear()
     await waitForProgrammaticScrollReset()
+    fireEvent.pointerDown(scroller)
     fireEvent.scroll(scroller)
     expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
 
@@ -6542,6 +6775,7 @@ describe('MessageList nested tool calls', () => {
 
     scrollIntoView.mockClear()
     await waitForProgrammaticScrollReset()
+    fireEvent.pointerDown(scroller)
     fireEvent.scroll(scroller)
     expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
 
@@ -9042,6 +9276,22 @@ describe('MessageList nested tool calls', () => {
     ).toBeTruthy()
   })
 
+  it('explains provider quota exhaustion in the active locale and preserves upstream detail', () => {
+    useSettingsStore.setState({ locale: 'zh' })
+    const raw = 'API Error: 429 Go usage limit exceeded · monthly'
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [{ id: 'quota', type: 'error', code: 'billing_error', message: raw, timestamp: 1 }],
+        }),
+      },
+    })
+    render(<MessageList />)
+    expect(screen.getByText('供应商额度或余额不足。请检查供应商的计费信息、等待额度恢复，或切换到其他供应商。')).toBeTruthy()
+    expect(screen.getByText(raw)).toBeTruthy()
+    expect(screen.queryByText(/请先登录/)).toBeNull()
+  })
+
   it('renders business API errors in the active locale without raw English fallback', () => {
     useSettingsStore.setState({ locale: 'zh' })
     useChatStore.setState({
@@ -9351,6 +9601,30 @@ describe('MessageList nested tool calls', () => {
     expect(document.activeElement).toBe(opener)
     expect(useWorkspaceStore.getState().getSession(ACTIVE_TAB).origin).toBeNull()
     vi.unstubAllGlobals()
+  })
+})
+
+describe('buildUniqueRenderItemKeys', () => {
+  type RenderItemArg = Parameters<typeof buildUniqueRenderItemKeys>[0][number]
+  const messageItem = (id: string): RenderItemArg =>
+    ({ kind: 'message', message: { id, type: 'assistant_text', content: id, timestamp: 1 } })
+
+  it('leaves an all-unique transcript byte-identical', () => {
+    const items = [messageItem('a'), messageItem('b'), messageItem('c')]
+    expect(buildUniqueRenderItemKeys(items)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('suffixes only the repeats, keeping the first occurrence bare', () => {
+    // A provider that reuses one response id across consecutive rows yields the
+    // same key twice; the second row must not collide with the first.
+    const items = [messageItem('dup'), messageItem('dup'), messageItem('other')]
+    expect(buildUniqueRenderItemKeys(items)).toEqual(['dup', 'dup\u00001', 'other'])
+  })
+
+  it('keeps two different ids that merely share a block suffix apart', () => {
+    const items = [messageItem('resp-1-block-0'), messageItem('resp-1-block-0')]
+    const keys = buildUniqueRenderItemKeys(items)
+    expect(new Set(keys).size).toBe(keys.length)
   })
 })
 
@@ -10542,6 +10816,49 @@ describe('MessageList agent card activity', () => {
     fireEvent.click(screen.getByRole('button', { name: /Expand agent/ }))
   }
 
+  it.each(['pointer', 'focus'] as const)('preserves idle reading when Agent activity loads after %s interaction (#1751)', async (interaction) => {
+    const observers = new Map<Element, ResizeObserverCallback>()
+    vi.stubGlobal('ResizeObserver', class {
+      targets: Element[] = []
+      constructor(private callback: ResizeObserverCallback) {}
+      observe(target: Element) { this.targets.push(target); observers.set(target, this.callback) }
+      disconnect() { this.targets.forEach((target) => observers.delete(target)) }
+      unobserve(target: Element) { observers.delete(target) }
+    })
+    let scrollHeight = 1000
+    const scrollTops = new WeakMap<HTMLElement, number>()
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(400)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(() => scrollHeight)
+    vi.spyOn(HTMLElement.prototype, 'scrollTop', 'get').mockImplementation(function (this: HTMLElement) { return scrollTops.get(this) ?? 0 })
+    vi.spyOn(HTMLElement.prototype, 'scrollTop', 'set').mockImplementation(function (this: HTMLElement, value: number) { scrollTops.set(this, Math.max(0, Math.min(value, scrollHeight - 400))) })
+    let resolveActivity!: (run: SubagentRunResponse) => void
+    vi.spyOn(subagentsApi, 'getRunByTool').mockImplementation(() => new Promise((resolve) => { resolveActivity = resolve }))
+    const view = renderDispatchedAgent()
+    const scroller = view.container.querySelector<HTMLElement>('.chat-scroll-area')!
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/ }))
+    await waitForProgrammaticScrollReset()
+    scroller.scrollTop = 600
+    fireEvent.scroll(scroller)
+    const expand = screen.getByRole('button', { name: /Expand agent/ })
+    if (interaction === 'pointer') fireEvent.pointerDown(expand)
+    else fireEvent.focus(expand)
+    fireEvent.click(expand)
+    await screen.findByTestId('agent-call-activity-loading')
+    const content = scroller.firstElementChild!
+    // The loading placeholder is still within the near-bottom threshold. The
+    // fetched activity arrives after the disclosure suppression window.
+    scrollHeight += 28
+    act(() => observers.get(content)?.([{ target: content, contentRect: { height: scrollHeight } } as ResizeObserverEntry], {} as ResizeObserver))
+    await waitForProgrammaticScrollReset()
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)) })
+    act(() => resolveActivity(runWithActivity(CHILD_ACTIVITY)))
+    await screen.findByTestId('agent-call-activity')
+    scrollHeight += 600
+    act(() => observers.get(content)?.([{ target: content, contentRect: { height: scrollHeight } } as ResizeObserverEntry], {} as ResizeObserver))
+    await waitForProgrammaticScrollReset()
+    expect(scroller.scrollTop).toBe(600)
+  })
+
   it('fetches a run’s tool stream only once its Agent card is expanded', async () => {
     const getRunByTool = vi.spyOn(subagentsApi, 'getRunByTool')
       .mockResolvedValue(runWithActivity(CHILD_ACTIVITY))
@@ -10681,7 +10998,7 @@ describe('MessageList edit and resend', () => {
   function setup(messages: UIMessage[], checkpoints: Checkpoint[], sessionOverrides: Partial<PerSessionState> = {}) {
     vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({ checkpoints })
     const reloadHistory = vi.fn().mockResolvedValue(undefined)
-    const sendMessage = vi.fn()
+    const sendMessage = vi.fn().mockReturnValue(true)
     const queueComposerPrefill = vi.fn()
     const stopGeneration = vi.fn()
     useChatStore.setState({

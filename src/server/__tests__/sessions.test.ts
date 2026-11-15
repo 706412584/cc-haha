@@ -1505,7 +1505,7 @@ describe('SessionService', () => {
     ))).toBe(true)
   })
 
-  it('should not coalesce in-flight session list scans across config scopes', async () => {
+  it.each([false, true])('should not coalesce in-flight session list scans across config scopes (archived=%s)', async (archived) => {
     const scopeRoot = path.join(tmpDir, 'session-list-request-scopes')
     const firstConfigDir = path.join(scopeRoot, 'first')
     const secondConfigDir = path.join(scopeRoot, 'second')
@@ -1528,6 +1528,17 @@ describe('SessionService', () => {
       '24300001-bbbb-cccc-dddd-eeeeeeeeeeee',
       'Second in-flight scope',
     )
+    if (archived) {
+      for (const [configDir, id] of [
+        [firstConfigDir, '24300000-bbbb-cccc-dddd-eeeeeeeeeeee'],
+        [secondConfigDir, '24300001-bbbb-cccc-dddd-eeeeeeeeeeee'],
+      ] as const) {
+        await fs.mkdir(path.join(configDir, 'cc-haha'), { recursive: true })
+        await fs.writeFile(path.join(configDir, 'cc-haha', 'session-archives.json'), JSON.stringify({
+          schemaVersion: 1, sessions: { [id]: { archived: true } },
+        }))
+      }
+    }
 
     const serviceWithSpy = service as unknown as {
       scanSessionListSummary: (...args: unknown[]) => Promise<unknown>
@@ -1550,10 +1561,10 @@ describe('SessionService', () => {
     }
 
     process.env.CLAUDE_CONFIG_DIR = firstConfigDir
-    const firstScopeRequest = service.listSessions({ limit: 10, offset: 0 })
+    const firstScopeRequest = service.listSessions({ limit: 10, offset: 0, archived })
     await firstScanStarted
     process.env.CLAUDE_CONFIG_DIR = secondConfigDir
-    const secondScopeRequest = service.listSessions({ limit: 10, offset: 0 })
+    const secondScopeRequest = service.listSessions({ limit: 10, offset: 0, archived })
     await new Promise(resolve => setTimeout(resolve, 10))
     releaseFirstScan()
 
@@ -1867,6 +1878,18 @@ describe('SessionService', () => {
 
     const messages = await service.getSessionMessages(sessionId)
     expect(messages).toHaveLength(2)
+  })
+
+  it('preserves API error identity and provider details when reading transcript history', async () => {
+    const sessionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    await writeSessionFile('-tmp-project', sessionId, [
+      makeSnapshotEntry(),
+      { ...makeAssistantEntry('API Error: Go usage limit exceeded'), isApiErrorMessage: true, error: 'billing_error' },
+      makeAssistantEntry('A normal answer mentioning API Error.'),
+    ])
+    const messages = await service.getSessionMessages(sessionId)
+    expect(messages[0]).toMatchObject({ type: 'assistant', isApiErrorMessage: true, error: 'billing_error' })
+    expect(messages[1]).not.toHaveProperty('isApiErrorMessage')
   })
 
   it('preserves structured toolUseResult metadata for AskUserQuestion answers', async () => {
@@ -2487,7 +2510,7 @@ describe('SessionService', () => {
     ])
   })
 
-  it('hides a task-notification and its direct acknowledgement, but keeps the work that follows', async () => {
+  it('should project the task-notification turn as a status and keep everything the assistant does after it', async () => {
     const sessionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     const firstUserId = crypto.randomUUID()
     const firstAssistantId = crypto.randomUUID()
@@ -2566,6 +2589,7 @@ describe('SessionService', () => {
     expect(messages.map((message) => message.id)).toEqual([
       firstUserId,
       firstAssistantId,
+      taskNotificationId,
       taskAssistantId,
       taskToolUseMessageId,
       taskToolResultId,
@@ -2573,6 +2597,15 @@ describe('SessionService', () => {
       realFollowUpId,
       realAssistantId,
     ])
+    expect(messages[2]).toEqual({
+      id: taskNotificationId,
+      type: 'system',
+      content: {
+        subtype: 'background_continue',
+        notifications: [{ taskId: 'bg-1', status: 'completed', summary: 'Background command completed' }],
+      },
+      timestamp: '2026-01-01T00:01:00.000Z',
+    })
     expect(JSON.stringify(messages)).not.toContain('<task-notification>')
     expect(JSON.stringify(messages)).toContain('后台命令跑完了，我来重启服务')
     expect(JSON.stringify(messages)).toContain('server restarted')
@@ -2651,8 +2684,10 @@ describe('SessionService', () => {
 
     expect(ids).toContain(startId)
     expect(ids).toContain(startAssistantId)
-    // Only the queued notification record itself is plumbing...
-    expect(ids).not.toContain(notificationId)
+    // Upstream #1674: the queued notification is projected as a
+    // background_continue status message (not hidden), so its id IS present —
+    // but as a system message, not as a task-notification XML turn.
+    expect(ids).toContain(notificationId)
     // ...while the acknowledgement and the tool call that resumes work are all
     // real conversation and must be kept.
     expect(ids).toContain(ackThinkingId)
@@ -2741,6 +2776,55 @@ describe('SessionService', () => {
     expect((await service.getSessionTaskNotifications(sessionId)).map((item) => item.taskId)).toEqual(
       expect.arrayContaining(['alpha', 'bravo']),
     )
+  })
+
+  it('projects the isMeta batch of settled agents as one status listing every agent', async () => {
+    // print.ts joins settled local_agent notifications into one isMeta prompt.
+    const sessionId = 'cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    const userId = crypto.randomUUID()
+    const dispatchedId = crypto.randomUUID()
+    const batchId = crypto.randomUUID()
+    const replyId = crypto.randomUUID()
+    const notification = (taskId: string, status: string, summary: string) => [
+      '<task-notification>',
+      `<task-id>${taskId}</task-id>`,
+      `<tool-use-id>call_${taskId}</tool-use-id>`,
+      '<task-type>local_agent</task-type>',
+      `<status>${status}</status>`,
+      `<summary>${summary}</summary>`,
+      '<result>long agent report</result>',
+      '</task-notification>',
+    ].join('\n')
+
+    await writeSessionFile('-tmp-agent-batch', sessionId, [
+      makeSnapshotEntry(),
+      { ...makeUserEntry('review in parallel', userId), parentUuid: null },
+      { ...makeAssistantEntry('two agents started', userId), uuid: dispatchedId },
+      {
+        ...makeUserEntry([
+          notification('agent-a', 'completed', 'Agent "Review API" completed'),
+          notification('agent-b', 'killed', 'Agent "Review UI" was stopped'),
+        ].join('\n'), batchId),
+        isMeta: true,
+        parentUuid: dispatchedId,
+      },
+      { ...makeAssistantEntry('both reviews are in', batchId), uuid: replyId },
+    ])
+
+    const messages = await service.getSessionMessages(sessionId)
+
+    expect(messages.map((message) => message.id)).toEqual([userId, dispatchedId, batchId, replyId])
+    expect(messages[2]).toMatchObject({
+      type: 'system',
+      content: {
+        subtype: 'background_continue',
+        notifications: [
+          { taskId: 'agent-a', status: 'completed', summary: 'Agent "Review API" completed' },
+          { taskId: 'agent-b', status: 'stopped', summary: 'Agent "Review UI" was stopped' },
+        ],
+      },
+    })
+    expect(JSON.stringify(messages)).not.toContain('long agent report')
   })
 
   it('uses bounded locators for snapshots and task notifications with safe fallback', async () => {
@@ -2843,7 +2927,10 @@ describe('SessionService', () => {
       serveWrongEmptyFingerprint = false
 
       const callsBeforeFullHistory = locatorCalls
-      expect(await indexedService.getSessionMessages(sessionId)).toHaveLength(1)
+      expect((await indexedService.getSessionMessages(sessionId)).map(message => message.id)).toEqual([
+        'task-notification-locator',
+        expect.any(String),
+      ])
       expect(locatorCalls).toBe(callsBeforeFullHistory)
 
       mode = 'shadow'
@@ -3598,8 +3685,12 @@ describe('SessionService', () => {
 
     await expect(createRepositoryBranch(workDir, { name: 'a'.repeat(201) }))
       .rejects.toMatchObject({ code: 'REPOSITORY_BRANCH_NAME_INVALID' })
-    await expect(createRepositoryBranch(workDir, { name: 'a'.repeat(200) }))
-      .resolves.toMatchObject({ branch: 'a'.repeat(200) })
+    // Windows MAX_PATH (260) makes .git/refs/heads/<200-char>.lock exceed the
+    // filesystem limit, so git itself rejects the create even though the name
+    // passes check-ref-format. The validation cap is 200, but the OS caps lower.
+    const viableLength = process.platform === 'win32' ? 150 : 200
+    await expect(createRepositoryBranch(workDir, { name: 'a'.repeat(viableLength) }))
+      .resolves.toMatchObject({ branch: 'a'.repeat(viableLength) })
   })
 
   it('should not let a flag-shaped base branch reach git as an option', async () => {
@@ -5097,12 +5188,19 @@ describe('Sessions API', () => {
       messages: unknown[]
       taskNotifications: unknown[]
     }
-    expect(body.messages).toHaveLength(3)
+    expect(body.messages).toHaveLength(4)
     expect(body.messages[1]).toMatchObject({
       type: 'assistant',
       usage: { input_tokens: 1234, output_tokens: 56 },
     })
     expect(body.messages[2]).toMatchObject({
+      type: 'system',
+      content: {
+        subtype: 'background_continue',
+        notifications: [{ taskId: 'bg-1', status: 'failed', summary: 'Background command failed & stopped' }],
+      },
+    })
+    expect(body.messages[3]).toMatchObject({
       type: 'assistant',
       content: [{ type: 'text', text: 'the background command failed, investigating' }],
     })
@@ -5217,7 +5315,14 @@ describe('Sessions API', () => {
       prompt: 'Read session routes',
       source: 'subagent-jsonl',
     })
-    expect(body.messages).toHaveLength(3)
+    expect(body.messages).toHaveLength(4)
+    expect(body.messages[2]).toMatchObject({
+      type: 'system',
+      content: {
+        subtype: 'background_continue',
+        notifications: [{ taskId: 'child-shell-task', status: 'stopped', summary: 'Child shell stopped' }],
+      },
+    })
     expect(JSON.stringify(body.messages)).not.toContain('<task-notification>')
     expect(JSON.stringify(body.messages)).toContain('Child shell stopped, continuing the review')
     expect(body.taskNotifications).toEqual([{
@@ -6858,6 +6963,58 @@ describe('Sessions API', () => {
     expect(launchInfo).not.toBeNull()
     expect(launchInfo!.workDir).toBe('/tmp/project-with-hyphen')
     expect(launchInfo!.transcriptMessageCount).toBe(0)
+  })
+
+  it('POST /api/sessions/:id/rewind keeps hidden entries the remaining conversation is chained through', async () => {
+    const sessionId = 'aaaaaaaa-bbbb-cccc-dddd-111111111111'
+    const ids = Array.from({ length: 9 }, () => crypto.randomUUID())
+    const [firstUser, skillPrompt, firstReply, interrupted, sentinel, resumed, resumedReply, target, targetReply] = ids
+    const chained = (entry: Record<string, unknown>, uuid: string, parentUuid: string | null) => ({
+      ...entry,
+      uuid,
+      parentUuid,
+      sessionId,
+    })
+    const filePath = await writeSessionFile('-tmp-api-rewind-hidden-chain', sessionId, [
+      makeSnapshotEntry(),
+      chained(makeUserEntry('first prompt'), firstUser, null),
+      // Hidden from history: a skill body and the sentinel a resumed CLI writes
+      // after an interrupted turn. Later messages are chained through both.
+      chained({ ...makeUserEntry('Base directory for this skill: /skills/demo'), isMeta: true }, skillPrompt, firstUser),
+      chained(makeAssistantEntry('first reply'), firstReply, skillPrompt),
+      chained(makeUserEntry('second prompt'), interrupted, firstReply),
+      chained({
+        ...makeAssistantEntry('No response requested.'),
+        message: { model: '<synthetic>', id: 'msg_synthetic', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'No response requested.' }] },
+      }, sentinel, interrupted),
+      chained(makeUserEntry('continue'), resumed, sentinel),
+      chained(makeAssistantEntry('continued reply'), resumedReply, resumed),
+      chained(makeUserEntry('prompt to edit and resend'), target, resumedReply),
+      chained(makeAssistantEntry('reply being rewound'), targetReply, target),
+    ])
+
+    const executeRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/rewind`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userMessageIndex: 3,
+        targetUserMessageId: target,
+        expectedContent: 'prompt to edit and resend',
+      }),
+    })
+    expect(executeRes.status).toBe(200)
+    const executeBody = await executeRes.json() as {
+      conversation: { removedMessageIds: string[] }
+    }
+    expect(executeBody.conversation.removedMessageIds).toEqual([target, targetReply])
+
+    // What --resume rebuilds from the rewritten file must still reach the start.
+    const { loadTranscriptFile, buildConversationChain } = await import('../../utils/sessionStorage.js')
+    const loaded = await loadTranscriptFile(filePath)
+    const chain = buildConversationChain(loaded.messages, loaded.messages.get(resumedReply as never)!)
+    expect(chain.map((message) => message.uuid)).toEqual(ids.slice(0, 7))
+    expect(loaded.messages.has(target as never)).toBe(false)
+    expect(loaded.messages.has(targetReply as never)).toBe(false)
   })
 
   it('POST /api/sessions/:id/rewind should target the selected message id instead of a shifted visible index', async () => {
@@ -10539,7 +10696,7 @@ describe('Sessions API', () => {
     expect(body.activityState).toBe('idle')
   })
 
-  it('POST /api/sessions/:id/chat should queue a message', async () => {
+  it('POST /api/sessions/:id/chat rejects unimplemented delivery without leaving running activity', async () => {
     const sessionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     await writeSessionFile('-tmp-api-test', sessionId, [
       makeSnapshotEntry(),
@@ -10551,18 +10708,17 @@ describe('Sessions API', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: 'New question' }),
     })
-    expect(res.status).toBe(202)
+    expect(res.status).toBe(501)
 
-    const body = (await res.json()) as { messageId: string; status: string }
-    expect(body.status).toBe('queued')
-    expect(body.messageId).toBeTruthy()
+    const body = (await res.json()) as { error: string; message: string }
+    expect(body.error).toBe('REST_CHAT_NOT_IMPLEMENTED')
+    expect(body.message).toContain('WebSocket')
+    expect(body).not.toHaveProperty('messageId')
 
     const statusRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/chat/status`)
     const status = (await statusRes.json()) as { state: string; activityState: string }
-    expect(status.state).toBe('thinking')
-    expect(status.activityState).toBe('running')
-
-    await fetch(`${baseUrl}/api/sessions/${sessionId}/chat/stop`, { method: 'POST' })
+    expect(status.state).toBe('idle')
+    expect(status.activityState).toBe('idle')
   })
 
   it('POST /api/sessions/:id/chat/stop should reset state to idle', async () => {

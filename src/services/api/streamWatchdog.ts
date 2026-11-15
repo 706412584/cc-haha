@@ -23,6 +23,10 @@ export type StreamWatchdogSnapshot = {
   lastEventType?: string
   lastDeltaType?: string
   lastBlockType?: string
+  /** performance.now() when the most recent thinking_delta landed; undefined
+   *  before any thinking has streamed. Used by isThinkingOnlyStall to spare
+   *  long-but-active reasoning from the fast-fail budget. */
+  lastThinkingAt?: number
   messageStopReceived: boolean
   toolUseStarted: boolean
   localToolUseStarted: boolean
@@ -91,6 +95,7 @@ function countContentDelta(
         ...snapshot,
         contentDeltaCount: snapshot.contentDeltaCount + 1,
         thinkingDeltaCount: snapshot.thinkingDeltaCount + 1,
+        lastThinkingAt: performance.now(),
       }
     case 'input_json_delta':
       return {
@@ -320,20 +325,52 @@ class StreamWatchdogState {
    * (openaiResponsesStreamToAnthropic.ts), neither of which increments
    * thinkingDeltaCount. Keying only on the delta count would leave those
    * streams protected by the 600s cap alone — the exact stall this fixes.
+   *
+   * A stream whose most recent thinking_delta is still fresh is NOT a stall:
+   * reasoning models on `max` effort think for many minutes before writing
+   * their first user-visible token. We only call it stalled when the most
+   * recent thinking event is itself older than the fast-fail budget, so a
+   * healthy long think that is actively producing new content is never cut
+   * off — even if that thinking happens to repeat or circle.
    */
-  isThinkingOnlyStall(): boolean {
+  /**
+   * Milliseconds until the most recent thinking event becomes "quiet" — i.e.
+   * until we should consider the stream stalled. Returns 0 if the quiet
+   * window has already elapsed, or Infinity if no thinking has streamed yet.
+   * Callers use this to re-arm the watchdog timer so the next wake-up is
+   * guaranteed to land at or past the quiet window, instead of skipping the
+   * stall check entirely when it lands early.
+   */
+  msUntilThinkingQuietWindow(quietWindowMs: number): number {
+    const last = this.snapshotValue.lastThinkingAt
+    // No thinking delta yet — the full budget applies from stream start.
+    // This prevents the timer from firing immediately for streams that open
+    // a thinking block but haven't produced any thinking_delta events yet
+    // (e.g. replay cassettes, signature-only gateways).
+    if (last === undefined) return quietWindowMs
+    const elapsed = performance.now() - last
+    return Math.max(0, quietWindowMs - elapsed)
+  }
+
+  isThinkingOnlyStall(quietWindowMs = 0): boolean {
     const snapshot = this.snapshotValue
     const enteredReasoning =
       snapshot.thinkingDeltaCount > 0 ||
       snapshot.lastBlockType === 'thinking' ||
       snapshot.lastBlockType === 'redacted_thinking'
-    return (
-      enteredReasoning &&
-      snapshot.textDeltaCount === 0 &&
-      snapshot.toolInputDeltaCount === 0 &&
-      !snapshot.toolUseStarted &&
-      !snapshot.messageStopReceived
-    )
+    if (!enteredReasoning) return false
+    if (snapshot.textDeltaCount > 0) return false
+    if (snapshot.toolInputDeltaCount > 0) return false
+    if (snapshot.toolUseStarted) return false
+    if (snapshot.messageStopReceived) return false
+    if (snapshot.lastThinkingAt !== undefined && quietWindowMs > 0) {
+      // Most recent thinking event is still inside the quiet window — the
+      // stream is actively thinking, not stalled.
+      if (performance.now() - snapshot.lastThinkingAt < quietWindowMs) {
+        return false
+      }
+    }
+    return true
   }
 
   snapshot(): StreamWatchdogSnapshot {

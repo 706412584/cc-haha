@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { ApiClient, bytesToBase64, type FetchAdapter, type FetchResponse } from './client'
+import { ApiClient, bytesToBase64, type ApiError, type FetchAdapter, type FetchResponse } from './client'
 import type { Host } from './types'
 
 const lan: Host = {
@@ -28,6 +28,29 @@ const response = (
 })
 
 describe('host-scoped API transport', () => {
+  test('the H5 page sends same-origin cookies and no Authorization when it has no token', async () => {
+    const calls: { url: string; init: Parameters<FetchAdapter>[1] }[] = []
+    const fetch: FetchAdapter = async (url, init) => {
+      calls.push({ url, init })
+      return response(url.endsWith('/api/public-access/session') ? { authenticated: true } : {})
+    }
+    // Remote browser on the gateway: the HttpOnly device cookie authenticates.
+    const cookie = new ApiClient(remote, '', { fetch, credentials: 'same-origin' })
+    await cookie.verify()
+    expect(calls[0]!.url).toBe(`${remote.url}/api/public-access/session`)
+    expect(calls[0]!.init.credentials).toBe('same-origin')
+    expect(calls[0]!.init.headers.Authorization).toBeUndefined()
+    // A page opened on the computer itself has no token to verify; any authenticated read proves it.
+    const loopback = new ApiClient({ ...lan, url: 'http://127.0.0.1:3456' }, '', { fetch })
+    await loopback.verify()
+    expect(calls[1]!.url).toBe('http://127.0.0.1:3456/api/status')
+    expect(calls[1]!.init.method).toBe('GET')
+    // A LAN token still goes to the token check, and native clients never send cookies.
+    await new ApiClient(lan, 'lan-token', { fetch }).verify()
+    expect(calls[2]!.url).toBe(`${lan.url}/api/h5-access/verify`)
+    expect(calls[2]!.init.credentials).toBe('omit')
+  })
+
   test('concurrent clients keep their own destination and credential', async () => {
     const calls: { url: string; init: Parameters<FetchAdapter>[1] }[] = []
     const fetch: FetchAdapter = async (url, init) => {
@@ -429,6 +452,21 @@ describe('slow links and tool images', () => {
     expect(calls[0].init.headers).toMatchObject({ Authorization: 'Bearer fake-token', Origin: remote.url, Accept: 'image/*' })
   })
 
+  test('an image body that arrived base64-encoded (direct path) goes into the data URI as is', async () => {
+    const encoded = Buffer.from(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 255, 7])).toString('base64')
+    const client = new ApiClient(remote, 'fake-token', {
+      fetch: async () =>
+        response({}, 200, {
+          headers: { get: (name) => (name.toLowerCase() === 'content-type' ? 'image/png' : null) },
+          base64: async () => encoded,
+          arrayBuffer: async () => {
+            throw new Error('decoded and re-encoded the image')
+          },
+        }),
+    })
+    expect(await client.image('/api/sessions/s-1/tool-images/toolu_1/0', 'full')).toBe(`data:image/png;base64,${encoded}`)
+  })
+
   test('refuses non-image paths, active image types and error bodies', async () => {
     const client = (contentType: string, status = 200) => new ApiClient(lan, 'fake', {
       fetch: async () => response({ error: 'Tool image not found' }, status, {
@@ -449,5 +487,50 @@ describe('slow links and tool images', () => {
       for (let i = 0; i < length; i++) bytes[i] = (i * 131 + 7) & 255
       expect(bytesToBase64(bytes)).toBe(Buffer.from(bytes).toString('base64'))
     }
+  })
+})
+
+describe('request outcomes for finding a moved computer', () => {
+  const observed = (fetch: FetchAdapter, extra: { timeoutMs?: number } = {}) => {
+    const outcomes: (ApiError | null)[] = []
+    const client = new ApiClient(remote, 'native_fake', { fetch, onSettled: (error) => outcomes.push(error), ...extra })
+    return { client, outcomes }
+  }
+
+  test('success, a refused connection, a timeout and a Cloudflare 530 each report once with the thrown error', async () => {
+    const ok = observed(async () => response({ sessions: [] }))
+    await ok.client.get('/api/sessions')
+    expect(ok.outcomes).toEqual([null])
+
+    const refused = observed(async () => { throw new TypeError('Network request failed') })
+    const refusal = await refused.client.get<never>('/api/sessions').catch((error: ApiError) => error)
+    expect(refused.outcomes).toEqual([refusal])
+    expect(refusal).toMatchObject({ code: 'NETWORK_ERROR' })
+
+    const silent = observed(async (_url, init) =>
+      new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })), { timeoutMs: 5 })
+    await expect(silent.client.get('/api/sessions')).rejects.toMatchObject({ code: 'TIMEOUT' })
+    expect(silent.outcomes.map((error) => error?.code)).toEqual(['TIMEOUT'])
+
+    const gone = observed(async () => response(null, 530, { text: async () => '<html>error 1033</html>' }))
+    await expect(gone.client.get('/api/sessions')).rejects.toMatchObject({ status: 530 })
+    expect(gone.outcomes.map((error) => error?.status)).toEqual([530])
+
+    const denied = observed(async () => response({ error: 'Unauthorized' }, 401))
+    await expect(denied.client.get('/api/sessions')).rejects.toMatchObject({ status: 401 })
+    expect(denied.outcomes.map((error) => error?.status)).toEqual([401])
+  })
+
+  test('an observer that throws never changes the request result', async () => {
+    const client = new ApiClient(remote, 'native_fake', {
+      fetch: async () => response({ ok: true }),
+      onSettled: () => { throw new Error('observer bug') },
+    })
+    await expect(client.get('/api/sessions')).resolves.toEqual({ ok: true })
+    const failing = new ApiClient(remote, 'native_fake', {
+      fetch: async () => { throw new TypeError('offline') },
+      onSettled: () => { throw new Error('observer bug') },
+    })
+    await expect(failing.get('/api/sessions')).rejects.toMatchObject({ code: 'NETWORK_ERROR' })
   })
 })

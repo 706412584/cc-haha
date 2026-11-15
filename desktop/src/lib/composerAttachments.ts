@@ -177,12 +177,16 @@ async function fileToComposerAttachment(file: File): Promise<ComposerAttachment 
   }
 
   const rawData = await readFileAsDataUrl(file)
-  const data = isImage ? await compressDataUrl(rawData) : rawData
+  // Fork §E: shrink inline images before they reach the 16 MiB server frame
+  // budget. compressDataUrl bounds its own Image/canvas decode with a timeout,
+  // so a headless/jsdom runtime that cannot decode still yields the original
+  // bytes instead of hanging the drop.
+  const data = isImage ? await compressDataUrl(rawData).catch(() => rawData) : rawData
   return {
     id: nextAttachmentId(),
     name: file.name,
     type: isImage ? 'image' : 'file',
-    mimeType: isImage ? 'image/jpeg' : (file.type || undefined),
+    mimeType: file.type || undefined,
     previewUrl: isImage ? data : undefined,
     data,
   }

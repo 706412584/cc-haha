@@ -4,6 +4,7 @@ import { settingsApi } from '../api/settings'
 import { modelsApi } from '../api/models'
 import { h5AccessApi } from '../api/h5Access'
 import { tracesApi } from '../api/traces'
+import { DEFAULT_TERMINAL_FONT_SIZE, normalizeTerminalFontSize } from '../lib/terminalTheme'
 import {
   isMaxConcurrentSubagents,
   type AgentOfficeSurface,
@@ -71,6 +72,7 @@ type SettingsStore = {
   thinkingEnabled: boolean
   thinkingAutoCollapse: boolean
   workflowKeywordTriggerEnabled: boolean
+  nextPromptSuggestionsEnabled: boolean
   leanModeEnabled: boolean
   agentTeamsEnabled: boolean
   maxConcurrentSubagents: number | null
@@ -135,6 +137,7 @@ type SettingsStore = {
   setThinkingEnabled: (enabled: boolean) => Promise<void>
   setThinkingAutoCollapse: (enabled: boolean) => Promise<void>
   setWorkflowKeywordTriggerEnabled: (enabled: boolean) => Promise<void>
+  setNextPromptSuggestionsEnabled: (enabled: boolean) => Promise<void>
   setLeanModeEnabled: (enabled: boolean) => Promise<void>
   setAgentTeamsEnabled: (enabled: boolean) => Promise<void>
   setMaxConcurrentSubagents: (value: number | null) => Promise<void>
@@ -152,7 +155,7 @@ type SettingsStore = {
   setSkipWebFetchPreflight: (enabled: boolean) => Promise<void>
   setDesktopNotificationsEnabled: (enabled: boolean) => Promise<void>
   setSessionContentSearchEnabled: (enabled: boolean) => Promise<void>
-  setDesktopTerminal: (settings: DesktopTerminalSettings) => Promise<void>
+  setDesktopTerminal: (settings: Partial<DesktopTerminalSettings>) => Promise<void>
   setWorkspaceLsp: (settings: WorkspaceLspSettings) => Promise<void>
   setWebSearch: (settings: WebSearchSettings) => Promise<void>
   setUpdateProxy: (settings: UpdateProxySettings) => Promise<void>
@@ -198,6 +201,8 @@ const DEFAULT_H5_ACCESS_SETTINGS: H5AccessSettings = {
 const DEFAULT_DESKTOP_TERMINAL_SETTINGS: DesktopTerminalSettings = {
   startupShell: 'system',
   customShellPath: '',
+  fontFamily: '',
+  fontSize: DEFAULT_TERMINAL_FONT_SIZE,
 }
 let desktopTerminalSaveQueue: Promise<void> = Promise.resolve()
 let desktopTerminalSaveVersion = 0
@@ -252,6 +257,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   thinkingEnabled: true,
   thinkingAutoCollapse: true,
   workflowKeywordTriggerEnabled: true,
+  nextPromptSuggestionsEnabled: false,
   leanModeEnabled: false,
   agentTeamsEnabled: true,
   maxConcurrentSubagents: null,
@@ -354,6 +360,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         thinkingEnabled: userSettings.alwaysThinkingEnabled !== false,
         thinkingAutoCollapse: userSettings.thinkingAutoCollapse !== false,
         workflowKeywordTriggerEnabled: userSettings.workflowKeywordTriggerEnabled !== false,
+        // Opt-in: every suggestion is an extra model request.
+        nextPromptSuggestionsEnabled: userSettings.nextPromptSuggestionsEnabled === true,
         // Forward read migration: older settings leave the experiment disabled.
         leanModeEnabled: !leanModePendingAtStart && leanModePendingSaves === 0 && leanModeVersionAtStart === leanModeSaveVersion
           ? userSettings.leanModeEnabled === true : get().leanModeEnabled,
@@ -458,6 +466,17 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       await settingsApi.updateUser({ workflowKeywordTriggerEnabled: enabled })
     } catch (error) {
       set({ workflowKeywordTriggerEnabled: prev })
+      throw error
+    }
+  },
+
+  setNextPromptSuggestionsEnabled: async (enabled) => {
+    const prev = get().nextPromptSuggestionsEnabled
+    set({ nextPromptSuggestionsEnabled: enabled })
+    try {
+      await settingsApi.updateUser({ nextPromptSuggestionsEnabled: enabled })
+    } catch (error) {
+      set({ nextPromptSuggestionsEnabled: prev })
       throw error
     }
   },
@@ -696,7 +715,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   setDesktopTerminal: async (settings) => {
-    const next = normalizeDesktopTerminalSettings(settings)
+    const next = normalizeDesktopTerminalSettings({ ...get().desktopTerminal, ...settings })
     const saveVersion = ++desktopTerminalSaveVersion
     set({ desktopTerminal: next })
     const save = desktopTerminalSaveQueue
@@ -1083,6 +1102,10 @@ function normalizeDesktopTerminalSettings(
     customShellPath: typeof settings?.customShellPath === 'string'
       ? settings.customShellPath
       : DEFAULT_DESKTOP_TERMINAL_SETTINGS.customShellPath,
+    // Forward read migration for shell-only settings. Do not rewrite the
+    // user-owned JSON until a preference is explicitly saved.
+    fontFamily: typeof settings?.fontFamily === 'string' ? settings.fontFamily.trim() : '',
+    fontSize: normalizeTerminalFontSize(settings?.fontSize),
   }
 }
 

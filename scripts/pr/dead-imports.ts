@@ -342,7 +342,50 @@ function parses(source: string): boolean {
  * blanking cannot repair a syntax error.
  */
 export function blankingIsSound(source: string): boolean {
-  return parses(blankNonCode(source))
+  const blanked = blankNonCode(source)
+  if (parses(blanked)) return true
+  // Bun's transpiler has a per-file parse budget; a very large but valid file
+  // (300 KB+) can fail `transformSync` even though `bun build` compiles it. When
+  // the whole file won't parse, fall back to checking it in top-level chunks:
+  // if every chunk still parses after blanking, the lexer did not desync — the
+  // whole-file failure is the transpiler's size limit, not a blanking bug.
+  return parsesInTopLevelChunks(blanked)
+}
+
+/**
+ * Parse a large source in independently-balanced top-level chunks. Returns true
+ * only when every non-empty chunk parses, so a real blanking desync (which
+ * corrupts a chunk) still fails.
+ */
+function parsesInTopLevelChunks(source: string): boolean {
+  const chunks = splitTopLevelChunks(source)
+  if (chunks.length <= 1) return false
+  return chunks.every(chunk => chunk.trim() === '' || parses(chunk))
+}
+
+/**
+ * Split on depth-0 blank lines, keeping each chunk bracket-balanced on its own.
+ * A blanking desync that unbalances brackets makes a chunk start mid-construct;
+ * splitting there yields an unparseable piece, which the caller detects.
+ */
+function splitTopLevelChunks(source: string): string[] {
+  const lines = source.split('\n')
+  const chunks: string[] = []
+  let current: string[] = []
+  let depth = 0
+  for (const line of lines) {
+    current.push(line)
+    for (const ch of line) {
+      if (ch === '{' || ch === '(' || ch === '[') depth += 1
+      else if (ch === '}' || ch === ')' || ch === ']') depth -= 1
+    }
+    if (depth === 0 && line.trim() === '') {
+      chunks.push(current.join('\n'))
+      current = []
+    }
+  }
+  if (current.length > 0) chunks.push(current.join('\n'))
+  return chunks
 }
 
 /**
