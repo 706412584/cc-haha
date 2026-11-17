@@ -844,6 +844,62 @@ describe('providerRuntimeEnv', () => {
       'anthropic/claude-opus-4.7': 1000000,
     })
   })
+
+  test('persists a provider customHeaders into ANTHROPIC_CUSTOM_HEADERS', () => {
+    const env = buildProviderManagedEnv({
+      id: 'provider-1',
+      presetId: 'jiekouai',
+      name: 'Local relay',
+      apiKey: 'provider-key',
+      baseUrl: 'http://127.0.0.1:18080',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'gpt-6.1-sol',
+        haiku: 'gpt-6.1-sol',
+        sonnet: 'gpt-6.1-sol',
+        opus: 'gpt-6.1-sol',
+      },
+      customHeaders: 'User-Agent: claude-cli/2.1.288 (external, cli)\nX-Client-Name: Claude Code',
+    })
+    expect(env.ANTHROPIC_CUSTOM_HEADERS).toBe('User-Agent: claude-cli/2.1.288 (external, cli)\nX-Client-Name: Claude Code')
+  })
+
+  test('omits ANTHROPIC_CUSTOM_HEADERS when the provider has no customHeaders', () => {
+    const env = buildProviderManagedEnv({
+      id: 'provider-1',
+      presetId: 'jiekouai',
+      name: 'Local relay',
+      apiKey: 'provider-key',
+      baseUrl: 'http://127.0.0.1:18080',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'gpt-6.1-sol',
+        haiku: 'gpt-6.1-sol',
+        sonnet: 'gpt-6.1-sol',
+        opus: 'gpt-6.1-sol',
+      },
+    })
+    expect(env.ANTHROPIC_CUSTOM_HEADERS).toBeUndefined()
+  })
+
+  test('omits ANTHROPIC_CUSTOM_HEADERS when customHeaders is blank', () => {
+    const env = buildProviderManagedEnv({
+      id: 'provider-1',
+      presetId: 'jiekouai',
+      name: 'Local relay',
+      apiKey: 'provider-key',
+      baseUrl: 'http://127.0.0.1:18080',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'gpt-6.1-sol',
+        haiku: 'gpt-6.1-sol',
+        sonnet: 'gpt-6.1-sol',
+        opus: 'gpt-6.1-sol',
+      },
+      customHeaders: '   ',
+    })
+    expect(env.ANTHROPIC_CUSTOM_HEADERS).toBeUndefined()
+  })
 })
 
 function clearCapabilityCache() {

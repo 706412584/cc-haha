@@ -1686,6 +1686,11 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
           ANTHROPIC_DEFAULT_HAIKU_MODEL: runtimeModels.haiku,
           ANTHROPIC_DEFAULT_SONNET_MODEL: runtimeModels.sonnet,
           ANTHROPIC_DEFAULT_OPUS_MODEL: runtimeModels.opus,
+          // A provider's own customHeaders wins over the shared settings.json
+          // value: the shared value only reflects the active provider, so an
+          // edit on a non-default provider would otherwise load the wrong
+          // header set.
+          ...(provider?.customHeaders ? { ANTHROPIC_CUSTOM_HEADERS: provider.customHeaders } : {}),
         }
         applyToolSearchEnv(mergedEnv, apiFormat, toolSearchEnabled)
         applyDisableExperimentalBetasEnv(mergedEnv, disableExperimentalBetas)
@@ -1777,6 +1782,10 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
   const displayedSettingsJson = showApiKey
     ? settingsJson
     : maskSettingsJsonSecrets(settingsJson)
+  // Single source of truth: the textarea reads/writes ANTHROPIC_CUSTOM_HEADERS
+  // inside settingsJson. On save we ALSO submit that value to the provider
+  // record so a non-default provider persists it too (the shared settings.json
+  // only reflects the active provider).
   const customHeadersValue = useMemo(() => readCustomHeadersFromSettingsJson(settingsJson), [settingsJson])
   const regionalEndpointItems = (selectedPreset.regionalEndpoints ?? []).map((endpoint) => ({
     value: endpoint.baseUrl,
@@ -2159,6 +2168,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
           ...(storedImageGeneration !== undefined && { imageGeneration: storedImageGeneration }),
           ...(storedProxy && { proxy: storedProxy }),
           notes: notes.trim() || undefined,
+          customHeaders: customHeadersValue.trim() || undefined,
         })
       } else if (provider) {
         const input: UpdateProviderInput = {
@@ -2179,6 +2189,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
           imageGeneration: storedImageGeneration ?? null,
           ...(!keepRemoteProxy && { proxy: storedProxy }),
           notes: notes.trim() || undefined,
+          customHeaders: customHeadersValue.trim() || null,
         }
         if (apiKey.trim()) input.apiKey = apiKey.trim()
         await updateProvider(provider.id, input)

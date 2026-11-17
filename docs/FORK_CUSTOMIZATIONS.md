@@ -36,6 +36,7 @@
 | Provider 运行时环境官方账号分支（OpenAI/Grok OAuth runtime env） | `src/server/services/providerRuntimeEnv.ts` | grep `buildOpenAIOfficialRuntimeEnv`、`buildGrokOfficialRuntimeEnv` |
 | Provider compat/thinking 徽章 + media proxy 步骤标签 | `desktop/src/pages/settings/ProviderSettings.tsx` | 合并 diff 目视 |
 | Provider 编辑面板自定义请求头 textarea（写入 `env.ANTHROPIC_CUSTOM_HEADERS`,可覆盖 UA) | `desktop/src/pages/settings/ProviderSettings.tsx`(`readCustomHeadersFromSettingsJson` / `updateSettingsJsonCustomHeaders`) | `ProviderSettings.test.tsx`「provider custom request headers editor」4 例绿;5 份 locale 同步 `settings.providers.customHeaders*` |
+| `SavedProvider.customHeaders` 持久化到 provider 数据（非默认 provider 也能存;`buildProviderManagedEnv` 写回 env 防 sync 覆盖) | `src/server/types/provider.ts`(3 处 schema)、`src/server/services/providerRuntimeEnv.ts`(return 末尾)、`desktop/src/types/provider.ts`(3 处) | `provider-runtime-env.test.ts` 3 例新测试绿 |
 
 ## C. 会话存储 / 索引 / 历史
 

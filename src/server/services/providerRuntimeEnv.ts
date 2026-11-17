@@ -781,6 +781,13 @@ export function buildProviderManagedEnv(
     ANTHROPIC_DEFAULT_OPUS_MODEL: runtimeModels.opus,
     ...attributionHeaderEnvForModel(runtimeModels.main),
     ...buildImageGenerationManagedEnv(provider),
+    // Per-provider custom request headers. Persisted on the provider so a
+    // non-default provider can carry its own header set; the shared
+    // settings.json only reflects the active provider, so a non-default
+    // provider's custom headers would otherwise be lost on save.
+    ...(provider.customHeaders?.trim()
+      ? { ANTHROPIC_CUSTOM_HEADERS: provider.customHeaders }
+      : {}),
   }
 }
 
