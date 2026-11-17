@@ -35,6 +35,7 @@
 | ★ `xhigh` 推理档（K3/兼容模型），含 ultracode/max 档位 | `src/commands/effort/effort.tsx:30`、`src/server/services/providerRuntimeEnv.ts`（grep `xhigh_effort`） | ModelSelector / ReasoningEffortPopover 测试绿 |
 | Provider 运行时环境官方账号分支（OpenAI/Grok OAuth runtime env） | `src/server/services/providerRuntimeEnv.ts` | grep `buildOpenAIOfficialRuntimeEnv`、`buildGrokOfficialRuntimeEnv` |
 | Provider compat/thinking 徽章 + media proxy 步骤标签 | `desktop/src/pages/settings/ProviderSettings.tsx` | 合并 diff 目视 |
+| Provider 编辑面板自定义请求头 textarea（写入 `env.ANTHROPIC_CUSTOM_HEADERS`,可覆盖 UA) | `desktop/src/pages/settings/ProviderSettings.tsx`(`readCustomHeadersFromSettingsJson` / `updateSettingsJsonCustomHeaders`) | `ProviderSettings.test.tsx`「provider custom request headers editor」4 例绿;5 份 locale 同步 `settings.providers.customHeaders*` |
 
 ## C. 会话存储 / 索引 / 历史
 
@@ -52,6 +53,7 @@
 | 流断线重试预算 `CLAUDE_STREAM_TRANSIENT_RETRY_BUDGET_MS`（默认 60s）+ fork 默认 4 次重试 | `src/services/api/withRetry.ts:439-443`、`src/services/api/streamRetry.ts:83` | grep `getStreamTransientRetryBudgetMs`；`streamRetry.test.ts` 绿 |
 | 流断线重试横幅（kind-specific 文案 + data-retry-kind） | `desktop/src/components/chat/StreamingIndicator.tsx` | grep `data-retry-kind` |
 | `PENDING_PERMISSION_DISCONNECT_CLEANUP_MS` 保 5 分钟（上游为自动回答提到 31 分钟） | `src/server/ws/handler.ts:196` | grep 该常量 |
+| Relay 透传 `User-Agent`（不剥 `claude-cli/...`,上游如星驰有客户端白名单） | `src/server/proxy/handler.ts:502`(`isInternalClientHeader` 不再匹配 user-agent) | `handlerUserAgentPassthrough.test.ts` 绿;opencode-go preset 仍可被 upstreamHeaders 覆盖 UA |
 
 ## E. 桌面 UX（fork-only / 改上游）
 

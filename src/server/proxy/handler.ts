@@ -502,7 +502,13 @@ const INTERNAL_CLIENT_HEADERS = new Set([
 function isInternalClientHeader(name: string, value: string): boolean {
   if (INTERNAL_CLIENT_HEADERS.has(name)) return true
   if (name === 'x-app') return value === 'cli'
-  return name === 'user-agent' && /^claude-cli\/[^\s]+\s+\(/i.test(value)
+  // Fork customization: do NOT strip User-Agent. The upstream provider may
+  // enforce a client whitelist (e.g. xingchiapi returns 403 client_not_allowed
+  // unless User-Agent identifies a supported programming client). The relay is
+  // a transparent proxy for the local CLI and must forward the CLI's identity
+  // unchanged. Presets that need a different UA still override it via
+  // upstreamHeaders, which is applied after this filter.
+  return false
 }
 
 function hopByHopDenySet(headers: Headers): Set<string> {

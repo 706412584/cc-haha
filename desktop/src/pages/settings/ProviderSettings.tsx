@@ -1293,6 +1293,43 @@ function updateSettingsJsonToolSearch(
   }
 }
 
+/**
+ * Read/write the ANTHROPIC_CUSTOM_HEADERS entry inside the settings JSON.
+ *
+ * The proxy already honors this env var per request (see
+ * `src/services/api/client.ts:getCustomHeaders`) but it was previously only
+ * editable by hand inside the JSON. Surfacing it as a small textarea above
+ * the raw JSON lets a user override User-Agent and any other header without
+ * having to know the JSON layout — needed for upstreams that whitelist
+ * specific programming clients (e.g. xingchiapi).
+ */
+function readCustomHeadersFromSettingsJson(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw || '{}') as { env?: Record<string, unknown> }
+    const value = parsed.env?.ANTHROPIC_CUSTOM_HEADERS
+    return typeof value === 'string' ? value : ''
+  } catch {
+    return ''
+  }
+}
+
+function updateSettingsJsonCustomHeaders(raw: string, customHeaders: string): string {
+  try {
+    const parsed = JSON.parse(raw || '{}') as { env?: Record<string, unknown> }
+    const existingEnv = parsed.env && typeof parsed.env === 'object' && !Array.isArray(parsed.env)
+      ? parsed.env
+      : {}
+    const env = { ...existingEnv }
+    const trimmed = customHeaders.trim()
+    if (trimmed) env.ANTHROPIC_CUSTOM_HEADERS = customHeaders
+    else delete env.ANTHROPIC_CUSTOM_HEADERS
+    parsed.env = env
+    return JSON.stringify(parsed, null, 2)
+  } catch {
+    return raw
+  }
+}
+
 function updateSettingsJsonDisableExperimentalBetas(
   raw: string,
   disableExperimentalBetas: boolean,
@@ -1740,6 +1777,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
   const displayedSettingsJson = showApiKey
     ? settingsJson
     : maskSettingsJsonSecrets(settingsJson)
+  const customHeadersValue = useMemo(() => readCustomHeadersFromSettingsJson(settingsJson), [settingsJson])
   const regionalEndpointItems = (selectedPreset.regionalEndpoints ?? []).map((endpoint) => ({
     value: endpoint.baseUrl,
     label: endpoint.region === 'cn_zh'
@@ -2617,6 +2655,25 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
               <ProviderTestResultLines result={testResult} />
             </div>
           )}
+        </div>}
+
+        {/* Custom headers editor: a small convenience textarea that reads/writes
+            env.ANTHROPIC_CUSTOM_HEADERS inside the settings JSON. Lets users
+            override User-Agent and other headers without editing JSON directly. */}
+        {!browserMode && <div>
+          <span className={cx(FORM_SECTION_LABEL, 'mb-2')}>{t('settings.providers.customHeaders')}</span>
+          <textarea
+            aria-label={t('settings.providers.customHeaders')}
+            value={customHeadersValue}
+            onChange={(e) => {
+              setSettingsJson((current) => updateSettingsJsonCustomHeaders(current, e.target.value))
+            }}
+            placeholder={t('settings.providers.customHeadersPlaceholder')}
+            rows={3}
+            spellCheck={false}
+            className="w-full resize-y rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs leading-5 text-[var(--color-text-primary)] focus:border-[var(--color-brand)] focus:outline-none"
+          />
+          <p className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">{t('settings.providers.customHeadersHint')}</p>
         </div>}
 
         {/* Settings JSON stays on the trusted desktop. */}
