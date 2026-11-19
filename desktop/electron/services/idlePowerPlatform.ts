@@ -10,6 +10,8 @@ export type PowerPlatformDependencies = {
   runCommand?: (file: string, args: readonly string[]) => Promise<{ stdout: string; stderr: string }>
   /** Final controller safety check, after all probes and immediately before dispatch. */
   beforeExecute?: () => Promise<void>
+  /** Diagnostic sink for probe failures — never throws, so a logging failure cannot break detection. */
+  onError?: (stage: string, error: unknown) => void
 }
 
 type RunCommand = NonNullable<PowerPlatformDependencies['runCommand']>
@@ -92,10 +94,11 @@ function unavailable(): PowerCapabilities {
   return { lock: false, sleep: false, hibernate: false, shutdown: false }
 }
 
-async function probe(command: Command, run: RunCommand): Promise<string | null> {
+async function probe(command: Command, run: RunCommand, onError?: (stage: string, error: unknown) => void, stage = 'probe'): Promise<string | null> {
   try {
     return (await run(command.file, command.args)).stdout.trim()
-  } catch {
+  } catch (error) {
+    try { onError?.(stage, error) } catch { /* A diagnostic sink must never break detection. */ }
     return null
   }
 }
@@ -123,7 +126,7 @@ async function inspectMac(run: RunCommand): Promise<PowerPlan> {
   }
 }
 
-async function inspectWindows(run: RunCommand, env: NodeJS.ProcessEnv): Promise<PowerPlan> {
+async function inspectWindows(run: RunCommand, env: NodeJS.ProcessEnv, onError?: (stage: string, error: unknown) => void): Promise<PowerPlan> {
   const system32 = path.win32.join(env.SystemRoot || 'C:\\Windows', 'System32')
   const powershell = path.win32.join(system32, 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   const scriptCommand = (script: string, expectsBoolean = false): Command => ({
@@ -141,7 +144,7 @@ async function inspectWindows(run: RunCommand, env: NodeJS.ProcessEnv): Promise<
       shutdown: { file: path.win32.join(system32, 'shutdown.exe'), args: ['/s', '/t', '0'] },
     },
   }
-  const output = await probe(scriptCommand(windowsCapabilitiesScript), run)
+  const output = await probe(scriptCommand(windowsCapabilitiesScript), run, onError, 'windows-capabilities')
   if (output === null) return plan
   try {
     const caps: unknown = JSON.parse(output)
@@ -153,7 +156,8 @@ async function inspectWindows(run: RunCommand, env: NodeJS.ProcessEnv): Promise<
       hibernate: supported('systemS4') && supported('hiberFilePresent') && 'hiberFileType' in caps && caps.hiberFileType === 2,
       shutdown: supported('systemS5'),
     }
-  } catch {
+  } catch (error) {
+    try { onError?.('windows-capabilities-parse', error) } catch { /* ignore */ }
     // Unknown or localized/malformed output must not enable an action.
   }
   return plan
@@ -204,15 +208,54 @@ async function inspect(deps: PowerPlatformDependencies, run: RunCommand): Promis
   const env = deps.env ?? process.env
   switch (deps.platform ?? process.platform) {
     case 'darwin': return inspectMac(run)
-    case 'win32': return inspectWindows(run, env)
+    case 'win32': return inspectWindows(run, env, deps.onError)
     case 'linux': return inspectLinux(run, env)
     default: return { capabilities: unavailable(), commands: {} }
   }
 }
 
+/**
+ * Fallback capability probe for Windows: parse `powercfg /a` output instead of
+ * the Win32 GetPwrCapabilities + C# Add-Type path. Used when the primary probe
+ * fails (e.g. execFile mangles the multi-line PowerShell script on some
+ * Windows/Node combinations, or Add-Type is blocked by policy). Only the
+ * "available on this system" section is read; the "not available" section is
+ * ignored. Matches both English and Simplified Chinese output — other locales
+ * fall back to the primary probe's unavailable() result.
+ */
+async function detectPowerCapabilitiesViaPowercfg(run: RunCommand, env: NodeJS.ProcessEnv, onError?: (stage: string, error: unknown) => void): Promise<PowerCapabilities> {
+  const system32 = path.win32.join(env.SystemRoot || 'C:\\Windows', 'System32')
+  const powercfg = path.win32.join(system32, 'powercfg.exe')
+  const output = await probe({ file: powercfg, args: ['/a'] }, run, onError, 'powercfg-fallback')
+  if (output === null) return unavailable()
+  // The "available" section lists states the system supports; the "not
+  // available" section is below a second header. We only need the first.
+  const availableSection = output.split(/此系统上没有以下睡眠状态|The following sleep states are not available/i)[0] ?? output
+  const hasHibernate = /休眠|Hibernate/i.test(availableSection)
+  const hasSleep = /待机|Standby|Sleep/i.test(availableSection)
+  return {
+    lock: true, // Windows always supports lock via user32.dll LockWorkStation.
+    sleep: hasSleep,
+    hibernate: hasHibernate,
+    shutdown: true, // Windows always supports shutdown.exe /s /t 0.
+  }
+}
+
 /** Read-only support checks; OS policy, inhibitors or app vetoes may still reject dispatch. */
 export async function detectPowerCapabilities(deps: PowerPlatformDependencies = {}): Promise<PowerCapabilities> {
-  return (await inspect(deps, deps.runCommand ?? runCommand)).capabilities
+  const run = deps.runCommand ?? runCommand
+  const env = deps.env ?? process.env
+  const onError = deps.onError
+  const plan = await inspect(deps, run)
+  // If the primary probe came back all-unavailable on Windows, try the
+  // powercfg /a fallback before giving up — the primary probe depends on
+  // execFile passing a multi-line PowerShell script with $ variables intact,
+  // which some Windows/Node combinations mangle.
+  if ((deps.platform ?? process.platform) === 'win32' && !plan.capabilities.lock && !plan.capabilities.sleep && !plan.capabilities.hibernate && !plan.capabilities.shutdown) {
+    try { onError?.('primary-probe-unavailable', new Error('primary probe returned all-unavailable')) } catch { /* ignore */ }
+    return detectPowerCapabilitiesViaPowercfg(run, env, onError)
+  }
+  return plan.capabilities
 }
 
 /** Resolves when the OS accepts the request, not when sleep/shutdown has completed. */

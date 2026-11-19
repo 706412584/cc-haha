@@ -42,6 +42,15 @@ type Options = {
   blocker?: Pick<PowerSaveBlocker, 'start' | 'stop'>
   lastAction: IdlePowerRecord | null
   capabilities: IdlePowerCapabilities
+  /**
+   * Re-probe OS capabilities on demand. Called by refresh() when the current
+   * snapshot marks the configured action as unavailable — gives the service a
+   * chance to recover from a startup-time probe failure (e.g. execFile
+   * mangling the PowerShell script) instead of sticking on "unavailable"
+   * forever. The returned capabilities replace the snapshot; a null/undefined
+   * result keeps the previous snapshot.
+   */
+  refreshCapabilities?(): Promise<IdlePowerCapabilities | null>
   readActivity(signal: AbortSignal): Promise<PowerActivitySnapshot>
   /** The platform calls beforeExecute after capability checks, immediately before dispatch. */
   execute(action: IdlePowerAction, beforeExecute: () => Promise<void>): Promise<void>
@@ -197,7 +206,20 @@ export class IdlePowerService {
 
   private async refresh(generation: number): Promise<void> {
     try {
-      if (this.state.settings.action === 'none' || !this.state.capabilities[this.state.settings.action]) return
+      if (this.state.settings.action === 'none') return
+      // If the startup probe marked this action as unavailable, give the
+      // platform a chance to re-probe before giving up. The refresh callback
+      // may succeed where the startup probe failed (e.g. execFile mangling
+      // the PowerShell script on Windows), so the action can still dispatch.
+      if (!this.state.capabilities[this.state.settings.action] && this.options.refreshCapabilities) {
+        const refreshed = await this.options.refreshCapabilities()
+        if (refreshed) {
+          this.state.capabilities = { ...refreshed }
+          this.state.notice = this.state.settings.action !== 'none' && !refreshed[this.state.settings.action] ? 'unavailable' : null
+          this.emit()
+        }
+      }
+      if (!this.state.capabilities[this.state.settings.action]) return
       const snapshot = await this.read()
       if (generation !== this.generation || !this.running) return
       const previous = this.observed

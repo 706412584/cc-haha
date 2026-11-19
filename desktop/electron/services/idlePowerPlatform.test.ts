@@ -21,11 +21,17 @@ function fixture(platform: NodeJS.Platform, override?: (file: string, args: read
   const runCommand = vi.fn<RunCommand>(async (file, args) => {
     const overridden = override?.(file, args)
     if (overridden !== undefined) return { stdout: overridden, stderr: '' }
+    // The powercfg /a fallback must fail in fixtures that don't explicitly
+    // stub it, or the "fails closed" tests would see lock/shutdown=true.
+    if (file.endsWith('powercfg.exe')) throw new Error('powercfg unavailable in fixture')
     if (file === '/bin/test') return { stdout: '', stderr: '' }
     if (file === '/usr/bin/pmset' && args[0] === '-g') return { stdout: 'Capabilities for AC Power:\n displaysleep\n sleep\n', stderr: '' }
     if (file.endsWith('powershell.exe')) {
       return { stdout: args.at(-1)?.includes('GetPwrCapabilities') ? JSON.stringify(windowsCapabilities) : 'true\r\n', stderr: '' }
     }
+    // The powercfg /a fallback must fail in these fixtures too, or the
+    // "fails closed" tests would see the fallback's lock/shutdown=true.
+    if (file.endsWith('powercfg.exe')) throw new Error('powercfg unavailable in fixture')
     if (file === '/usr/bin/loginctl') return { stdout: 'Active=yes\nRemote=no\nType=wayland\n', stderr: '' }
     if (file === '/usr/bin/busctl') {
       if (args.at(-1)?.startsWith('Can')) return { stdout: 's "yes"\n', stderr: '' }
@@ -71,12 +77,20 @@ describe('idle power platform capabilities', () => {
   it('recognizes Windows modern standby without S1/S2/S3 and excludes noninteractive sessions', async () => {
     const { deps } = fixture('win32', () => JSON.stringify({ ...windowsCapabilities, systemS3: false, aoAc: true }))
     expect((await detectPowerCapabilities(deps)).sleep).toBe(true)
-    const inactive = fixture('win32', () => JSON.stringify({ ...windowsCapabilities, interactive: false }))
+    const inactive = fixture('win32', (file) => {
+      if (file.endsWith('powershell.exe')) return JSON.stringify({ ...windowsCapabilities, interactive: false })
+      if (file.endsWith('powercfg.exe')) throw new Error('powercfg failed')
+    })
     expect(await detectPowerCapabilities(inactive.deps)).toEqual(unavailable)
   })
 
   it.each(['not json', 'null', '{}', '{"interactive":"true","systemS4":"true"}'])('fails closed on invalid Windows capability output: %s', async stdout => {
-    const { deps } = fixture('win32', () => stdout)
+    const { deps } = fixture('win32', (file) => {
+      // Only the Win32 PowerShell probe returns the invalid output; the
+      // powercfg /a fallback must also fail so the test stays "fails closed".
+      if (file.endsWith('powershell.exe')) return stdout
+      if (file.endsWith('powercfg.exe')) throw new Error('powercfg failed')
+    })
     expect(await detectPowerCapabilities(deps)).toEqual(unavailable)
   })
 
@@ -201,5 +215,34 @@ describe('idle power platform dispatch', () => {
       if (args[0] === 'sleepnow') throw new Error('OS refused sleep')
     })
     await expect(executePowerAction('sleep', deps)).rejects.toThrow('OS refused sleep')
+  })
+
+  it('falls back to powercfg /a when the Win32 probe returns all-unavailable', async () => {
+    const { deps, runCommand } = fixture('win32', (file) => {
+      // Win32 probe returns garbage → JSON.parse fails → all-unavailable.
+      if (file.endsWith('powershell.exe')) return 'not json'
+      // powercfg /a fallback reports hibernate + standby available.
+      if (file.endsWith('powercfg.exe')) return '此系统上有以下睡眠状态:\n    待机 (S3)\n    休眠\n此系统上没有以下睡眠状态:\n    待机 (S1)\n'
+    })
+    const caps = await detectPowerCapabilities(deps)
+    expect(caps).toEqual({ lock: true, sleep: true, hibernate: true, shutdown: true })
+    expect(runCommand.mock.calls.some(([file]) => file.endsWith('powercfg.exe'))).toBe(true)
+  })
+
+  it('falls back to powercfg /a with English output', async () => {
+    const { deps } = fixture('win32', (file) => {
+      if (file.endsWith('powershell.exe')) return 'not json'
+      if (file.endsWith('powercfg.exe')) return 'The following sleep states are available on this system:\n    Standby (S3)\n    Hibernate\nThe following sleep states are not available on this system:\n    Standby (S1)\n'
+    })
+    const caps = await detectPowerCapabilities(deps)
+    expect(caps).toEqual({ lock: true, sleep: true, hibernate: true, shutdown: true })
+  })
+
+  it('returns unavailable when both the Win32 probe and the powercfg fallback fail', async () => {
+    const { deps } = fixture('win32', (file) => {
+      if (file.endsWith('powershell.exe')) return 'not json'
+      if (file.endsWith('powercfg.exe')) throw new Error('powercfg failed')
+    })
+    expect(await detectPowerCapabilities(deps)).toEqual(unavailable)
   })
 })
