@@ -41,6 +41,7 @@ import { resetSettingsCache, setSessionSettingsCache } from '../../utils/setting
 import { clearGrokModelCatalogCache, getGrokModelCatalog } from '../../services/grokAuth/modelCatalog.js'
 import { hahaGrokOAuthService } from '../services/hahaGrokOAuthService.js'
 import { createResumableSocketHandler } from '../ws/resumableStreams.js'
+import { buildSessionModelCatalog, resolveSessionRuntimeFromCatalog } from '../services/sessionModelCatalog.js'
 
 function makeClientSocket(sessionId: string, clientKind: 'full' | 'pet' = 'full') {
   const sent: string[] = []
@@ -313,6 +314,67 @@ describe('WebSocket Grok catalog runtime selection', () => {
       type: 'runtime_config_applied', modelId: 'grok-new-cold-model', effortLevel: 'max',
     }))
     expect(await getRuntimeSettings(sessionId)).toMatchObject({ model: 'grok-new-cold-model', effort: 'max' })
+  })
+})
+
+describe('stale runtime modelId guard', () => {
+  afterEach(() => {
+    __resetWebSocketHandlerStateForTests()
+    mock.restore()
+  })
+
+  const fableProvider = {
+    id: 'fable-provider',
+    presetId: 'custom',
+    name: 'Fable Provider',
+    apiKey: 'secret',
+    baseUrl: 'http://127.0.0.1:1',
+    apiFormat: 'openai_chat',
+    models: {
+      main: 'deepseek-v4.1-flash',
+      fable: 'GLM-5.3',
+      haiku: 'deepseek-v4.1-flash',
+      sonnet: 'GLM-5.3-Flash',
+      opus: 'kimi-k3.1-pro',
+    },
+    model1mSupport: { main: true, fable: true, haiku: true, sonnet: true, opus: true },
+  }
+
+  const launchInfoFor = (runtimeModelId: string) => ({
+    filePath: '/tmp/stale-model.jsonl', projectDir: '/tmp', workDir: '/tmp',
+    transcriptMessageCount: 0, customTitle: null,
+    runtimeProviderId: fableProvider.id, runtimeModelId,
+  })
+
+  it('keeps a Fable-slot selection instead of treating it as stale', async () => {
+    const sessionId = `stale-fable-${crypto.randomUUID()}`
+    spyOn(sessionService, 'getSessionLaunchInfo').mockResolvedValue(launchInfoFor('GLM-5.3[1m]') as never)
+    spyOn(ProviderService.prototype, 'listProviders').mockResolvedValue({
+      providers: [fableProvider as never], activeId: fableProvider.id, providerOrder: [],
+    })
+    spyOn(SettingsService.prototype, 'getUserSettings').mockResolvedValue({})
+    spyOn(SettingsService.prototype, 'getPermissionMode').mockResolvedValue('default')
+    expect(await getRuntimeSettings(sessionId)).toMatchObject({ model: 'GLM-5.3[1m]' })
+  })
+
+  it('falls back to the main model with its 1m marker so catalog resolution succeeds', async () => {
+    const sessionId = `stale-main-${crypto.randomUUID()}`
+    spyOn(sessionService, 'getSessionLaunchInfo').mockResolvedValue(launchInfoFor('retired-model[1m]') as never)
+    spyOn(ProviderService.prototype, 'listProviders').mockResolvedValue({
+      providers: [fableProvider as never], activeId: fableProvider.id, providerOrder: [],
+    })
+    spyOn(SettingsService.prototype, 'getUserSettings').mockResolvedValue({})
+    spyOn(SettingsService.prototype, 'getPermissionMode').mockResolvedValue('default')
+    const settings = await getRuntimeSettings(sessionId)
+    expect(settings).toMatchObject({ model: 'deepseek-v4.1-flash[1m]' })
+    // The fallback id must be a catalog identity, otherwise the next
+    // collaboration send fails with SESSION_MODEL_UNAVAILABLE.
+    const catalog = buildSessionModelCatalog(
+      [fableProvider as never],
+      { claude: false, openai: false, grok: false, deepseek: false },
+    )
+    expect(resolveSessionRuntimeFromCatalog({}, { providerId: fableProvider.id, modelId: settings.model! }, catalog))
+      .toMatchObject({ modelId: 'deepseek-v4.1-flash[1m]' })
   })
 })
 

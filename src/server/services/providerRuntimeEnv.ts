@@ -250,7 +250,7 @@ export function normalizeImageGeneration(
   }
 }
 
-function applyModel1mSupport(model: string, enabled: boolean | undefined): string {
+export function applyModel1mSupport(model: string, enabled: boolean | undefined): string {
   const trimmed = model.trim()
   if (!enabled) return trimmed
   return `${trimmed.replace(/\[1m\]$/i, '').replace(/:1m$/i, '').trim()}[1m]`
