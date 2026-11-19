@@ -55,6 +55,7 @@
 | 流断线重试横幅（kind-specific 文案 + data-retry-kind） | `desktop/src/components/chat/StreamingIndicator.tsx` | grep `data-retry-kind` |
 | `PENDING_PERMISSION_DISCONNECT_CLEANUP_MS` 保 5 分钟（上游为自动回答提到 31 分钟） | `src/server/ws/handler.ts:196` | grep 该常量 |
 | Relay 透传 `User-Agent`（不剥 `claude-cli/...`,上游如星驰有客户端白名单） | `src/server/proxy/handler.ts:502`(`isInternalClientHeader` 不再匹配 user-agent) | `handlerUserAgentPassthrough.test.ts` 绿;opencode-go preset 仍可被 upstreamHeaders 覆盖 UA |
+| 跨协议路径同样透传客户端身份（`openai_chat`/`openai_responses`/`gemini` 曾从空对象构造上游头,出站 UA 退化成 `Bun/x.y.z`;Anthropic 专有头与 `x-stainless-*` 仍丢弃） | `src/server/proxy/handler.ts`(`forwardClientHeaders(incomingHeaders, true)`) | `handlerUserAgentPassthrough.test.ts` 的跨协议用例绿;本地网关 `127.0.0.1:6789/panel/#logs` 应显示 `claude-cli/2.1.288 (external, cli)` |
 
 ## E. 桌面 UX（fork-only / 改上游）
 
