@@ -18,6 +18,8 @@ import { teamService } from '../services/teamService.js'
 import { changeTeamMemberRuntime } from '../services/teamPlanRuntime.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 import { ensureCliSessionStartedForControl } from '../ws/handler.js'
+import { teamMemberRuntimeIdentitySchema, teamRuntimeControlActionSchema, teamRuntimeControlIdentitySchema } from '../../shared/teamRuntimeControl.js'
+import { getTeamRuntimeControlView, resumeReviewedTeam } from '../services/teamRuntimeControlService.js'
 
 /**
  * The plan card is durable and can be approved or resumed long after the
@@ -61,6 +63,22 @@ export async function handleTeamsApi(
     const method = req.method
     const teamName = segments[2] ? decodeURIComponent(segments[2]) : undefined
 
+    if (teamName && segments[3] === 'runtime-control') {
+      if (method === 'GET' && !segments[4]) {
+        const parsed = teamRuntimeControlIdentitySchema.safeParse(Object.fromEntries(requestUrl.searchParams))
+        if (!parsed.success) throw ApiError.badRequest('Team runtime identity is required')
+        return Response.json({ control: await getTeamRuntimeControlView(teamName, parsed.data) })
+      }
+      if (method === 'POST' && segments[4] === 'resume') {
+        let raw: unknown
+        try { raw = await req.json() } catch { throw ApiError.badRequest('Invalid JSON body') }
+        const parsed = teamRuntimeControlActionSchema.safeParse(raw)
+        if (!parsed.success) throw ApiError.badRequest('A current team revision and fresh human resume intent are required')
+        return Response.json({ control: await resumeReviewedTeam(teamName, parsed.data, id => ensureCliSessionStartedForControl(id, requestUrl)) })
+      }
+      throw ApiError.badRequest('Unknown team runtime action')
+    }
+
     if (method === 'GET' && teamName === 'session' && segments[3] && segments[4] === 'plan') {
       return Response.json({ plan: await teamPlanService.getForSession(decodeURIComponent(segments[3])) })
     }
@@ -73,7 +91,7 @@ export async function handleTeamsApi(
         const { members, tasks, ...identity } = parsed.data
         const plan = await teamPlanService.update(teamName, identity, {
           ...(members ? { members } : {}), ...(tasks ? { tasks } : {}),
-        })
+        }, req.signal)
         return Response.json({ plan })
       }
       const parsed = teamPlanActionSchema.safeParse(raw)
@@ -86,6 +104,7 @@ export async function handleTeamsApi(
           // its state check is narrower (review_pending only) and its failure
           // message names the plan, so both run and the first refusal wins.
           startLeader: sessionId => ensureCliSessionStartedForControl(sessionId, requestUrl),
+          signal: req.signal,
         }) })
       }
       if (action === 'resume') {
@@ -210,12 +229,14 @@ export async function handleTeamsApi(
       if (typeof body.modelId !== 'string' || !body.modelId.trim()) throw ApiError.badRequest('modelId (string) is required')
       if (body.providerId !== null && typeof body.providerId !== 'string') throw ApiError.badRequest('providerId must be a string or null')
       if (body.effortLevel !== undefined && typeof body.effortLevel !== 'string') throw ApiError.badRequest('effortLevel must be a string')
+      const identity = teamMemberRuntimeIdentitySchema.safeParse(body)
+      if (!identity.success) throw ApiError.badRequest('Current team and member identities and revision are required')
       const member = await changeTeamMemberRuntime(teamName, agentId, {
         providerId: body.providerId,
         modelId: body.modelId,
         ...(body.effortLevel !== undefined ? { effortLevel: body.effortLevel } : {}),
-      })
-      return Response.json({ ok: true, member })
+      }, identity.data)
+      return Response.json({ ok: true, member, control: await getTeamRuntimeControlView(teamName, identity.data) })
     }
 
     // ── GET /api/teams/:name ──────────────────────────────────────────────

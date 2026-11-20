@@ -32,17 +32,21 @@ const sessionsApiMock = vi.hoisted(() => ({
   create: vi.fn(),
   list: vi.fn(),
   listProjectHistory: vi.fn(),
+  getFullHistory: vi.fn(),
   getGitInfo: vi.fn(),
   getRepositoryContext: vi.fn(),
   getRecentProjects: vi.fn(),
   createRepositoryBranch: vi.fn(),
 }))
 
+const clipboardMock = vi.hoisted(() => ({ copyTextToClipboard: vi.fn() }))
+
 const repositoryContextMock = sessionsApiMock.getRepositoryContext
 
 vi.mock('../../api/sessions', () => ({
   sessionsApi: sessionsApiMock,
 }))
+vi.mock('@/lib/clipboard', () => clipboardMock)
 
 const agentsApiMock = vi.hoisted(() => ({
   list: vi.fn(),
@@ -153,6 +157,13 @@ vi.mock('../../i18n', () => ({
       'sidebar.expand': 'Expand sidebar',
       'session.lastUpdated': 'last updated {time}',
       'sidebar.sessionStatus.attention': 'Needs you',
+      'sidebar.copyMarkdown': 'Copy Markdown',
+      'sidebar.exportMarkdown': 'Export Markdown',
+      'sidebar.markdownCopied': 'Markdown copied.',
+      'sidebar.markdownExported': 'Markdown exported.',
+      'sidebar.markdownCopyFailed': 'Could not copy Markdown.',
+      'sidebar.markdownExportFailed': 'Could not export Markdown.',
+      'sidebar.markdownHistoryIncomplete': 'The session history is incomplete, so Markdown was not created.',
       'session.timeJustNow': 'just now',
       'session.timeMinutes': '{n}m ago',
       'session.timeHours': '{n}h ago',
@@ -179,7 +190,7 @@ vi.mock('./ProjectEditorModal', () => ({
     error?: string | null
     onClose: () => void
     onSourceFolderChange?: (path: string) => void
-    onSubmit: (submission: { name: string; sourceFolder: string; logicalRoot: string }) => void | Promise<void>
+    onSubmit: (submission: { name: string; sourceFolder: string; logicalRoot: string; additionalDirectories: string[] }) => void | Promise<void>
     onRestoreFolderName?: () => void | Promise<void>
     onRemoveFromSidebar?: () => void | Promise<void>
   }) => {
@@ -211,7 +222,7 @@ vi.mock('./ProjectEditorModal', () => ({
         )}
         <button
           type="button"
-          onClick={() => void props.onSubmit({ name, sourceFolder, logicalRoot })}
+          onClick={() => void props.onSubmit({ name, sourceFolder, logicalRoot, additionalDirectories: [] })}
         >
           Submit {props.mode} project
         </button>
@@ -222,6 +233,7 @@ vi.mock('./ProjectEditorModal', () => ({
               name: props.suggestedName!.trim().replace(/\s+/g, ' '),
               sourceFolder,
               logicalRoot,
+              additionalDirectories: [],
             })}
           >
             Submit folder project name
@@ -439,6 +451,7 @@ describe('Sidebar', () => {
     setSessionsArchived.mockReset()
     setSessionsArchived.mockResolvedValue({ successes: [], failures: [] })
     addToast.mockReset()
+    clipboardMock.copyTextToClipboard.mockReset()
     desktopUiPreferencesApiMock.updateSidebarPreferences.mockReset()
     desktopUiPreferencesApiMock.getProjectDirectories.mockReset()
     desktopUiPreferencesApiMock.updateProjectDirectories.mockReset()
@@ -455,6 +468,8 @@ describe('Sidebar', () => {
     sessionsApiMock.create.mockReset()
     sessionsApiMock.list.mockReset()
     sessionsApiMock.listProjectHistory.mockReset()
+    sessionsApiMock.getFullHistory.mockReset()
+    sessionsApiMock.getFullHistory.mockResolvedValue({ messages: [], page: { historyComplete: true, contentTruncated: false, omittedOversizedEntries: 0 } })
     sessionsApiMock.listProjectHistory.mockResolvedValue({ sessions: [], nextCursor: null })
     sessionsApiMock.getGitInfo.mockReset()
     sessionsApiMock.getRecentProjects.mockReset()
@@ -622,7 +637,7 @@ describe('Sidebar', () => {
     fireEvent.contextMenu(screen.getByText('Archive target'))
     const menu = screen.getByRole('menu')
     expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
-      'Rename', 'sidebar.exportSession', 'sidebar.copySessionPath', 'sidebar.archiveSession', 'Delete',
+      'Rename', 'sidebar.exportSession', 'sidebar.copySessionPath', 'Copy Markdown', 'Export Markdown', 'sidebar.archiveSession', 'Delete',
     ])
     expect(within(menu).getByRole('separator')).toBeInTheDocument()
 
@@ -638,6 +653,51 @@ describe('Sidebar', () => {
 
     await act(async () => addToast.mock.calls[0]![0].action.onClick())
     expect(setSessionsArchived).toHaveBeenCalledWith(['archive-target'], false)
+  })
+
+  it('copies and exports complete Markdown and reports incomplete ordinary history', async () => {
+    const originalCreateObjectURL = Object.getOwnPropertyDescriptor(URL, 'createObjectURL')
+    const originalRevokeObjectURL = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL')
+    const createObjectURL = vi.fn(() => 'blob:sidebar-markdown')
+    const revokeObjectURL = vi.fn()
+    const downloads: Array<{ href: string; download: string }> = []
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push({ href: this.href, download: this.download })
+    })
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
+
+    try {
+      useSessionStore.setState({ sessions: [makeSession('markdown-target', 'Markdown target', '/workspace/alpha', '2026-01-01')] })
+      sessionsApiMock.getFullHistory.mockResolvedValue({
+        messages: [{ id: 'm1', type: 'user', content: 'Prompt body', timestamp: '2026-01-01T00:00:00.000Z' }],
+        page: { historyComplete: true, contentTruncated: false, omittedOversizedEntries: 0 },
+      })
+      clipboardMock.copyTextToClipboard.mockResolvedValue(true)
+      render(<Sidebar />)
+      fireEvent.contextMenu(screen.getByText('Markdown target'))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Copy Markdown' }))
+      await waitFor(() => expect(clipboardMock.copyTextToClipboard).toHaveBeenCalledWith(expect.stringContaining('Prompt body')))
+      expect(addToast).toHaveBeenCalledWith({ type: 'success', message: 'Markdown copied.' })
+
+      fireEvent.contextMenu(screen.getByText('Markdown target'))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Export Markdown' }))
+      await waitFor(() => expect(downloads).toEqual([{ href: 'blob:sidebar-markdown', download: 'Markdown target.md' }]))
+      expect(addToast).toHaveBeenCalledWith({ type: 'success', message: 'Markdown exported.' })
+
+      sessionsApiMock.getFullHistory.mockResolvedValueOnce({
+        messages: [], page: { historyComplete: false, contentTruncated: false, omittedOversizedEntries: 0 },
+      })
+      fireEvent.contextMenu(screen.getByText('Markdown target'))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Copy Markdown' }))
+      await waitFor(() => expect(addToast).toHaveBeenCalledWith({ type: 'error', message: 'The session history is incomplete, so Markdown was not created.' }))
+    } finally {
+      clickSpy.mockRestore()
+      if (originalCreateObjectURL) Object.defineProperty(URL, 'createObjectURL', originalCreateObjectURL)
+      else Reflect.deleteProperty(URL, 'createObjectURL')
+      if (originalRevokeObjectURL) Object.defineProperty(URL, 'revokeObjectURL', originalRevokeObjectURL)
+      else Reflect.deleteProperty(URL, 'revokeObjectURL')
+    }
   })
 
   it('leaves a rejected session usable and without an undo', async () => {
@@ -1429,69 +1489,46 @@ describe('Sidebar', () => {
     await waitFor(() => expect(useUIStore.getState().newSessionDraft?.workDir).toBe('/workspace/alpha'))
   })
 
-  it('creates a named project at its resolved root while launching the selected source folder', async () => {
+  it('creates a nested project at its selected root without renaming the parent repository', async () => {
     repositoryContextMock.mockResolvedValue({ repoRoot: '/workspace/repository' })
     createSession.mockResolvedValue('created-project-session')
 
     render(<Sidebar />)
-
     fireEvent.click(screen.getByRole('button', { name: 'New project' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Use existing folder' }))
-
-    const editor = screen.getByTestId('project-editor-modal')
-    expect(editor).toHaveAttribute('data-source-folder', '')
     fireEvent.click(screen.getByRole('button', { name: 'Choose project source' }))
 
-    await waitFor(() => expect(repositoryContextMock).toHaveBeenCalledWith('/workspace/repository/packages/app'))
-    await waitFor(() => {
-      expect(editor).toHaveAttribute('data-source-folder', '/workspace/repository/packages/app')
-      expect(editor).toHaveAttribute('data-logical-root', '/workspace/repository')
-      expect(editor).toHaveAttribute('data-suggested-name', 'repository')
-    })
-
+    const editor = screen.getByTestId('project-editor-modal')
+    expect(editor).toHaveAttribute('data-logical-root', '/workspace/repository/packages/app')
+    expect(editor).toHaveAttribute('data-suggested-name', 'app')
     fireEvent.click(screen.getByRole('button', { name: 'Submit create project' }))
+
     await waitFor(() => {
+      expect(desktopUiPreferencesApiMock.updateProjectDirectories).toHaveBeenCalledWith(
+        '/workspace/repository/packages/app', [], { createProject: true },
+      )
       expect(desktopUiPreferencesApiMock.updateProjectDisplayName).toHaveBeenCalledWith(
-        '/workspace/repository',
-        'Created project',
+        '/workspace/repository/packages/app', 'Created project',
       )
       expect(createSession).toHaveBeenCalledWith('/workspace/repository/packages/app')
       expect(connectToSession).toHaveBeenCalledWith('created-project-session')
     })
-    expect(createSession.mock.invocationCallOrder[0]).toBeLessThan(
-      desktopUiPreferencesApiMock.updateProjectDisplayName.mock.invocationCallOrder[0]!,
+    expect(desktopUiPreferencesApiMock.updateProjectDirectories.mock.invocationCallOrder[0]).toBeLessThan(
+      createSession.mock.invocationCallOrder[0]!,
     )
-    expect(repositoryContextMock).toHaveBeenCalledTimes(1)
+    expect(repositoryContextMock).not.toHaveBeenCalled()
   })
 
-  it('opens the session before repository context resolves and falls back after lookup failure', async () => {
-    const repositoryContext = createDeferred<{ repoRoot: string | null; workDir?: string }>()
-    repositoryContextMock.mockReturnValueOnce(repositoryContext.promise)
+  it('keeps a hidden parent hidden when creating an independent child project', async () => {
+    window.localStorage.setItem(PROJECT_HIDDEN_STORAGE_KEY, JSON.stringify(['/workspace/repository']))
     createSession.mockResolvedValue('created-project-session')
-
     render(<Sidebar />)
-
     fireEvent.click(screen.getByRole('button', { name: 'New project' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Use existing folder' }))
     fireEvent.click(screen.getByRole('button', { name: 'Choose project source' }))
     fireEvent.click(screen.getByRole('button', { name: 'Submit create project' }))
-
-    await waitFor(() => {
-      expect(createSession).toHaveBeenCalledWith('/workspace/repository/packages/app')
-      expect(connectToSession).toHaveBeenCalledWith('created-project-session')
-      expect(screen.queryByTestId('project-editor-modal')).not.toBeInTheDocument()
-    })
-    expect(desktopUiPreferencesApiMock.updateProjectDisplayName).not.toHaveBeenCalled()
-
-    await act(async () => {
-      repositoryContext.reject(new Error('repository context unavailable'))
-      await repositoryContext.promise.catch(() => undefined)
-    })
-
-    await waitFor(() => expect(desktopUiPreferencesApiMock.updateProjectDisplayName).toHaveBeenCalledWith(
-      '/workspace/repository/packages/app',
-      'Created project',
-    ))
+    await waitFor(() => expect(connectToSession).toHaveBeenCalledWith('created-project-session'))
+    expect(JSON.parse(window.localStorage.getItem(PROJECT_HIDDEN_STORAGE_KEY)!)).toEqual(['/workspace/repository'])
   })
 
   it('resets instead of persisting a redundant alias when creating with the folder name', async () => {
@@ -1508,7 +1545,7 @@ describe('Sidebar', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Choose project source' }))
     await waitFor(() => expect(screen.getByTestId('project-editor-modal')).toHaveAttribute(
       'data-suggested-name',
-      'repository',
+      'app',
     ))
     fireEvent.click(screen.getByRole('button', { name: 'Submit folder project name' }))
 
@@ -1517,7 +1554,7 @@ describe('Sidebar', () => {
       expect(screen.queryByTestId('project-editor-modal')).not.toBeInTheDocument()
     })
     expect(desktopUiPreferencesApiMock.updateProjectDisplayName).toHaveBeenCalledWith(
-      '/workspace/repository',
+      '/workspace/repository/packages/app',
       null,
     )
   })
@@ -1539,7 +1576,6 @@ describe('Sidebar', () => {
     fireEvent.click(screen.getByRole('button', { name: 'New project' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Use existing folder' }))
     fireEvent.click(screen.getByRole('button', { name: 'Choose project source' }))
-    await waitFor(() => expect(repositoryContextMock).toHaveBeenCalled())
     fireEvent.click(screen.getByRole('button', { name: 'Submit create project' }))
 
     await waitFor(() => {
@@ -1574,7 +1610,6 @@ describe('Sidebar', () => {
     fireEvent.click(screen.getByRole('button', { name: 'New project' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Use existing folder' }))
     fireEvent.click(screen.getByRole('button', { name: 'Choose project source' }))
-    await waitFor(() => expect(repositoryContextMock).toHaveBeenCalled())
     fireEvent.click(screen.getByRole('button', { name: 'Submit create project' }))
 
     await waitFor(() => {
@@ -1585,69 +1620,36 @@ describe('Sidebar', () => {
     expect(connectToSession).not.toHaveBeenCalled()
   })
 
-  it('uses the resolved non-git workDir as the project display-name key', async () => {
-    repositoryContextMock.mockResolvedValue({
-      repoRoot: null,
-      workDir: '/real/workspace/project',
+  it('uses the server-validated project identity for the display name', async () => {
+    desktopUiPreferencesApiMock.updateProjectDirectories.mockResolvedValueOnce({
+      ok: true, projectKey: '/real/workspace/project', mainDirectory: '/real/workspace/project', additionalDirectories: [],
     })
     createSession.mockResolvedValue('created-project-session')
-
     render(<Sidebar />)
-
     fireEvent.click(screen.getByRole('button', { name: 'New project' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Use existing folder' }))
     fireEvent.click(screen.getByRole('button', { name: 'Choose project source' }))
-
-    await waitFor(() => {
-      const editor = screen.getByTestId('project-editor-modal')
-      expect(editor).toHaveAttribute('data-source-folder', '/workspace/repository/packages/app')
-      expect(editor).toHaveAttribute('data-logical-root', '/real/workspace/project')
-      expect(editor).toHaveAttribute('data-suggested-name', 'project')
-    })
-
     fireEvent.click(screen.getByRole('button', { name: 'Submit create project' }))
+
     await waitFor(() => {
       expect(desktopUiPreferencesApiMock.updateProjectDisplayName).toHaveBeenCalledWith(
-        '/real/workspace/project',
-        'Created project',
+        '/real/workspace/project', 'Created project',
       )
       expect(createSession).toHaveBeenCalledWith('/workspace/repository/packages/app')
     })
   })
 
-  it('keeps the latest logical root when an earlier lookup finishes late', async () => {
-    let resolveFirstLookup: (value: { repoRoot: string | null }) => void = () => undefined
-    const firstLookup = new Promise<{ repoRoot: string | null }>((resolve) => {
-      resolveFirstLookup = resolve
-    })
-    repositoryContextMock
-      .mockImplementationOnce(() => firstLookup)
-      .mockResolvedValueOnce({ repoRoot: '/workspace/other' })
-
+  it('keeps the latest selected folder as its independent project root', () => {
     render(<Sidebar />)
-
     fireEvent.click(screen.getByRole('button', { name: 'New project' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Use existing folder' }))
     fireEvent.click(screen.getByRole('button', { name: 'Choose project source' }))
     fireEvent.click(screen.getByRole('button', { name: 'Choose other project source' }))
-
-    await waitFor(() => expect(repositoryContextMock).toHaveBeenNthCalledWith(2, '/workspace/other'))
-    await waitFor(() => {
-      const editor = screen.getByTestId('project-editor-modal')
-      expect(editor).toHaveAttribute('data-source-folder', '/workspace/other')
-      expect(editor).toHaveAttribute('data-logical-root', '/workspace/other')
-      expect(editor).toHaveAttribute('data-suggested-name', 'other')
-    })
-
-    await act(async () => {
-      resolveFirstLookup({ repoRoot: '/workspace/repository' })
-      await Promise.resolve()
-    })
-
     const editor = screen.getByTestId('project-editor-modal')
     expect(editor).toHaveAttribute('data-source-folder', '/workspace/other')
     expect(editor).toHaveAttribute('data-logical-root', '/workspace/other')
     expect(editor).toHaveAttribute('data-suggested-name', 'other')
+    expect(repositoryContextMock).not.toHaveBeenCalled()
   })
 
   it('edits, resets, and removes a project without changing its real path or sessions', async () => {

@@ -4,6 +4,7 @@ import { ApiError } from '../middleware/errorHandler.js'
 import { normalizeJsonObject, readRecoverableJsonFile } from './recoverableJsonFile.js'
 import { ensurePersistentStorageUpgraded } from './persistentStorageMigrations.js'
 import { writeJsonFileAtomic } from '../storage/atomicWrite.js'
+import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
 
 export class ManagedSettingsService {
   private static writeLocks = new Map<string, Promise<void>>()
@@ -45,6 +46,7 @@ export class ManagedSettingsService {
       // snapshot:true so a corrupt/zero-filled settings.json can be restored
       // from the previous good copy on the next read.
       await writeJsonFileAtomic(filePath, settings, { snapshot: true })
+      resetSettingsCache()
     } catch (error) {
       throw ApiError.internal(`Failed to write settings.json: ${error}`)
     }

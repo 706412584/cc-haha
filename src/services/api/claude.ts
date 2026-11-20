@@ -1,5 +1,6 @@
 ﻿import { getConfiguredProviderOutputBudget, getOutputBudgetHeaders, markOutputBudgetSource } from './outputBudget.js'
 import { OpenAICodexTurnState } from '../openaiAuth/turnState.js';
+import { getOutputBudgetSource, isLocalProtocolProxy } from './outputBudget.js'
 import type {
   BetaContentBlock,
   BetaContentBlockParam,
@@ -67,6 +68,7 @@ import {
 import { getOrCreateUserID } from "../../utils/config.js";
 import {
   CAPPED_DEFAULT_MAX_TOKENS,
+  ESCALATED_MAX_TOKENS,
   getModelMaxOutputTokens,
   getSonnet1mExpTreatmentEnabled,
 } from "../../utils/context.js";
@@ -74,7 +76,7 @@ import { resolveAppliedEffort } from "../../utils/effort.js";
 import { isEnvTruthy } from "../../utils/envUtils.js";
 import { errorMessage } from "../../utils/errors.js";
 import { computeFingerprintFromMessages } from "../../utils/fingerprint.js";
-import { normalizeImagesForAPI } from '../../utils/imageValidation.js'
+import { createImageInputProtection, normalizeImagesForAPI } from '../../utils/imageValidation.js'
 import { normalizeAnthropicBaseUrl } from './anthropicBaseUrl.js'
 import { resolveProviderMediaEndpoint } from './providerMedia/providers.js'
 import { captureAPIRequest, logError } from "../../utils/log.js";
@@ -199,6 +201,7 @@ import {
   resolveOpenAICodexFirstTokenTimeoutMs,
 } from "src/services/openaiAuth/streamPolicy.js";
 import { endQueryProfile, queryCheckpoint } from "src/utils/queryProfiler.js";
+import { getSettings_DEPRECATED } from "src/utils/settings/settings.js";
 import {
   modelSupportsAdaptiveThinking,
   modelUsesBoundThinking,
@@ -304,7 +307,7 @@ import {
 } from "./promptCacheBreakDetection.js";
 import { recordPromptSnapshot } from "./promptSnapshot.js";
 import { withStreamRetry } from "./streamRetry.js";
-import { readProviderEnv, withRequestProviderRoute } from "../../utils/model/providerEnvScope.js";
+import { readProviderEnv, readProviderEnvForModel, withRequestProviderRoute } from "../../utils/model/providerEnvScope.js";
 import {
   type ApiAttemptBudget,
   CannotRetryError,
@@ -997,13 +1000,12 @@ export async function* executeNonStreamingRequest(
     async (anthropic, attempt, context) => {
       const start = Date.now();
       const retryParams = paramsFromContext(context);
-      captureRequest(retryParams);
-      onAttempt(attempt, start, retryParams.max_tokens);
-
-      const adjustedParams = adjustParamsForNonStreaming(
-        retryParams,
-        MAX_NON_STREAMING_TOKENS,
-      );
+      const adjustedParams = markOutputBudgetSource(
+        adjustParamsForNonStreaming(retryParams, MAX_NON_STREAMING_TOKENS),
+        getOutputBudgetSource(retryParams) ?? 'explicit',
+      )
+      captureRequest(adjustedParams)
+      onAttempt(attempt, start, adjustedParams.max_tokens)
 
       try {
         // biome-ignore lint/plugin: non-streaming API call
@@ -1015,7 +1017,7 @@ export async function* executeNonStreamingRequest(
           {
             signal: retryOptions.signal,
             timeout: fallbackTimeoutMs,
-            headers: getOutputBudgetHeaders(retryParams),
+            headers: getOutputBudgetHeaders(adjustedParams),
           },
         );
       } catch (err) {
@@ -1628,10 +1630,13 @@ async function* queryModel(
   queryCheckpoint("query_message_normalization_start");
   // Every caller replays history through here (main loop, compaction, away
   // summary), so another model's signed thinking is dropped at this boundary.
+  const messagesToNormalize = stripSignatureBlocksAfterModelChange(messages, options.model)
+  const imageInput = createImageInputProtection(messagesToNormalize)
   let messagesForAPI = normalizeMessagesForAPI(
-    stripSignatureBlocksAfterModelChange(messages, options.model),
+    messagesToNormalize,
     filteredTools,
     options.model,
+    imageInput.mapMessage,
   );
   queryCheckpoint("query_message_normalization_end");
   // stripSignatureBlocksAfterModelChange (above) already strips thinking from
@@ -1691,6 +1696,7 @@ async function* queryModel(
   const provider = getAPIProvider()
   messagesForAPI = await normalizeImagesForAPI(messagesForAPI, {
     countDocuments: provider === 'bedrock' || provider === 'vertex',
+    protectedInputImages: imageInput.images,
   })
   // Shrink total base64 media payload after request-level image normalization,
   // so the final encoded request stays under the API's ~20 MB size limit. A
@@ -2254,6 +2260,7 @@ async function* queryModel(
   let didFallBackToNonStreaming = false;
   let fallbackMessage: AssistantMessage | undefined;
   let maxOutputTokens = 0;
+  let outputLimitRetryBudget: number | undefined
   let responseHeaders: globalThis.Headers | undefined = undefined;
   let research: unknown = undefined;
   let isFastModeRequest = isFastMode; // Keep separate state as it may change if falling back
@@ -2275,6 +2282,49 @@ async function* queryModel(
       assistantCommitBuffer.add(partialTextMessage, "text");
     }
   };
+
+  const captureModelRequest = (params: BetaMessageStreamParams) => {
+    captureAPIRequest(params, options.querySource)
+    maxOutputTokens = params.max_tokens
+    outputLimitRetryBudget = getOutputBudgetSource(params) === 'default'
+      ? getMaxOutputTokensRetryBudget(options.model, maxOutputTokens)
+      : undefined
+  }
+
+  function* commitFallbackResponse(result: BetaMessage): Generator<AssistantMessage> {
+    const outputLimit = result.stop_reason === 'max_tokens' || result.stop_reason === 'model_context_window_exceeded'
+    const truncatedToolUse = outputLimit && result.content.some(block => block.type === 'tool_use')
+    const message: AssistantMessage = {
+      message: {
+        ...result,
+        usage: normalizeUsage(result.usage),
+        content: normalizeContentFromAPI(
+          truncatedToolUse ? result.content.filter(block => block.type !== 'tool_use') : result.content,
+          tools,
+          options.agentId,
+        ),
+      },
+      requestId: streamRequestId ?? undefined,
+      type: 'assistant',
+      uuid: randomUUID(),
+      timestamp: new Date().toISOString(),
+      ...(process.env.USER_TYPE === 'ant' && research !== undefined && { research }),
+      ...(advisorModel && { advisorModel }),
+    }
+    fallbackMessage = message
+    if (!outputLimit || message.message.content.length > 0) {
+      newMessages.push(message)
+      yield message
+    }
+    if (outputLimit) {
+      yield createOutputLimitErrorMessage({
+        stopReason: result.stop_reason as 'max_tokens' | 'model_context_window_exceeded',
+        maxOutputTokens,
+        truncatedToolUse,
+        retryBudget: outputLimitRetryBudget,
+      })
+    }
+  }
 
   try {
     queryCheckpoint("query_client_creation_start");
@@ -2306,9 +2356,7 @@ async function* queryModel(
         queryCheckpoint("query_client_creation_end");
 
         const params = paramsFromContext(context);
-        captureAPIRequest(params, options.querySource); // Capture for bug reports
-
-        maxOutputTokens = params.max_tokens;
+        captureModelRequest(params)
 
         // Fire immediately before the fetch is dispatched. .withResponse() below
         // awaits until response headers arrive, so this MUST be before the await
@@ -2426,6 +2474,11 @@ async function* queryModel(
         streamResponse as Response | undefined,
         configuredFirstTokenTimeoutMs,
       );
+    // The watchdog releases the response before retry classification runs.
+    const canReplayCodexResponse = canRetryOpenAICodexStreamWithBufferedContent(
+      streamResponse as Response | undefined,
+      false,
+    );
     // The idle watchdog waits the first-token budget until the first chunk
     // arrives, then switches to the shorter mid-stream idle budget (#826).
     let currentStreamIdleTimeoutMs = STREAM_FIRST_TOKEN_TIMEOUT_MS;
@@ -2479,13 +2532,19 @@ async function* queryModel(
     const toolInputDurationGuard = new StreamToolInputDurationGuard({
       enabled: streamWatchdogEnabled,
       timeoutMs: STREAM_TOOL_INPUT_MAX_DURATION_MS,
-      onTimeout: () => {
+      onTimeout: (index) => {
+        if (streamIdleAborted) return;
+        toolInputDurationGuard.clear();
         streamIdleAborted = true;
         streamAbortReason = "tool_input_duration";
         streamWatchdogFiredAt = performance.now();
+        const stalledTool = contentBlocks[index];
         streamWatchdogTimeoutError = streamWatchdogState.createTimeoutError(
           "tool_input_duration",
           STREAM_TOOL_INPUT_MAX_DURATION_MS,
+          stalledTool?.type === "tool_use" &&
+            typeof stalledTool.input === "string" &&
+            stalledTool.input.length > 0,
         );
         releaseStreamResources();
       },
@@ -2523,9 +2582,10 @@ async function* queryModel(
       // with, even if the phase (first-token → idle) flips between arm and fire.
       // While a tool_use input is open, the upstream emits its JSON one complete
       // key/value at a time and only pings in between (the SDK drops pings), so
-      // a long `content` value is legitimately silent. The tool-input guard owns
-      // that gap; the idle budget must not cut it shorter (#1536).
-      const idleMs = toolInputDurationGuard.hasActiveInput()
+      // a long `content` value is legitimately silent (#1536). Keep the idle
+      // warning while the per-tool timers govern when that silence aborts.
+      const toolInputActive = toolInputDurationGuard.hasActiveInput();
+      const idleMs = toolInputActive
         ? Math.max(currentStreamIdleTimeoutMs, STREAM_TOOL_INPUT_MAX_DURATION_MS)
         : currentStreamIdleTimeoutMs;
       const warningMs = idleMs / 2;
@@ -2548,6 +2608,7 @@ async function* queryModel(
         warningMs,
         warningMs,
       );
+      if (toolInputActive) return;
       streamIdleTimer = setTimeout(() => {
         streamIdleAborted = true;
         streamAbortReason = "idle";
@@ -3076,6 +3137,7 @@ async function* queryModel(
                 stopReason,
                 maxOutputTokens,
                 truncatedToolUse: outputLimitCommit?.truncatedToolUse ?? false,
+                retryBudget: outputLimitRetryBudget,
               });
             }
 
@@ -3336,12 +3398,8 @@ async function* queryModel(
         nonStreamingFallbackAvailable:
           !disableFallback &&
           !assistantCommitBuffer.hasCrossedSideEffectBoundary(),
-        transientRetryAllowed:
-          newMessages.length === 0 ||
-          canRetryOpenAICodexStreamWithBufferedContent(
-            streamResponse as Response | undefined,
-            !canReplay,
-          ),
+        transientRetryAllowed: newMessages.length === 0 || canReplayCodexResponse,
+        toolInputTimeoutRetryAllowed: canReplayCodexResponse,
       });
 
       // Never replay a response through the non-streaming fallback after it
@@ -3550,35 +3608,10 @@ async function* queryModel(
           attemptNumber = attempt;
           maxOutputTokens = tokens;
         },
-        (params) => captureAPIRequest(params, options.querySource),
+        captureModelRequest,
         streamRequestId,
       );
-
-      const m: AssistantMessage = {
-        message: {
-          ...result,
-          usage: normalizeUsage(result.usage),
-          content: normalizeContentFromAPI(
-            result.content,
-            tools,
-            options.agentId,
-          ),
-        },
-        requestId: streamRequestId ?? undefined,
-        type: "assistant",
-        uuid: randomUUID(),
-        timestamp: new Date().toISOString(),
-        ...(process.env.USER_TYPE === "ant" &&
-          research !== undefined && {
-            research,
-          }),
-        ...(advisorModel && {
-          advisorModel,
-        }),
-      };
-      newMessages.push(m);
-      fallbackMessage = m;
-      yield m;
+      yield* commitFallbackResponse(result)
     } finally {
       clearStreamIdleTimers();
       // Defensive: the normal and error paths above already disarm these, but
@@ -3662,31 +3695,10 @@ async function* queryModel(
             attemptNumber = attempt;
             maxOutputTokens = tokens;
           },
-          (params) => captureAPIRequest(params, options.querySource),
+          captureModelRequest,
           failedRequestId,
         );
-
-        const m: AssistantMessage = {
-          message: {
-            ...result,
-            usage: normalizeUsage(result.usage),
-            content: normalizeContentFromAPI(
-              result.content,
-              tools,
-              options.agentId,
-            ),
-          },
-          requestId: streamRequestId ?? undefined,
-          type: "assistant",
-          uuid: randomUUID(),
-          timestamp: new Date().toISOString(),
-          ...(process.env.USER_TYPE === "ant" &&
-            research !== undefined && { research }),
-          ...(advisorModel && { advisorModel }),
-        };
-        newMessages.push(m);
-        fallbackMessage = m;
-        yield m;
+        yield* commitFallbackResponse(result)
 
         // Continue to success logging below
       } catch (fallbackError) {
@@ -4411,9 +4423,33 @@ export function adjustParamsForNonStreaming<
   };
 }
 
-function isMaxTokensCapEnabled(): boolean {
+export function isMaxTokensCapEnabled(): boolean {
+  const mode = getSettings_DEPRECATED().maxOutputTokensEscalationMode;
+  if (mode === "enabled") return true;
+  if (mode === "disabled") return false;
   // 3P default: false (not validated on Bedrock/Vertex)
   return getFeatureValue_CACHED_MAY_BE_STALE("tengu_otk_slot_v1", false);
+}
+
+function canUseMaxTokensCap(model: string): boolean {
+  // Proxy and dedicated OAuth adapters can omit, clamp or replace the local
+  // budget. Until they report the accepted budget, use their native defaults
+  // and continuation rather than claiming an 8k cap or a larger clean replay.
+  return getAPIProvider() !== 'azureOpenAI'
+    && !isOpenAIResponsesModel(model)
+    && !isLocalProtocolProxy(readProviderEnvForModel(model, 'ANTHROPIC_BASE_URL'))
+    && !['CC_HAHA_OPENAI_OAUTH_PROVIDER', 'CC_HAHA_GROK_OAUTH_PROVIDER', 'CC_HAHA_DEEPSEEK_OAUTH_PROVIDER']
+      .some(key => isEnvTruthy(readProviderEnvForModel(model, key)))
+    && !process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+    && getConfiguredProviderOutputBudget(undefined, model) === undefined
+}
+
+function getMaxOutputTokensRetryBudget(model: string, requested: number): number | undefined {
+  if (!isMaxTokensCapEnabled() || !canUseMaxTokensCap(model)) return undefined
+  const limits = getModelMaxOutputTokens(model)
+  if (requested !== Math.min(limits.default, CAPPED_DEFAULT_MAX_TOKENS)) return undefined
+  const retryBudget = Math.min(ESCALATED_MAX_TOKENS, limits.upperLimit)
+  return retryBudget > requested ? retryBudget : undefined
 }
 
 export function getMaxOutputTokensForModel(model: string): number {
@@ -4427,13 +4463,13 @@ export function getMaxOutputTokensForModel(model: string): number {
     return providerBudget
   }
 
-  // Slot-reservation cap: drop default to 8k for all models. BQ p99 output
+  // Slot-reservation cap: drop eligible native defaults to 8k. BQ p99 output
   //  = 4,911 tokens; 32k/64k defaults over-reserve 8-16× slot capacity.
-  // Requests hitting the cap get one clean retry at 64k (query.ts
+  // Requests hitting the cap get one model-bounded retry up to 64k (query.ts
   // max_output_tokens_escalate). Math.min keeps models with lower native
   // defaults (e.g. claude-3-opus at 4k) at their native value. Applied
   // before the env-var override so CLAUDE_CODE_MAX_OUTPUT_TOKENS still wins.
-  const defaultTokens = isMaxTokensCapEnabled()
+  const defaultTokens = isMaxTokensCapEnabled() && canUseMaxTokensCap(model)
     ? Math.min(maxOutputTokens.default, CAPPED_DEFAULT_MAX_TOKENS)
     : maxOutputTokens.default;
 

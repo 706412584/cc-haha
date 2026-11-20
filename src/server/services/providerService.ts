@@ -27,8 +27,10 @@ import { openaiResponsesToAnthropic } from '../proxy/transform/openaiResponsesTo
 import type { AnthropicRequest } from '../proxy/transform/types.js'
 import {
   OPENAI_OFFICIAL_PROVIDER,
+  buildOpenAIOfficialRuntimeEnv,
   isOpenAIOfficialProviderId,
 } from './openaiOfficialProvider.js'
+import { getDesktopOpenAICodexModelCatalog, readCachedDesktopOpenAICodexModelCatalog } from './openaiModelCatalog.js'
 import { hahaOpenAIOAuthService } from './hahaOpenAIOAuthService.js'
 import { hahaOAuthService } from './hahaOAuthService.js'
 import {
@@ -88,6 +90,7 @@ import type {
   ProviderProxyConfig,
   ProvidersIndex,
   CreateProviderInput,
+  ImportProviderInput,
   UpdateProviderInput,
   TestProviderInput,
   FetchModelsInput,
@@ -161,7 +164,7 @@ function mergeSavedOrderIntoDisplayOrder(providerOrder: string[], savedOrder: st
   })
 }
 
-function buildSavedProvider(input: CreateProviderInput): SavedProvider {
+function buildSavedProvider(input: ImportProviderInput): SavedProvider {
   const imageGeneration = normalizeImageGeneration(input.imageGeneration)
   return {
     id: crypto.randomUUID(),
@@ -185,6 +188,7 @@ function buildSavedProvider(input: CreateProviderInput): SavedProvider {
     ...(input.proxy !== undefined && { proxy: input.proxy }),
     ...(input.notes !== undefined && { notes: input.notes }),
     ...(input.customHeaders?.trim() ? { customHeaders: input.customHeaders.trim() } : {}),
+    ...(input.usageScript !== undefined && { usageScript: input.usageScript }),
   }
 }
 
@@ -213,6 +217,7 @@ function appendNewProviderToOrder(providerOrder: string[], providerId: string, e
 
 export class ProviderService {
   private static serverPort = 3456
+  private static mutationQueues = new Map<string, Promise<void>>()
   private managedSettingsService = new ManagedSettingsService()
   private settingsService = new SettingsService()
 
@@ -235,8 +240,27 @@ export class ProviderService {
     return path.join(this.getCcHahaDir(), 'providers.json')
   }
 
+  /** Serialize index read/modify/write across instances; settings callbacks read without this lock. */
+  private async withIndexMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const filePath = path.resolve(this.getIndexPath())
+    const previous = ProviderService.mutationQueues.get(filePath) ?? Promise.resolve()
+    const result = previous.then(operation)
+    const settled = result.then(() => {}, () => {})
+    ProviderService.mutationQueues.set(filePath, settled)
+    try {
+      return await result
+    } finally {
+      if (ProviderService.mutationQueues.get(filePath) === settled) {
+        ProviderService.mutationQueues.delete(filePath)
+      }
+    }
+  }
+
   private async readIndex(): Promise<ProvidersIndex> {
-    await ensurePersistentStorageUpgraded()
+    const migration = await ensurePersistentStorageUpgraded()
+    if (migration.failures.some(failure => failure.startsWith('cc-haha/settings.json:'))) {
+      throw ApiError.internal('Provider settings upgrade failed. Retry after the settings file is writable.')
+    }
     return readRecoverableJsonFile({
       filePath: this.getIndexPath(),
       label: 'providers index',
@@ -275,7 +299,8 @@ export class ProviderService {
         }
       }
       return {
-        settings: Object.assign({}, current, settings),
+        settings: Object.assign({}, current, settings,
+          expectedActiveProviderId !== undefined ? { providerEnvOwner: expectedActiveProviderId } : {}),
         result: undefined,
       }
     })
@@ -294,6 +319,12 @@ export class ProviderService {
 
   async getProvider(id: string): Promise<SavedProvider> {
     const index = await this.readIndex()
+    const provider = this.resolveProviderFromIndex(index, id)
+    if (!provider) throw ApiError.notFound(`Provider not found: ${id}`)
+    return provider
+  }
+
+  private resolveProviderFromIndex(index: ProvidersIndex, id: string): SavedProvider | undefined {
     if (isOpenAIOfficialProviderId(id)) {
       return this.resolveOpenAIOfficialProvider(index)
     }
@@ -309,10 +340,7 @@ export class ProviderService {
         models: this.resolveOfficialProviderModels(index, DEEPSEEK_ACCOUNT_PROVIDER_ID),
       }
     }
-
-    const provider = index.providers.find((p) => p.id === id)
-    if (!provider) throw ApiError.notFound(`Provider not found: ${id}`)
-    return provider
+    return index.providers.find((item) => item.id === id)
   }
 
   /** The built-in ChatGPT provider as saved: the user's model mapping and window overrides over its defaults. */
@@ -368,32 +396,33 @@ export class ProviderService {
     models: ModelMapping,
     options?: { modelContextWindows?: Record<string, number> },
   ): Promise<ModelMapping> {
-    if (!isBuiltInProviderId(id)) {
-      throw ApiError.notFound(`Official provider not found: ${id}`)
-    }
-    const contextWindows = options?.modelContextWindows
-    if (contextWindows !== undefined) {
-      this.assertOfficialContextWindows(id, contextWindows)
-    }
+    const { index, normalized } = await this.withIndexMutation(async () => {
+      if (!isBuiltInProviderId(id)) {
+        throw ApiError.notFound(`Official provider not found: ${id}`)
+      }
+      const contextWindows = options?.modelContextWindows
+      if (contextWindows !== undefined) {
+        this.assertOfficialContextWindows(id, contextWindows)
+      }
 
-    const index = await this.readIndex()
-    const normalized = normalizeModelMapping(models)
-    index.officialProviderModels = {
-      ...index.officialProviderModels,
-      [id]: normalized,
-    }
-    if (contextWindows !== undefined) {
-      const { [id]: _replaced, ...others } = index.officialProviderContextWindows
-      index.officialProviderContextWindows = Object.keys(contextWindows).length > 0
-        ? { ...others, [id]: contextWindows }
-        : others
-    }
-    await this.writeIndex(index)
+      const index = await this.readIndex()
+      const normalized = normalizeModelMapping(models)
+      index.officialProviderModels = {
+        ...index.officialProviderModels,
+        [id]: normalized,
+      }
+      if (contextWindows !== undefined) {
+        const { [id]: _replaced, ...others } = index.officialProviderContextWindows
+        index.officialProviderContextWindows = Object.keys(contextWindows).length > 0
+          ? { ...others, [id]: contextWindows }
+          : others
+      }
+      await this.writeIndex(index)
+      return { index, normalized }
+    })
 
     if (id === CLAUDE_OFFICIAL_PROVIDER_ID) {
-      if (index.activeId === null) {
-        await this.settingsService.updateOfficialModelMapping(normalized)
-      }
+      await this.syncOfficialToUserSettings()
       return normalized
     }
 
@@ -404,7 +433,6 @@ export class ProviderService {
           ? { ...DEEPSEEK_ACCOUNT_PROVIDER, models: normalized }
           : { ...GROK_OFFICIAL_PROVIDER, models: normalized }
       await this.syncToSettings(provider)
-      await this.updateManagedSettings({ model: normalized.main, modelContext: undefined })
     }
 
     return normalized
@@ -431,122 +459,130 @@ export class ProviderService {
   }
 
   async addProvider(input: CreateProviderInput): Promise<SavedProvider> {
-    const index = await this.readIndex()
+    return this.withIndexMutation(async () => {
+      const index = await this.readIndex()
 
-    const provider = buildSavedProvider(input)
+      const provider = buildSavedProvider(input)
 
-    index.providerOrder = appendNewProviderToOrder(index.providerOrder, provider.id, index.providers)
-    index.providers.push(provider)
-    await this.writeIndex(index)
-    return provider
+      index.providerOrder = appendNewProviderToOrder(index.providerOrder, provider.id, index.providers)
+      index.providers.push(provider)
+      await this.writeIndex(index)
+      return provider
+    })
   }
 
   /**
    * Append several providers in one pass.
    *
    * Bulk imports (cc-switch) read the index once and write it once so a partial
-   * failure cannot leave half the batch behind. The persisted shape is identical
-   * to addProvider, so no storage migration is involved.
+   * failure cannot leave half the batch behind. The index upgrade declares the
+   * optional import-only `usageScript`; old providers keep it absent, and index
+   * readers preserve its template fields through later edits.
    */
-  async importProviders(inputs: CreateProviderInput[]): Promise<SavedProvider[]> {
-    if (inputs.length === 0) return []
+  async importProviders(inputs: ImportProviderInput[]): Promise<SavedProvider[]> {
+    return this.withIndexMutation(async () => {
+      if (inputs.length === 0) return []
 
-    const index = await this.readIndex()
+      const index = await this.readIndex()
 
-    const imported: SavedProvider[] = []
-    for (const input of inputs) {
-      const provider = buildSavedProvider(input)
-      index.providerOrder = appendNewProviderToOrder(index.providerOrder, provider.id, index.providers)
-      index.providers.push(provider)
-      imported.push(provider)
-    }
+      const imported: SavedProvider[] = []
+      for (const input of inputs) {
+        const provider = buildSavedProvider(input)
+        index.providerOrder = appendNewProviderToOrder(index.providerOrder, provider.id, index.providers)
+        index.providers.push(provider)
+        imported.push(provider)
+      }
 
-    await this.writeIndex(index)
-    return imported
+      await this.writeIndex(index)
+      return imported
+    })
   }
 
   async updateProvider(id: string, input: UpdateProviderInput): Promise<SavedProvider> {
-    const index = await this.readIndex()
-    const idx = index.providers.findIndex((p) => p.id === id)
-    if (idx === -1) throw ApiError.notFound(`Provider not found: ${id}`)
+    const { index, updated } = await this.withIndexMutation(async () => {
+      const index = await this.readIndex()
+      const idx = index.providers.findIndex((p) => p.id === id)
+      if (idx === -1) throw ApiError.notFound(`Provider not found: ${id}`)
 
-    const existing = index.providers[idx]
-    const imageGeneration = input.imageGeneration
-      ? normalizeImageGeneration({
-        ...existing.imageGeneration,
-        ...input.imageGeneration,
-        baseUrl: input.imageGeneration.baseUrl,
-        apiKey: input.imageGeneration.apiKey,
-      })
-      : input.imageGeneration
-    const updated: SavedProvider = {
-      ...existing,
-      ...(input.name !== undefined && { name: input.name }),
-      ...(input.apiKey !== undefined && { apiKey: input.apiKey }),
-      ...(input.authStrategy !== undefined && { authStrategy: input.authStrategy }),
-      ...(input.baseUrl !== undefined && { baseUrl: input.baseUrl }),
-      ...(input.apiFormat !== undefined && { apiFormat: input.apiFormat }),
-      ...(input.runtimeKind !== undefined && { runtimeKind: input.runtimeKind }),
-      ...(input.models !== undefined && { models: normalizeModelMapping(input.models) }),
-      ...(input.model1mSupport !== undefined && input.model1mSupport !== null && { model1mSupport: input.model1mSupport }),
-      ...(typeof input.autoCompactWindow === 'number' && { autoCompactWindow: input.autoCompactWindow }),
-      ...(input.modelContextWindows !== undefined && input.modelContextWindows !== null && { modelContextWindows: input.modelContextWindows }),
-      ...(input.modelMaxOutputTokens !== undefined && input.modelMaxOutputTokens !== null && { modelMaxOutputTokens: input.modelMaxOutputTokens }),
-      ...(input.toolSearchEnabled !== undefined && { toolSearchEnabled: input.toolSearchEnabled }),
-      ...(input.supportsNestedToolResultMedia !== undefined && { supportsNestedToolResultMedia: input.supportsNestedToolResultMedia }),
-      ...(input.requestCompatibility !== undefined && input.requestCompatibility !== null && { requestCompatibility: input.requestCompatibility }),
-      ...(input.disableExperimentalBetas === true && { disableExperimentalBetas: true }),
-      ...(imageGeneration !== undefined && imageGeneration !== null && { imageGeneration }),
-      ...(input.proxy !== undefined && input.proxy !== null && { proxy: input.proxy }),
-      ...(input.notes !== undefined && { notes: input.notes }),
-      ...(input.customHeaders !== undefined && input.customHeaders !== null && input.customHeaders.trim()
-        ? { customHeaders: input.customHeaders.trim() }
-        : {}),
-    }
-    if (input.proxy === null) {
-      delete updated.proxy
-    }
-    if (input.customHeaders === null) {
-      delete updated.customHeaders
-    }
-    if (input.model1mSupport === null) {
-      delete updated.model1mSupport
-    }
-    if (input.autoCompactWindow === null) {
-      delete updated.autoCompactWindow
-    }
-    if (input.modelContextWindows === null) {
-      delete updated.modelContextWindows
-    }
-    // Re-arm compatibility markers when the user edits anything about
-    // this provider. The presumption is "user is fixing it" — give the
-    // new config a fresh chance, even if the old one was flagged
-    // incompatible. Mirrors the desktop providerCompatStore behavior
-    // for fake tool_use detection (which clears on edit too).
-    delete updated.thinkingIncompatible
-    delete updated.thinkingIncompatibleReason
+      const existing = index.providers[idx]
+      const imageGeneration = input.imageGeneration
+        ? normalizeImageGeneration({
+          ...existing.imageGeneration,
+          ...input.imageGeneration,
+          baseUrl: input.imageGeneration.baseUrl,
+          apiKey: input.imageGeneration.apiKey,
+        })
+        : input.imageGeneration
+      const updated: SavedProvider = {
+        ...existing,
+        ...(input.name !== undefined && { name: input.name }),
+        ...(input.apiKey !== undefined && { apiKey: input.apiKey }),
+        ...(input.authStrategy !== undefined && { authStrategy: input.authStrategy }),
+        ...(input.baseUrl !== undefined && { baseUrl: input.baseUrl }),
+        ...(input.apiFormat !== undefined && { apiFormat: input.apiFormat }),
+        ...(input.runtimeKind !== undefined && { runtimeKind: input.runtimeKind }),
+        ...(input.models !== undefined && { models: normalizeModelMapping(input.models) }),
+        ...(input.model1mSupport !== undefined && input.model1mSupport !== null && { model1mSupport: input.model1mSupport }),
+        ...(typeof input.autoCompactWindow === 'number' && { autoCompactWindow: input.autoCompactWindow }),
+        ...(input.modelContextWindows !== undefined && input.modelContextWindows !== null && { modelContextWindows: input.modelContextWindows }),
+        ...(input.modelMaxOutputTokens !== undefined && input.modelMaxOutputTokens !== null && { modelMaxOutputTokens: input.modelMaxOutputTokens }),
+        ...(input.toolSearchEnabled !== undefined && { toolSearchEnabled: input.toolSearchEnabled }),
+        ...(input.supportsNestedToolResultMedia !== undefined && { supportsNestedToolResultMedia: input.supportsNestedToolResultMedia }),
+        ...(input.requestCompatibility !== undefined && input.requestCompatibility !== null && { requestCompatibility: input.requestCompatibility }),
+        ...(input.disableExperimentalBetas === true && { disableExperimentalBetas: true }),
+        ...(imageGeneration !== undefined && imageGeneration !== null && { imageGeneration }),
+        ...(input.proxy !== undefined && input.proxy !== null && { proxy: input.proxy }),
+        ...(input.notes !== undefined && { notes: input.notes }),
+        ...(input.customHeaders !== undefined && input.customHeaders !== null && input.customHeaders.trim()
+          ? { customHeaders: input.customHeaders.trim() }
+          : {}),
+      }
+      if (input.proxy === null) {
+        delete updated.proxy
+      }
+      if (input.customHeaders === null) {
+        delete updated.customHeaders
+      }
+      if (input.model1mSupport === null) {
+        delete updated.model1mSupport
+      }
+      if (input.autoCompactWindow === null) {
+        delete updated.autoCompactWindow
+      }
+      if (input.modelContextWindows === null) {
+        delete updated.modelContextWindows
+      }
+      // Re-arm compatibility markers when the user edits anything about
+      // this provider. The presumption is "user is fixing it" — give the
+      // new config a fresh chance, even if the old one was flagged
+      // incompatible. Mirrors the desktop providerCompatStore behavior
+      // for fake tool_use detection (which clears on edit too).
+      delete updated.thinkingIncompatible
+      delete updated.thinkingIncompatibleReason
 
-    // Bump the revision counter so any in-flight `runtimeOverride` snapshot
-    // for this provider is recognised as stale by handleSetRuntimeConfig
-    // and forces a CLI restart even when the (providerId, modelId, effort)
-    // tuple is unchanged. See SavedProviderSchema.revision docstring.
-    updated.revision = (existing.revision ?? 0) + 1
+      // Bump the revision counter so any in-flight `runtimeOverride` snapshot
+      // for this provider is recognised as stale by handleSetRuntimeConfig
+      // and forces a CLI restart even when the (providerId, modelId, effort)
+      // tuple is unchanged. See SavedProviderSchema.revision docstring.
+      updated.revision = (existing.revision ?? 0) + 1
 
-    if (input.modelMaxOutputTokens === null) {
-      delete updated.modelMaxOutputTokens
-    }
-    if (input.requestCompatibility === null) {
-      delete updated.requestCompatibility
-    }
-    if (input.disableExperimentalBetas === false) {
-      delete updated.disableExperimentalBetas
-    }
-    if (imageGeneration === null) {
-      delete updated.imageGeneration
-    }
+      if (input.modelMaxOutputTokens === null) {
+        delete updated.modelMaxOutputTokens
+      }
+      if (input.requestCompatibility === null) {
+        delete updated.requestCompatibility
+      }
+      if (input.disableExperimentalBetas === false) {
+        delete updated.disableExperimentalBetas
+      }
+      if (imageGeneration === null) {
+        delete updated.imageGeneration
+      }
 
-    index.providers[idx] = updated
-    await this.writeIndex(index)
+      index.providers[idx] = updated
+      await this.writeIndex(index)
+      return { index, updated }
+    })
 
     if (index.activeId === id) {
       await this.syncToSettings(updated)
@@ -556,17 +592,19 @@ export class ProviderService {
   }
 
   async deleteProvider(id: string): Promise<void> {
-    const index = await this.readIndex()
-    const idx = index.providers.findIndex((p) => p.id === id)
-    if (idx === -1) throw ApiError.notFound(`Provider not found: ${id}`)
+    return this.withIndexMutation(async () => {
+      const index = await this.readIndex()
+      const idx = index.providers.findIndex((p) => p.id === id)
+      if (idx === -1) throw ApiError.notFound(`Provider not found: ${id}`)
 
-    if (index.activeId === id) {
-      throw ApiError.conflict('Cannot delete the active provider. Switch to another provider first.')
-    }
+      if (index.activeId === id) {
+        throw ApiError.conflict('Cannot delete the active provider. Switch to another provider first.')
+      }
 
-    index.providers.splice(idx, 1)
-    index.providerOrder = index.providerOrder.filter((providerId) => providerId !== id)
-    await this.writeIndex(index)
+      index.providers.splice(idx, 1)
+      index.providerOrder = index.providerOrder.filter((providerId) => providerId !== id)
+      await this.writeIndex(index)
+    })
   }
 
   /**
@@ -630,59 +668,45 @@ export class ProviderService {
    * order without moving the built-in official rows.
    */
   async reorderProviders(orderedIds: string[]): Promise<{ providers: SavedProvider[]; providerOrder: string[] }> {
-    const index = await this.readIndex()
+    return this.withIndexMutation(async () => {
+      const index = await this.readIndex()
 
-    const currentSavedIds = savedProviderIds(index.providers)
-    const isFullDisplayPermutation = isPermutation(orderedIds, fullProviderOrderIds(index.providers))
-    const isLegacySavedPermutation = isPermutation(orderedIds, currentSavedIds)
+      const currentSavedIds = savedProviderIds(index.providers)
+      const isFullDisplayPermutation = isPermutation(orderedIds, fullProviderOrderIds(index.providers))
+      const isLegacySavedPermutation = isPermutation(orderedIds, currentSavedIds)
 
-    if (!isFullDisplayPermutation && !isLegacySavedPermutation) {
-      throw ApiError.badRequest('orderedIds must be a permutation of existing provider ids and built-in provider ids')
-    }
+      if (!isFullDisplayPermutation && !isLegacySavedPermutation) {
+        throw ApiError.badRequest('orderedIds must be a permutation of existing provider ids and built-in provider ids')
+      }
 
-    index.providerOrder = isFullDisplayPermutation
-      ? orderedIds
-      : mergeSavedOrderIntoDisplayOrder(index.providerOrder, orderedIds)
-    index.providers = sortSavedProvidersByOrder(index.providers, index.providerOrder)
-    await this.writeIndex(index)
+      index.providerOrder = isFullDisplayPermutation
+        ? orderedIds
+        : mergeSavedOrderIntoDisplayOrder(index.providerOrder, orderedIds)
+      index.providers = sortSavedProvidersByOrder(index.providers, index.providerOrder)
+      await this.writeIndex(index)
 
-    return {
-      providers: index.providers,
-      providerOrder: index.providerOrder,
-    }
+      return {
+        providers: index.providers,
+        providerOrder: index.providerOrder,
+      }
+    })
   }
 
   // --- Activation ---
 
   async activateProvider(id: string): Promise<void> {
-    const index = await this.readIndex()
-    const provider = isOpenAIOfficialProviderId(id)
-      ? this.resolveOpenAIOfficialProvider(index)
-      : isGrokOfficialProviderId(id)
-        ? {
-            ...GROK_OFFICIAL_PROVIDER,
-            models: this.resolveOfficialProviderModels(index, GROK_OFFICIAL_PROVIDER_ID),
-          }
-        : isDeepSeekAccountProviderId(id)
-          ? {
-              ...DEEPSEEK_ACCOUNT_PROVIDER,
-              models: this.resolveOfficialProviderModels(index, DEEPSEEK_ACCOUNT_PROVIDER_ID),
-            }
-          : index.providers.find((p) => p.id === id)
-    if (!provider) throw ApiError.notFound(`Provider not found: ${id}`)
+    const provider = await this.withIndexMutation(async () => {
+      const index = await this.readIndex()
+      const provider = this.resolveProviderFromIndex(index, id)
+      if (!provider) throw ApiError.notFound(`Provider not found: ${id}`)
 
-    index.activeId = id
-    await this.writeIndex(index)
+      index.activeId = id
+      await this.writeIndex(index)
+      return provider
+    })
 
-    if (
-      provider.runtimeKind === 'openai_oauth' ||
-      provider.runtimeKind === 'grok_oauth' ||
-      provider.runtimeKind === 'deepseek_oauth'
-    ) {
-      await this.syncToSettings(provider)
-      await this.updateManagedSettings({ model: provider.models.main, modelContext: undefined })
-    } else if (provider.presetId === 'official') {
-      await this.clearProviderFromSettings()
+    if (provider.presetId === 'official') {
+      await this.clearProviderFromSettings(provider.id)
     } else {
       await this.syncToSettings(provider)
     }
@@ -716,36 +740,46 @@ export class ProviderService {
   }
 
   private async syncMagpieProviders(baseUrl: string, models: MagpieModel[] | null): Promise<void> {
-    const index = await this.readIndex()
-    const limits = models ? magpieModelLimits(models) : null
-    const changed: SavedProvider[] = []
-    index.providers = index.providers.map((provider) => {
-      if (!isMagpieProvider(provider)) return provider
-      const next: SavedProvider = { ...provider, baseUrl }
-      if (limits) {
-        delete next.modelContextWindows
-        delete next.modelMaxOutputTokens
-        if (Object.keys(limits.modelContextWindows).length) next.modelContextWindows = limits.modelContextWindows
-        if (Object.keys(limits.modelMaxOutputTokens).length) next.modelMaxOutputTokens = limits.modelMaxOutputTokens
-      }
-      if (JSON.stringify(next) === JSON.stringify(provider)) return provider
-      changed.push(next)
-      return next
+    const active = await this.withIndexMutation(async () => {
+      const index = await this.readIndex()
+      const limits = models ? magpieModelLimits(models) : null
+      const changed: SavedProvider[] = []
+      index.providers = index.providers.map((provider) => {
+        if (!isMagpieProvider(provider)) return provider
+        const next: SavedProvider = { ...provider, baseUrl }
+        if (limits) {
+          delete next.modelContextWindows
+          delete next.modelMaxOutputTokens
+          if (Object.keys(limits.modelContextWindows).length) next.modelContextWindows = limits.modelContextWindows
+          if (Object.keys(limits.modelMaxOutputTokens).length) next.modelMaxOutputTokens = limits.modelMaxOutputTokens
+        }
+        if (JSON.stringify(next) === JSON.stringify(provider)) return provider
+        changed.push(next)
+        return next
+      })
+      if (!changed.length) return
+      await this.writeIndex(index)
+      return changed.find((provider) => provider.id === index.activeId)
     })
-    if (!changed.length) return
-    await this.writeIndex(index)
-    const active = changed.find((provider) => provider.id === index.activeId)
     if (active) await this.syncToSettings(active)
   }
 
   async activateOfficial(): Promise<void> {
-    const index = await this.readIndex()
-    index.activeId = null
-    await this.writeIndex(index)
+    await this.withIndexMutation(async () => {
+      const index = await this.readIndex()
+      index.activeId = null
+      await this.writeIndex(index)
+    })
     await this.clearProviderFromSettings()
-    await this.settingsService.updateOfficialModelMapping(
-      this.resolveOfficialProviderModels(index, CLAUDE_OFFICIAL_PROVIDER_ID),
-    )
+    await this.syncOfficialToUserSettings()
+  }
+
+  private async syncOfficialToUserSettings(): Promise<void> {
+    await this.settingsService.updateOfficialModelMapping(async () => {
+      const latestIndex = await this.readIndex()
+      if (latestIndex.activeId !== null) return null
+      return this.resolveOfficialProviderModels(latestIndex, CLAUDE_OFFICIAL_PROVIDER_ID)
+    })
   }
 
   // --- Settings sync ---
@@ -760,41 +794,79 @@ export class ProviderService {
     })
   }
 
-  async getProviderRuntimeEnv(id: string): Promise<Record<string, string>> {
-    const provider = await this.getProvider(id)
-    return this.buildManagedEnv(provider, {
-      proxyPath: `/proxy/providers/${provider.id}`,
-    })
+  async getProviderRuntimeEnv(id: string, options?: { cachedCatalogOnly?: boolean }): Promise<Record<string, string>> {
+    const index = await this.readIndex()
+    const provider = this.resolveProviderFromIndex(index, id)
+    if (!provider) throw ApiError.notFound(`Provider not found: ${id}`)
+    const env = isOpenAIOfficialProviderId(id)
+      ? buildOpenAIOfficialRuntimeEnv(
+        provider.models,
+        index.officialProviderContextWindows[id],
+        options?.cachedCatalogOnly
+          ? await readCachedDesktopOpenAICodexModelCatalog()
+          : await getDesktopOpenAICodexModelCatalog({ waitForInitial: true }),
+      )
+      : this.buildManagedEnv(provider, { proxyPath: `/proxy/providers/${provider.id}` })
+    // The JSON editor belongs to the active provider. Pass its subagent choice
+    // in the host's launch snapshot; the CLI must still filter settings-sourced
+    // model vars so another provider (and approved team workers) stays isolated.
+    if ((await this.readIndex()).activeId === id) {
+      const settings = await this.readSettings()
+      const subagentModel = (settings.env as Record<string, unknown> | undefined)?.CLAUDE_CODE_SUBAGENT_MODEL
+      if (settings.providerEnvOwner === id && typeof subagentModel === 'string') {
+        env.CLAUDE_CODE_SUBAGENT_MODEL = subagentModel
+      }
+    }
+    return env
   }
 
   private async syncToSettings(provider: SavedProvider): Promise<void> {
-    await this.managedSettingsService.updateSettings((settings) => {
+    await this.managedSettingsService.updateSettings(async (settings) => {
+      const index = await this.readIndex()
+      if (index.activeId !== provider.id) return { settings, result: undefined }
+      const currentProvider = this.resolveProviderFromIndex(index, provider.id) ?? provider
       const existingEnv = (settings.env as Record<string, string>) || {}
       const cleanedEnv = { ...existingEnv }
 
       for (const key of getManagedEnvKeys()) {
         delete cleanedEnv[key]
       }
-      const providerEnv = this.buildManagedEnv(provider)
+      const providerEnv = this.buildManagedEnv(currentProvider)
+      if (settings.providerEnvOwner === currentProvider.id &&
+        typeof existingEnv.CLAUDE_CODE_SUBAGENT_MODEL === 'string') {
+        providerEnv.CLAUDE_CODE_SUBAGENT_MODEL = existingEnv.CLAUDE_CODE_SUBAGENT_MODEL
+      }
       // Discovered capabilities belong to this server's launch snapshot, not
       // persisted settings that outlive the authenticated catalog cache.
       delete providerEnv[GROK_MODEL_CATALOG_ENV_KEY]
 
-      return {
-        settings: {
-          ...settings,
-          env: {
-            ...cleanedEnv,
-            ...providerEnv,
-          },
+      const nextSettings: Record<string, unknown> = {
+        ...settings,
+        providerEnvOwner: currentProvider.id,
+        env: {
+          ...cleanedEnv,
+          ...providerEnv,
         },
+      }
+      if (
+        currentProvider.runtimeKind === 'openai_oauth' ||
+        currentProvider.runtimeKind === 'grok_oauth' ||
+        currentProvider.runtimeKind === 'deepseek_oauth'
+      ) {
+        nextSettings.model = currentProvider.models.main
+        delete nextSettings.modelContext
+      }
+
+      return {
+        settings: nextSettings,
         result: undefined,
       }
     })
   }
 
-  private async clearProviderFromSettings(): Promise<void> {
-    await this.managedSettingsService.updateSettings((settings) => {
+  private async clearProviderFromSettings(expectedActiveId: string | null = null): Promise<void> {
+    await this.managedSettingsService.updateSettings(async (settings) => {
+      if ((await this.readIndex()).activeId !== expectedActiveId) return { settings, result: undefined }
       const env = { ...((settings.env as Record<string, string>) || {}) }
 
       for (const key of getManagedEnvKeys()) {
@@ -804,6 +876,7 @@ export class ProviderService {
       const nextSettings: Record<string, unknown> = {
         ...settings,
       }
+      delete nextSettings.providerEnvOwner
 
       if (Object.keys(env).length === 0) {
         delete nextSettings.env

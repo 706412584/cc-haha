@@ -135,9 +135,10 @@ describe('ShareImageDialog', () => {
     const select = screen.getByLabelText('Image theme') as HTMLSelectElement
     // Fork ships ten app themes (upstream had six); the share dialog mirrors them all.
     expect(Array.from(select.options).map((option) => option.value)).toEqual([
-      'current', 'white', 'paper', 'warm-classic', 'celadon', 'dark', 'ink-blue',
+      'current', 'white', 'paper', 'warm-classic', 'celadon', 'dark', 'ink-blue', 'neutral-dark',
       'classic-white', 'classic-light', 'eye-care', 'classic-dark',
     ])
+    expect(screen.getByRole('option', { name: 'Neutral Dark' })).toHaveValue('neutral-dark')
     expect(select.value).toBe('current')
   })
 

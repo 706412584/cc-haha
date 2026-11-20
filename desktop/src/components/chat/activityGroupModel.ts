@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import type { TranslationKey } from '../../i18n'
 import type { UIMessage } from '../../types/chat'
+import { isExitPlanModeTool, isPlanRevisionResult } from './PlanModePreview'
 
 type ToolCall = Extract<UIMessage, { type: 'tool_use' }>
 type ToolResult = Extract<UIMessage, { type: 'tool_result' }>
@@ -42,16 +43,24 @@ export type ActivitySegment = {
 }
 
 /**
- * Wall-clock gap between the tool_use and its tool_result, used for the "524ms"
- * badge (#1149). The CLI does not report a real execution duration over the wire
- * — BashProgress never leaves the ink renderer — so this is the transcript
- * timestamp delta and therefore includes any permission-approval wait.
+ * Per-tool execution duration for the "524ms" badge (#1149, #1915). Prefers the
+ * runtime's measured `tool.call` duration (`result.durationMs`, which excludes
+ * assistant streaming buffer, serial queue wait, and permission dialog wait),
+ * falling back to the `tool_use` → `tool_result` timestamp delta for legacy
+ * transcripts recorded before `durationMs` existed.
  */
 export function toolCallDurationMs(
   toolCall: Pick<ToolCall, 'timestamp'>,
-  result?: Pick<ToolResult, 'timestamp'>,
+  result?: Pick<ToolResult, 'timestamp' | 'durationMs'>,
 ): number | undefined {
   if (!result) return undefined
+  if (
+    typeof result.durationMs === 'number' &&
+    Number.isFinite(result.durationMs) &&
+    result.durationMs >= 0
+  ) {
+    return result.durationMs
+  }
   const elapsed = result.timestamp - toolCall.timestamp
   return Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : undefined
 }
@@ -195,7 +204,10 @@ export function toolCallHasError(
   childToolCallsByParent: Map<string, ToolCall[]>,
 ): boolean {
   const result = resultMap.get(toolCall.toolUseId)
-  if (result?.isError) return true
+  // Keep planning is returned as a refusal so the model stays in plan mode.
+  if (result?.isError && !(isExitPlanModeTool(toolCall.toolName) && isPlanRevisionResult(result.content))) {
+    return true
+  }
 
   return (childToolCallsByParent.get(toolCall.toolUseId) ?? []).some((childToolCall) =>
     toolCallHasError(childToolCall, resultMap, childToolCallsByParent),

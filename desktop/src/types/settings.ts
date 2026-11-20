@@ -19,6 +19,7 @@ export const THEME_MODES = [
   'celadon',
   'dark',
   'ink-blue',
+  'neutral-dark',
   'classic-white',
   'classic-light',
   'eye-care',
@@ -27,7 +28,7 @@ export const THEME_MODES = [
 export type ThemeMode = (typeof THEME_MODES)[number]
 
 /** The themes on a dark ground. Drives `color-scheme` and Mermaid. */
-export const DARK_THEME_MODES = ['dark', 'ink-blue', 'classic-dark'] as const
+export const DARK_THEME_MODES = ['dark', 'ink-blue', 'neutral-dark', 'classic-dark'] as const
 export type DarkThemeMode = (typeof DARK_THEME_MODES)[number]
 
 /**
@@ -261,6 +262,10 @@ export type UserSettings = {
   workspaceLsp?: WorkspaceLspSettings
   /** Days to keep transcripts. 0 disables session persistence entirely. */
   cleanupPeriodDays?: number
+  /** Max output tokens escalation mode; absent means 'auto' (follow GrowthBook). */
+  maxOutputTokensEscalationMode?: 'auto' | 'enabled' | 'disabled'
+  /** Non-persisted read hint naming General settings hydrated from cc-haha/settings.json fallback. */
+  ccHahaFallbackKeys?: Array<'effort' | 'language'>
   [key: string]: unknown
 }
 

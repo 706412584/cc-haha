@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
+import http from 'node:http'
 import { PassThrough } from 'node:stream'
 import type { SidecarChild, SidecarPlan } from './sidecarManager'
 import { ADAPTER_FLAGS, SYSTEM_PROXY_ERROR_ENV } from './sidecarManager'
@@ -2005,5 +2006,27 @@ describe('ElectronServerRuntime', () => {
       '/isolated/user-data/diagnostics/electron-host.log',
       expect.stringContaining('[process-error] sidecar process error: spawn error'),
     )
+  })
+
+  it('persists the system proxy resolver failure behind a Cloudflare CONNECT 502', async () => {
+    const runtime = createRuntime({ diagnosticsFile: '/isolated/diagnostics/electron-host.log',
+      resolveSystemProxy: async () => { throw Object.assign(new Error('PAC resolver failed token=fixture-private-pac'), { code: 'EAI_AGAIN' }) },
+    })
+    try {
+      await runtime.startServer()
+      const bridge = new URL(sidecarMocks.serverPlans.at(-1)!.env.CC_HAHA_SYSTEM_PROXY_URL!)
+      const status = await new Promise<number | undefined>((resolve, reject) => {
+        const request = http.request({ hostname: bridge.hostname, port: Number(bridge.port), method: 'CONNECT', path: 'region1.v2.argotunnel.com:7844' })
+        request.once('connect', (response, socket) => { socket.destroy(); resolve(response.statusCode) })
+        request.once('error', reject)
+        request.end()
+      })
+      expect(status).toBe(502)
+      const logs = sidecarMocks.appendHostDiagnostic.mock.calls.map(call => String(call[1])).join('\n')
+      expect(logs).toContain('system_proxy_resolution')
+      expect(logs).toContain('PAC resolver failed')
+      expect(logs).toContain('EAI_AGAIN')
+      expect(logs).not.toContain('fixture-private-pac')
+    } finally { runtime.stopAll() }
   })
 })

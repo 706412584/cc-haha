@@ -87,6 +87,7 @@ type SessionStore = {
   updateSessionTitle: (id: string, title: string) => void
   updateSessionMessageCount: (id: string, messageCount: number) => void
   updateSessionPermissionMode: (id: string, mode: PermissionMode) => void
+  updateSessionWorkDir: (id: string, workDir: string) => void
   setActiveSession: (id: string | null) => void
 }
 
@@ -105,6 +106,7 @@ const pendingCreatedSessionIds = new Set<string>()
 // those authoritative names so a later stale `Untitled Session` row cannot
 // erase them while the local index reconciles.
 const pendingSessionTitles = new Map<string, string>()
+const pendingSessionWorkDirs = new Map<string, string>()
 
 export const useSessionStore = create<SessionStore>((set, get) => ({
   sessions: [],
@@ -133,6 +135,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const response = await sessionsApi.list(buildSessionListParams(project))
       if (requestId !== get().sessionListRequestId) return
       const raw = response.sessions
+      // Only server rows can acknowledge a cwd notification. During index
+      // building, mergeSessionList also visits retained local rows.
+      for (const row of raw) {
+        if (pendingSessionWorkDirs.get(row.id) === row.workDir) pendingSessionWorkDirs.delete(row.id)
+      }
       const archivedIds = response.archivedSessionIds ? new Set(response.archivedSessionIds) : null
       const indexStatus = response.index ?? null
       useSessionRuntimeStore.getState().syncFromSessions(raw, runtimeSelections)
@@ -405,13 +412,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   deleteSession: async (id: string) => {
     await sessionsApi.delete(id)
-    releaseWorkspaceSession(id)
-    useTabStore.getState().markSessionsDeleted([id])
-    pendingCreatedSessionIds.delete(id)
-    pendingSessionTitles.delete(id)
-    invalidateRecentProjectsCache()
-    useSessionRuntimeStore.getState().clearSelection(id)
-    excludeDeletedProjectSessions([id])
+    await releaseDeletedSessions([id])
     set((s) => ({
       sessions: s.sessions.filter((session) => session.id !== id),
       historicalSessionIds: removeIdsFromSet(s.historicalSessionIds, [id]),
@@ -427,17 +428,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   deleteSessions: async (ids: string[]) => {
     const sessionIds = [...new Set(ids)].filter(Boolean)
     const result = await sessionsApi.batchDelete(sessionIds)
-    if (result.successes.length > 0) {
-      invalidateRecentProjectsCache()
-    }
-    for (const id of result.successes) {
-      releaseWorkspaceSession(id)
-      pendingCreatedSessionIds.delete(id)
-      pendingSessionTitles.delete(id)
-      useSessionRuntimeStore.getState().clearSelection(id)
-    }
-    excludeDeletedProjectSessions(result.successes)
-    useTabStore.getState().markSessionsDeleted(result.successes)
+    await releaseDeletedSessions(result.successes)
     set((s) => ({
       sessions: s.sessions.filter((session) => !result.successes.includes(session.id)),
       historicalSessionIds: removeIdsFromSet(s.historicalSessionIds, result.successes),
@@ -587,6 +578,20 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     }))
   },
 
+  updateSessionWorkDir: (id, workDir) => {
+    if (!workDir.trim()) return
+    pendingSessionWorkDirs.set(id, workDir)
+    if (get().sessions.find(row => row.id === id)?.workDir === workDir) return
+    sessionsApi.invalidateGitInfo(id)
+    set((state) => {
+      const session = state.sessions.find(row => row.id === id)
+      if (!session || session.workDir === workDir) return state
+      return { sessions: state.sessions.map(row => row.id === id
+        ? { ...row, workDir, workDirExists: true, workspaceState: 'available' as const }
+        : row) }
+    })
+  },
+
   setActiveSession: (id) => set({ activeSessionId: id }),
 }))
 
@@ -631,6 +636,23 @@ function buildRecentProjectBoundaries(sessions: SessionListItem[]): Record<strin
     }
   }
   return boundaries
+}
+
+async function releaseDeletedSessions(ids: string[]): Promise<void> {
+  if (!ids.length) return
+  // chatStore uses sessionStore to update titles during live turns.
+  const { useChatStore } = await import('./chatStore')
+  for (const id of ids) {
+    useChatStore.getState().markSessionCompletionRead(id)
+    releaseWorkspaceSession(id)
+    pendingCreatedSessionIds.delete(id)
+    pendingSessionTitles.delete(id)
+    pendingSessionWorkDirs.delete(id)
+    useSessionRuntimeStore.getState().clearSelection(id)
+  }
+  invalidateRecentProjectsCache()
+  useTabStore.getState().markSessionsDeleted(ids)
+  excludeDeletedProjectSessions(ids)
 }
 
 function excludeDeletedProjectSessions(ids: string[]): void {
@@ -689,7 +711,7 @@ function mergeSessionList(
 
   for (const item of incoming) {
     const current = currentById.get(item.id)
-    const candidate = applyPendingSessionTitle(preserveLocalTitle(current, item))
+    const candidate = applyPendingSessionWorkDir(applyPendingSessionTitle(preserveLocalTitle(current, item)))
     const existing = byId.get(candidate.id)
     if (!existing || sessionModifiedTime(candidate) > sessionModifiedTime(existing)) {
       byId.set(candidate.id, candidate)
@@ -697,6 +719,13 @@ function mergeSessionList(
   }
 
   return [...byId.values()].sort((a, b) => sessionModifiedTime(b) - sessionModifiedTime(a))
+}
+
+function applyPendingSessionWorkDir(session: SessionListItem): SessionListItem {
+  const workDir = pendingSessionWorkDirs.get(session.id)
+  if (!workDir) return session
+  if (session.workDir === workDir) return session
+  return { ...session, workDir, workDirExists: true, workspaceState: 'available' }
 }
 
 function applyPendingSessionTitle(session: SessionListItem): SessionListItem {

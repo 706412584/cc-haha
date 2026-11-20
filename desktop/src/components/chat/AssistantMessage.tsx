@@ -18,7 +18,12 @@ import { InlineVideoGallery } from './InlineVideoGallery'
 import { AssistantOutputTargetCard } from './AssistantOutputTargetCard'
 import { FakeToolUseNotice } from './FakeToolUseNotice'
 import { openPreviewLink } from '../../lib/openPreviewLink'
-import { extractAssistantOutputTargets, type TurnOutputEvidence } from '../../lib/assistantOutputTargets'
+import {
+  collectAssistantOutputMentions,
+  resolveAssistantOutputMentions,
+  selectAssistantOutputTargets,
+  type TurnOutputEvidence,
+} from '@/lib/assistantOutputTargets'
 import { extractFakeToolUseBlocks } from '../../lib/fakeToolUseDetection'
 import { resolveAssistantFileHref } from '@/lib/assistantFileContext'
 import type { MarkdownImageClick } from '../markdown/MarkdownRenderer'
@@ -27,6 +32,7 @@ import { useProviderStore } from '../../stores/providerStore'
 import { useProviderCompatStore } from '../../stores/providerCompatStore'
 import { useTranslation, type TranslationKey } from '../../i18n'
 import { useDiskConfirmedTargets } from '../../hooks/useDiskConfirmedTargets'
+import { useWorkspacePathAliases } from '@/hooks/useWorkspacePathAliases'
 import { useTurnWrittenTargets } from '../../hooks/useTurnWrittenTargets'
 import { createWorkspaceFileLinkVerifier } from '../../lib/workspaceFileStats'
 import type { PreviewLinkTarget } from '@/lib/previewLinkRouter'
@@ -93,17 +99,27 @@ export const AssistantMessage = memo(function AssistantMessage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [content, isStreaming, activeProviderId])
 
+  const mentions = useMemo(() => isStreaming || !sessionId ? [] : collectAssistantOutputMentions(content, {
+    workDir, includeUnconfirmedNames: true,
+  }), [content, isStreaming, sessionId, workDir])
+  const mentionedPaths = useMemo(() => mentions.flatMap(({ path }) => path ? [path] : []), [mentions])
+  const { aliases, pending } = useWorkspacePathAliases(sessionId, workDir, mentionedPaths)
+  const resolvedMentions = useMemo(
+    () => resolveAssistantOutputMentions(mentions, aliases, pending, workDir),
+    [aliases, mentions, pending, workDir],
+  )
+
   const [openWith, setOpenWith] = useState<{ items: OpenWithItem[]; anchor: DOMRect } | null>(null)
   const [viewer, setViewer] = useState<{ images: Array<{ src: string; name: string; path?: string }>; index: number } | null>(null)
 
   const handleLinkClick = useCallback(
     (href: PreviewLinkTarget, event: ReactMouseEvent<HTMLDivElement>): boolean => {
       if (!sessionId) return false
-      const handled = openPreviewLink(resolveAssistantFileHref(href, content), sessionId)
+      const handled = openPreviewLink(resolveAssistantFileHref(href, content, aliases), sessionId)
       if (handled) event.preventDefault()
       return handled
     },
-    [content, sessionId],
+    [aliases, content, sessionId],
   )
 
   // A reference guessed from a code span or prose links only once its file is
@@ -112,8 +128,8 @@ export const AssistantMessage = memo(function AssistantMessage({
   const fileLinkVerifier = useMemo(
     () => isStreaming || !sessionId
       ? undefined
-      : createWorkspaceFileLinkVerifier(sessionId, (path) => resolveAssistantFileHref(path, content)),
-    [content, isStreaming, sessionId],
+      : createWorkspaceFileLinkVerifier(sessionId, (path) => resolveAssistantFileHref(path, content, aliases)),
+    [aliases, content, isStreaming, sessionId],
   )
 
   // Right-clicking a reference in the prose opens the same menu the output cards
@@ -130,7 +146,7 @@ export const AssistantMessage = memo(function AssistantMessage({
       event.preventDefault()
       const anchor = link!.getBoundingClientRect()
       void (async () => {
-        const items = await buildOpenWithMenuItemsForHref(resolveAssistantFileHref(href, content), {
+        const items = await buildOpenWithMenuItemsForHref(resolveAssistantFileHref(href, content, aliases), {
           sessionId,
           workDir,
           // Cast t: useTranslation takes TranslationKey, the builder takes string.
@@ -140,7 +156,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         if (items.length > 0) setOpenWith({ items, anchor })
       })()
     },
-    [content, sessionId, t, workDir],
+    [aliases, content, sessionId, t, workDir],
   )
 
   const extractedTargets = useMemo(
@@ -148,7 +164,7 @@ export const AssistantMessage = memo(function AssistantMessage({
       isStreaming || !sessionId
         ? []
         : // Image/video targets render inline (InlineImageGallery/InlineVideoGallery); never also as a card.
-          extractAssistantOutputTargets(cleanContent, {
+          selectAssistantOutputTargets(resolvedMentions, {
             workDir,
             changedFiles: turnChangedFiles,
             includeChangedFileFallback: isTurnOutputOwner,
@@ -160,7 +176,7 @@ export const AssistantMessage = memo(function AssistantMessage({
           }).filter(
             (target) => target.kind !== 'image' && target.kind !== 'video',
           ),
-    [cleanContent, isStreaming, isTurnOutputOwner, sessionId, workDir, turnChangedFiles, turnOutputEvidence?.unlistedWrites],
+    [resolvedMentions, isStreaming, isTurnOutputOwner, sessionId, workDir, turnChangedFiles, turnOutputEvidence?.unlistedWrites],
   )
   // A bare name the text could not bound is settled against the workspace listing,
   // then a file no changed file accounts for must show it was written this turn.
@@ -173,12 +189,13 @@ export const AssistantMessage = memo(function AssistantMessage({
         baseUrl: getServerBaseUrl(),
         sessionId,
         workDir,
+        aliases,
       })
       return (src: string) => isManagedGeneratedImagePath(src)
         ? null
         : resolveLocalImage(src)
     },
-    [isStreaming, sessionId, workDir],
+    [aliases, isStreaming, sessionId, workDir],
   )
 
   // A click on a picture in the prose opens it, and its neighbours in the reply, in
@@ -252,6 +269,7 @@ export const AssistantMessage = memo(function AssistantMessage({
               text={cleanContent}
               sessionId={sessionId}
               workDir={workDir}
+              mentions={resolvedMentions}
               changedFiles={turnChangedFiles}
               suppressManagedGeneratedImages
             />
@@ -261,6 +279,7 @@ export const AssistantMessage = memo(function AssistantMessage({
               text={cleanContent}
               sessionId={sessionId}
               workDir={workDir}
+              mentions={resolvedMentions}
               changedFiles={turnChangedFiles}
             />
           )}

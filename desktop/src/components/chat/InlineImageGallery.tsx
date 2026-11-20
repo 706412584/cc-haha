@@ -7,7 +7,9 @@ import { ImageAnnotationModal } from './ImageAnnotationModal'
 import { ImageGalleryModal } from './ImageGalleryModal'
 import { isManagedGeneratedImagePath, localImageFileUrl } from '../../lib/attachmentImages'
 import {
-  extractAssistantOutputTargets,
+  collectAssistantOutputMentions,
+  selectAssistantOutputTargets,
+  type AssistantOutputMention,
   extractMarkdownImageSources,
 } from '../../lib/assistantOutputTargets'
 import { isAbsoluteLocalPath, previewFsUrl } from '../../lib/handlePreviewLink'
@@ -80,6 +82,7 @@ type Props = {
    */
   sessionId?: string
   workDir?: string | null
+  mentions?: AssistantOutputMention[]
   changedFiles?: string[]
   /** ImageGen outputs already have a dedicated placeholder/result card. */
   suppressManagedGeneratedImages?: boolean
@@ -92,7 +95,7 @@ type Props = {
   allowRemoteImages?: boolean
 }
 
-export function InlineImageGallery({ text, sessionId, workDir, changedFiles, suppressManagedGeneratedImages = false, allowRemoteImages = false }: Props) {
+export function InlineImageGallery({ text, sessionId, workDir, mentions, changedFiles, suppressManagedGeneratedImages = false, allowRemoteImages = false }: Props) {
   const t = useTranslation()
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
   // Fork feature: annotate an inline picture, then land the marked-up copy in
@@ -153,7 +156,7 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
   const changedFileEvidence = changedFiles !== undefined && changedFiles.length === 0 ? undefined : changedFiles
 
   const extractedRelativeTargets = useMemo(() => sessionId
-    ? extractAssistantOutputTargets(text, {
+    ? selectAssistantOutputTargets(mentions ?? collectAssistantOutputMentions(text, { workDir, includeUnconfirmedNames: true }), {
       workDir,
       changedFiles: changedFileEvidence,
       includeUnconfirmedNames: true,
@@ -165,7 +168,7 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
         !markdownImageSources.has(normalizeImageReference(target.normalizedPath ?? ''))
       ),
     )
-    : [], [changedFileEvidence, markdownImageSources, sessionId, text, workDir])
+    : [], [changedFileEvidence, mentions, markdownImageSources, sessionId, text, workDir])
   // `截图保存为1.png` may be `1.png` saved by a glued verb, or one CJK name; the
   // workspace listing settles which, as it does for the output cards.
   const relativeTargets = useDiskConfirmedTargets(sessionId, extractedRelativeTargets)

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -40,6 +40,30 @@ describe('desktop index startup diagnostics', () => {
         .find((part) => part.startsWith(`${directive} `))
       expect(value, `${directive} missing from CSP`).toBeDefined()
       expect(value, `${directive} must allow blob:`).toContain('blob:')
+    }
+  })
+
+  it('keeps the script error visible after the startup deadline', () => {
+    const document = new DOMParser().parseFromString(html, 'text/html')
+    const watchdog = Array.from(document.scripts).find(script =>
+      script.textContent?.includes('__CC_HAHA_SHOW_STARTUP_ERROR__'),
+    )!
+    vi.useFakeTimers()
+    try {
+      const window = Object.assign(new EventTarget(), {
+        location: { href: 'file:///desktop/dist/index.html' },
+        setTimeout,
+        clearTimeout,
+      })
+      new Function('window', 'document', watchdog.textContent!)(window, document)
+      window.dispatchEvent(new ErrorEvent('error', { message: 'TypeError: store initialization failed' }))
+      expect(document.querySelector('pre')?.textContent).toContain('TypeError: store initialization failed')
+
+      vi.advanceTimersByTime(8000)
+
+      expect(document.querySelector('pre')?.textContent).toContain('TypeError: store initialization failed')
+    } finally {
+      vi.useRealTimers()
     }
   })
 

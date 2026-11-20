@@ -6,14 +6,12 @@ labels: bug
 assignees: ''
 ---
 
-> **更快得到帮助**：如果你还不确定这是不是 Bug，或想先确认使用方法，建议先到用户交流群（企业微信，二维码见 README）里提问；确定为缺陷后，请完整填写以下信息，方便复现与定位。
-
 ## 提交前确认
 <!-- 请在提交 issue 前确认以下事项 -->
 
-- [ ] 我已经阅读了 [README 常见问题](https://github.com/NanmiCoder/cc-haha#常见问题)
+- [ ] 我已经阅读了 [README 常见问题](https://github.com/706412584/cc-haha#常见问题)
 - [ ] 我已经升级到最新版本后复现过这个问题
-- [ ] 我已经搜索过[现有 issues](https://github.com/NanmiCoder/cc-haha/issues)，确认没有重复问题
+- [ ] 我已经搜索过[现有 issues](https://github.com/706412584/cc-haha/issues)，确认没有重复问题
 - [ ] 我已经隐藏截图和日志中的 API Key、Token、Cookie 等敏感信息
 - [ ] 我已在分享前检查自动生成的诊断报告或诊断包，确认其中没有不应公开的私密元数据
 

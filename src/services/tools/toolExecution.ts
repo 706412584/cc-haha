@@ -357,6 +357,7 @@ export async function* runToolUse(
           content: `<tool_use_error>InputValidationError: ${errorContent}</tool_use_error>`,
         }],
         toolUseResult: `InputValidationError: JSON parse failed (${len} bytes)`,
+        durationMs: 0,
         sourceToolAssistantUUID: assistantMessage.uuid,
       }),
     }
@@ -425,6 +426,7 @@ export async function* runToolUse(
           },
         ],
         toolUseResult: `Error: No such tool available: ${toolName}`,
+        durationMs: 0,
         sourceToolAssistantUUID: assistantMessage.uuid,
       }),
     }
@@ -467,6 +469,7 @@ export async function* runToolUse(
         message: createUserMessage({
           content: [content],
           toolUseResult: CANCEL_MESSAGE,
+          durationMs: 0,
           sourceToolAssistantUUID: assistantMessage.uuid,
         }),
       }
@@ -504,6 +507,7 @@ export async function* runToolUse(
           },
         ],
         toolUseResult: detailedError,
+        durationMs: 0,
         sourceToolAssistantUUID: assistantMessage.uuid,
       }),
     }
@@ -722,6 +726,7 @@ async function checkPermissionsAndCallTool(
             },
           ],
           toolUseResult: `InputValidationError: ${parsedInput.error.message}`,
+          durationMs: 0,
           sourceToolAssistantUUID: assistantMessage.uuid,
         }),
       },
@@ -729,11 +734,13 @@ async function checkPermissionsAndCallTool(
   }
 
   // Validate input values. Each tool has its own validation logic
+  const validationStartTime = Date.now()
   const isValidCall = await tool.validateInput?.(
     parsedInput.data,
     toolUseContext,
   )
   if (isValidCall?.result === false) {
+    const validationDurationMs = Math.max(0, Date.now() - validationStartTime)
     logForDebugging(
       `${tool.name} tool validation error: ${isValidCall.message?.slice(0, 200)}`,
     )
@@ -775,6 +782,7 @@ async function checkPermissionsAndCallTool(
             },
           ],
           toolUseResult: `Error: ${isValidCall.message}`,
+          durationMs: validationDurationMs,
           sourceToolAssistantUUID: assistantMessage.uuid,
         }),
       },
@@ -903,6 +911,7 @@ async function checkPermissionsAndCallTool(
           message: createUserMessage({
             content: [createToolResultStopMessage(toolUseID)],
             toolUseResult: `Error: ${stopReason}`,
+            durationMs: 0,
             sourceToolAssistantUUID: assistantMessage.uuid,
           }),
         })
@@ -1115,6 +1124,7 @@ async function checkPermissionsAndCallTool(
         content: messageContent,
         imagePasteIds: rejectImageIds,
         toolUseResult: `Error: ${errorMessage}`,
+        durationMs: 0,
         sourceToolAssistantUUID: assistantMessage.uuid,
       }),
     })
@@ -1269,7 +1279,7 @@ async function checkPermissionsAndCallTool(
         })
       },
     )
-    const durationMs = Date.now() - startTime
+    const durationMs = Math.max(0, Date.now() - startTime)
     addToToolDuration(durationMs)
 
     // Log tool content/output as span event if enabled
@@ -1510,6 +1520,7 @@ async function checkPermissionsAndCallTool(
             toolUseContext.agentId && !toolUseContext.preserveToolUseResults
               ? undefined
               : stripDuplicatedMediaPayload(toolUseResult),
+          durationMs,
           mcpMeta: toolUseContext.agentId ? undefined : mcpMeta,
           sourceToolAssistantUUID: assistantMessage.uuid,
         }),
@@ -1636,7 +1647,7 @@ async function checkPermissionsAndCallTool(
     }
     return resultingMessages
   } catch (error) {
-    const durationMs = Date.now() - startTime
+    const durationMs = Math.max(0, Date.now() - startTime)
     addToToolDuration(durationMs)
 
     endToolExecutionSpan({
@@ -1773,6 +1784,7 @@ async function checkPermissionsAndCallTool(
             },
           ],
           toolUseResult: `Error: ${content}`,
+          durationMs,
           mcpMeta: toolUseContext.agentId
             ? undefined
             : error instanceof

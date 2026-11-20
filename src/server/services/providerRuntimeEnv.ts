@@ -1,5 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
+import { isEnvTruthy } from '../../utils/envUtils.js'
 
 import type { ModelApiFormatRule } from '../../shared/modelApiFormats.js'
 import {
@@ -34,6 +35,7 @@ import {
   ModelContextWindowsSchema,
   OPENAI_OFFICIAL_PROVIDER_ID,
   PROVIDER_DEEPSEEK_ACCOUNT_MODEL_IDS_SCHEMA_VERSION,
+  PROVIDER_ENV_OWNER_SCHEMA_VERSION,
   PROVIDER_TOOL_SEARCH_OPT_IN_SCHEMA_VERSION,
 } from '../types/provider.js'
 import {
@@ -76,6 +78,7 @@ export function getManagedProviderEnvKeyList(): string[] {
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_CUSTOM_HEADERS',
   'ENABLE_TOOL_SEARCH',
   'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',
   'CLAUDE_CODE_DISABLE_THINKING',
@@ -926,19 +929,37 @@ export function activeProviderNeedsProxy(configDir: string): boolean {
 export function mergeActiveProviderManagedEnv(
   settingsEnv: Record<string, string>,
   configDir: string,
-  options?: { serverPort?: number },
+  options?: { serverPort?: number; settingsProviderId?: unknown },
 ): Record<string, string> {
   const index = readProvidersIndex(configDir)
-  if (!index) return settingsEnv
-
+  const activeEnv = index ? buildActiveProviderManagedEnv(index, options) : null
+  const active = index?.activeId && activeEnv
+    ? { providerId: index.activeId, schemaVersion: index.schemaVersion ?? 1, env: activeEnv }
+    : null
   const cleanedEnv = { ...settingsEnv }
-  for (const key of Object.keys(cleanedEnv)) {
-    if (isManagedProviderEnvKey(key)) {
-      delete cleanedEnv[key]
+  if (index) {
+    for (const key of Object.keys(cleanedEnv)) {
+      if (isManagedProviderEnvKey(key)) delete cleanedEnv[key]
     }
   }
-  return {
-    ...cleanedEnv,
-    ...(buildActiveProviderManagedEnv(index, options) ?? {}),
+  if (active) {
+    Object.assign(cleanedEnv, active.env)
+    // The active provider's JSON can override a preset with any explicit
+    // string, including empty/inherit. Standalone CLI reloads keep that choice.
+    const ownsSettings = options?.settingsProviderId === active.providerId ||
+      (options?.settingsProviderId === undefined && active.schemaVersion < PROVIDER_ENV_OWNER_SCHEMA_VERSION)
+    if (ownsSettings && typeof settingsEnv.CLAUDE_CODE_SUBAGENT_MODEL === 'string') {
+      cleanedEnv.CLAUDE_CODE_SUBAGENT_MODEL = settingsEnv.CLAUDE_CODE_SUBAGENT_MODEL
+    }
+  } else if (typeof options?.settingsProviderId === 'string') {
+    // A failed switch to Official may leave the previous provider's file behind.
+    delete cleanedEnv.CLAUDE_CODE_SUBAGENT_MODEL
   }
+  // Official desktop OAuth gets its preferences from original user settings,
+  // never the active custom provider's shared Haha env (including preset defaults).
+  if (process.env.CLAUDE_CODE_ENTRYPOINT === 'claude-desktop' &&
+    !isEnvTruthy(process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST)) {
+    delete cleanedEnv.CLAUDE_CODE_SUBAGENT_MODEL
+  }
+  return cleanedEnv
 }
