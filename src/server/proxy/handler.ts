@@ -1010,7 +1010,7 @@ async function handleOpenaiChat(
         })
       }
       const resent = await handleOpenaiChat(
-        body, baseUrl, apiKey, isSavedApiKey, isStream, networkSettings, traceContext, requestOptions, upstreamHeaders, 'text_only',
+        body, baseUrl, apiKey, incomingHeaders, isSavedApiKey, isStream, networkSettings, traceContext, requestOptions, upstreamHeaders, 'text_only',
         unsupportedReasoningFields,
       )
       if (resent.ok) {
@@ -1045,7 +1045,7 @@ async function handleOpenaiChat(
         })
       }
       const resent = await handleOpenaiChat(
-        body, baseUrl, apiKey, isSavedApiKey, isStream, networkSettings, traceContext, requestOptions, upstreamHeaders,
+        body, baseUrl, apiKey, incomingHeaders, isSavedApiKey, isStream, networkSettings, traceContext, requestOptions, upstreamHeaders,
         imageContentMode, new Set([...unsupportedReasoningFields, rejectedField]),
       )
       if (resent.ok) {
