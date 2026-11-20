@@ -168,6 +168,15 @@ export const SavedProviderSchema = z.object({
   proxy: ProviderProxyConfigSchema.optional(),
   notes: z.string().optional(),
   /**
+   * Per-provider custom request headers (curl-style multi-line "Name: Value").
+   * Forwarded verbatim to the upstream as `ANTHROPIC_CUSTOM_HEADERS`. Lets a
+   * user override User-Agent or add any other header a provider requires
+   * (e.g. xingchiapi whitelists specific programming clients). Persisted on
+   * the provider itself rather than only in the shared settings.json so a
+   * non-default provider can carry its own header set.
+   */
+  customHeaders: z.string().optional(),
+  /**
    * Sticky compatibility marker: set to true when cc-haha observes this
    * provider rejecting Anthropic's `thinking` field via a 4xx like
    * "additionalModelRequestFields not supported" (typical for Bedrock
@@ -245,6 +254,7 @@ export const CreateProviderSchema = z.object({
   imageGeneration: ImageGenerationConfigSchema.optional(),
   proxy: ProviderProxyConfigSchema.optional(),
   notes: z.string().optional(),
+  customHeaders: z.string().optional(),
 })
 
 export const UpdateProviderSchema = z.object({
@@ -266,6 +276,7 @@ export const UpdateProviderSchema = z.object({
   imageGeneration: ImageGenerationConfigSchema.nullable().optional(),
   proxy: ProviderProxyConfigSchema.nullable().optional(),
   notes: z.string().optional(),
+  customHeaders: z.string().nullable().optional(),
 })
 
 export const TestProviderSchema = z.object({

@@ -1096,6 +1096,41 @@ describe('ProviderService', () => {
   // ─── updateProvider ──────────────────────────────────────────────────────
 
   describe('updateProvider', () => {
+    test('persists customHeaders on update and clears them on null', async () => {
+      const svc = new ProviderService()
+      const added = await svc.addProvider(sampleInput())
+
+      const updated = await svc.updateProvider(added.id, {
+        customHeaders: 'User-Agent: claude-cli/2.1.288 (external, cli)\nX-Client-Name: Claude Code',
+      })
+      expect(updated.customHeaders).toBe('User-Agent: claude-cli/2.1.288 (external, cli)\nX-Client-Name: Claude Code')
+      // Survives the round-trip through the index file.
+      expect((await svc.getProvider(added.id)).customHeaders)
+        .toBe('User-Agent: claude-cli/2.1.288 (external, cli)\nX-Client-Name: Claude Code')
+
+      const cleared = await svc.updateProvider(added.id, { customHeaders: null })
+      expect(cleared.customHeaders).toBeUndefined()
+      expect((await svc.getProvider(added.id)).customHeaders).toBeUndefined()
+
+      // Omitted means "leave unchanged", not "clear".
+      const touched = await svc.updateProvider(added.id, { customHeaders: 'X-Test: 1' })
+      expect(touched.customHeaders).toBe('X-Test: 1')
+      await svc.updateProvider(added.id, { notes: 'no headers field' })
+      expect((await svc.getProvider(added.id)).customHeaders).toBe('X-Test: 1')
+    })
+
+    test('addProvider persists customHeaders', async () => {
+      const svc = new ProviderService()
+      const added = await svc.addProvider(sampleInput({
+        customHeaders: 'X-Client-Name: Claude Code',
+      }))
+      expect(added.customHeaders).toBe('X-Client-Name: Claude Code')
+      expect((await svc.getProvider(added.id)).customHeaders).toBe('X-Client-Name: Claude Code')
+
+      const blank = await svc.addProvider(sampleInput({ customHeaders: '   ' }))
+      expect(blank.customHeaders).toBeUndefined()
+    })
+
     test('should update provider fields', async () => {
       const svc = new ProviderService()
       const added = await svc.addProvider(sampleInput())

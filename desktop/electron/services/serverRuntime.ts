@@ -576,18 +576,26 @@ export class ElectronServerRuntime {
    * Cloudflare-only and uses the user's configured domain (namedUrl).
    */
   async startTunnel(options: TunnelStartOptions): Promise<TunnelStatus> {
+    this.logTunnel(`startTunnel enter mode=${options.mode} provider=${options.provider ?? 'auto'} hasToken=${!!options.token?.trim()} hasNamedUrl=${!!options.namedUrl}`)
     // A user-initiated start supersedes any pending reconnect and earns a fresh
     // reconnect budget. Remember the options so an unexpected exit can replay it.
     this.tunnelReconnectEpoch += 1
     this.clearTunnelReconnectTimer()
     this.tunnelReconnectAttempts = 0
     this.tunnelLastOptions = options
-    return this.runTunnelStart(options)
+    try {
+      return await this.runTunnelStart(options)
+    } catch (error) {
+      this.logTunnel(`startTunnel threw: ${error instanceof Error ? error.message : String(error)}`)
+      throw error
+    }
   }
 
   private async runTunnelStart(options: TunnelStartOptions): Promise<TunnelStatus> {
     const epoch = this.tunnelReconnectEpoch
+    this.logTunnel('runTunnelStart: awaiting getServerUrl')
     const serverUrl = await this.getServerUrl()
+    this.logTunnel(`runTunnelStart: getServerUrl resolved ${serverUrl}`)
     // `getServerUrl` can suspend while the server is (re)starting. A pending
     // reconnect's own start does not bump the epoch, so without this re-check a
     // user-initiated stop landing in that window would be overwritten and the
@@ -607,13 +615,26 @@ export class ElectronServerRuntime {
     this.tunnelStartedAt = 0
     this.tunnelState = { status: 'starting', url: null, mode: options.mode, error: null, provider: null, download: null }
 
+    this.logTunnel('runTunnelStart: awaiting resolveSidecarBaseEnv')
     const env = await this.resolveSidecarBaseEnv()
+    this.logTunnel('runTunnelStart: resolveSidecarBaseEnv resolved')
     if (generation !== this.tunnelGeneration) return this.getTunnelStatus()
 
     // The fallback helper owns the running/error state transitions; it publishes
     // the server report before returning, so reading our own state is enough.
+    this.logTunnel('runTunnelStart: entering startTunnelWithFallback')
     await this.startTunnelWithFallback({ options, generation, port, serverUrl, env })
+    this.logTunnel('runTunnelStart: startTunnelWithFallback returned')
     return this.getTunnelStatus()
+  }
+
+  private logTunnel(message: string): void {
+    if (!this.diagnosticsFile) return
+    try {
+      this.deps.appendHostDiagnostic(this.diagnosticsFile, `[tunnel] ${message}`)
+    } catch {
+      // Diagnostics are best-effort: never let a log write break tunnel startup.
+    }
   }
 
   /**
@@ -639,6 +660,7 @@ export class ElectronServerRuntime {
 
     for (const provider of providers) {
       if (generation !== this.tunnelGeneration) return null
+      this.logTunnel(`startTunnelWithFallback: trying provider=${provider}`)
       try {
         const instance = await this.startTunnelForProvider(provider, {
           options,
@@ -648,6 +670,7 @@ export class ElectronServerRuntime {
           env,
           downloadRef,
         })
+        this.logTunnel(`startTunnelWithFallback: provider=${provider} succeeded url=${instance.url}`)
         if (generation !== this.tunnelGeneration) {
           await instance.stop().catch(() => {})
           return null
@@ -674,6 +697,7 @@ export class ElectronServerRuntime {
         return instance
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
+        this.logTunnel(`startTunnelWithFallback: provider=${provider} failed: ${message}`)
         failures.push(`${provider === 'cloudflare' ? 'Cloudflare' : 'Pinggy'}: ${message}`)
       }
     }
@@ -708,6 +732,7 @@ export class ElectronServerRuntime {
     downloadRef: { value: TunnelDownloadStatus | null }
   }): Promise<TunnelProviderInstance> {
     const { options, generation, port, env } = context
+    this.logTunnel(`startTunnelForProvider: enter provider=${provider} mode=${options.mode} port=${port}`)
     if (options.mode === 'named' && provider === 'pinggy') {
       throw new Error('Named tunnels require Cloudflare; Pinggy only supports quick tunnels.')
     }
@@ -718,6 +743,7 @@ export class ElectronServerRuntime {
 
     let instance: TunnelProviderInstance
     if (provider === 'pinggy') {
+      this.logTunnel('startTunnelForProvider: invoking createPinggyTunnel')
       instance = await this.deps.createPinggyTunnel({
         port,
         directory: this.pinggyDirectory(),
@@ -746,13 +772,17 @@ export class ElectronServerRuntime {
       // Scope the failure flag to the download itself: a later spawn failure must
       // not be mislabelled as "cloudflared download failed" in the settings UI.
       const resolveBinary = async () => {
+        this.logTunnel('startTunnelForProvider: resolveBinary start')
         try {
-          return await this.deps.ensureCloudflaredBinary({
+          const binary = await this.deps.ensureCloudflaredBinary({
             cacheDir: claudeConfigDir(this.baseEnv),
             env: this.baseEnv,
             onProgress,
           })
+          this.logTunnel(`startTunnelForProvider: resolveBinary ok path=${binary}`)
+          return binary
         } catch (error) {
+          this.logTunnel(`startTunnelForProvider: resolveBinary failed: ${error instanceof Error ? error.message : String(error)}`)
           recordDownload({
             state: 'failed',
             receivedBytes: context.downloadRef.value?.receivedBytes ?? 0,
@@ -762,16 +792,21 @@ export class ElectronServerRuntime {
           throw error
         }
       }
+      this.logTunnel('startTunnelForProvider: awaiting resolveTunnelToken')
+      const token = await this.resolveTunnelToken(options, context.serverUrl)
+      this.logTunnel(`startTunnelForProvider: resolveTunnelToken returned hasToken=${!!token}`)
+      this.logTunnel('startTunnelForProvider: invoking createCloudflareTunnel')
       instance = await this.deps.createCloudflareTunnel({
         port,
         mode: options.mode,
-        token: await this.resolveTunnelToken(options, context.serverUrl),
+        token,
         namedUrl: options.namedUrl,
         env,
         timeoutMs: TUNNEL_URL_TIMEOUT_MS,
         onChild,
         resolveBinary,
       })
+      this.logTunnel('startTunnelForProvider: createCloudflareTunnel returned')
     }
     // A provider that dies after we publish it must not be reported as running:
     // the exit handler clears the server URL and flips to the error state.
@@ -1085,19 +1120,30 @@ export class ElectronServerRuntime {
    */
   private async resolveTunnelToken(options: TunnelStartOptions, serverUrl: string): Promise<string | null> {
     const explicit = options.token?.trim()
-    if (explicit) return explicit
-    if (options.mode !== 'named') return null
+    if (explicit) {
+      this.logTunnel('resolveTunnelToken: using explicit token from options')
+      return explicit
+    }
+    if (options.mode !== 'named') {
+      this.logTunnel('resolveTunnelToken: mode != named, returning null')
+      return null
+    }
 
+    this.logTunnel(`resolveTunnelToken: fetching stored token from ${serverUrl}/api/h5-access/tunnel/token`)
     try {
       const response = await this.fetchFn(`${serverUrl}/api/h5-access/tunnel/token`, {
         headers: this.localServerHeaders(),
       })
+      this.logTunnel(`resolveTunnelToken: fetch returned status=${response.status}`)
       if (!response.ok) return null
       const body = await response.json() as { token?: unknown }
-      return typeof body.token === 'string' && body.token.trim() ? body.token.trim() : null
+      const found = typeof body.token === 'string' && body.token.trim() ? body.token.trim() : null
+      this.logTunnel(`resolveTunnelToken: stored token ${found ? 'present' : 'absent'}`)
+      return found
     } catch (error) {
       // A lookup failure must surface as the ordinary missing-token error below
       // rather than a network error the user cannot act on.
+      this.logTunnel(`resolveTunnelToken: fetch threw: ${error instanceof Error ? error.message : String(error)}`)
       console.error('[desktop] failed to load the stored tunnel token', error)
       return null
     }

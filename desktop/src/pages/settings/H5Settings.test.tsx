@@ -446,6 +446,82 @@ describe('H5AccessSettings tunnel provider + cloudflared download', () => {
     expect(startTunnel).not.toHaveBeenCalled()
   })
 
+  it('hides the one-click (quick) tunnel entry and defaults to named mode', () => {
+    seedH5Tunnel({ tunnel: { ...runningCloudflare, status: 'idle', url: null, mode: null }, hostStatus: null })
+    render(<H5AccessSettings />)
+    const mode = screen.getByLabelText('Tunnel mode') as HTMLSelectElement
+    // Fork customization: the quick (random-address) entry is hidden, only the
+    // named-tunnel flow remains. The mode state must default to 'named' so the
+    // token + domain inputs render without the user flipping the select.
+    expect(mode.value).toBe('named')
+    const optionValues = Array.from(mode.querySelectorAll('option')).map(option => option.value)
+    expect(optionValues).toEqual(['named'])
+    expect(optionValues).not.toContain('quick')
+  })
+
+  it('validates a pasted cloudflared install command and reports the tunnel ID', async () => {
+    seedH5Tunnel({ tunnel: { ...runningCloudflare, status: 'idle', url: null, mode: null }, hostStatus: null })
+    const addToast = vi.fn()
+    useUIStore.setState({ addToast })
+    const tunnelId = '5832ad3c-782f-4c0e-b183-6bad74ede5db'
+    const token = btoa(JSON.stringify({
+      a: '0123456789abcdef0123456789abcdef',
+      t: tunnelId,
+      s: btoa('fake-tunnel-secret-for-tests'),
+    }))
+
+    render(<H5AccessSettings />)
+    fireEvent.change(screen.getByLabelText(/Cloudflare.*token/i), {
+      target: { value: `sudo cloudflared service install ${token}` },
+    })
+    fireEvent.click(screen.getByTestId('h5-access-tunnel-token-verify'))
+
+    await waitFor(() => expect(addToast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'success', message: expect.stringContaining(tunnelId) }),
+    ))
+  })
+
+  it('rejects an empty token draft, unrecognized text, and ambiguous pastes', async () => {
+    seedH5Tunnel({ tunnel: { ...runningCloudflare, status: 'idle', url: null, mode: null }, hostStatus: null })
+    const addToast = vi.fn()
+    useUIStore.setState({ addToast })
+    const idA = '5832ad3c-782f-4c0e-b183-6bad74ede5db'
+    const idB = '0d9c6c2e-4f5a-4b7e-9c1d-2e3f4a5b6c7d'
+    const makeToken = (id: string) => btoa(JSON.stringify({
+      a: '0123456789abcdef0123456789abcdef',
+      t: id,
+      s: btoa('fake-tunnel-secret-for-tests'),
+    }))
+
+    render(<H5AccessSettings />)
+    const input = screen.getByLabelText(/Cloudflare.*token/i)
+    const verify = screen.getByTestId('h5-access-tunnel-token-verify')
+
+    // Empty draft — nothing to validate.
+    fireEvent.click(verify)
+    await waitFor(() => expect(addToast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', message: expect.stringMatching(/paste|粘贴|貼上|貼り付け|붙여/i) }),
+    ))
+
+    // Unrecognized text — no Cloudflare token structure inside.
+    addToast.mockClear()
+    fireEvent.change(input, { target: { value: 'not a token at all' } })
+    fireEvent.click(verify)
+    await waitFor(() => expect(addToast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error' }),
+    ))
+
+    // Ambiguous — two distinct tokens pasted together.
+    addToast.mockClear()
+    fireEvent.change(input, {
+      target: { value: `cloudflared tunnel run --token ${makeToken(idA)}\ncloudflared tunnel run --token ${makeToken(idB)}` },
+    })
+    fireEvent.click(verify)
+    await waitFor(() => expect(addToast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error' }),
+    ))
+  })
+
   it('rejects a private LAN address typed into the tunnel domain field', () => {
     seedH5Tunnel({ tunnel: { ...runningCloudflare, status: 'idle', url: null, mode: null }, hostStatus: null })
     render(<H5AccessSettings />)
@@ -479,6 +555,11 @@ describe('H5 tunnel i18n contract', () => {
     'settings.general.h5AccessTunnelDomainHint',
     'settings.general.h5AccessTunnelDomainInvalid',
     'settings.general.h5AccessTunnelDomainRequired',
+    'settings.general.h5AccessTunnelTokenVerify',
+    'settings.general.h5AccessTunnelTokenVerifyEmpty',
+    'settings.general.h5AccessTunnelTokenVerifyOk',
+    'settings.general.h5AccessTunnelTokenVerifyMissing',
+    'settings.general.h5AccessTunnelTokenVerifyAmbiguous',
   ] as const
 
   it.each(LOCALES)('defines every new tunnel key in %s', (locale) => {
@@ -493,6 +574,14 @@ describe('H5 tunnel i18n contract', () => {
     for (const locale of LOCALES) {
       const value = translate(locale, 'settings.general.h5AccessTunnelDownloadingProgress', { percent: '42' })
       expect(value, `${locale} dropped the {percent} placeholder`).toContain('42')
+    }
+  })
+
+  it('interpolates the tunnel ID in the verify-ok toast in every locale', () => {
+    const tunnelId = '5832ad3c-782f-4c0e-b183-6bad74ede5db'
+    for (const locale of LOCALES) {
+      const value = translate(locale, 'settings.general.h5AccessTunnelTokenVerifyOk', { tunnelId })
+      expect(value, `${locale} dropped the {tunnelId} placeholder`).toContain(tunnelId)
     }
   })
 

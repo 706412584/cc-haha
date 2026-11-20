@@ -1300,3 +1300,77 @@ describe('Magpie on the provider list', () => {
     expect(screen.queryByRole('dialog', { name: 'Add Model' })).not.toBeInTheDocument()
   })
 })
+
+describe('provider custom request headers editor', () => {
+  beforeEach(() => {
+    useSettingsStore.setState({ locale: 'en' })
+    vi.spyOn(useSettingsStore.getState(), 'fetchAll').mockResolvedValue()
+  })
+
+  it('renders an empty textarea for a fresh custom provider', async () => {
+    vi.spyOn(providersApi, 'list').mockResolvedValue({ providers: [], activeId: null })
+    vi.spyOn(providersApi, 'getSettings').mockResolvedValue({ skipWebFetchPreflight: true })
+    render(<ProviderSettings />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /Add Model/ }))
+    const dialog = within(screen.getByRole('dialog'))
+    fireEvent.click(dialog.getByRole('button', { name: 'DeepSeek' }))
+
+    const textarea = await dialog.findByRole('textbox', { name: 'Custom request headers' }) as HTMLTextAreaElement
+    expect(textarea.value).toBe('')
+  })
+
+  it('writes the textarea into env.ANTHROPIC_CUSTOM_HEADERS inside the settings JSON', async () => {
+    vi.spyOn(providersApi, 'list').mockResolvedValue({ providers: [], activeId: null })
+    vi.spyOn(providersApi, 'getSettings').mockResolvedValue({ skipWebFetchPreflight: true })
+    render(<ProviderSettings />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /Add Model/ }))
+    const dialog = within(screen.getByRole('dialog'))
+    fireEvent.click(dialog.getByRole('button', { name: 'DeepSeek' }))
+
+    const textarea = await dialog.findByRole('textbox', { name: 'Custom request headers' }) as HTMLTextAreaElement
+    fireEvent.change(textarea, {
+      target: { value: 'User-Agent: claude-cli/2.1.288 (external, cli)\nX-Client-Name: Claude Code' },
+    })
+
+    const settingsJson = (dialog.getByRole('textbox', { name: 'Settings JSON' }) as HTMLTextAreaElement).value
+    const parsed = JSON.parse(settingsJson) as { env?: Record<string, unknown> }
+    expect(parsed.env?.ANTHROPIC_CUSTOM_HEADERS).toBe('User-Agent: claude-cli/2.1.288 (external, cli)\nX-Client-Name: Claude Code')
+  })
+
+  it('clears env.ANTHROPIC_CUSTOM_HEADERS when the textarea is emptied', async () => {
+    vi.spyOn(providersApi, 'list').mockResolvedValue({ providers: [], activeId: null })
+    vi.spyOn(providersApi, 'getSettings').mockResolvedValue({ skipWebFetchPreflight: true })
+    render(<ProviderSettings />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /Add Model/ }))
+    const dialog = within(screen.getByRole('dialog'))
+    fireEvent.click(dialog.getByRole('button', { name: 'DeepSeek' }))
+
+    const textarea = await dialog.findByRole('textbox', { name: 'Custom request headers' }) as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'X-Test: yes' } })
+    let settingsJson = (dialog.getByRole('textbox', { name: 'Settings JSON' }) as HTMLTextAreaElement).value
+    expect(JSON.parse(settingsJson).env?.ANTHROPIC_CUSTOM_HEADERS).toBe('X-Test: yes')
+
+    fireEvent.change(textarea, { target: { value: '' } })
+    settingsJson = (dialog.getByRole('textbox', { name: 'Settings JSON' }) as HTMLTextAreaElement).value
+    expect(JSON.parse(settingsJson).env?.ANTHROPIC_CUSTOM_HEADERS).toBeUndefined()
+  })
+
+  it('reflects an existing ANTHROPIC_CUSTOM_HEADERS from the settings JSON', async () => {
+    vi.spyOn(providersApi, 'list').mockResolvedValue({ providers: [], activeId: null })
+    vi.spyOn(providersApi, 'getSettings').mockResolvedValue({
+      skipWebFetchPreflight: true,
+      env: { ANTHROPIC_CUSTOM_HEADERS: 'User-Agent: pre-existing/1.0' },
+    })
+    render(<ProviderSettings />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /Add Model/ }))
+    const dialog = within(screen.getByRole('dialog'))
+    fireEvent.click(dialog.getByRole('button', { name: 'DeepSeek' }))
+
+    const textarea = await dialog.findByRole('textbox', { name: 'Custom request headers' }) as HTMLTextAreaElement
+    await waitFor(() => expect(textarea.value).toBe('User-Agent: pre-existing/1.0'))
+  })
+})

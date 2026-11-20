@@ -250,7 +250,7 @@ export function normalizeImageGeneration(
   }
 }
 
-function applyModel1mSupport(model: string, enabled: boolean | undefined): string {
+export function applyModel1mSupport(model: string, enabled: boolean | undefined): string {
   const trimmed = model.trim()
   if (!enabled) return trimmed
   return `${trimmed.replace(/\[1m\]$/i, '').replace(/:1m$/i, '').trim()}[1m]`
@@ -781,6 +781,13 @@ export function buildProviderManagedEnv(
     ANTHROPIC_DEFAULT_OPUS_MODEL: runtimeModels.opus,
     ...attributionHeaderEnvForModel(runtimeModels.main),
     ...buildImageGenerationManagedEnv(provider),
+    // Per-provider custom request headers. Persisted on the provider so a
+    // non-default provider can carry its own header set; the shared
+    // settings.json only reflects the active provider, so a non-default
+    // provider's custom headers would otherwise be lost on save.
+    ...(provider.customHeaders?.trim()
+      ? { ANTHROPIC_CUSTOM_HEADERS: provider.customHeaders }
+      : {}),
   }
 }
 

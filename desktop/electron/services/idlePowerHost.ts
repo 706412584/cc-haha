@@ -23,6 +23,8 @@ export async function createIdlePowerHost(options: {
   onChange(state: IdlePowerState): void
   detectCapabilities?: typeof detectPowerCapabilities
   executeAction?: typeof executePowerAction
+  /** Optional diagnostic sink for probe failures — wired to electron-host.log by main. */
+  appendDiagnostic?: (message: string) => void
 }): Promise<IdlePowerService> {
   const preferences = readIdlePowerPreferences(options.app)
   const translate = (key: string, params: Record<string, string | number> = {}) => {
@@ -31,12 +33,27 @@ export async function createIdlePowerHost(options: {
     return value
   }
   const actionName = (action: IdlePowerAction) => translate(`power.action.${action}`)
-  const capabilities = await (options.detectCapabilities ?? detectPowerCapabilities)()
+  const onError = (stage: string, error: unknown) => {
+    try { options.appendDiagnostic?.(`[idle-power] ${stage}: ${error instanceof Error ? error.message : String(error)}`) } catch { /* ignore */ }
+  }
+  const detect = () => (options.detectCapabilities ?? detectPowerCapabilities)({ onError })
+  const capabilities = await detect()
   const service = new IdlePowerService({
     settings: preferences.settings,
     blocker: options.blocker,
     lastAction: preferences.lastAction,
     capabilities,
+    // Re-probe on demand when the startup snapshot says the action is
+    // unavailable — gives the powercfg fallback a second chance to succeed
+    // where the initial Win32 probe failed.
+    refreshCapabilities: async () => {
+      try {
+        return await detect()
+      } catch (error) {
+        onError('refresh-capabilities', error)
+        return null
+      }
+    },
     readActivity: options.readActivity,
     getIdleSeconds: () => options.monitor.getSystemIdleTime(),
     getPointerPosition: () => options.screen.getCursorScreenPoint(),

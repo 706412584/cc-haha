@@ -55,6 +55,7 @@ import {
 import { SettingsService } from '../services/settingsService.js'
 import { ProviderService } from '../services/providerService.js'
 import {
+  applyModel1mSupport,
   getPresetDefaultEnv,
   getPresetReasoningProviderKind,
 } from '../services/providerRuntimeEnv.js'
@@ -6832,8 +6833,8 @@ export async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSet
       }
 
       // Stale-modelId guard: when the persisted runtime modelId is no longer
-      // present in any of the active provider's four model slots
-      // (main / haiku / sonnet / opus), the upstream will return 404 and we
+      // present in any of the active provider's model slots
+      // (main / fable / haiku / sonnet / opus), the upstream will return 404 and we
       // surface "There's an issue with the selected model (...)" — which is
       // exactly the cycle a user hits when they rename a model in Settings
       // and resume an old session. Fall back to the provider's main model
@@ -6850,9 +6851,13 @@ export async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSet
           // would treat every 1M selection as a stale model.
           const baseModelId = (value: string) =>
             value.trim().replace(/\[1m\]$/i, '').replace(/:1m$/i, '').trim()
+          // Every slot the picker can select for this provider, including the
+          // fork's Fable slot — leaving it out made a Fable selection look
+          // stale and silently replaced the user's model with the main slot.
           const knownModels = new Set(
             [
               provider.models.main,
+              provider.models.fable,
               provider.models.haiku,
               provider.models.sonnet,
               provider.models.opus,
@@ -6861,10 +6866,18 @@ export async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSet
               .filter(Boolean),
           )
           if (knownModels.size > 0 && !knownModels.has(baseModelId(runtimeOverride.modelId))) {
-            console.warn(
-              `[WS] Persisted runtime modelId '${runtimeOverride.modelId}' is no longer in provider ${provider.id}'s model map; falling back to ${provider.models.main}`,
+            // Fall back to the id the provider env launches with, `[1m]`
+            // marker included. The bare map value is not a catalog identity,
+            // so persisting it made later resolveSessionRuntime() calls fail
+            // with SESSION_MODEL_UNAVAILABLE.
+            const fallbackModelId = applyModel1mSupport(
+              provider.models.main,
+              provider.model1mSupport?.main,
             )
-            resolvedModelId = provider.models.main
+            console.warn(
+              `[WS] Persisted runtime modelId '${runtimeOverride.modelId}' is no longer in provider ${provider.id}'s model map; falling back to ${fallbackModelId}`,
+            )
+            resolvedModelId = fallbackModelId
           }
         }
       }

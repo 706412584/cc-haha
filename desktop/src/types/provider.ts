@@ -94,6 +94,12 @@ export type SavedProvider = {
   thinkingIncompatible?: boolean
   /** Last 4xx message snippet, surfaced in the badge tooltip. */
   thinkingIncompatibleReason?: string
+  /**
+   * Per-provider custom request headers (curl-style multi-line "Name: Value").
+   * Persisted on the provider so a non-default provider can carry its own
+   * header set — the shared settings.json only reflects the active provider.
+   */
+  customHeaders?: string
 }
 
 export type CreateProviderInput = {
@@ -116,6 +122,7 @@ export type CreateProviderInput = {
   imageGeneration?: ImageGenerationConfig
   proxy?: ProviderProxyConfig
   notes?: string
+  customHeaders?: string
 }
 
 export type UpdateProviderInput = {
@@ -137,6 +144,7 @@ export type UpdateProviderInput = {
   imageGeneration?: ImageGenerationConfig | null
   proxy?: ProviderProxyConfig | null
   notes?: string
+  customHeaders?: string | null
 }
 
 export type TestProviderConfigInput = {

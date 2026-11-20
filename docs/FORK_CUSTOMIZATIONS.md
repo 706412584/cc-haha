@@ -35,6 +35,8 @@
 | ★ `xhigh` 推理档（K3/兼容模型），含 ultracode/max 档位 | `src/commands/effort/effort.tsx:30`、`src/server/services/providerRuntimeEnv.ts`（grep `xhigh_effort`） | ModelSelector / ReasoningEffortPopover 测试绿 |
 | Provider 运行时环境官方账号分支（OpenAI/Grok OAuth runtime env） | `src/server/services/providerRuntimeEnv.ts` | grep `buildOpenAIOfficialRuntimeEnv`、`buildGrokOfficialRuntimeEnv` |
 | Provider compat/thinking 徽章 + media proxy 步骤标签 | `desktop/src/pages/settings/ProviderSettings.tsx` | 合并 diff 目视 |
+| Provider 编辑面板自定义请求头 textarea（写入 `env.ANTHROPIC_CUSTOM_HEADERS`,可覆盖 UA) | `desktop/src/pages/settings/ProviderSettings.tsx`(`readCustomHeadersFromSettingsJson` / `updateSettingsJsonCustomHeaders`) | `ProviderSettings.test.tsx`「provider custom request headers editor」4 例绿;5 份 locale 同步 `settings.providers.customHeaders*` |
+| `SavedProvider.customHeaders` 持久化到 provider 数据（非默认 provider 也能存;`buildProviderManagedEnv` 写回 env 防 sync 覆盖) | `src/server/types/provider.ts`(3 处 schema)、`src/server/services/providerRuntimeEnv.ts`(return 末尾)、`desktop/src/types/provider.ts`(3 处) | `provider-runtime-env.test.ts` 3 例新测试绿 |
 
 ## C. 会话存储 / 索引 / 历史
 
@@ -52,6 +54,9 @@
 | 流断线重试预算 `CLAUDE_STREAM_TRANSIENT_RETRY_BUDGET_MS`（默认 60s）+ fork 默认 4 次重试 | `src/services/api/withRetry.ts:439-443`、`src/services/api/streamRetry.ts:83` | grep `getStreamTransientRetryBudgetMs`；`streamRetry.test.ts` 绿 |
 | 流断线重试横幅（kind-specific 文案 + data-retry-kind） | `desktop/src/components/chat/StreamingIndicator.tsx` | grep `data-retry-kind` |
 | `PENDING_PERMISSION_DISCONNECT_CLEANUP_MS` 保 5 分钟（上游为自动回答提到 31 分钟） | `src/server/ws/handler.ts:196` | grep 该常量 |
+| Relay 透传 `User-Agent`（不剥 `claude-cli/...`,上游如星驰有客户端白名单） | `src/server/proxy/handler.ts:502`(`isInternalClientHeader` 不再匹配 user-agent) | `handlerUserAgentPassthrough.test.ts` 绿;opencode-go preset 仍可被 upstreamHeaders 覆盖 UA |
+| 跨协议路径同样透传客户端身份（`openai_chat`/`openai_responses`/`gemini` 曾从空对象构造上游头,出站 UA 退化成 `Bun/x.y.z`;Anthropic 专有头与 `x-stainless-*` 仍丢弃） | `src/server/proxy/handler.ts`(`forwardClientHeaders(incomingHeaders, true)`) | `handlerUserAgentPassthrough.test.ts` 的跨协议用例绿;本地网关 `127.0.0.1:6789/panel/#logs` 应显示 `claude-cli/2.1.288 (external, cli)` |
+| Stale-modelId guard（persisted 模型已不在任何槽位时回退 main,防上游 404）——**必须含 fable 槽**,回退值必须带 `[1m]` 标记,否则 catalog 解析抛 `SESSION_MODEL_UNAVAILABLE` | `src/server/ws/handler.ts`(`Stale-modelId guard` + `applyModel1mSupport`) | `websocket-handler.test.ts` 的 `stale runtime modelId guard` 两例绿;上游无此 guard |
 
 ## E. 桌面 UX（fork-only / 改上游）
 
@@ -65,6 +70,7 @@
 | TabBar：双箭头槽位 unmount、滚轮横滚、team-member activity 守卫 | `desktop/src/components/layout/TabBar.tsx` | 合并 diff 目视 + TabBar 相关测试 |
 | Material Symbols 字体类（自托管 woff2，防 21 个图标 span 渲染原始文本） | `desktop/src/theme/globals.css:4-12` | grep `material-symbols-outlined.woff2` |
 | 文件树右键 WorkspaceFileTreeMenu + WorkspaceEditableFile（上游已删，fork 保留） | `desktop/src/components/workbench/WorkspaceFileTreeMenu.tsx`、`WorkspaceEditableFile.tsx` | 文件存在 + 对应测试绿 |
+| 电源能力检测多层防御：Win32 probe 全 false 时回退 `powercfg /a` 解析；`idlePower.refresh` 在 capabilities 为 false 时先调 `refreshCapabilities` 重试；`idlePowerHost` 把 probe 错误写入诊断日志 | `desktop/electron/services/idlePowerPlatform.ts`(`detectPowerCapabilitiesViaPowercfg`)、`idlePower.ts`(`refresh` 开头)、`idlePowerHost.ts`(`onError` / `refreshCapabilities`) | `idlePowerPlatform.test.ts` 36 例绿（含 3 例回退）;`idlePower` 全套 88 例绿 |
 | 聊天内容列宽 `var(--chat-content-max-width)`（不得回退到上游 800px 硬编码） | `desktop/src/components/chat/BackgroundTasksBar.tsx`、`SessionTaskBar.tsx` | grep `max-w-\[900px\]` 应为 0 |
 | 设置 → 系统提示词页：主系统提示词**替换**（`--system-prompt-file`，与编排提示词的 append 通道区分）+ 载入内置默认快照 | `desktop/src/components/settings/SystemPromptSettings.tsx`、`src/server/api/system-prompt.ts`、`src/server/services/systemPromptPreferencesService.ts`、`src/constants/prompts.ts`（`getStaticSystemPromptSnapshot`）、`src/server/services/conversationService.ts`（`resolveSystemPromptFile`） | grep `resolvedSystemPromptPath`、`getStaticSystemPromptSnapshot`；`system-prompt.test.ts`、`system-prompt-api.test.ts`、`SystemPromptSettings.test.tsx` 绿。注意：上游合并时 `getStaticSystemPromptSnapshot` 是加法导出，若丢失则「载入内置默认」按钮静默为空 |
 

@@ -25,6 +25,7 @@ import { copyTextToClipboard } from '@/lib/clipboard'
 import { getDesktopHost } from '@/lib/desktopHost'
 import { h5AccessApi, type H5TunnelStatusView } from '../../api/h5Access'
 import type { H5TunnelProvider } from '../../types/settings'
+import { findCloudflareTunnelToken } from '../../lib/desktopHost/publicAccessConfiguration'
 
 /**
  * The H5 access panel — current monolith implementation including tunnel controls.
@@ -203,7 +204,7 @@ export function H5AccessSettings() {
   const [h5EnableConfirmOpen, setH5EnableConfirmOpen] = useState(false)
   const [h5QrDataUrl, setH5QrDataUrl] = useState<string | null>(null)
   const [h5ActionRunning, setH5ActionRunning] = useState(false)
-  const [h5TunnelMode, setH5TunnelMode] = useState<'quick' | 'named'>('quick')
+  const [h5TunnelMode, setH5TunnelMode] = useState<'quick' | 'named'>('named')
   const [h5TunnelTokenDraft, setH5TunnelTokenDraft] = useState('')
   const [h5TunnelTokenVisible, setH5TunnelTokenVisible] = useState(false)
   // A named tunnel needs both the Cloudflare token and the public hostname it
@@ -433,6 +434,28 @@ export function H5AccessSettings() {
     })
   }
 
+  // Local format check — no cloudflared spawn, no network call. Decodes the
+  // token the way cloudflared does (base64 of `{a, t, s}`) so users catch
+  // pasting mistakes before they hit Start and wonder why nothing connects.
+  const handleH5VerifyTunnelToken = () => {
+    const draft = h5TunnelTokenDraft.trim()
+    if (!draft) {
+      addToast({ type: 'error', message: t('settings.general.h5AccessTunnelTokenVerifyEmpty') })
+      return
+    }
+    const result = findCloudflareTunnelToken(draft)
+    if (result.status === 'found') {
+      addToast({
+        type: 'success',
+        message: t('settings.general.h5AccessTunnelTokenVerifyOk', { tunnelId: result.tunnelId }),
+      })
+    } else if (result.status === 'ambiguous') {
+      addToast({ type: 'error', message: t('settings.general.h5AccessTunnelTokenVerifyAmbiguous') })
+    } else {
+      addToast({ type: 'error', message: t('settings.general.h5AccessTunnelTokenVerifyMissing') })
+    }
+  }
+
   // Manual downgrade: pin the tunnel to Pinggy. The desktop main process
   // replaces the running tunnel on start, so no explicit stop is needed.
   //
@@ -637,7 +660,8 @@ export function H5AccessSettings() {
                     disabled={h5TunnelOccupied || h5ActionRunning}
                     onChange={(event) => setH5TunnelMode(event.target.value === 'named' ? 'named' : 'quick')}
                   >
-                    <option value="quick">{t('settings.general.h5AccessTunnelModeQuick')}</option>
+                    {/* quick（一键公网）入口已在 fork 隐藏：保留运行时分支以便已
+                        运行的 quick tunnel 仍可 stop,但新启动必须走 named。 */}
                     <option value="named">{t('settings.general.h5AccessTunnelModeNamed')}</option>
                   </select>
                   <Button
@@ -704,15 +728,26 @@ export function H5AccessSettings() {
                         : t('settings.general.h5AccessTunnelTokenPlaceholder')}
                       onChange={(event) => setH5TunnelTokenDraft(event.target.value)}
                     />
-                    <button
-                      type="button"
-                      className="mt-1 text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
-                      onClick={() => setH5TunnelTokenVisible((v) => !v)}
-                    >
-                      {h5TunnelTokenVisible
-                        ? t('settings.general.h5AccessHideToken')
-                        : t('settings.general.h5AccessShowToken')}
-                    </button>
+                    <div className="mt-1 flex items-center gap-3">
+                      <button
+                        type="button"
+                        className="text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
+                        onClick={() => setH5TunnelTokenVisible((v) => !v)}
+                      >
+                        {h5TunnelTokenVisible
+                          ? t('settings.general.h5AccessHideToken')
+                          : t('settings.general.h5AccessShowToken')}
+                      </button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={h5ActionRunning}
+                        onClick={handleH5VerifyTunnelToken}
+                        data-testid="h5-access-tunnel-token-verify"
+                      >
+                        {t('settings.general.h5AccessTunnelTokenVerify')}
+                      </Button>
+                    </div>
                   </div>
                 )}
                 {h5TunnelDownloading && (

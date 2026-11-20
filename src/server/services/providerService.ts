@@ -184,6 +184,7 @@ function buildSavedProvider(input: CreateProviderInput): SavedProvider {
     ...(imageGeneration !== undefined && { imageGeneration }),
     ...(input.proxy !== undefined && { proxy: input.proxy }),
     ...(input.notes !== undefined && { notes: input.notes }),
+    ...(input.customHeaders?.trim() ? { customHeaders: input.customHeaders.trim() } : {}),
   }
 }
 
@@ -498,9 +499,15 @@ export class ProviderService {
       ...(imageGeneration !== undefined && imageGeneration !== null && { imageGeneration }),
       ...(input.proxy !== undefined && input.proxy !== null && { proxy: input.proxy }),
       ...(input.notes !== undefined && { notes: input.notes }),
+      ...(input.customHeaders !== undefined && input.customHeaders !== null && input.customHeaders.trim()
+        ? { customHeaders: input.customHeaders.trim() }
+        : {}),
     }
     if (input.proxy === null) {
       delete updated.proxy
+    }
+    if (input.customHeaders === null) {
+      delete updated.customHeaders
     }
     if (input.model1mSupport === null) {
       delete updated.model1mSupport

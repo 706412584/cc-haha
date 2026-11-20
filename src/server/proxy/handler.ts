@@ -415,12 +415,12 @@ export async function handleProxyRequest(req: Request, url: URL): Promise<Respon
       return await handleAnthropicCompatible(body, upstreamBaseUrl, config.apiKey, config.authStrategy, req.headers, isStream, networkSettings, traceContext, upstreamHeaders, hoistNestedMedia)
     }
     if (apiFormat === 'gemini') {
-      return await handleGemini(body, upstreamBaseUrl, config.apiKey, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, requestOptions, upstreamHeaders)
+      return await handleGemini(body, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, requestOptions, upstreamHeaders)
     }
     if (apiFormat === 'openai_chat') {
-      return await handleOpenaiChat(body, upstreamBaseUrl, config.apiKey, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, requestOptions, upstreamHeaders)
+      return await handleOpenaiChat(body, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, requestOptions, upstreamHeaders)
     }
-    return await handleOpenaiResponses(body, upstreamBaseUrl, config.apiKey, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, promptCacheKey, requestOptions, upstreamHeaders)
+    return await handleOpenaiResponses(body, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, promptCacheKey, requestOptions, upstreamHeaders)
   } catch (err) {
     if (traceContext && !wasTraceErrorRecorded(err) && !recordedTraceErrorContexts.has(traceContext)) {
       void recordProxyTrace({
@@ -502,7 +502,13 @@ const INTERNAL_CLIENT_HEADERS = new Set([
 function isInternalClientHeader(name: string, value: string): boolean {
   if (INTERNAL_CLIENT_HEADERS.has(name)) return true
   if (name === 'x-app') return value === 'cli'
-  return name === 'user-agent' && /^claude-cli\/[^\s]+\s+\(/i.test(value)
+  // Fork customization: do NOT strip User-Agent. The upstream provider may
+  // enforce a client whitelist (e.g. xingchiapi returns 403 client_not_allowed
+  // unless User-Agent identifies a supported programming client). The relay is
+  // a transparent proxy for the local CLI and must forward the CLI's identity
+  // unchanged. Presets that need a different UA still override it via
+  // upstreamHeaders, which is applied after this filter.
+  return false
 }
 
 function hopByHopDenySet(headers: Headers): Set<string> {
@@ -515,6 +521,43 @@ function hopByHopDenySet(headers: Headers): Set<string> {
     }
   }
   return deny
+}
+
+/** Headers that describe the Anthropic wire protocol itself. */
+const ANTHROPIC_PROTOCOL_HEADERS = new Set([
+  'anthropic-version',
+  'anthropic-beta',
+  'anthropic-dangerous-direct-browser-access',
+])
+
+/**
+ * Copy the inbound client headers an upstream should see.
+ *
+ * `crossProtocol` is set when the upstream speaks OpenAI or Gemini: the
+ * Anthropic wire headers and the SDK's transport headers describe the
+ * client↔proxy hop only, so strict gateways would reject or misparse them. The
+ * client identity always survives the protocol hop — third-party gateways
+ * whitelist on it (e.g. xingchiapi answers `403 client_not_allowed` when the
+ * User-Agent does not name a supported programming client).
+ */
+function forwardClientHeaders(
+  incomingHeaders: Headers,
+  crossProtocol = false,
+): Record<string, string> {
+  const forwarded: Record<string, string> = {}
+  const deny = hopByHopDenySet(incomingHeaders)
+  for (const [name, value] of incomingHeaders.entries()) {
+    const lower = name.toLowerCase()
+    if (!value) continue
+    if (deny.has(lower) || isInternalClientHeader(lower, value)) continue
+    // The local proxy's authority must not replace the upstream host, and body
+    // framing belongs to the transformed request.
+    if (lower === 'host' || lower === 'content-type' || lower === 'content-length') continue
+    if (lower === 'x-api-key' || lower === 'authorization' || lower === 'x-goog-api-key') continue
+    if (crossProtocol && (ANTHROPIC_PROTOCOL_HEADERS.has(lower) || lower.startsWith('x-stainless-'))) continue
+    forwarded[name] = value
+  }
+  return forwarded
 }
 
 /**
@@ -633,22 +676,14 @@ async function handleAnthropicCompatible(
   const url = `${normalizeAnthropicBaseUrl(baseUrl)}/v1/messages`
   const proxyOptions = getNetworkProxyFetchOptions(networkSettings, url)
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...buildAnthropicAuthHeaders(apiKey, authStrategy),
-  }
   // Preserve protocol and custom headers from the incoming request
   // (anthropic-version is required; anthropic-beta and custom headers such as
   // those injected via ANTHROPIC_CUSTOM_HEADERS carry real semantics for the
   // upstream endpoint). Hop-by-hop and auth headers are not forwarded.
-  const deny = hopByHopDenySet(incomingHeaders)
-  for (const [name, value] of incomingHeaders.entries()) {
-    const lower = name.toLowerCase()
-    if (deny.has(lower) || isInternalClientHeader(lower, value)) continue
-    // The local proxy's authority must not replace the upstream host.
-    if (lower === 'host' || lower === 'content-type' || lower === 'content-length') continue
-    if (lower === 'x-api-key' || lower === 'authorization') continue
-    if (value) headers[name] = value
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...buildAnthropicAuthHeaders(apiKey, authStrategy),
+    ...forwardClientHeaders(incomingHeaders),
   }
   // Preset-declared headers go last so they win over the pass-through above —
   // notably the session id, which is internal-client-filtered on the way in and
@@ -865,6 +900,7 @@ async function handleOpenaiChat(
   body: AnthropicRequest,
   baseUrl: string,
   apiKey: string,
+  incomingHeaders: Headers,
   isSavedApiKey: boolean,
   isStream: boolean,
   networkSettings: NetworkSettings,
@@ -897,9 +933,10 @@ async function handleOpenaiChat(
     traceContext.protocolTrace = new ProtocolTraceObserver('openai_chat', transformed,
       resolveRequestCompatibility(body, { ...requestOptions, protocol: 'openai_chat' }).outputBudget)
   }
-  // Preset-declared headers first: `Authorization` is applied last so a preset can
-  // never shadow the credential, and the resolver already drops framing headers.
-  const upstreamRequestHeaders: Record<string, string> = {}
+  // Client identity first, then preset-declared headers: a preset still wins
+  // over the pass-through (opencode-go deliberately replaces the UA), while
+  // `Authorization` is applied last so a preset can never shadow the credential.
+  const upstreamRequestHeaders: Record<string, string> = forwardClientHeaders(incomingHeaders, true)
   applyUpstreamHeaders(upstreamRequestHeaders, upstreamHeaders)
   upstreamRequestHeaders['Content-Type'] = 'application/json'
   upstreamRequestHeaders.Authorization = `Bearer ${apiKey}`
@@ -973,7 +1010,7 @@ async function handleOpenaiChat(
         })
       }
       const resent = await handleOpenaiChat(
-        body, baseUrl, apiKey, isSavedApiKey, isStream, networkSettings, traceContext, requestOptions, upstreamHeaders, 'text_only',
+        body, baseUrl, apiKey, incomingHeaders, isSavedApiKey, isStream, networkSettings, traceContext, requestOptions, upstreamHeaders, 'text_only',
         unsupportedReasoningFields,
       )
       if (resent.ok) {
@@ -1008,7 +1045,7 @@ async function handleOpenaiChat(
         })
       }
       const resent = await handleOpenaiChat(
-        body, baseUrl, apiKey, isSavedApiKey, isStream, networkSettings, traceContext, requestOptions, upstreamHeaders,
+        body, baseUrl, apiKey, incomingHeaders, isSavedApiKey, isStream, networkSettings, traceContext, requestOptions, upstreamHeaders,
         imageContentMode, new Set([...unsupportedReasoningFields, rejectedField]),
       )
       if (resent.ok) {
@@ -1152,6 +1189,7 @@ async function handleOpenaiResponses(
   body: AnthropicRequest,
   baseUrl: string,
   apiKey: string,
+  incomingHeaders: Headers,
   isSavedApiKey: boolean,
   isStream: boolean,
   networkSettings: NetworkSettings,
@@ -1166,9 +1204,10 @@ async function handleOpenaiResponses(
       resolveRequestCompatibility(body, { ...requestOptions, protocol: 'openai_responses' }).outputBudget)
   }
   const url = buildOpenaiEndpoint(baseUrl, 'responses')
-  // Preset-declared headers first: `Authorization` is applied last so a preset can
-  // never shadow the credential, and the resolver already drops framing headers.
-  const upstreamRequestHeaders: Record<string, string> = {}
+  // Client identity first, then preset-declared headers: a preset still wins
+  // over the pass-through (opencode-go deliberately replaces the UA), while
+  // `Authorization` is applied last so a preset can never shadow the credential.
+  const upstreamRequestHeaders: Record<string, string> = forwardClientHeaders(incomingHeaders, true)
   applyUpstreamHeaders(upstreamRequestHeaders, upstreamHeaders)
   upstreamRequestHeaders['Content-Type'] = 'application/json'
   upstreamRequestHeaders.Authorization = `Bearer ${apiKey}`
@@ -1349,6 +1388,7 @@ async function handleGemini(
   body: AnthropicRequest,
   baseUrl: string,
   apiKey: string,
+  incomingHeaders: Headers,
   isSavedApiKey: boolean,
   isStream: boolean,
   networkSettings: NetworkSettings,
@@ -1361,8 +1401,9 @@ async function handleGemini(
   const url = isStream
     ? `${baseUrl}/models/${model}:streamGenerateContent?alt=sse`
     : `${baseUrl}/models/${model}:generateContent`
-  // Preset-declared headers first, so the credential always wins over them.
-  const upstreamRequestHeaders: Record<string, string> = {}
+  // Client identity first, then preset-declared headers, so the credential and
+  // a preset's deliberate overrides always win over the pass-through.
+  const upstreamRequestHeaders: Record<string, string> = forwardClientHeaders(incomingHeaders, true)
   applyUpstreamHeaders(upstreamRequestHeaders, upstreamHeaders)
   upstreamRequestHeaders['Content-Type'] = 'application/json'
   upstreamRequestHeaders['x-goog-api-key'] = apiKey
