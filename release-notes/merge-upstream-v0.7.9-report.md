@@ -64,6 +64,8 @@
 - contracts 实际执行报告：`artifacts/merge-v079-contracts/2026-11-20T21-15-38-229Z/report.md`；其中 Agent-flow 通过，其余失败日志保留，部分错误已在后续焦点回归修复。
 - 浏览器组件画廊确认 neutral-dark / classic-dark 切换和 CSS 值、无 Vite overlay；画廊有横向溢出且无后端导致 runtime-control fetch 失败，不能据此声称手机正式布局或团队端到端通过。
 - desktop-ui-smoke 因未安装 agent-browser 明确 skipped；未安装额外浏览器依赖，改用已有 Chrome DevTools 做有限主题交互检查。
+- 覆盖率门禁已启动，但长时间无报告，且与完整 server lane 重复执行大型根测试；停止该重复运行，状态记为未完成，不能声称覆盖率通过。
+- IM 本地套件：1047 pass / 1 skip / 21 fail，失败含 WebSocket fixture close 的 500ms 超时；未将其记为通过。
 - 未运行真实 Provider/付费模型测试。未修改 quarantine、覆盖率阈值、分支保护或仓库设置。
 
 ## 清理与发布顺序
