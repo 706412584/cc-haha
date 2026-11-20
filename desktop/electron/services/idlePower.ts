@@ -215,7 +215,8 @@ export class IdlePowerService {
         const refreshed = await this.options.refreshCapabilities()
         if (refreshed) {
           this.state.capabilities = { ...refreshed }
-          this.state.notice = this.state.settings.action !== 'none' && !refreshed[this.state.settings.action] ? 'unavailable' : null
+          // `action === 'none'` returned above, so the index access is total here.
+          this.state.notice = !refreshed[this.state.settings.action] ? 'unavailable' : null
           this.emit()
         }
       }

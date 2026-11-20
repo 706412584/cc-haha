@@ -278,7 +278,11 @@ describe('proxy anthropic-compatible path', () => {
       expect(headers['x-claude-remote-container-id']).toBeUndefined()
       expect(headers['x-claude-remote-session-id']).toBeUndefined()
       expect(headers['x-client-app']).toBeUndefined()
-      expect(headers['user-agent']).toBeUndefined()
+      // Fork customization: the relay forwards the client's User-Agent instead
+      // of stripping it — gateways that whitelist programming clients (e.g.
+      // xingchiapi) answer 403 client_not_allowed without it. See
+      // docs/FORK_CUSTOMIZATIONS.md section D.
+      expect(headers['user-agent']).toBe('claude-cli/2.1.220.693 (external, sdk, client-app/example/1.0)')
       // Empty key sends no auth header at all, and hop-by-hop headers — both
       // the fixed set and the ones named by `Connection` — do not leak to the
       // upstream.

@@ -2692,6 +2692,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
           <span className={cx(FORM_SECTION_LABEL, 'mb-2')}>{t('settings.providers.settingsJson')}</span>
           <textarea
             aria-label={t('settings.providers.settingsJson')}
+            data-testid="provider-settings-json"
             value={displayedSettingsJson}
             onChange={(e) => {
               settingsJsonUserEditedRef.current = true

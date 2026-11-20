@@ -2784,7 +2784,7 @@ describe('Settings > Providers tab', () => {
       expect(within(dialog).queryByText('Mainland China promotion')).not.toBeInTheDocument()
       await act(async () => settleSettings?.())
       await waitFor(() => {
-        expect(dialog.querySelector('textarea')?.value).toContain(
+        expect(dialog.querySelector('textarea[data-testid="provider-settings-json"]')?.value).toContain(
           '"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"',
         )
       })
@@ -2803,7 +2803,7 @@ describe('Settings > Providers tab', () => {
 
     const dialog = screen.getByRole('dialog')
     await waitFor(() => expect(resolveSettings).toBeTypeOf('function'))
-    const settingsTextarea = dialog.querySelector('textarea') as HTMLTextAreaElement
+    const settingsTextarea = dialog.querySelector('textarea[data-testid="provider-settings-json"]') as HTMLTextAreaElement
     fireEvent.change(settingsTextarea, {
       target: {
         value: JSON.stringify({
@@ -2891,7 +2891,7 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(mediaSupport)
 
     const settingsTextarea = await waitFor(() => {
-      const textarea = dialog.querySelector('textarea') as HTMLTextAreaElement
+      const textarea = dialog.querySelector('textarea[data-testid="provider-settings-json"]') as HTMLTextAreaElement
       const settings = JSON.parse(textarea.value) as {
         env?: {
           ANTHROPIC_API_KEY?: string
@@ -2984,7 +2984,7 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add Model|添加模型/i }))
     const dialog = screen.getByRole('dialog')
     await waitFor(() => {
-      const settingsTextarea = dialog.querySelector('textarea')
+      const settingsTextarea = dialog.querySelector('textarea[data-testid="provider-settings-json"]')
       expect(settingsTextarea?.value).toContain('"ANTHROPIC_MODEL"')
     })
     fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
@@ -3049,7 +3049,7 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add Model|添加模型/i }))
     const dialog = screen.getByRole('dialog')
     const settingsTextarea = await waitFor(() => {
-      const textarea = dialog.querySelector('textarea')
+      const textarea = dialog.querySelector('textarea[data-testid="provider-settings-json"]')
       expect(textarea?.value).toContain('"ANTHROPIC_MODEL"')
       return textarea as HTMLTextAreaElement
     })
@@ -3122,7 +3122,7 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getAllByText('Edit')[0]!)
     const dialog = screen.getByRole('dialog')
     await waitFor(() => {
-      expect(dialog.querySelector('textarea')?.value).not.toBe('')
+      expect(dialog.querySelector('textarea[data-testid="provider-settings-json"]')?.value).not.toBe('')
     })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
 
@@ -3142,7 +3142,7 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getAllByText('Edit')[0]!)
     const dialog = screen.getByRole('dialog')
     await waitFor(() => {
-      expect(dialog.querySelector('textarea')?.value).not.toBe('')
+      expect(dialog.querySelector('textarea[data-testid="provider-settings-json"]')?.value).not.toBe('')
     })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
 
@@ -3181,7 +3181,7 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add Model|添加模型/i }))
     const dialog = screen.getByRole('dialog')
     await waitFor(() => {
-      const settingsTextarea = dialog.querySelector('textarea')
+      const settingsTextarea = dialog.querySelector('textarea[data-testid="provider-settings-json"]')
       expect(settingsTextarea?.value).toContain('"ANTHROPIC_MODEL"')
     })
 
@@ -3266,7 +3266,7 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add Model/i }))
     const dialog = screen.getByRole('dialog')
     const settingsTextarea = await waitFor(() => {
-      const textarea = dialog.querySelector('textarea')
+      const textarea = dialog.querySelector('textarea[data-testid="provider-settings-json"]')
       expect(textarea?.value).toContain('"EXISTING_ENV"')
       return textarea as HTMLTextAreaElement
     })
@@ -3512,7 +3512,7 @@ describe('Settings > Providers tab', () => {
       /GPT and o-series models still receive the reasoning effort selected for the Session/i,
     )
     const settingsTextarea = await waitFor(() => {
-      const textarea = dialog.querySelector('textarea')
+      const textarea = dialog.querySelector('textarea[data-testid="provider-settings-json"]')
       expect(textarea?.value).toContain('"ANTHROPIC_MODEL"')
       return textarea as HTMLTextAreaElement
     })
@@ -3581,14 +3581,14 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add Model|添加模型/i }))
     const dialog = screen.getByRole('dialog')
     await waitFor(() => {
-      const settingsTextarea = dialog.querySelector('textarea')
+      const settingsTextarea = dialog.querySelector('textarea[data-testid="provider-settings-json"]')
       expect(settingsTextarea?.value).toContain('"ANTHROPIC_MODEL"')
     })
     fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
     fireEvent.click(within(dialog).getByRole('checkbox', { name: /1M support: main/i }))
     fireEvent.click(within(dialog).getByRole('checkbox', { name: /1M support: sonnet/i }))
     await waitFor(() => {
-      const settingsTextarea = dialog.querySelector('textarea')
+      const settingsTextarea = dialog.querySelector('textarea[data-testid="provider-settings-json"]')
       expect(settingsTextarea?.value).toContain('"ANTHROPIC_MODEL": "claude-sonnet-4-6[1m]"')
       expect(settingsTextarea?.value).toContain('"ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-6[1m]"')
       expect(settingsTextarea?.value).toContain('"CLAUDE_CODE_MODEL_CONTEXT_WINDOWS"')
@@ -3692,7 +3692,7 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add Model|添加模型/i }))
     const dialog = screen.getByRole('dialog')
     await waitFor(() => {
-      const settingsTextarea = dialog.querySelector('textarea')
+      const settingsTextarea = dialog.querySelector('textarea[data-testid="provider-settings-json"]')
       expect(settingsTextarea?.value).toContain('"ANTHROPIC_MODEL"')
     })
     fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
@@ -3710,7 +3710,7 @@ describe('Settings > Providers tab', () => {
 
     fireEvent.click(within(dialog).getByRole('checkbox', { name: /1M support: fable/i }))
     await waitFor(() => {
-      expect(dialog.querySelector('textarea')?.value).toContain('"ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5[1m]"')
+      expect(dialog.querySelector('textarea[data-testid="provider-settings-json"]')?.value).toContain('"ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5[1m]"')
     })
     fireEvent.click(within(dialog).getByRole('button', { name: /Save|Add|保存|添加/i }))
 
@@ -3786,7 +3786,7 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add Model|添加模型/i }))
     const dialog = screen.getByRole('dialog')
     await waitFor(() => {
-      expect(dialog.querySelector('textarea')?.value).toContain('"ANTHROPIC_MODEL"')
+      expect(dialog.querySelector('textarea[data-testid="provider-settings-json"]')?.value).toContain('"ANTHROPIC_MODEL"')
     })
     fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
     return dialog
@@ -3930,7 +3930,7 @@ describe('Settings > Providers tab', () => {
     // Going through handleModelChange is what keeps the settings JSON in sync —
     // a bare setState would leave the textarea on the old model id.
     await waitFor(() => {
-      expect(dialog.querySelector('textarea')?.value).toContain('"ANTHROPIC_MODEL": "gpt-5-mini"')
+      expect(dialog.querySelector('textarea[data-testid="provider-settings-json"]')?.value).toContain('"ANTHROPIC_MODEL": "gpt-5-mini"')
     })
   })
 
