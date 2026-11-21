@@ -25,7 +25,7 @@ describe('task notification policy', () => {
 <summary>Agent "Probe" completed</summary>
 </task-notification>`)
 
-    expect(shouldForwardTaskNotificationToModel(notification, { structuredOutput: true })).toBe(true)
+    expect(shouldForwardTaskNotificationToModel(notification, { structuredOutput: true })).toBe(false)
   })
 
   test('keeps local agent notifications as model input for plain print mode', () => {

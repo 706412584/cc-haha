@@ -99,10 +99,15 @@ export function parseTaskNotificationXml(text: string): ParsedTaskNotification {
 }
 
 export function shouldForwardTaskNotificationToModel(
-  _notification: ParsedTaskNotification,
-  _options: { structuredOutput: boolean },
+  notification: ParsedTaskNotification,
+  options: { structuredOutput: boolean },
 ): boolean {
-  return true
+  // Structured-output local-agent completions are deferred into one merged
+  // follow-up (TaskNotificationFollowUpBatch) instead of re-entering the
+  // model once per agent; background shell notifications still forward
+  // immediately. The mock-llm backgroundNotifications scenario asserts the
+  // merged batch reaches the model exactly once.
+  return !(options.structuredOutput && notification.taskType === 'local_agent')
 }
 
 /**

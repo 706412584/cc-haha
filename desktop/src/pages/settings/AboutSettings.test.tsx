@@ -103,7 +103,7 @@ it('keeps manual checking and installing available while automatic updates are o
 it('no longer offers the user group QR entry while keeping repo and feedback links', async () => {
   await renderAboutSettings()
 
-  expect(screen.getByRole('button', { name: /NanmiCoder\/cc-haha/ })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /706412584\/cc-haha/ })).toBeInTheDocument()
   expect(screen.getByRole('button', { name: /反馈问题/ })).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: /加入 cc-haha 交流群/ })).not.toBeInTheDocument()
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()

@@ -735,11 +735,13 @@ describe('SessionService', () => {
     expect(session.projectRoot).toBe('/tmp/test')
   })
 
-  it('treats a sub-directory of a git repo as its own project when it has its own projects/ entry', async () => {
+  it('keeps an explicitly registered sub-directory of a git repo as its own project', async () => {
     const repoRoot = await createCleanGitRepo(tmpDir)
     const subDir = path.join(repoRoot, 'tools', 'sub')
     await fs.mkdir(subDir, { recursive: true })
     const realSubDir = await fs.realpath(subDir)
+    const { DesktopUiPreferencesService } = await import('../services/desktopUiPreferencesService.js')
+    await new DesktopUiPreferencesService().updateProjectDirectories({ workDir: realSubDir, additionalDirectories: [], createProject: true })
 
     const sessionId = 'cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee'
     await writeSessionFile(sanitizePath(realSubDir), sessionId, [
@@ -753,9 +755,12 @@ describe('SessionService', () => {
     expect(result.sessions).toHaveLength(1)
     expect(result.sessions[0]).toMatchObject({
       id: sessionId,
-      projectRoot: realSubDir,
       workDir: realSubDir,
     })
+    // projectRoot keeps its canonicalized form (lowercase drive, forward
+    // slashes on Windows), so assert independence from the parent repo root
+    // instead of byte-equality with the realpath input.
+    expect(result.sessions[0].projectRoot).not.toBe(await fs.realpath(repoRoot))
   })
 
   it('should keep duplicate session ids from different transcript paths distinct', async () => {

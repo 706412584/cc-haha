@@ -1159,6 +1159,7 @@ interface MediaPosition {
 export function shrinkMediaToSizeBudget(
   messages: (UserMessage | AssistantMessage)[],
   budgetBytes: number,
+  protectedImages?: WeakSet<object>,
 ): (UserMessage | AssistantMessage)[] {
   // Pass 1: collect all media positions and their sizes
   const positions: MediaPosition[] = [];
@@ -1202,6 +1203,13 @@ export function shrinkMediaToSizeBudget(
   const toRemove = new Set<MediaPosition>();
   for (const pos of positions) {
     if (totalSize <= budgetBytes) break;
+    const content = messages[pos.msgIdx].message.content;
+    if (Array.isArray(content)) {
+      const block = content[pos.blockIdx];
+      const media = pos.nestedIdx === -1 ? block
+        : isToolResult(block) && Array.isArray(block.content) ? block.content[pos.nestedIdx] : undefined;
+      if (media && protectedImages?.has(media)) continue;
+    }
     toRemove.add(pos);
     totalSize -= pos.size;
   }
@@ -1709,6 +1717,7 @@ async function* queryModel(
     messagesForAPI = shrinkMediaToSizeBudget(
       messagesForAPI,
       API_MAX_MEDIA_BYTES_BUDGET,
+      imageInput.images,
     );
   }
 

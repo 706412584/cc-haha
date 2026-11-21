@@ -3575,6 +3575,11 @@ function handleStopGeneration(
     conversationService.sendInterrupt(sessionId)
   } else if (stoppedTurn?.interruptBoundaryPending && conversationService.hasSession(sessionId)) {
     conversationService.pauseTeamWorkers(sessionId)
+  } else {
+    // Team ownership outlives its lead process. Stop must reach the runtime
+    // while that process is absent or starting too; an idle UI is not proof
+    // that the independent member processes have stopped.
+    conversationService.sendInterrupt(sessionId)
   }
 
   if (foregroundInFlight || foregroundCliRunActive || agentsInFlight || backgroundTaskIds.length > 0) {

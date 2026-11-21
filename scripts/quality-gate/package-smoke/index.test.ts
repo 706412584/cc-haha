@@ -406,6 +406,7 @@ describe('packaged artifact inspection', () => {
     writeFile(rootDir, `${appRoot}/Contents/Info.plist`)
     writeFile(rootDir, `${appRoot}/Contents/MacOS/Claude Code Haha`, thinMachO('arm64'))
     writeFile(rootDir, `${resources}/app.asar`)
+    writeFile(rootDir, `${unpacked}/plugin-seed/marketplaces/cc-haha-builtin/.claude-plugin/marketplace.json`)
     writeFile(rootDir, `${unpacked}/dist/index.html`)
     writeFile(rootDir, `${unpacked}/dist/m/index.html`)
     writeFile(rootDir, `${unpacked}/dist/m/h5.json`)
