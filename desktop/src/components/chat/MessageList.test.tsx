@@ -402,10 +402,27 @@ describe('MessageList nested tool calls', () => {
     expect(getPage).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Load earlier messages' }))
     expect(await screen.findByText('older page message')).toBeTruthy()
-    expect(getPage).toHaveBeenCalledWith(ACTIVE_TAB, { cursor: 'older-cursor', mediaRefs: true }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(getPage).toHaveBeenCalledWith(ACTIVE_TAB, { cursor: 'older-cursor', mediaRefs: true, limit: 500 }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(useChatStore.getState().sessions[ACTIVE_TAB]?.messages.map((message) => message.id)).toEqual(['old', 'live'])
   })
 
+
+  it('prefetches just one older page per user scroll and never on initial layout', async () => {
+    const page = { nextCursor: 'older-1', hasMore: true, historyComplete: false, sourceVersion: 'v1', scannedBytes: 10, omittedOversizedEntries: 0 }
+    useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState({ historyWindowed: true, historyPage: page, messages: [{ id: 'live', type: 'assistant_text', content: 'tail', timestamp: 1 }] }) } })
+    const getPage = vi.spyOn(sessionsApi, 'getHistoryPage').mockResolvedValueOnce({ messages: [], page: { ...page, nextCursor: 'older-2', previousCursor: 'newer' } })
+    const { container } = render(<MessageList />)
+    const scroller = container.querySelector<HTMLElement>('.chat-scroll-area')!
+    Object.defineProperty(scroller, 'scrollTop', { configurable: true, writable: true, value: 80 })
+    fireEvent.scroll(scroller)
+    expect(getPage).not.toHaveBeenCalled()
+    fireEvent.wheel(scroller, { deltaY: -100 })
+    fireEvent.scroll(scroller)
+    await waitFor(() => expect(getPage).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(useChatStore.getState().sessions[ACTIVE_TAB]?.historyPageLoading).toBe(false))
+    fireEvent.scroll(scroller)
+    expect(getPage).toHaveBeenCalledTimes(1)
+  })
 
   it('keeps the visible row in place when loading older pages enables virtualization', async () => {
     const messages: UIMessage[] = Array.from({ length: 110 }, (_, index) => ({ id: `prepend-${index}`, type: 'assistant_text', content: `Visible prepend row ${index}`, timestamp: index }))
@@ -432,11 +449,10 @@ describe('MessageList nested tool calls', () => {
     await waitForProgrammaticScrollReset()
     fireEvent.wheel(scroller, { deltaY: -100 })
     scroller.scrollTop = 0
-    fireEvent.scroll(scroller)
     const row = () => container.querySelector<HTMLElement>('[data-chat-render-item-key="prepend-0"]')!
     const before = row().getBoundingClientRect().top
     expect(container.querySelector('[data-virtual-message-item]')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'Load earlier messages' }))
+    fireEvent.scroll(scroller)
     await waitFor(() => expect(useChatStore.getState().sessions[ACTIVE_TAB]?.messages).toHaveLength(140))
     expect(container.querySelector('[data-virtual-message-item]')).not.toBeNull()
     expect(row().getBoundingClientRect().top).toBe(before)

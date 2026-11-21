@@ -77,10 +77,10 @@ describe('sessionsApi', () => {
     const response = { messages: [], page: { nextCursor: 'older', hasMore: true } }
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(response), { headers: { 'Content-Type': 'application/json' } }))
     expect(await sessionsApi.getHistoryPage('session-1', { mediaRefs: true })).toEqual(response)
-    await sessionsApi.getHistoryPage('session-1', { cursor: 'older', mediaRefs: true })
+    await sessionsApi.getHistoryPage('session-1', { cursor: 'older', mediaRefs: true, limit: 500 })
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       'http://127.0.0.1:3456/api/sessions/session-1/messages?media=ref',
-      'http://127.0.0.1:3456/api/sessions/session-1/messages?cursor=older&media=ref',
+      'http://127.0.0.1:3456/api/sessions/session-1/messages?cursor=older&media=ref&limit=500',
     ])
   })
 

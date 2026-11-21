@@ -558,6 +558,20 @@ describe('paged transcript normalization', () => {
     ).toBe('user')
   })
 
+  test('keeps first-tool identity and repeated orphan results while indexing dense history', () => {
+    const rows = normalizeHistory([
+      entry('first', 'assistant', [{ type: 'tool_use', id: 'same', name: 'Read', input: {} }]),
+      entry('duplicate', 'assistant', [{ type: 'tool_use', id: 'same', name: 'Read', input: {} }]),
+      entry('result', 'user', [{ type: 'tool_result', tool_use_id: 'same', content: 'first match' }]),
+      entry('orphan', 'user', [{ type: 'tool_result', tool_use_id: 'orphan', content: 'old' }]),
+      entry('orphan-next', 'user', [{ type: 'tool_result', tool_use_id: 'orphan', content: 'latest' }]),
+    ])
+    expect(rows).toHaveLength(3)
+    expect(rows[0]).toMatchObject({ toolUseId: 'same', text: 'first match' })
+    expect(rows[1]).toMatchObject({ toolUseId: 'same', text: '' })
+    expect(rows[2]).toMatchObject({ toolUseId: 'orphan', text: 'latest' })
+  })
+
   test('keeps tool-result images from references and from older computers that inline them', () => {
     const ref = { type: 'image', source: { type: 'ref', media_type: 'image/png', url: '/api/sessions/s/tool-images/toolu_shot/0', bytes: 1692780, width: 1920, height: 1139 } }
     const inline = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGk=' } }

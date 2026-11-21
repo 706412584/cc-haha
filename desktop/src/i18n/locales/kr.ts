@@ -345,6 +345,10 @@ export const kr: Record<TranslationKey, string> = {
   "chat.history.loadFailed": "메시지를 불러오지 못했습니다.",
   "chat.history.retry": "다시 시도",
   "chat.history.loadMore": "이전 메시지 불러오기",
+  "chat.history.loadAll": "모든 메시지 불러오기",
+  "chat.history.noVisibleMessages": "이 기록에는 내부 상태만 있습니다. 이전 메시지 또는 모든 메시지를 불러오세요.",
+  "chat.history.loadingAll": "모든 메시지를 불러오는 중… {count}개 로드됨",
+  "session.loadedMessages": "메시지 {count}개 로드됨",
 
   "trace.windowNotice": "대화와 추적은 제한된 페이지로 불러옵니다.",
   "trace.windowLimited": "일부 기록이 표시 한도를 초과했습니다. 원본 파일은 유지됩니다.",

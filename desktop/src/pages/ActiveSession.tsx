@@ -928,7 +928,7 @@ export function ActiveSession({ sessionId, active = true }: { sessionId?: string
     !showRightPanel && visibleMessageCount > 0
       ? {
           key: 'messages',
-          content: <span className="shrink-0">{t('session.messages', { count: visibleMessageCount })}</span>,
+          content: <span className="shrink-0">{t(sessionState?.historyWindowed ? 'session.loadedMessages' : 'session.messages', { count: visibleMessageCount })}</span>,
         }
       : null,
   ]

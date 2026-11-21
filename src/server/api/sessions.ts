@@ -789,6 +789,9 @@ async function getSessionMessages(req: Request, sessionId: string, url: URL): Pr
   const media = url.searchParams.get('media')
   if (media !== null && media !== 'ref') throw ApiError.badRequest('Invalid history media mode')
   if (media === 'ref' && mode === 'full') throw ApiError.badRequest('media=ref is only available for paged history')
+  const limitRaw = url.searchParams.get('limit')
+  const limit = limitRaw === null ? undefined : Number(limitRaw)
+  if (limit !== undefined && (mode === 'full' || !Number.isInteger(limit) || limit < 1 || limit > 1000)) throw ApiError.badRequest('History page limit must be an integer between 1 and 1000')
   return Response.json(await sessionService.getSessionHistoryPage(sessionId, {
     cursor,
     // `mode=full` returns the whole transcript up to the reader's byte budget in
@@ -796,6 +799,7 @@ async function getSessionMessages(req: Request, sessionId: string, url: URL): Pr
     full: mode === 'full',
     // Remote clients fetch tool images by reference instead of inline base64.
     mediaRefs: media === 'ref',
+    limit,
     signal: req.signal,
   }))
 }

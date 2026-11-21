@@ -324,7 +324,7 @@ describe('host-scoped API transport', () => {
     await client.history('session-id', 'opaque/+==')
     expect(JSON.parse(calls[0].body!)).toEqual(input)
     expect(calls[1].url).toBe(
-      `${lan.url}/api/sessions/session-id/messages?media=ref&cursor=opaque%2F%2B%3D%3D`
+      `${lan.url}/api/sessions/session-id/messages?media=ref&limit=500&cursor=opaque%2F%2B%3D%3D`
     )
   })
 
@@ -431,7 +431,7 @@ describe('slow links and tool images', () => {
     const urls: string[] = []
     const client = new ApiClient(remote, 'fake', { fetch: async (url) => { urls.push(url); return response({ messages: [] }) } })
     await client.history('session-id')
-    expect(urls).toEqual([`${remote.url}/api/sessions/session-id/messages?media=ref`])
+    expect(urls).toEqual([`${remote.url}/api/sessions/session-id/messages?media=ref&limit=500`])
   })
 
   test('downloads a referenced image as a data URI with the served type', async () => {

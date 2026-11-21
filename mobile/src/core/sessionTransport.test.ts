@@ -1944,6 +1944,57 @@ describe('history cursor safety', () => {
     h.transport.dispose()
   })
 
+  test('an external cancellation does not apply a late older page or discard current history', async () => {
+    const pending = deferred<HistoryPage>()
+    let signal: AbortSignal | undefined
+    const h = harness(async (_id, cursor, options) => {
+      if (!cursor) return history([entry('tail', 'user', 'Keep')], 'v1', 'older')
+      signal = options?.signal
+      return pending.promise
+    })
+    await h.ready()
+    const controller = new AbortController()
+    const loading = h.transport.loadOlder(1, controller.signal)
+    controller.abort()
+    expect(signal?.aborted).toBe(true)
+    pending.resolve(history([entry('old', 'user', 'Cancelled')], 'v1'))
+    expect(await loading).toBe('unavailable')
+    expect(h.transport.state.items.map(item => item.text)).toEqual(['Keep'])
+    expect(h.transport.historyPage?.page?.nextCursor).toBe('older')
+    h.transport.dispose()
+  })
+
+  test('explicit load-all walks every page and finishes without touching live rows', async () => {
+    const h = harness(async (_id, cursor) => cursor === 'c1'
+      ? history([entry('middle', 'user', 'Middle')], 'v1', 'c2')
+      : cursor === 'c2' ? history([entry('first', 'user', 'First')], 'v1')
+      : history([entry('tail', 'user', 'Tail')], 'v1', 'c1'))
+    const socket = await h.ready()
+    socket.receive({ type: 'content_delta', text: 'Live' })
+    expect(await h.transport.loadAll()).toBe('loaded')
+    expect(h.transport.state.items.map(item => item.text)).toEqual(['First', 'Middle', 'Tail', 'Live'])
+    expect(h.transport.historyPage?.page?.nextCursor).toBeNull()
+    h.transport.dispose()
+  })
+
+  test('load-all stops after cancellation instead of reading the following cursor', async () => {
+    const pending = deferred<HistoryPage>()
+    const cursors: Array<string | undefined> = []
+    const h = harness(async (_id, cursor) => {
+      cursors.push(cursor)
+      return cursor ? pending.promise : history([entry('tail', 'user', 'Tail')], 'v1', 'c1')
+    })
+    await h.ready()
+    const controller = new AbortController()
+    const all = h.transport.loadAll(controller.signal)
+    controller.abort()
+    pending.resolve(history([entry('cancelled', 'user', 'No')], 'v1', 'c2'))
+    expect(await all).toBe('unavailable')
+    expect(cursors).toEqual([undefined, 'c1'])
+    expect(h.transport.state.items.map(item => item.text)).toEqual(['Tail'])
+    h.transport.dispose()
+  })
+
   test('loads several older pages in one call and stops at the end', async () => {
     const older: Record<string, HistoryPage> = {
       c1: history([entry('a', 'user', 'A')], 'v1', 'c2'),
@@ -2006,6 +2057,28 @@ describe('history cursor safety', () => {
     expect(h.transport.state.items.map((i) => i.text)).toEqual(['Fresh'])
     expect(h.transport.historyPage?.page?.sourceVersion).toBe('v2')
     expect(h.errors.at(-1)).toMatchObject({ code: 'HISTORY_PAGE_STALE' })
+    h.transport.dispose()
+  })
+
+  test('cancelling a stale-cursor recovery aborts its reload and ignores a late replacement', async () => {
+    const pending = deferred<HistoryPage>()
+    let reads = 0
+    let reloadSignal: AbortSignal | undefined
+    const h = harness(async (_id, cursor, options) => {
+      if (cursor) throw new ApiError('Changed', 409, 'HISTORY_CHANGED')
+      if (reads++ === 0) return history([entry('keep', 'user', 'Keep')], 'v1', 'older')
+      reloadSignal = options?.signal
+      return pending.promise
+    })
+    await h.ready()
+    const controller = new AbortController()
+    const loading = h.transport.loadOlder(1, controller.signal)
+    await flush()
+    controller.abort()
+    expect(reloadSignal?.aborted).toBe(true)
+    pending.resolve(history([entry('late', 'user', 'Late')], 'v2'))
+    await loading
+    expect(h.transport.state.items.map(item => item.text)).toEqual(['Keep'])
     h.transport.dispose()
   })
 

@@ -5938,7 +5938,11 @@ export class SessionService {
       throw ApiError.notFound(`Session not found: ${sessionId}`)
     }
     const mediaRefs = options.mediaRefs === true && !options.full
-    const result = await readBoundedHistoryPage(found.filePath, mediaRefs ? { ...options, measure: measureEntryWithMediaRefs } : options)
+    const result = await readBoundedHistoryPage(found.filePath, mediaRefs ? {
+      ...options,
+      measure: measureEntryWithMediaRefs,
+      ...(options.limit !== undefined ? { budget: { records: options.limit, rows: options.limit, bytes: 2 * 1024 * 1024 } } : {}),
+    } : options)
     // A referenced-session read only needs the records on this page. Building the
     // ownership index scans the transcript from the start, which is what stalls the
     // shared server while a model pages backward.

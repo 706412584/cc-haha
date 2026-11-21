@@ -218,6 +218,8 @@ function ChatSession({
   const [revision, setRevision] = useState(0)
   const [hasOlder, setHasOlder] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
+  const [loadingAll, setLoadingAll] = useState(false)
+  const allHistoryController = useRef<AbortController | null>(null)
   const [olderFailed, setOlderFailed] = useState(false)
   const [awayFromLatest, setAwayFromLatest] = useState(false)
   // 停在最新处附近：这时不开「保持阅读位置」，新内容由倒置列表自然贴底。
@@ -259,6 +261,7 @@ function ChatSession({
     mounted.current = true
     return () => {
       mounted.current = false
+      allHistoryController.current?.abort()
       clearTimeout(noticeTimer.current)
     }
   }, [])
@@ -375,6 +378,7 @@ function ChatSession({
     const stopNetwork = watchDeviceNetwork(() => channel.resume())
     return () => {
       alive = false
+      allHistoryController.current?.abort()
       recovery.dispose()
       listener.remove()
       stopNetwork()
@@ -714,7 +718,7 @@ function ChatSession({
   const send = (message: ClientMessage) => dispatch(message)
   /** 往前翻一批（两页）；in-flight 只认 ref，避免重复请求。更早的内容接在倒置列表末尾（画面顶部），阅读位置不动。 */
   function loadOlderBatch() {
-    if (olderInFlight.current) return
+    if (olderInFlight.current || allHistoryController.current) return
     const channel = transport.current
     if (!channel) return
     olderInFlight.current = true
@@ -745,6 +749,30 @@ function ChatSession({
         })
       })
   }
+  async function loadAllMessages() {
+    if (olderInFlight.current || allHistoryController.current) return
+    const channel = transport.current
+    if (!channel) return
+    const controller = new AbortController()
+    allHistoryController.current = controller
+    olderInFlight.current = true
+    setLoadingOlder(true)
+    setLoadingAll(true)
+    setOlderFailed(false)
+    try {
+      const result = await channel.loadAll(controller.signal)
+      if (!mounted.current || transport.current !== channel) return
+      if (result === 'unavailable' && !controller.signal.aborted) {
+        olderFailedRef.current = true
+        setOlderFailed(true)
+      }
+      if (!channel.historyPage?.page?.nextCursor) setHasOlder(false)
+    } finally {
+      if (allHistoryController.current === controller) allHistoryController.current = null
+      olderInFlight.current = false
+      if (mounted.current) { setLoadingOlder(false); setLoadingAll(false) }
+    }
+  }
   /** 滑近顶部（已加载的最早内容）时提前往前翻。只读 ref 和传输层，加载结束的回调里调用也不会读到旧状态。 */
   function maybeLoadOlder() {
     const { viewport, content } = listSize.current
@@ -765,7 +793,7 @@ function ChatSession({
     loadOlderBatch()
   }
   function trackScroll(value: NativeScrollEvent) {
-    const offset = value.contentOffset.y
+    const offset = Math.abs(value.contentOffset.y)
     scrollMetrics.current = { offset }
     listSize.current = { viewport: value.layoutMeasurement.height, content: value.contentSize.height }
     const near = offset < LATEST_SLOP
@@ -1398,6 +1426,7 @@ function ChatSession({
               listSize.current.viewport = nativeEvent.layout.height
               maybeLoadOlder()
             }}
+            onTouchStart={() => { autoBatches.current = 0 }}
             onScrollBeginDrag={() => {
               autoBatches.current = 0
             }}
@@ -1418,6 +1447,9 @@ function ChatSession({
                 failed={olderFailed}
                 ready={ready}
                 onLoad={retryOlder}
+                loadingAll={loadingAll}
+                onLoadAll={() => { void loadAllMessages() }}
+                onCancel={() => allHistoryController.current?.abort()}
               />
             }
             ListEmptyComponent={

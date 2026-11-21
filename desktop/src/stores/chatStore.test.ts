@@ -17252,6 +17252,17 @@ describe('chatStore activity state survival across reload paths', () => {
     }
   })
 
+  it('continues past a tail containing only invisible background wake-ups to reach conversation content', async () => {
+    const page = { nextCursor: 'older-visible', hasMore: true, historyComplete: false, sourceVersion: 'v1', scannedBytes: 1024, omittedOversizedEntries: 0 }
+    vi.mocked(sessionsApi.getHistoryPage)
+      .mockResolvedValueOnce({ messages: [{ id: 'wake', type: 'system', timestamp: '2026-01-01T00:01:00Z', content: { subtype: 'background_continue', notifications: [{ taskId: 'task', summary: 'internal wake-up' }] } }], page })
+      .mockResolvedValueOnce({ messages: [{ id: 'question', type: 'user', content: 'Visible conversation', timestamp: '2026-01-01T00:00:00Z' }], page: { ...page, nextCursor: null, previousCursor: 'newer', hasMore: false } })
+    useChatStore.setState({ sessions: { [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }) } })
+    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'user_text', content: 'Visible conversation' })]))
+    expect(sessionsApi.getHistoryPage).toHaveBeenCalledTimes(2)
+  })
+
   it('shows a bounded page immediately and restores state independently without treating the tail as authoritative', async () => {
     const page = { nextCursor: 'older', hasMore: true, historyComplete: false, sourceVersion: 'v1', scannedBytes: 1024, omittedOversizedEntries: 0 }
     vi.mocked(sessionsApi.getFullHistory).mockResolvedValueOnce({ messages: [{ id: 'tail', type: 'assistant', content: 'recent', timestamp: '2026-01-01T00:00:00Z' }], page })
@@ -17271,7 +17282,7 @@ describe('chatStore activity state survival across reload paths', () => {
 
   it('cancels stale background recovery before an authoritative history reload', async () => {
     const page = { nextCursor: 'older', hasMore: true, historyComplete: false, sourceVersion: 'v1', scannedBytes: 10, omittedOversizedEntries: 0 }
-    vi.mocked(sessionsApi.getFullHistory).mockResolvedValueOnce({ messages: [], page })
+    vi.mocked(sessionsApi.getFullHistory).mockResolvedValueOnce({ messages: [{ id: 'tail', type: 'assistant', content: 'visible', timestamp: '2026-01-01T00:00:00Z' }], page })
     let resolveRecovery!: (value: Awaited<ReturnType<typeof sessionsApi.getHistoryRecovery>>) => void
     let signal: AbortSignal | undefined
     vi.mocked(sessionsApi.getHistoryRecovery).mockImplementationOnce((_id, options) => {
@@ -17290,7 +17301,7 @@ describe('chatStore activity state survival across reload paths', () => {
 
   it('restores complete recovery fields from a newer append without clearing incomplete fields', async () => {
     const page = { nextCursor: 'older', hasMore: true, historyComplete: false, sourceVersion: '1:2:10:1', scannedBytes: 10, omittedOversizedEntries: 0 }
-    vi.mocked(sessionsApi.getFullHistory).mockResolvedValueOnce({ messages: [], page })
+    vi.mocked(sessionsApi.getFullHistory).mockResolvedValueOnce({ messages: [{ id: 'tail', type: 'assistant', content: 'visible', timestamp: '2026-01-01T00:00:00Z' }], page })
     vi.mocked(sessionsApi.getHistoryRecovery).mockResolvedValueOnce({
       status: 'incomplete', sourceVersion: '1:2:20:2', omittedRecords: 1, messages: [],
       completeness: { usage: true, goal: false, todos: false, activity: false },
@@ -17378,6 +17389,76 @@ describe('chatStore activity state survival across reload paths', () => {
     await pending
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toBe(messages)
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.historyPage).toBe(replacement)
+  })
+
+  it('loads all remaining pages only on explicit request and completes cumulative history', async () => {
+    const page = { nextCursor: 'older-1', hasMore: true, historyComplete: false, sourceVersion: 'v1', scannedBytes: 10, omittedOversizedEntries: 0 }
+    useChatStore.setState({ sessions: { [TEST_SESSION_ID]: makeSession({ historyPage: page }) } })
+    vi.mocked(sessionsApi.getHistoryPage)
+      .mockResolvedValueOnce({ messages: [{ id: 'middle', type: 'user', content: 'middle', timestamp: '2026-01-01T00:01:00Z' }], page: { ...page, nextCursor: 'older-2', previousCursor: 'newer' } })
+      .mockResolvedValueOnce({ messages: [{ id: 'first', type: 'user', content: 'first', timestamp: '2026-01-01T00:00:00Z' }], page: { ...page, nextCursor: null, previousCursor: 'newer', hasMore: false } })
+    await useChatStore.getState().loadAllHistory(TEST_SESSION_ID)
+    const current = useChatStore.getState().sessions[TEST_SESSION_ID]!
+    expect(current.messages.map(message => message.id)).toEqual(['first', 'middle'])
+    expect(current.historyPage?.historyComplete).toBe(true)
+    expect(current.historyAllLoading).toBe(false)
+    expect(sessionsApi.getHistoryPage).toHaveBeenCalledTimes(2)
+  })
+
+  it('cancels loading all without discarding already loaded rows or applying the pending page', async () => {
+    const messages: UIMessage[] = [{ id: 'tail', type: 'assistant_text', content: 'keep', timestamp: 1 }]
+    const page = { nextCursor: 'older', hasMore: true, historyComplete: false, sourceVersion: 'v1', scannedBytes: 10, omittedOversizedEntries: 0 }
+    useChatStore.setState({ sessions: { [TEST_SESSION_ID]: makeSession({ messages, historyPage: page }) } })
+    let resolvePage!: (value: SessionHistoryPage) => void
+    let signal: AbortSignal | undefined
+    vi.mocked(sessionsApi.getHistoryPage).mockImplementationOnce((_id, _page, options) => {
+      signal = options?.signal
+      return new Promise(resolve => { resolvePage = resolve })
+    })
+    const pending = useChatStore.getState().loadAllHistory(TEST_SESSION_ID)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.historyAllLoading).toBe(true)
+    useChatStore.getState().cancelAllHistory(TEST_SESSION_ID)
+    expect(signal?.aborted).toBe(true)
+    resolvePage({ messages: [{ id: 'old', type: 'user', content: 'not applied', timestamp: '2026-01-01T00:00:00Z' }], page: { ...page, nextCursor: null } })
+    await pending
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toBe(messages)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.historyAllLoading).toBe(false)
+    expect(sessionsApi.getHistoryPage).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears all-history loading flags when automatic reconnect invalidates pagination', async () => {
+    useChatStore.getState().connectToSession(TEST_SESSION_ID, { minimalBootstrap: true, prewarm: false, applyRuntimeSelection: false })
+    const page = { nextCursor: 'older', hasMore: true, historyComplete: false, sourceVersion: 'v1', scannedBytes: 10, omittedOversizedEntries: 0 }
+    useChatStore.setState({ sessions: { [TEST_SESSION_ID]: makeSession({ historyHydrated: true, historyStatus: 'ready', chatState: 'idle', historyPage: page }) } })
+    let resolvePage!: (value: SessionHistoryPage) => void
+    let signal: AbortSignal | undefined
+    vi.mocked(sessionsApi.getHistoryPage).mockImplementationOnce((_id, _page, options) => {
+      signal = options?.signal
+      return new Promise(resolve => { resolvePage = resolve })
+    })
+    const pending = useChatStore.getState().loadAllHistory(TEST_SESSION_ID)
+    connectionStateHandlers.get(TEST_SESSION_ID)?.('reconnecting')
+    expect(signal?.aborted).toBe(true)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.historyAllLoading).toBe(false)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.historyPageLoading).toBe(false)
+    resolvePage({ messages: [], page: { ...page, nextCursor: null } })
+    await pending
+  })
+
+  it('clears all-history loading flags when the conversation is cleared mid-load', async () => {
+    const page = { nextCursor: 'older', hasMore: true, historyComplete: false, sourceVersion: 'v1', scannedBytes: 10, omittedOversizedEntries: 0 }
+    useChatStore.setState({ sessions: { [TEST_SESSION_ID]: makeSession({ historyHydrated: true, historyStatus: 'ready', chatState: 'idle', historyPage: page }) } })
+    let resolvePage!: (value: SessionHistoryPage) => void
+    vi.mocked(sessionsApi.getHistoryPage).mockImplementationOnce(() => new Promise(resolve => { resolvePage = resolve }))
+    const pending = useChatStore.getState().loadAllHistory(TEST_SESSION_ID)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.historyAllLoading).toBe(true)
+    useChatStore.getState().clearMessages(TEST_SESSION_ID)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toEqual([])
+    resolvePage({ messages: [{ id: 'old', type: 'user', content: 'not applied after clear', timestamp: '2026-01-01T00:00:00Z' }], page: { ...page, nextCursor: null } })
+    await pending
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toEqual([])
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.historyAllLoading).toBe(false)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.historyPageLoading).toBe(false)
   })
 
   it('does not request an older page twice while one is in flight', async () => {

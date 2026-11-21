@@ -348,6 +348,10 @@ export const jp: Record<TranslationKey, string> = {
   "chat.history.loadFailed": "メッセージを読み込めませんでした。",
   "chat.history.retry": "再試行",
   "chat.history.loadMore": "以前のメッセージを読み込む",
+  "chat.history.loadAll": "すべてのメッセージを読み込む",
+  "chat.history.noVisibleMessages": "この履歴には内部状態のみが含まれます。以前のメッセージ、またはすべてを読み込んでください。",
+  "chat.history.loadingAll": "すべて読み込み中… {count} 件を読み込み済み",
+  "session.loadedMessages": "{count} 件のメッセージを読み込み済み",
 
   "trace.windowNotice": "会話とトレースは制限付きページで読み込まれます。",
   "trace.windowLimited": "表示上限を超えた記録があります。元のファイルは変更されません。",

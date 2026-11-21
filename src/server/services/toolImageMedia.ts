@@ -109,6 +109,13 @@ export function projectMessageMedia<T extends { content?: unknown; toolUseResult
     const content = message.content.map((block: unknown) => {
       if (!block || typeof block !== 'object') return block
       const value = block as Record<string, unknown>
+      // Signatures are replay-only bytes; the timeline renders the reasoning,
+      // not its provider authentication envelope. Keep the transcript intact.
+      if (value.type === 'thinking' && typeof value.signature === 'string') {
+        const { signature: _signature, ...display } = value
+        changed = true
+        return display
+      }
       if (value.type !== 'tool_result' || typeof value.tool_use_id !== 'string') return block
       const projected = projectToolResultContent(value.content, sessionId, value.tool_use_id)
       if (projected === value.content) return block
@@ -137,8 +144,11 @@ export function measureEntryWithMediaRefs(entry: Record<string, unknown>): numbe
   const content = (entry.message as { content?: unknown } | undefined)?.content
   if (Array.isArray(content)) {
     for (const block of content) {
-      if (!block || typeof block !== 'object' || (block as { type?: unknown }).type !== 'tool_result') continue
-      for (const image of toolResultImages((block as { content?: unknown }).content)) bytes -= image.data.length - REF_BYTES
+      if (!block || typeof block !== 'object') continue
+      const value = block as Record<string, unknown>
+      if (value.type === 'thinking' && typeof value.signature === 'string') bytes -= Buffer.byteLength(JSON.stringify(value.signature)) - 2
+      if (value.type !== 'tool_result') continue
+      for (const image of toolResultImages(value.content)) bytes -= image.data.length - REF_BYTES
     }
   }
   const file = (entry.toolUseResult as { file?: { base64?: unknown } } | undefined)?.file

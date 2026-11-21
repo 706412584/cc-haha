@@ -192,6 +192,21 @@ afterEach(() => {
   useTrajectoryViewStore.setState({ modes: {}, opened: {}, nav: null })
 })
 
+describe('partial history message count', () => {
+  it('labels the loaded window instead of presenting it as the transcript total', () => {
+    const id = 'partial-count'
+    useTabStore.setState({ activeTabId: id, tabs: [{ sessionId: id, title: 'Main', type: 'session', status: 'idle' }] })
+    useSessionStore.setState({ sessions: [{ id, title: 'Main', messageCount: 5000, createdAt: '', modifiedAt: '', projectPath: '/fixture', workDir: '/fixture', workDirExists: true }] })
+    useChatStore.setState({ sessions: { [id]: {
+      ...createDefaultSessionState(), connectionState: 'connected', historyStatus: 'ready', historyHydrated: true, historyWindowed: true,
+      messages: [{ id: 'm', type: 'assistant_text', content: 'visible', timestamp: 1 }],
+    } } })
+    render(<ActiveSession />)
+    expect(screen.getByText('1 messages loaded')).toBeTruthy()
+    expect(screen.queryByText('5000 messages')).toBeNull()
+  })
+})
+
 describe('workspace split sizing', () => {
   function fixture(scale = 1) {
     const id = 'workspace-resize-regression'

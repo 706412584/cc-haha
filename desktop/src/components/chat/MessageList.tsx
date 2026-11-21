@@ -2505,6 +2505,9 @@ export function MessageList({
   const branchSession = useSessionStore((s) => s.branchSession)
   const reloadHistory = useChatStore((s) => s.reloadHistory)
   const loadOlderHistory = useChatStore((s) => s.loadOlderHistory)
+  const loadAllHistory = useChatStore((s) => s.loadAllHistory)
+  const cancelAllHistory = useChatStore((s) => s.cancelAllHistory)
+  const historyScrollIntentRef = useRef(false)
   const queueComposerPrefill = useChatStore((s) => s.queueComposerPrefill)
   const memberSessionTeam = useTeamStore((s) => (
     resolvedSessionId ? s.getTeamByMemberSessionId(resolvedSessionId) : null
@@ -2845,6 +2848,17 @@ export function MessageList({
     // prevent the jump-to-latest button from flickering during auto-scroll.
     const container = scrollContainerRef.current
     if (!container) return
+    if (historyScrollIntentRef.current && container.scrollTop <= 160 && resolvedSessionId) {
+      historyScrollIntentRef.current = false
+      const history = useChatStore.getState().sessions[resolvedSessionId]
+      if (history?.historyPage?.nextCursor && !history.historyPageLoading && !history.historyAllLoading && !history.historyError) {
+        releaseBottomRestoration()
+        shouldAutoScrollRef.current = false
+        rememberSessionScroll(resolvedSessionId, container, false)
+        restoringScrollAnchorRef.current = sessionScrollSnapshots.get(resolvedSessionId)?.anchor ?? null
+        void loadOlderHistory(resolvedSessionId)
+      }
+    }
     if (restoringScrollAnchorRef.current) {
       // Native anchoring/scroll clamping can emit scroll during remeasurement.
       // Only an explicit reader action ends restoration, not a timer or resize.
@@ -2883,7 +2897,7 @@ export function MessageList({
     if (resolvedSessionId) {
       rememberSessionScroll(resolvedSessionId, container, isAtBottom)
     }
-  }, [hasPendingPermissionCard, resolvedSessionId, syncVirtualViewportFromContainer])
+  }, [hasPendingPermissionCard, loadOlderHistory, releaseBottomRestoration, resolvedSessionId, syncVirtualViewportFromContainer])
 
   /**
    * Expanding a collapsed block is the reader rearranging their own view, not
@@ -2923,6 +2937,7 @@ export function MessageList({
   }, [releaseBottomRestoration, syncVirtualViewportFromContainer])
 
   const markUserScrollIntent = useCallback(() => {
+    historyScrollIntentRef.current = true
     releaseBottomRestoration()
     restoringScrollAnchorRef.current = null
     userScrollIntentUntilRef.current = performance.now() + USER_SCROLL_INTENT_WINDOW_MS
@@ -3071,7 +3086,7 @@ export function MessageList({
     scrollToBottom()
   }, [scrollToBottom])
 
-  const handleLoadOlderHistory = useCallback(() => {
+  const handleLoadOlderHistory = useCallback((all = false) => {
     if (!resolvedSessionId) return
     const container = scrollContainerRef.current
     if (container) {
@@ -3080,8 +3095,10 @@ export function MessageList({
       rememberSessionScroll(resolvedSessionId, container, false)
       restoringScrollAnchorRef.current = sessionScrollSnapshots.get(resolvedSessionId)?.anchor ?? null
     }
-    void loadOlderHistory(resolvedSessionId)
-  }, [loadOlderHistory, releaseBottomRestoration, resolvedSessionId])
+    historyScrollIntentRef.current = false
+    if (all) void loadAllHistory(resolvedSessionId)
+    else void loadOlderHistory(resolvedSessionId)
+  }, [loadAllHistory, loadOlderHistory, releaseBottomRestoration, resolvedSessionId])
 
   useEffect(() => {
     const content = scrollContentRef.current
@@ -4260,6 +4277,8 @@ export function MessageList({
 
   return (
     <ScrollSnapshotBoundary sessionId={resolvedSessionId} onLeave={() => {
+      if (resolvedSessionId) cancelAllHistory(resolvedSessionId)
+      historyScrollIntentRef.current = false
       const container = scrollContainerRef.current
       if (resolvedSessionId && container && container.clientHeight > 0) {
         rememberSessionScroll(resolvedSessionId, container, shouldAutoScrollRef.current)
@@ -4298,22 +4317,31 @@ export function MessageList({
           className="mx-auto max-w-[var(--chat-content-max-width)]"
         >
           {sessionState?.historyWindowed && sessionState?.historyPage?.nextCursor ? (
-            // The server's byte budget cut history short; this is the only
-            // remaining pagination seam, and it is user-driven.
-            <div className="flex items-center justify-center gap-2 py-2 text-xs text-[var(--color-text-tertiary)]">
-              {sessionState.historyPageLoading ? (
+            <div className="flex flex-wrap items-center justify-center gap-2 py-2 text-xs text-[var(--color-text-tertiary)]">
+              {sessionState.historyAllLoading ? (
+                <>
+                  <span role="status">{t('chat.history.loadingAll', { count: messages.length })}</span>
+                  <Button variant="ghost" size="xs" onClick={() => resolvedSessionId && cancelAllHistory(resolvedSessionId)}>{t('common.cancel')}</Button>
+                </>
+              ) : sessionState.historyPageLoading ? (
                 <div className="flex items-center gap-2" role="status">
                   <LoaderCircle size={12} className="animate-spin" />{t('chat.history.loading')}
                 </div>
               ) : sessionState.historyError ? (
                 <>
                   <span role="alert" className="text-[var(--color-text-secondary)]">{t('chat.history.loadFailed')}</span>
-                  <Button variant="ghost" size="xs" onClick={handleLoadOlderHistory}>{t('chat.history.retry')}</Button>
+                  <Button variant="ghost" size="xs" onClick={() => handleLoadOlderHistory()}>{t('chat.history.retry')}</Button>
                 </>
               ) : (
-                <Button variant="ghost" size="xs" onClick={handleLoadOlderHistory}>{t('chat.history.loadMore')}</Button>
+                <>
+                  <Button variant="ghost" size="xs" onClick={() => handleLoadOlderHistory()}>{t('chat.history.loadMore')}</Button>
+                  <Button variant="ghost" size="xs" onClick={() => handleLoadOlderHistory(true)}>{t('chat.history.loadAll')}</Button>
+                </>
               )}
             </div>
+          ) : null}
+          {renderItems.length === 0 && sessionState?.historyWindowed && sessionState.historyPage?.nextCursor ? (
+            <p role="status" className="py-6 text-center text-sm text-[var(--color-text-tertiary)]">{t('chat.history.noVisibleMessages')}</p>
           ) : null}
           {virtualTranscriptWindow.enabled ? (
             <VirtualSpacer height={virtualTranscriptWindow.beforeHeight} position="top" />

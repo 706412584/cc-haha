@@ -662,10 +662,11 @@ export const sessionsApi = {
     }
   },
 
-  getHistoryPage(sessionId: string, page?: { cursor?: string; mediaRefs?: boolean }, options?: ApiRequestOptions) {
+  getHistoryPage(sessionId: string, page?: { cursor?: string; mediaRefs?: boolean; limit?: number }, options?: ApiRequestOptions) {
     const query = new URLSearchParams()
     if (page?.cursor) query.set('cursor', page.cursor)
     if (page?.mediaRefs) query.set('media', 'ref')
+    if (page?.limit !== undefined) query.set('limit', String(page.limit))
     return api.get<SessionHistoryPage>(`/api/sessions/${sessionId}/messages${query.size ? `?${query}` : ''}`, options)
   },
 

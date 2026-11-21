@@ -347,6 +347,10 @@ export const zh: Record<TranslationKey, string> = {
   "chat.history.loadFailed": "消息加载失败。",
   "chat.history.retry": "重试",
   "chat.history.loadMore": "加载更早的消息",
+  "chat.history.loadAll": "加载全部消息",
+  "chat.history.noVisibleMessages": "这段历史只有内部状态记录，请继续加载更早消息或加载全部。",
+  "chat.history.loadingAll": "正在加载全部消息…已加载 {count} 条",
+  "session.loadedMessages": "已加载 {count} 条消息",
 
   "trace.windowNotice": "聊天记录与追踪按有限窗口加载。",
   "trace.windowLimited": "部分记录超出查看上限，原始文件保持完整。",

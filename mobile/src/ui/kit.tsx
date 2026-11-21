@@ -1405,7 +1405,7 @@ export function Spinner({
         toValue: 1,
         duration: 1100,
         easing: Easing.linear,
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       })
     )
     loop.start()
@@ -1451,7 +1451,7 @@ export function HaloDot({ size = 9, color }: { size?: number; color?: string }) 
         toValue: 1,
         duration: 2200,
         easing: Easing.inOut(Easing.quad),
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       })
     )
     loop.start()

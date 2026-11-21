@@ -433,7 +433,7 @@ export class SessionTransport {
    * 返回结果让界面能区分「真的加载了」「没连上」「已经在翻」「到底了」，
    * 不会出现点了没反应又没有任何提示的情况。
    */
-  async loadOlder(pages = 1): Promise<LoadOlderResult> {
+  async loadOlder(pages = 1, signal?: AbortSignal): Promise<LoadOlderResult> {
     if (this.#disposed || !this.#historyReady) return 'unavailable'
     if (this.#paginationPending) return 'busy'
     let current = this.historyPage
@@ -443,6 +443,9 @@ export class SessionTransport {
     const generation = this.#generation
     const historyEpoch = this.#historyEpoch
     const controller = this.#requestController()
+    const cancel = () => controller.abort()
+    signal?.addEventListener('abort', cancel, { once: true })
+    if (signal?.aborted) controller.abort()
     const limit = Math.max(1, Math.min(10, Math.trunc(pages) || 1))
     let loaded = false
     try {
@@ -453,7 +456,7 @@ export class SessionTransport {
           cursor,
           { signal: controller.signal }
         )
-        if (!this.#valid(generation) || historyEpoch !== this.#historyEpoch)
+        if (controller.signal.aborted || !this.#valid(generation) || historyEpoch !== this.#historyEpoch)
           return loaded ? 'loaded' : 'unavailable'
         if (older.page?.nextCursor === cursor)
           throw new ApiError(
@@ -495,15 +498,34 @@ export class SessionTransport {
             'HISTORY_PAGE_STALE'
           )
         )
-        await this.#reloadHistory(generation)
+        await this.#reloadHistory(generation, controller.signal)
         // 已经用最新一页恢复，不再让界面提示“没连上”。
-        return 'loaded'
+        return controller.signal.aborted ? 'unavailable' : 'loaded'
       } else this.#report(error)
       return loaded ? 'loaded' : 'unavailable'
     } finally {
+      signal?.removeEventListener('abort', cancel)
       this.#requests.delete(controller)
       this.#paginationPending = false
     }
+  }
+
+  async loadAll(signal?: AbortSignal): Promise<LoadOlderResult> {
+    const seen = new Set<string>()
+    let loaded = false
+    while (!signal?.aborted && !this.#disposed && this.historyPage?.page?.nextCursor) {
+      const cursor = this.historyPage.page.nextCursor
+      if (seen.has(cursor)) return 'unavailable'
+      seen.add(cursor)
+      const result = await this.loadOlder(1, signal)
+      if (result === 'busy' || result === 'unavailable') return result
+      loaded ||= result === 'loaded'
+      if (this.historyPage?.page?.nextCursor === cursor) return 'unavailable'
+      // Yield between pages so web animations and the cancel action can run
+      // even when transport/cache promises resolve without a network turn.
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
+    }
+    return signal?.aborted || this.#disposed ? 'unavailable' : loaded ? 'loaded' : 'end'
   }
 
   #connect(reconnecting: boolean) {
@@ -938,8 +960,11 @@ export class SessionTransport {
     }
   }
 
-  async #reloadHistory(generation: number) {
+  async #reloadHistory(generation: number, signal?: AbortSignal) {
     const controller = this.#requestController()
+    const cancel = () => controller.abort()
+    signal?.addEventListener('abort', cancel, { once: true })
+    if (signal?.aborted) controller.abort()
     const historyEpoch = ++this.#historyEpoch
     try {
       const history = await this.#options.client.history(
@@ -947,7 +972,7 @@ export class SessionTransport {
         undefined,
         { signal: controller.signal }
       )
-      if (!this.#valid(generation) || historyEpoch !== this.#historyEpoch)
+      if (controller.signal.aborted || !this.#valid(generation) || historyEpoch !== this.#historyEpoch)
         return
       // 会话被改写过，旧的游标链作废，只用最新一页。
       this.#olderPages.clear()
@@ -964,6 +989,7 @@ export class SessionTransport {
       if (this.#isUnauthorized(error)) this.#requirePairing()
       else this.#report(error)
     } finally {
+      signal?.removeEventListener('abort', cancel)
       this.#requests.delete(controller)
     }
   }

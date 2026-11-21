@@ -71,6 +71,15 @@ afterAll(async () => {
 })
 
 describe('tool image references', () => {
+  it('excludes replay-only thinking signatures from display bytes without mutating source records', () => {
+    const signature = 'signature'.repeat(20_000)
+    const entry = { type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'visible reasoning', signature }] } }
+    expect(media.measureEntryWithMediaRefs(entry)).toBeLessThan(512)
+    const projected = media.projectMessageMedia({ content: entry.message.content }, 's')
+    expect(projected.content[0]).toEqual({ type: 'thinking', thinking: 'visible reasoning' })
+    expect(entry.message.content[0]?.signature).toBe(signature)
+  })
+
   it('replaces tool-result image bytes with references and keeps text blocks', () => {
     const content = [
       { type: 'text', text: 'caption' },
@@ -124,6 +133,22 @@ describe('history with media=ref', () => {
 
     expect((await api(`/api/sessions/${sessionId}/messages?media=inline`)).status).toBe(400)
     expect((await api(`/api/sessions/${sessionId}/messages?media=ref&mode=full`)).status).toBe(400)
+  })
+
+  it('accepts bounded 500-record reference pages and rejects invalid page limits', async () => {
+    const sessionId = 'a1b2c3d4-0000-4000-8000-000000000004'
+    const dir = path.join(tmpDir, 'projects', '-tmp-shots')
+    await fs.mkdir(dir, { recursive: true })
+    const entries = Array.from({ length: 700 }, (_, i) => ({ type: 'assistant', uuid: `row-${i}`, timestamp: new Date(i * 1000).toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: `visible ${i}` }] } }))
+    await fs.writeFile(path.join(dir, `${sessionId}.jsonl`), entries.map(entry => JSON.stringify(entry)).join('\n') + '\n')
+    const response = await api(`/api/sessions/${sessionId}/messages?media=ref&limit=500`)
+    expect(response.status).toBe(200)
+    const history = await response.json() as Json
+    expect(history.messages).toHaveLength(500)
+    expect(history.page.hasMore).toBe(true)
+    for (const limit of ['0', '1001', 'NaN', '2.5']) {
+      expect((await api(`/api/sessions/${sessionId}/messages?media=ref&limit=${limit}`)).status).toBe(400)
+    }
   })
 
   it('warms references from the visible history page without changing its source transcript', async () => {

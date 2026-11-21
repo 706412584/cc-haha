@@ -306,7 +306,7 @@ export class ApiClient {
   ) {
     // media=ref: tool images arrive as references and are downloaded only when shown.
     return this.get<HistoryPage>(
-      `/api/sessions/${encodeURIComponent(id)}/messages?media=ref${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
+      `/api/sessions/${encodeURIComponent(id)}/messages?media=ref&limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
       options
     )
   }

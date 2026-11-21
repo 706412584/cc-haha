@@ -1,4 +1,4 @@
-import { Pressable } from 'react-native'
+import { Pressable, View } from 'react-native'
 import { Text } from '../Text'
 import { Spinner, useColors } from '../kit'
 
@@ -11,14 +11,20 @@ export function OlderHistoryStatus({
   failed,
   ready,
   onLoad,
+  loadingAll = false,
+  onLoadAll,
+  onCancel,
 }: {
   loading: boolean
   failed: boolean
   ready: boolean
   onLoad(): void
+  loadingAll?: boolean
+  onLoadAll?(): void
+  onCancel?(): void
 }) {
   const colors = useColors()
-  const label = loading
+  const label = loadingAll ? '正在加载全部消息' : loading
     ? '正在加载更早的消息'
     : !ready
       ? '连上电脑后继续加载'
@@ -27,6 +33,7 @@ export function OlderHistoryStatus({
         : '加载更早的消息'
   const disabled = loading || !ready
   return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap' }}>
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={label}
@@ -48,5 +55,11 @@ export function OlderHistoryStatus({
       {loading ? <Spinner size={14} /> : null}
       <Text style={{ fontSize: 14, color: disabled ? colors.ink3 : colors.ink2 }}>{label}</Text>
     </Pressable>
+    {ready && (loadingAll ? onCancel : !loading && onLoadAll) ? (
+      <Pressable accessibilityRole="button" accessibilityLabel={loadingAll ? '取消加载全部' : '加载全部消息'} onPress={loadingAll ? onCancel : onLoadAll} style={{ paddingHorizontal: 12, minHeight: 44, justifyContent: 'center' }}>
+        <Text style={{ fontSize: 14, color: colors.ink2 }}>{loadingAll ? '取消' : '加载全部消息'}</Text>
+      </Pressable>
+    ) : null}
+    </View>
   )
 }

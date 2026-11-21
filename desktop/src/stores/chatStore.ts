@@ -222,6 +222,7 @@ export type PerSessionState = {
   historyWindowed?: boolean
   /** An explicit "load earlier" page request is in flight. */
   historyPageLoading?: boolean
+  historyAllLoading?: boolean
   historyRecoveryStatus?: 'loading' | 'ready' | 'incomplete' | 'error'
   streamingText: string
   streamingToolInput: string
@@ -557,6 +558,8 @@ type ChatStore = {
   ) => Promise<void>
   /** Load the next older page when the server's byte budget cut history short. */
   loadOlderHistory: (sessionId: string) => Promise<void>
+  loadAllHistory: (sessionId: string) => Promise<void>
+  cancelAllHistory: (sessionId: string) => void
   reloadHistory: (
     sessionId: string,
     guard?: {
@@ -1205,6 +1208,8 @@ export function __resetCompactionThrashForTesting(): void {
 /** @internal — clear in-flight history load bookkeeping between tests. */
 export function __resetHistoryLoadStateForTesting(): void {
   historyLoadsInFlight.clear()
+  for (const controller of historyAllControllers.values()) controller.abort()
+  historyAllControllers.clear()
   historyReloadGenerations.clear()
   historyLoadAbortRetries.clear()
   // Cross-test contamination: a `stop_generation` from a prior test latches the
@@ -2977,15 +2982,42 @@ function describeHistoryLoadError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+const HISTORY_WINDOW_RECORDS = 500
+const HISTORY_INVISIBLE_SCAN_BYTES = 64 * 1024 * 1024
+
+function hasVisibleHistoryContent(messages: UIMessage[]): boolean {
+  return messages.some(message => message.type !== 'background_task' && !(message.type === 'system' && message.backgroundContinueTaskIds !== undefined))
+}
+
 async function fetchAndMapSessionHistory(
   sessionId: string,
   existingOwnedToolUseIds = new Set<string>(),
   signal?: AbortSignal,
   mode: 'page' | 'full' = 'full',
 ) {
-  const response = mode === 'page'
-    ? await sessionsApi.getHistoryPage(sessionId, { mediaRefs: true }, { signal })
+  let response = mode === 'page'
+    ? await sessionsApi.getHistoryPage(sessionId, { mediaRefs: true, limit: HISTORY_WINDOW_RECORDS }, { signal })
     : await sessionsApi.getFullHistory(sessionId, { signal })
+  if (mode === 'page') {
+    const seen = new Set<string>()
+    let scannedBytes = response.page?.scannedBytes ?? 0
+    while (response.page?.nextCursor && !hasVisibleHistoryContent(mapHistoryMessagesToUiMessages(response.messages)) && scannedBytes < HISTORY_INVISIBLE_SCAN_BYTES) {
+      const cursor = response.page.nextCursor
+      if (seen.has(cursor)) throw new Error('Session history cursor did not advance')
+      seen.add(cursor)
+      const older = await sessionsApi.getHistoryPage(sessionId, { cursor, mediaRefs: true, limit: HISTORY_WINDOW_RECORDS }, { signal })
+      if (!older.page || older.page.sourceVersion !== response.page.sourceVersion) throw new Error('Session history changed while loading')
+      scannedBytes += older.page.scannedBytes
+      const omittedOversizedEntries = response.page.omittedOversizedEntries + older.page.omittedOversizedEntries
+      const contentTruncated = Boolean(response.page.contentTruncated || older.page.contentTruncated)
+      response = {
+        messages: [...older.messages, ...response.messages],
+        taskNotifications: [...(older.taskNotifications ?? []), ...(response.taskNotifications ?? [])],
+        page: { ...response.page, nextCursor: older.page.nextCursor, hasMore: older.page.hasMore, scannedBytes, omittedOversizedEntries, contentTruncated,
+          historyComplete: older.page.nextCursor === null && response.page.previousCursor == null && omittedOversizedEntries === 0 && !contentTruncated },
+      }
+    }
+  }
   const { page } = response
   const historyComplete = !page || page.historyComplete
   const messages = historyComplete ? response.messages : []
@@ -3154,6 +3186,7 @@ export function isRecoveringSessionCompletion(sessionId: string): boolean {
 }
 const historyRecoveryControllers = new Map<string, AbortController>()
 const historyPageControllers = new Map<string, AbortController>()
+const historyAllControllers = new Map<string, AbortController>()
 // Rows produced by the most recent durable history load, per session. Idle-tab
 // eviction only drops a transcript whose every row is still one of these
 // objects; anything else may be live state REST has not caught up with yet.
@@ -3165,7 +3198,7 @@ function markHistoryRowsDurable(sessionId: string, rows: UIMessage[]) {
 // Older-than-budget history is loaded on explicit request only. The timeline
 // mounts one array, so every page is prepended to `session.messages` directly.
 async function fetchOlderHistoryPage(sessionId: string, cursor: string, signal: AbortSignal): Promise<{ messages: UIMessage[]; page: SessionHistoryPage['page'] }> {
-  const response = await sessionsApi.getHistoryPage(sessionId, { cursor, mediaRefs: true }, { signal })
+  const response = await sessionsApi.getHistoryPage(sessionId, { cursor, mediaRefs: true, limit: HISTORY_WINDOW_RECORDS }, { signal })
   return { messages: mapHistoryMessagesToUiMessages(response.messages), page: response.page }
 }
 
@@ -3218,6 +3251,8 @@ function advanceHistoryLifecycle(sessionId: string): number {
   historyRecoveryControllers.delete(sessionId)
   historyPageControllers.get(sessionId)?.abort()
   historyPageControllers.delete(sessionId)
+  historyAllControllers.get(sessionId)?.abort()
+  historyAllControllers.delete(sessionId)
   terminalReconnectHistoryBoundaries.delete(sessionId)
   return nextGeneration
 }
@@ -3605,6 +3640,9 @@ async function loadOlderHistoryPage(
       // message that has since been persisted) keep their existing object.
       const known = new Set(current.messages.flatMap(strongHistoryMessageIdentities))
       const older = result.messages.filter(message => !strongHistoryMessageIdentities(message).some(identity => known.has(identity)))
+      const durable = durableHistoryRows.get(sessionId) ?? new WeakSet<UIMessage>()
+      for (const message of older) durable.add(message)
+      durableHistoryRows.set(sessionId, durable)
       const messages = older.length ? [...older, ...current.messages] : current.messages
       // TEMP probe: paging prepend is the one path that puts rows above the
       // current head. Record what arrived and what the new head became.
@@ -3640,6 +3678,10 @@ async function loadOlderHistoryPage(
   } finally {
     if (historyPageControllers.get(sessionId) === controller) {
       historyPageControllers.delete(sessionId)
+    }
+    // A reconnect/clear can abort this controller and remove it from the map
+    // without resetting the flag itself; no load may outlive its controller.
+    if (!historyPageControllers.has(sessionId)) {
       set(state => ({ sessions: updateSessionIn(state.sessions, sessionId, () => ({ historyPageLoading: false })) }))
     }
   }
@@ -3979,6 +4021,8 @@ export const useChatStore = create<ChatStore>((setState, get) => {
                 historyStatus: 'idle' as const,
                 historyHydrated: false,
                 historyError: null,
+                historyAllLoading: false,
+                historyPageLoading: false,
                 awaitingReconnectSync: true,
                 preHydrationSocketGapPending: false,
                 scheduledTaskTurn: undefined,
@@ -4114,6 +4158,8 @@ export const useChatStore = create<ChatStore>((setState, get) => {
         sessions: updateSessionIn(s.sessions, sessionId, () => ({
           connectionState: 'disconnected',
           connectionSnapshotReady: false,
+          historyAllLoading: false,
+          historyPageLoading: false,
           elapsedTimer: null,
         })),
       }))
@@ -4688,6 +4734,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
   },
 
   loadHistory: async (sessionId, options) => {
+    if (historyAllControllers.has(sessionId)) get().cancelAllHistory(sessionId)
     if (isSideChatSession(sessionId)) {
       set((state) => ({ sessions: updateSessionIn(state.sessions, sessionId, () => ({ historyStatus: 'ready', historyHydrated: true })) }))
       return
@@ -5200,11 +5247,51 @@ export const useChatStore = create<ChatStore>((setState, get) => {
   },
 
   loadOlderHistory: async (sessionId) => {
-    if (isSideChatSession(sessionId)) return
+    if (isSideChatSession(sessionId) || historyAllControllers.has(sessionId)) return
     await loadOlderHistoryPage(sessionId, get, set)
   },
 
+  loadAllHistory: async (sessionId) => {
+    if (isSideChatSession(sessionId) || historyAllControllers.has(sessionId) || get().sessions[sessionId]?.historyPageLoading) return
+    const controller = new AbortController()
+    const lifecycle = currentHistoryLifecycle(sessionId)
+    historyAllControllers.set(sessionId, controller)
+    set(state => ({ sessions: updateSessionIn(state.sessions, sessionId, () => ({ historyAllLoading: true, historyError: null })) }))
+    try {
+      const seen = new Set<string>()
+      while (!controller.signal.aborted && isCurrentHistoryLifecycle(sessionId, lifecycle)) {
+        const before = get().sessions[sessionId]
+        const cursor = before?.historyPage?.nextCursor
+        if (!cursor || seen.has(cursor)) break
+        seen.add(cursor)
+        await loadOlderHistoryPage(sessionId, get, set)
+        const after = get().sessions[sessionId]
+        if (after?.historyError || after?.historyPage?.nextCursor === cursor) break
+      }
+    } finally {
+      if (historyAllControllers.get(sessionId) === controller) {
+        historyAllControllers.delete(sessionId)
+      }
+      // Same rule as the page load: a lifecycle advance (reconnect, clear,
+      // server-side reset) removes the controller without resetting the flag.
+      if (!historyAllControllers.has(sessionId)) {
+        set(state => ({ sessions: updateSessionIn(state.sessions, sessionId, () => ({ historyAllLoading: false })) }))
+      }
+    }
+  },
+
+  cancelAllHistory: (sessionId) => {
+    const controller = historyAllControllers.get(sessionId)
+    if (!controller) return
+    controller.abort()
+    historyAllControllers.delete(sessionId)
+    historyPageControllers.get(sessionId)?.abort()
+    historyPageControllers.delete(sessionId)
+    set(state => ({ sessions: updateSessionIn(state.sessions, sessionId, () => ({ historyAllLoading: false, historyPageLoading: false })) }))
+  },
+
   reloadHistory: async (sessionId, guard, options) => {
+    if (historyAllControllers.has(sessionId)) get().cancelAllHistory(sessionId)
     const skipReload = () => {
       if (options?.requireApplied) throw new Error('History reload was not applied')
     }

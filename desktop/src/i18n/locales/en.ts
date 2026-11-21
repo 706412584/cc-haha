@@ -300,6 +300,10 @@ export const en = {
   "chat.history.loadFailed": "Could not load messages.",
   "chat.history.retry": "Try again",
   "chat.history.loadMore": "Load earlier messages",
+  "chat.history.loadAll": "Load all messages",
+  "chat.history.noVisibleMessages": "This history window contains only internal state. Load earlier messages or load all.",
+  "chat.history.loadingAll": "Loading all messages… {count} loaded",
+  "session.loadedMessages": "{count} messages loaded",
 
   "trace.windowNotice": "Transcript and trace use bounded pages.",
   "trace.windowLimited": "Some records exceed the viewing limit; the original file is unchanged.",

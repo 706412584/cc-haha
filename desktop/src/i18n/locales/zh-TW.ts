@@ -347,6 +347,10 @@ export const zh: Record<TranslationKey, string> = {
   "chat.history.loadFailed": "訊息載入失敗。",
   "chat.history.retry": "重試",
   "chat.history.loadMore": "載入更早的訊息",
+  "chat.history.loadAll": "載入全部訊息",
+  "chat.history.noVisibleMessages": "這段歷史只有內部狀態記錄，請繼續載入更早訊息或載入全部。",
+  "chat.history.loadingAll": "正在載入全部訊息…已載入 {count} 條",
+  "session.loadedMessages": "已載入 {count} 條訊息",
 
   "trace.windowNotice": "聊天記錄與追蹤以有限視窗載入。",
   "trace.windowLimited": "部分記錄超過檢視上限，原始檔案保持完整。",

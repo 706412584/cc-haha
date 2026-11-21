@@ -268,6 +268,7 @@ export function normalizeHistory(
 ): ChatItem[] {
   const items: ChatItem[] = []
   const seen = new Set<string>()
+  const firstToolIndex = new Map<string, number>()
   for (const entry of entries) {
     if (seen.has(entry.id)) continue
     seen.add(entry.id)
@@ -409,7 +410,8 @@ export function normalizeHistory(
         block.thinking.trim()
       )
         items.push({ ...base, type: 'thinking', text: block.thinking })
-      else if (type === 'tool_use' && string(block.id) && string(block.name))
+      else if (type === 'tool_use' && string(block.id) && string(block.name)) {
+        if (!firstToolIndex.has(block.id)) firstToolIndex.set(block.id, items.length)
         items.push({
           ...base,
           type: 'tool',
@@ -419,10 +421,8 @@ export function normalizeHistory(
           input: block.input,
           pending: false,
         })
-      else if (type === 'tool_result' && string(block.tool_use_id)) {
-        const previous = items.findIndex(
-          (item) => item.type === 'tool' && item.toolUseId === block.tool_use_id
-        )
+      } else if (type === 'tool_result' && string(block.tool_use_id)) {
+        const previous = firstToolIndex.get(block.tool_use_id) ?? -1
         const result = {
           result: block.content,
           text: resultText(block.content),
@@ -431,13 +431,15 @@ export function normalizeHistory(
           pending: false,
         }
         if (previous >= 0) items[previous] = { ...items[previous], ...result }
-        else
+        else {
+          firstToolIndex.set(block.tool_use_id, items.length)
           items.push({
             ...base,
             type: 'tool',
             toolUseId: block.tool_use_id,
             ...result,
           })
+        }
       } else if (type === 'image') {
         const source = record(block.source)
         const attachment =
