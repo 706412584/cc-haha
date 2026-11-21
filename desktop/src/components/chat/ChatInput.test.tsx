@@ -63,6 +63,7 @@ vi.mock('../../api/sessions', () => ({
     list: mocks.list,
     getMessages: mocks.getMessages,
     getGitInfo: mocks.getGitInfo,
+    invalidateGitInfo: vi.fn(),
     getSlashCommands: mocks.getSlashCommands,
     getRepositoryContext: mocks.getRepositoryContext,
     createRepositoryBranch: mocks.createRepositoryBranch,
@@ -1546,6 +1547,91 @@ describe('ChatInput file mentions', () => {
     expect(screen.queryByRole('button', { name: /^Location/ })).not.toBeInTheDocument()
   })
 
+  it('refreshes the composer worktree after a cwd notification and ignores an older Git response', async () => {
+    const oldInfo = { branch: 'main', repoName: 'repo', workDir: '/repo', changedFiles: 0, worktree: null }
+    let resolveOld!: (info: typeof oldInfo) => void
+    const oldRequest = new Promise<typeof oldInfo>(resolve => { resolveOld = resolve })
+    mocks.getGitInfo.mockReturnValue(oldRequest)
+    render(<ChatInput />)
+    await waitFor(() => expect(mocks.getGitInfo).toHaveBeenCalledWith(sessionId))
+    const worktreePath = '/repo/.claude/worktrees/entered'
+    mocks.getGitInfo.mockResolvedValue({ ...oldInfo, workDir: worktreePath,
+      worktree: { enabled: true, path: worktreePath, plannedPath: null, sourceWorkDir: '/repo', slug: 'entered', branch: 'worktree-entered' },
+    })
+    act(() => useSessionStore.getState().updateSessionWorkDir(sessionId, worktreePath))
+    expect(await screen.findByTestId('worktree-details-trigger')).toBeInTheDocument()
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); resolveOld(oldInfo); await oldRequest })
+    expect(screen.getByTestId('worktree-details-trigger')).toBeInTheDocument()
+    fireEvent.mouseEnter(screen.getByTestId('worktree-details-trigger'))
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(worktreePath)
+  })
+
+  it('refreshes the composer branch chip on window focus, visibility return, and focus returning from the terminal', async () => {
+    let currentBranch = 'master'
+    mocks.getGitInfo.mockImplementation(async () => ({
+      branch: currentBranch,
+      repoName: 'repo',
+      workDir: '/repo',
+      changedFiles: 0,
+      worktree: null,
+    }))
+
+    const { rerender } = render(
+      <div>
+        <button data-testid="prior-tab-button" type="button">Tab</button>
+        <textarea data-testid="docked-terminal-input" aria-label="Terminal" />
+        <ChatInput visible />
+      </div>,
+    )
+
+    expect(await screen.findByTestId('run-location-readonly')).toHaveTextContent('master')
+    // Programmatic mount auto-focus does not trigger a back-to-back duplicate /git-info fetch.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+    expect(mocks.getGitInfo).toHaveBeenCalledTimes(1)
+
+    currentBranch = 'dev_xxxx'
+    act(() => {
+      window.dispatchEvent(new Event('focus'))
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('run-location-readonly')).toHaveTextContent('dev_xxxx')
+    })
+
+    // Switching branches in the docked bottom terminal and focusing back into the composer refreshes the chip.
+    const terminalInput = screen.getByTestId('docked-terminal-input')
+    fireEvent.focus(terminalInput)
+    currentBranch = 'feat/from-terminal'
+    fireEvent.focus(getComposerElement(), { relatedTarget: terminalInput })
+    await waitFor(() => {
+      expect(screen.getByTestId('run-location-readonly')).toHaveTextContent('feat/from-terminal')
+    })
+
+    // Returning from a hidden state (e.g. Trajectory view) also refreshes the live branch once.
+    rerender(
+      <div>
+        <button data-testid="prior-tab-button" type="button">Tab</button>
+        <textarea data-testid="docked-terminal-input" aria-label="Terminal" />
+        <ChatInput visible={false} />
+      </div>,
+    )
+    screen.getByTestId('prior-tab-button').focus()
+    currentBranch = 'hotfix/after-trajectory'
+    const callsBeforeVisibleReturn = mocks.getGitInfo.mock.calls.length
+    rerender(
+      <div>
+        <button data-testid="prior-tab-button" type="button">Tab</button>
+        <textarea data-testid="docked-terminal-input" aria-label="Terminal" />
+        <ChatInput visible />
+      </div>,
+    )
+    await waitFor(() => {
+      expect(screen.getByTestId('run-location-readonly')).toHaveTextContent('hotfix/after-trajectory')
+    })
+    expect(mocks.getGitInfo).toHaveBeenCalledTimes(callsBeforeVisibleReturn + 1)
+  })
+
   it('reactively uses the active session project root display name while retaining the active worktree path in context', async () => {
     const worktreePath = '/repo/.claude/worktrees/desktop-main-12345678'
     useSessionStore.setState({
@@ -2353,6 +2439,102 @@ describe('ChatInput file mentions', () => {
       await waitFor(() => {
         expect(useChatStore.getState().sessions[sessionId]?.repositoryLaunchDraft?.branch).toBe(expected)
       })
+    })
+
+    it('replaces the empty session to switch back to an explicitly chosen branch when the checkout moved externally without a focus event', async () => {
+      let liveGitBranch = 'main'
+      mocks.getGitInfo.mockImplementation(async () => ({
+        branch: liveGitBranch,
+        repoName: 'repo',
+        workDir: '/repo',
+        changedFiles: 0,
+        worktree: null,
+      }))
+      mocks.create.mockResolvedValueOnce({ sessionId: 'created-explicit-branch', workDir: '/repo' })
+      seedEmptySession({ workDir: '/repo', branch: 'main', useWorktree: false, branchAutomatic: false })
+      render(<ChatInput variant="hero" />)
+
+      expect(await screen.findByRole('button', { name: 'Location: repo / main' })).toBeInTheDocument()
+
+      // Checkout moves to dev_xxxx while the composer never lost focus (so gitInfo in state is still 'main').
+      liveGitBranch = 'dev_xxxx'
+      setComposerText('edit on main only', 17)
+      fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+
+      await waitFor(() => {
+        expect(mocks.create).toHaveBeenCalledWith({
+          workDir: '/repo',
+          repository: { branch: 'main', worktree: false },
+        })
+      })
+      expect(mocks.wsSend).toHaveBeenCalledWith('created-explicit-branch', {
+        type: 'user_message',
+        content: 'edit on main only',
+        attachments: [],
+      })
+    })
+
+    it('refreshes the empty-session launch branch pill when focus returns from the docked terminal', async () => {
+      let liveBranch = 'main'
+      mocks.getGitInfo.mockImplementation(async () => ({
+        branch: liveBranch,
+        repoName: 'repo',
+        workDir: '/repo',
+        changedFiles: 0,
+        worktree: null,
+      }))
+      seedEmptySession()
+
+      render(
+        <div>
+          <textarea data-testid="docked-terminal-input" aria-label="Terminal" />
+          <ChatInput variant="hero" visible />
+        </div>,
+      )
+
+      expect(await screen.findByRole('button', { name: 'Location: repo / main' })).toBeInTheDocument()
+
+      const terminalInput = screen.getByTestId('docked-terminal-input')
+      fireEvent.focus(terminalInput)
+      liveBranch = 'feature/a'
+      mocks.getRepositoryContext.mockResolvedValue(movedToFeatureA())
+      fireEvent.focus(getComposerElement(), { relatedTarget: terminalInput })
+
+      expect(await screen.findByRole('button', { name: 'Location: repo / feature/a' })).toBeInTheDocument()
+      expect(useChatStore.getState().sessions[sessionId]?.repositoryLaunchDraft).toMatchObject({
+        branch: 'feature/a',
+        branchAutomatic: true,
+      })
+    })
+
+    it('sends directly without replacing the empty session when an automatic branch moved externally on disk', async () => {
+      let liveGitBranch = 'main'
+      mocks.getGitInfo.mockImplementation(async () => ({
+        branch: liveGitBranch,
+        repoName: 'repo',
+        workDir: '/repo',
+        changedFiles: 0,
+        worktree: null,
+      }))
+      seedEmptySession()
+      render(<ChatInput variant="hero" />)
+
+      expect(await screen.findByRole('button', { name: 'Location: repo / main' })).toBeInTheDocument()
+
+      // Checkout moves on disk without a focus event: both repository-context and git-info now report feature/a.
+      liveGitBranch = 'feature/a'
+      mocks.getRepositoryContext.mockResolvedValue(movedToFeatureA())
+      setComposerText('run in current checkout', 23)
+      fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+
+      await waitFor(() => {
+        expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
+          type: 'user_message',
+          content: 'run in current checkout',
+          attachments: [],
+        })
+      })
+      expect(mocks.create).not.toHaveBeenCalled()
     })
   })
 

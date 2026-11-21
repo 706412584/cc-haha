@@ -2,7 +2,7 @@
 
 > **用途**：上游合并时对照的唯一权威清单。每项含文件锚点与验证方法。
 > **维护规则**：新增 fork 定制时同步登记；合并报告（`release-notes/merge-upstream-vX-report.md`）的「保护清单」节按本清单生成；发现合并丢失后必须把该项的锚点回填本清单。
-> **最后核对**：2026-10-28（对照 fork v0.8.7 / 上游 v0.7.5 合并后工作树）
+> **最后核对**：2026-11-21（fork v0.9.1 基线与上游 v0.7.9 合并；本地验证细节见本轮合并报告）
 
 ## 使用方法（每轮上游合并）
 
@@ -45,13 +45,15 @@
 | localIndex schema：fork 列（`thinking_enabled` 等）与上游列分叉时落在双方都空出的版本号；`is_team_worker` = v7，`openai_fast_mode` = v8（fork），`agent_profile` = v9（2026-10-28 v0.7.5 合并落号，双方 v8 均被占用） | `src/server/services/localIndex/migrations.ts:3,179,207` | `LOCAL_INDEX_SCHEMA_VERSION` 与列守卫（`hasColumn` 幂等） |
 | boundedSessionHistory 12MiB 上限 + slimOversizedEntry | `src/server/services/boundedSessionHistory.ts:23,188` | grep `HISTORY_RETAINED_RECORD_BYTES` |
 | sessionService.appendJsonlEntry：保留 fork `invalidateReadCache`，不做双写 | `src/server/services/sessionService.ts` | grep `invalidateReadCache`；确认无重复 appendFile |
-| 会话右键菜单 Export JSONL / Copy path / Show in folder + 批量导出 | `desktop/src/components/layout/Sidebar.tsx:892-932` | grep `exportSession` |
+| 会话右键菜单 Export JSONL / Copy path / Show in folder + 批量导出；与上游 Markdown 导出并存 | `desktop/src/components/layout/Sidebar.tsx` | `Sidebar.test.tsx` 与 `sessionMarkdown.test.ts` |
+| 会话列表索引水合并发与 inspection 增量折叠：按文件路径缓存、stat/provider revision 作签名，追加只扫描新字节；OpenAI 当前账号窗口仍参与缓存签名 | `src/server/services/sessionService.ts`（`hydrateIndexedSession`、`readInspectionSnapshotForSession`、`inspectionSnapshots`） | `sessionService.sessionListPerformance.test.ts`、`sessionService.metadata.test.ts`、`session-context-provider-usage.test.ts` |
+| 断电恢复：原子写入 fsync + snapshot，损坏 Provider 索引先从快照恢复身份，再写 settings owner，最后升级 schema | `src/server/storage/atomicWrite.ts`、`managedSettingsService.ts`、`persistentStorageMigrations.ts` | `atomicWrite*.test.ts`、`persistence-upgrade.test.ts` 的恢复与子代理 owner 用例 |
 
 ## D. 中转/断流韧性
 
 | 定制 | 锚点 | 验证 |
 | --- | --- | --- |
-| 流断线重试预算 `CLAUDE_STREAM_TRANSIENT_RETRY_BUDGET_MS`（默认 60s）+ fork 默认 4 次重试 | `src/services/api/withRetry.ts:439-443`、`src/services/api/streamRetry.ts:83` | grep `getStreamTransientRetryBudgetMs`；`streamRetry.test.ts` 绿 |
+| 流断线重试墙钟预算 `CLAUDE_STREAM_TRANSIENT_RETRY_BUDGET_MS`（默认 60s）；watchdog 默认 4 次，transport/transient 沿用 API 默认 10 次，Codex tool-input watchdog 最多 1 次（v0.9.1 基线即如此） | `src/services/api/withRetry.ts:439-443`、`src/services/api/streamRetry.ts:83` | grep `getStreamTransientRetryBudgetMs`；`streamRetry.test.ts` 绿 |
 | 流断线重试横幅（kind-specific 文案 + data-retry-kind） | `desktop/src/components/chat/StreamingIndicator.tsx` | grep `data-retry-kind` |
 | `PENDING_PERMISSION_DISCONNECT_CLEANUP_MS` 保 5 分钟（上游为自动回答提到 31 分钟） | `src/server/ws/handler.ts:196` | grep 该常量 |
 | Relay 透传 `User-Agent`（不剥 `claude-cli/...`,上游如星驰有客户端白名单） | `src/server/proxy/handler.ts:502`(`isInternalClientHeader` 不再匹配 user-agent) | `handlerUserAgentPassthrough.test.ts` 绿;opencode-go preset 仍可被 upstreamHeaders 覆盖 UA |
@@ -62,6 +64,7 @@
 
 | 定制 | 锚点 | 验证 |
 | --- | --- | --- |
+| 四套经典主题（classic-white / classic-light / eye-care / classic-dark）与新增上游主题并存；CSS、启动脚本、主题集合、Agent Office 映射同时覆盖 | `desktop/src/theme/globals.css`、`desktop/index.html`、`desktop/src/types/settings.ts`、`desktop/src/components/agentOffice/officeTheme.ts` | `globals.test.ts`、`uiStore.test.ts`、`generalSettings.test.tsx`、`officeTheme.test.ts` |
 | 手动 compact 动作（ContextUsage 弹出层 → `/compact` 走消息链） | `desktop/src/components/chat/ContextUsageIndicator.tsx:511-517` | grep `handleCompact` |
 | Composer 能力菜单三个编排开关（coordinator / solo / re pipeline） | `desktop/src/components/chat/capabilityMenuModel.ts:60-63,451` | grep `toggleCoordinator`、`setPipeline` |
 | ToolCallGroup：useEdgeAutoExpanded 边缘触发自动展开、isStreaming 状态、media-gen 内联画廊、20k 预览截断 | `desktop/src/components/chat/ToolCallGroup.tsx:81` | grep `useEdgeAutoExpanded` |
@@ -83,7 +86,9 @@
 | Plugins 推荐目录 + URL 安装 + Configure 按钮（空列表不 early-return） | `desktop/src/components/plugins/PluginList.tsx:38-48` | grep `CATALOG_DESC_KEY`；`pluginsSettings.test.tsx` 绿 |
 | Skills 推荐目录节 + 空已安装列表不 early-return | `desktop/src/components/skills/SkillList.tsx` | `skillsSettings.test.tsx` 绿 |
 | chatStore 冷恢复对账 `applyKnownStoppedTasks(killStaleRunningTasks(..., confirmedActiveTaskIds), sessionId)`（loadHistory 与 reloadHistory 两分支都要） | `desktop/src/stores/chatStore.ts:4622,4753,5006,8028` | grep `applyKnownStoppedTasks` 应 ≥3 处 |
-| fork 的 stop/disconnect 边界（与上游 #1501 进程回收共存） | `src/server/services/conversationService.ts` | 合并报告 v0.7.1 关键决策 3 |
+| fork 的 stop/disconnect 边界（与上游 #1501 进程回收共存）：stop settlement/输出栅栏、进程 `instanceId` 防误杀、上游自主前台 epoch 兼容 | `src/server/services/conversationService.ts`、`src/server/ws/handler.ts` | `websocket-handler.test.ts` 的重复停止、自主续跑、进程替换用例 |
+| 团队中断计划恢复与 runtime-control 共存：仅本次人工确认的 resume 可在身份/revision 校验后重新授权 control；普通暂停团队追加成员不得绕过门禁 | `src/server/services/teamPlanService.ts`、`teamPlanRuntime.ts` | `teamPlanService.test.ts`、`teamPlanRuntime.resumeControl.test.ts` |
+| H5 隧道：保留 named tunnel 独立域名、Token 本地格式验证、quick 新建入口隐藏及 Cloudflare/Pinggy 诊断链 | `desktop/src/pages/settings/GeneralSettings.tsx`、`desktop/electron/services/serverRuntime.ts` | `generalSettings.test.tsx`、`serverRuntime.test.ts`、`cloudflareTunnel.test.ts` |
 
 ## G. 保删除项（上游功能，fork 主动移除——合并时**不要复活**）
 

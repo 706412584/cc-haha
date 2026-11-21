@@ -44,6 +44,15 @@ const PALETTES: Record<ThemeMode, OfficeThemePalette> = {
     bubbleBorder: 0xbccfc4,
   },
   dark: DARK_PALETTE,
+  'neutral-dark': {
+    ...DARK_PALETTE,
+    floor: 0x202020,
+    labelText: 0xf2f2f2,
+    taskText: 0xc4c4c4,
+    labelSurface: 0x2b2b2b,
+    bubbleSurface: 0x2b2b2b,
+    bubbleBorder: 0x4c4c4c,
+  },
   'ink-blue': {
     ...DARK_PALETTE,
     floor: 0x111923,

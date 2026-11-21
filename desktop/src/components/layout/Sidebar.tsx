@@ -1,6 +1,6 @@
 import { SessionScheduleMark } from '@/components/tasks/SessionScheduleMark'
 import { forwardRef, useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { Archive, Bell, CalendarClock, Check, ChevronRight, Clock, Ellipsis, Folder, FolderOpen, FolderPlus, GitBranch, ListChecks, Pencil, Pin, PinOff, Plus, RefreshCw, RotateCcw, Search, Settings, Smartphone, SquarePen, Store, Trash2, X } from 'lucide-react'
+import { Archive, Bell, CalendarClock, Check, ChevronRight, Clock, Copy, Download, Ellipsis, Folder, FolderOpen, FolderPlus, GitBranch, ListChecks, Pencil, Pin, PinOff, Plus, RefreshCw, RotateCcw, Search, Settings, Smartphone, SquarePen, Store, Trash2, X } from 'lucide-react'
 import { releaseWorkspaceSession } from '../../lib/workspace/releaseSession'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useUIStore } from '../../stores/uiStore'
@@ -29,7 +29,6 @@ import {
   normalizePathForCompare,
   projectTitle,
 } from './sidebarTaskGroups'
-import { sessionsApi } from '../../api/sessions'
 import type { SessionListItem } from '../../types/session'
 import { useTabStore, SETTINGS_TAB_ID, SCHEDULED_TAB_ID, MARKET_TAB_ID, CONNECTORS_TAB_ID } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
@@ -71,6 +70,7 @@ import {
 } from './sidebarProjectPreferenceStorage'
 import { useSessionListAutoRefresh } from '../../hooks/useSessionListAutoRefresh'
 import { formatRelativeTime } from '../../lib/formatRelativeTime'
+import { runSessionMarkdownAction, type SessionMarkdownActionMode } from '@/lib/sessionMarkdown'
 
 const desktopHost = getDesktopHost()
 const isDesktopRuntime = desktopHost.isDesktop
@@ -215,11 +215,6 @@ export function Sidebar({
   const projectHeaderSubmenuRef = useRef<HTMLDivElement>(null)
   const projectHeaderActionsRef = useRef<HTMLDivElement>(null)
   const sidebarPreferenceRevisionRef = useRef(0)
-  const projectRootLookupRevisionRef = useRef(0)
-  const projectRootLookupRef = useRef<{
-    sourceFolder: string
-    request: ReturnType<typeof sessionsApi.getRepositoryContext>
-  } | null>(null)
   const sessionScrollAreaRef = useRef<HTMLDivElement>(null)
   const pendingSessionScrollAnchorRef = useRef<SessionScrollAnchor | null>(null)
   const refreshSessionsNow = useSessionListAutoRefresh(fetchSessions, indexBuilding)
@@ -403,10 +398,12 @@ export function Sidebar({
     void desktopUiPreferencesApi.updateSidebarPreferences(normalized).catch(() => undefined)
   }, [desktopUiPreferencesRequest, onDesktopUiPreferencesConsumed])
 
-  const restoreHiddenProjectForWorkDir = useCallback((workDir: string | null | undefined) => {
+  const restoreHiddenProjectForWorkDir = useCallback((workDir: string | null | undefined, exact = false) => {
     if (!workDir) return
     setHiddenProjectKeys((current) => {
-      const next = new Set([...current].filter((projectKey) => !projectPathMatches(projectKey, workDir)))
+      const next = new Set([...current].filter((projectKey) => exact
+        ? normalizePathForCompare(projectKey) !== normalizePathForCompare(workDir)
+        : !projectPathMatches(projectKey, workDir)))
       if (next.size === current.size) return current
       persistSidebarProjectPreferences(buildSidebarProjectPreferences(
         projectOrder,
@@ -617,15 +614,11 @@ export function Sidebar({
   }, [hiddenProjectKeys, persistSidebarProjectPreferences, pinnedProjectKeys, projectOrganization])
 
   const closeProjectEditor = useCallback(() => {
-    projectRootLookupRevisionRef.current += 1
-    projectRootLookupRef.current = null
     setProjectEditor(null)
     setProjectEditorError(null)
   }, [])
 
   const openProjectCreator = useCallback(() => {
-    projectRootLookupRevisionRef.current += 1
-    projectRootLookupRef.current = null
     setProjectHeaderMenu(null)
     setProjectHeaderSubmenu(null)
     setProjectEditorError(null)
@@ -638,64 +631,30 @@ export function Sidebar({
   }, [])
 
   const updateProjectCreatorSourceFolder = useCallback((sourceFolder: string) => {
-    const lookupRevision = ++projectRootLookupRevisionRef.current
-    const fallbackSuggestedName = sourceFolder ? projectTitle(sourceFolder) : ''
     setProjectEditor((current) => current?.mode === 'create'
       ? {
         ...current,
         sourceFolder,
         logicalRoot: sourceFolder,
-        suggestedName: fallbackSuggestedName,
+        suggestedName: sourceFolder ? projectTitle(sourceFolder) : '',
       }
       : current)
-
-    if (!sourceFolder.trim()) {
-      projectRootLookupRef.current = null
-      return
-    }
-
-    const request = sessionsApi.getRepositoryContext(sourceFolder)
-    projectRootLookupRef.current = { sourceFolder, request }
-    void request
-      .then((context) => {
-        if (projectRootLookupRevisionRef.current !== lookupRevision) return
-        const logicalRoot = context.repoRoot || context.workDir || sourceFolder
-        setProjectEditor((current) => current?.mode === 'create' && current.sourceFolder === sourceFolder
-          ? {
-            ...current,
-            logicalRoot,
-            suggestedName: projectTitle(logicalRoot),
-          }
-          : current)
-      })
-      .catch(() => {
-        if (projectRootLookupRef.current?.request === request) {
-          projectRootLookupRef.current = null
-        }
-      })
   }, [])
 
-  const submitProjectCreation = useCallback(async ({ name, sourceFolder, logicalRoot, additionalDirectories }: ProjectEditorSubmission) => {
+  const submitProjectCreation = useCallback(async ({ name, sourceFolder, additionalDirectories }: ProjectEditorSubmission) => {
     setProjectEditorLoading(true)
     setProjectEditorError(null)
     try {
-      const cachedLookup = projectRootLookupRef.current
-      const contextRequest = (cachedLookup?.sourceFolder === sourceFolder
-        ? cachedLookup.request
-        : sessionsApi.getRepositoryContext(sourceFolder))
-        .catch(() => null)
-      await desktopUiPreferencesApi.updateProjectDirectories(sourceFolder, additionalDirectories)
+      const project = await desktopUiPreferencesApi.updateProjectDirectories(sourceFolder, additionalDirectories, { createProject: true })
       const sessionId = await useSessionStore.getState().createSession(sourceFolder)
-      restoreHiddenProjectForWorkDir(sourceFolder)
+      restoreHiddenProjectForWorkDir(project.projectKey, true)
 
       useTabStore.getState().openTab(sessionId, t('sidebar.newSession'))
       useChatStore.getState().connectToSession(sessionId)
       closeProjectEditor()
 
-      const context = await contextRequest
-      const resolvedLogicalRoot = context?.repoRoot || context?.workDir || logicalRoot || sourceFolder
       try {
-        await saveProjectDisplayName(resolvedLogicalRoot, name)
+        await saveProjectDisplayName(project.projectKey, name)
       } catch (displayNameError) {
         addToast({
           type: 'error',
@@ -713,7 +672,6 @@ export function Sidebar({
 
   const openProjectEditor = useCallback((project: ProjectGroup) => {
     if (project.key === 'unknown' || !project.workDir) return
-    projectRootLookupRevisionRef.current += 1
     setProjectContextMenu(null)
     setProjectEditorError(null)
     setProjectEditor({ mode: 'edit', logicalRoot: project.key })
@@ -842,6 +800,19 @@ export function Sidebar({
     setContextMenu(null)
     setPendingDeleteSessionId(id)
   }, [])
+
+  const handleMarkdown = useCallback((id: string, mode: SessionMarkdownActionMode) => {
+    setContextMenu(null)
+    const session = sessions.find((item) => item.id === id)
+    if (!session) return
+    void runSessionMarkdownAction({
+      sessionId: session.id,
+      title: session.title || t('tabs.untitled'),
+      mode,
+      addToast,
+      t,
+    })
+  }, [addToast, sessions, t])
 
   const restoreArchivedSessions = useCallback(async (ids: string[]) => {
     const { failures } = await setSessionsArchived(ids, false)
@@ -1793,6 +1764,18 @@ export function Sidebar({
               {t('sidebar.revealSession')}
             </SidebarMenuItem>
           )}
+          <SidebarMenuItem
+            icon={<Copy size={16} strokeWidth={ICON_STROKE} aria-hidden="true" />}
+            onClick={() => handleMarkdown(contextMenu.id, 'copy')}
+          >
+            {t('sidebar.copyMarkdown')}
+          </SidebarMenuItem>
+          <SidebarMenuItem
+            icon={<Download size={16} strokeWidth={ICON_STROKE} aria-hidden="true" />}
+            onClick={() => handleMarkdown(contextMenu.id, 'export')}
+          >
+            {t('sidebar.exportMarkdown')}
+          </SidebarMenuItem>
           <SidebarMenuItem
             icon={<Archive size={16} strokeWidth={ICON_STROKE} aria-hidden="true" />}
             disabled={runningSessionIds.has(contextMenu.id) || attentionSessionIds.has(contextMenu.id)}

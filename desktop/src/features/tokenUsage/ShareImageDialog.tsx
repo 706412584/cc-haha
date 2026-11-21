@@ -23,6 +23,7 @@ const THEME_LABEL_KEYS: Record<ThemeMode, TranslationKey> = {
   celadon: 'settings.general.appearance.celadon',
   dark: 'settings.general.appearance.dark',
   'ink-blue': 'settings.general.appearance.inkBlue',
+  'neutral-dark': 'settings.general.appearance.neutralDark',
   'classic-white': 'settings.general.appearance.classicWhite',
   'classic-light': 'settings.general.appearance.classicLight',
   'eye-care': 'settings.general.appearance.eyeCare',

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import css from './globals.css?raw'
-import { THEME_MODES } from '../types/settings'
+import { DARK_THEME_MODES, THEME_MODES } from '../types/settings'
 import { THEME_BACKGROUNDS } from './systemAppearance'
 
 const normalizedCss = css.replace(/\r\n/g, '\n')
@@ -26,7 +26,8 @@ function getThemeBlock(selector: string) {
           cursor = index
           closed = true
           break
-        }      }
+        }
+      }
     }
     if (!closed) throw new Error(`Theme block not closed: ${selector}`)
   }
@@ -56,6 +57,7 @@ const themes = [
   '[data-theme="celadon"]',
   '[data-theme="dark"]',
   '[data-theme="ink-blue"]',
+  '[data-theme="neutral-dark"]',
   '[data-theme="classic-white"]',
   '[data-theme="classic-light"]',
   '[data-theme="eye-care"]',
@@ -71,6 +73,7 @@ describe('desktop theme tokens', () => {
    */
   const requiredSourceTokens = [
     '--cc-bg', '--cc-s0', '--cc-s1', '--cc-s2', '--cc-bd', '--cc-bd2',
+    '--cc-bd-strong', '--cc-tab-edge', '--cc-tab-sep',
     '--cc-t1', '--cc-t2', '--cc-t3',
     '--cc-ac', '--cc-ac2', '--cc-ac-soft', '--cc-ac-soft-hover', '--cc-ac-border',
     '--cc-ac-ink', '--cc-on-ac',
@@ -90,7 +93,8 @@ describe('desktop theme tokens', () => {
   ]
 
   /** Consumed by components; defined once in the semantic layer. */
-  const requiredSemanticTokens = [    '--color-activity-heat-0',
+  const requiredSemanticTokens = [
+    '--color-activity-heat-0',
     '--color-activity-heat-1',
     '--color-activity-heat-2',
     '--color-activity-heat-3',
@@ -171,15 +175,38 @@ describe('desktop theme tokens', () => {
     for (const theme of themes) {
       expect(getThemeBlock(theme), `${theme} should declare color-scheme`).toContain('color-scheme:')
     }
-    expect(getThemeBlock('[data-theme="ink-blue"]')).toContain('color-scheme: dark;')
+    for (const theme of DARK_THEME_MODES) {
+      expect(getThemeBlock(`[data-theme="${theme}"]`)).toContain('color-scheme: dark;')
+    }
   })
 
-  it('binds the dark utility variant to every dark-ground theme', () => {
-    // `dark:` utilities compile against this list. Omitting a dark ID makes
+  it('binds the dark utility variant to every dark theme', () => {
+    // `dark:` utilities compile against this list. Omitting ink-blue makes
     // every one of them silently render its light branch on that theme.
-    for (const theme of ['dark', 'ink-blue', 'classic-dark']) {
+    for (const theme of DARK_THEME_MODES) {
       expect(normalizedCss).toContain(`[data-theme="${theme}"], [data-theme="${theme}"] *`)
     }
+  })
+
+  it('keeps the neutral dark grounds, boundaries and reading tiers achromatic', () => {
+    const block = getThemeBlock('[data-theme="neutral-dark"]')
+    const tokens = [
+      'bg', 's0', 's1', 's2', 'bd', 'bd2', 'bd-strong', 'tab-edge', 'tab-sep',
+      't1', 't2', 't3', 'code',
+    ]
+    for (const token of tokens) {
+      const match = new RegExp(`--cc-${token}:\\s*#([\\da-f]{2})([\\da-f]{2})([\\da-f]{2});`, 'i').exec(block)
+      expect(match, `${token} must be an opaque neutral gray`).not.toBeNull()
+      expect(new Set(match!.slice(1)).size, `${token} must not have a color cast`).toBe(1)
+    }
+  })
+
+  it('uses dark terminal and syntax colors for every dark palette', () => {
+    const selector = DARK_THEME_MODES.map((theme) => `[data-theme="${theme}"]`).join(',\n')
+    const block = getThemeBlock(selector)
+    expect(block).toContain('--color-terminal-ansi-red: #FF6D67;')
+    expect(block).toContain('--color-code-comment: #8F8683;')
+    expect(block).toContain('--color-diff-syntax-string: #A8CE8C;')
   })
 
   it('keeps activity heatmap colors on the app theme accent instead of the old blue ramp', () => {
@@ -240,7 +267,7 @@ describe('desktop theme tokens', () => {
   it('keeps the UI zoom slider thumb visible on every dark ground', () => {
     // The thumb is a light disc on a light track; on a dark ground it needs an
     // accent border to read at all. Every dark palette gets the override.
-    expect(normalizedCss).toContain('[data-theme="dark"] .settings-zoom-control,\n[data-theme="ink-blue"] .settings-zoom-control,\n[data-theme="classic-dark"] .settings-zoom-control')
+    expect(normalizedCss).toContain(DARK_THEME_MODES.map((theme) => `[data-theme="${theme}"] .settings-zoom-control`).join(',\n'))
     expect(css).toContain('--settings-zoom-thumb-bg: var(--color-surface-bright);')
     expect(css).toContain('--settings-zoom-thumb-border: var(--color-brand);')
     expect(css).toContain('box-shadow: var(--settings-zoom-thumb-shadow);')
@@ -554,8 +581,8 @@ describe('terminal palette tokens', () => {
 
   function terminalTokens(theme: string) {
     const blocks = [getThemeBlock(':root')]
-    if (theme === 'dark' || theme === 'ink-blue') {
-      blocks.push(getThemeBlock('[data-theme="dark"],\n[data-theme="ink-blue"]'))
+    if ((DARK_THEME_MODES as readonly string[]).includes(theme)) {
+      blocks.push(getThemeBlock(DARK_THEME_MODES.map((mode) => `[data-theme="${mode}"]`).join(',\n')))
     }
     blocks.push(getThemeBlock(`[data-theme="${theme}"]`))
     const tokens = new Map(Array.from(blocks.join('\n').matchAll(/(--[\w-]+):\s*([^;]+);/g), (match) => [match[1]!, match[2]!.trim()]))

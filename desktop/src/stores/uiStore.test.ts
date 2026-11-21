@@ -84,6 +84,7 @@ describe('uiStore theme handling', () => {
       'celadon',
       'dark',
       'ink-blue',
+      'neutral-dark',
       'classic-white',
       'classic-light',
       'eye-care',
@@ -136,6 +137,75 @@ describe('uiStore theme handling', () => {
     useUIStore.getState().setTheme('dark')
 
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+  })
+
+  it('retains neutral dark across a restart and round trips through every existing palette', async () => {
+    const first = await import('./uiStore')
+    first.useUIStore.getState().setFollowSystemTheme(false)
+    first.useUIStore.getState().setTheme('neutral-dark')
+    expect(window.localStorage.getItem('cc-haha-theme')).toBe('neutral-dark')
+    first.teardownTheme()
+
+    vi.resetModules()
+    const restarted = await import('./uiStore')
+    restarted.initializeTheme()
+    expect(restarted.useUIStore.getState().theme).toBe('neutral-dark')
+    expect(document.documentElement.style.colorScheme).toBe('dark')
+    expect(readThemeColor()).toBe('#202020')
+
+    for (const theme of ['white', 'paper', 'warm-classic', 'celadon', 'dark', 'ink-blue', 'classic-white', 'classic-light', 'eye-care', 'classic-dark'] as const) {
+      restarted.useUIStore.getState().setTheme(theme)
+      expect(document.documentElement.getAttribute('data-theme')).toBe(theme)
+      expect(document.documentElement.style.colorScheme).toBe(theme === 'dark' || theme === 'ink-blue' || theme === 'classic-dark' ? 'dark' : 'light')
+      expect(readThemeColor()).toBe(THEME_BACKGROUNDS[theme])
+      restarted.useUIStore.getState().setTheme('neutral-dark')
+      expect(document.documentElement.getAttribute('data-theme')).toBe('neutral-dark')
+      expect(readThemeColor()).toBe('#202020')
+    }
+    restarted.teardownTheme()
+  })
+
+  it('sends the neutral dark ground and dark appearance to the native host', async () => {
+    const setApplied = vi.fn().mockResolvedValue(undefined)
+    vi.doMock('../lib/desktopHost', () => ({ desktopHost: { appearance: { setApplied } } }))
+    try {
+      const { useUIStore } = await import('./uiStore')
+      await vi.dynamicImportSettled()
+      useUIStore.setState({ followSystemTheme: false })
+      useUIStore.getState().setTheme('neutral-dark')
+      await vi.dynamicImportSettled()
+      expect(setApplied).toHaveBeenLastCalledWith({
+        isDark: true,
+        background: '#202020',
+        lightBackground: '#FFFFFF',
+        darkBackground: '#202020',
+        followSystem: false,
+      })
+    } finally {
+      vi.doUnmock('../lib/desktopHost')
+    }
+  })
+
+  it('reports a neutral dark preference to the host before a light system applies it', async () => {
+    const setApplied = vi.fn().mockResolvedValue(undefined)
+    vi.doMock('../lib/desktopHost', () => ({ desktopHost: { appearance: { setApplied } } }))
+    try {
+      stubMatchMedia(false)
+      const { useUIStore } = await import('./uiStore')
+      await vi.dynamicImportSettled()
+      useUIStore.setState({ followSystemTheme: true, lightTheme: 'celadon', theme: 'celadon' })
+      useUIStore.getState().setTheme('neutral-dark')
+      await vi.dynamicImportSettled()
+      expect(setApplied).toHaveBeenLastCalledWith({
+        isDark: false,
+        background: '#F5F8F5',
+        lightBackground: '#F5F8F5',
+        darkBackground: '#202020',
+        followSystem: true,
+      })
+    } finally {
+      vi.doUnmock('../lib/desktopHost')
+    }
   })
 })
 
@@ -261,6 +331,32 @@ describe('uiStore following the system appearance', () => {
     expect(useUIStore.getState().theme).toBe('warm-classic')
     expect(document.documentElement.getAttribute('data-theme')).toBe('warm-classic')
     teardownTheme()
+  })
+
+  it('remembers neutral dark for system flips and a restarted dark session', async () => {
+    const media = stubMatchMedia(false)
+    const first = await import('./uiStore')
+    first.initializeTheme()
+    first.useUIStore.getState().setTheme('celadon')
+    first.useUIStore.getState().setTheme('neutral-dark')
+    expect(first.useUIStore.getState().theme).toBe('celadon')
+    expect(window.localStorage.getItem('cc-haha-dark-theme')).toBe('neutral-dark')
+
+    media.emit(true)
+    expect(first.useUIStore.getState().theme).toBe('neutral-dark')
+    expect(document.documentElement.style.colorScheme).toBe('dark')
+    media.emit(false)
+    expect(first.useUIStore.getState().theme).toBe('celadon')
+    expect(document.documentElement.style.colorScheme).toBe('light')
+    first.teardownTheme()
+
+    vi.resetModules()
+    stubMatchMedia(true)
+    const restarted = await import('./uiStore')
+    restarted.initializeTheme()
+    expect(restarted.useUIStore.getState()).toMatchObject({ theme: 'neutral-dark', darkTheme: 'neutral-dark', lightTheme: 'celadon', followSystemTheme: true })
+    expect(readThemeColor()).toBe('#202020')
+    restarted.teardownTheme()
   })
 
   it('rehydrates the switch and the light half after a restart', async () => {

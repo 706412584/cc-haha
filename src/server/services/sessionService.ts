@@ -25,7 +25,7 @@ import { createInterface } from 'node:readline'
 import { ApiError } from '../middleware/errorHandler.js'
 import { sanitizePath as sanitizePortablePath } from '../../utils/sessionStoragePortable.js'
 import { migrateFileHistorySnapshot, type FileHistorySnapshot } from '../../utils/fileHistory.js'
-import { findCanonicalGitRoot } from '../../utils/git.js'
+import { findCanonicalGitRoot, findCanonicalGitRootPreservingPathIdentity } from '../../utils/git.js'
 import { calculateUSDCost, MODEL_COSTS } from '../../utils/modelCost.js'
 import {
   MODEL_CONTEXT_WINDOW_DEFAULT,
@@ -60,10 +60,15 @@ import { cleanSessionTitleSource } from '../../utils/sessionTitleText.js'
 import {
   roughTokenCountEstimationForMessage,
 } from '../../services/tokenEstimation.js'
+import type { AssistantMessage } from '../../types/message.js'
+import { SYNTHETIC_MODEL } from '../../utils/messages.js'
+import { getTokenUsage, isUsableContextUsage } from '../../utils/tokens.js'
 import { ProviderService } from './providerService.js'
+import { OPENAI_OFFICIAL_PROVIDER_ID, isOpenAIOfficialProviderId } from './openaiOfficialProvider.js'
 import { shouldHideCommandMetadataContent } from '../../utils/commandMetadata.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { getSettings_DEPRECATED } from '../../utils/settings/settings.js'
+import { findExplicitProjectRoot, readProjectIdentity } from './projectIdentity.js'
 import { readSessionArchives, withSessionArchiveLock, writeSessionArchive } from '../../utils/sessionArchiveStore.js'
 import {
   extractGoalCreationTitle,
@@ -331,6 +336,7 @@ export type MessageEntry = {
   error?: string
   businessErrorCode?: string
   toolUseResult?: unknown
+  durationMs?: number
   timestamp: string
   model?: string
   usage?: MessageUsage
@@ -564,6 +570,7 @@ type RawEntry = {
     }
   }
   timestamp?: string
+  durationMs?: number
   version?: string
   snapshot?: {
     messageId?: string
@@ -592,6 +599,9 @@ type TranscriptContextAccumulator = {
   } | null
   estimatedTokensFromMessages: number
   estimatedTokensAfterUsage: number
+  latestUsageResponseId: string | undefined
+  unreportedOutputTokens: number
+  currentResponse: { id: string; outputTokens: number; tailTokens: number } | null
   transcriptHasMediaInput: boolean
 }
 
@@ -635,6 +645,9 @@ function createTranscriptContextAccumulator(): TranscriptContextAccumulator {
     latestUsage: null,
     estimatedTokensFromMessages: 0,
     estimatedTokensAfterUsage: 0,
+    latestUsageResponseId: undefined,
+    unreportedOutputTokens: 0,
+    currentResponse: null,
     transcriptHasMediaInput: false,
   }
 }
@@ -647,6 +660,9 @@ function accumulateTranscriptContext(
     state.latestUsage = null
     state.estimatedTokensFromMessages = 0
     state.estimatedTokensAfterUsage = 0
+    state.latestUsageResponseId = undefined
+    state.unreportedOutputTokens = 0
+    state.currentResponse = null
     state.transcriptHasMediaInput = false
   }
 
@@ -654,22 +670,45 @@ function accumulateTranscriptContext(
     state.latestModel = entry.message.model
   }
 
+  const assistant = entry.type === 'assistant' && entry.message
+    ? { ...entry, message: { ...entry.message, content: entry.message.content ?? [] } } as unknown as AssistantMessage
+    : undefined
+  const responseId = assistant?.message.model !== SYNTHETIC_MODEL
+    ? assistant?.message.id
+    : undefined
+  let tokens = 0
   if (
     entry.type === 'user' ||
     entry.type === 'assistant' ||
     entry.type === 'attachment'
   ) {
-    const tokens = roughTokenCountEstimationForMessage(entry)
+    tokens = roughTokenCountEstimationForMessage(entry)
     state.estimatedTokensFromMessages += tokens
-    state.estimatedTokensAfterUsage += tokens
     if (!state.transcriptHasMediaInput && hasMediaInput([entry])) {
       state.transcriptHasMediaInput = true
     }
   }
 
-  const usage = entry.message?.usage
+  // A streamed response has one assistant record per content block, sometimes
+  // interleaved with tool results. Keep only its counters, so later siblings
+  // neither erase earlier results nor charge the response's output twice.
+  if (responseId && state.currentResponse?.id !== responseId) {
+    state.currentResponse = { id: responseId, outputTokens: 0, tailTokens: 0 }
+  }
+  if (responseId && state.currentResponse) {
+    state.currentResponse.outputTokens += tokens
+  } else if (state.currentResponse) {
+    state.currentResponse.tailTokens += tokens
+  }
+  if (responseId && responseId === state.latestUsageResponseId) {
+    if (state.latestUsage?.outputTokens === 0) state.unreportedOutputTokens += tokens
+  } else {
+    state.estimatedTokensAfterUsage += tokens
+  }
+
+  const usage = assistant ? getTokenUsage(assistant) : undefined
   const model = entry.message?.model
-  if (!usage || typeof model !== 'string') return
+  if (!usage || typeof model !== 'string' || !isUsableContextUsage(usage)) return
 
   const inputTokens =
     typeof usage.input_tokens === 'number' ? usage.input_tokens : 0
@@ -684,15 +723,6 @@ function accumulateTranscriptContext(
       ? usage.cache_creation_input_tokens
       : 0
 
-  if (
-    inputTokens === 0 &&
-    outputTokens === 0 &&
-    cacheReadInputTokens === 0 &&
-    cacheCreationInputTokens === 0
-  ) {
-    return
-  }
-
   state.latestUsage = {
     model,
     inputTokens,
@@ -700,7 +730,11 @@ function accumulateTranscriptContext(
     cacheReadInputTokens,
     cacheCreationInputTokens,
   }
-  state.estimatedTokensAfterUsage = 0
+  state.latestUsageResponseId = responseId
+  state.estimatedTokensAfterUsage = responseId ? state.currentResponse!.tailTokens : 0
+  state.unreportedOutputTokens = outputTokens === 0
+    ? responseId ? state.currentResponse!.outputTokens : tokens
+    : 0
 }
 
 function resolveTranscriptContextUsage(
@@ -858,16 +892,7 @@ type InspectionFoldState = {
   hasUnknownModelCost: boolean
   firstUsageAt: number | null
   lastUsageAt: number | null
-  latestContextUsage: {
-    model: string
-    inputTokens: number
-    outputTokens: number
-    cacheReadInputTokens: number
-    cacheCreationInputTokens: number
-  } | null
-  estimatedTokensFromMessages: number
-  estimatedTokensAfterUsage: number
-  transcriptHasMediaInput: boolean
+  contextState: TranscriptContextAccumulator
   /** Running per-reply maxima, retained so an append is not billed a second time. */
   usageLedger: UsageLedger
 }
@@ -898,10 +923,7 @@ function createInspectionFoldState(): InspectionFoldState {
     hasUnknownModelCost: false,
     firstUsageAt: null,
     lastUsageAt: null,
-    latestContextUsage: null,
-    estimatedTokensFromMessages: 0,
-    estimatedTokensAfterUsage: 0,
-    transcriptHasMediaInput: false,
+    contextState: createTranscriptContextAccumulator(),
     usageLedger: new Map(),
   }
 }
@@ -917,7 +939,11 @@ function cloneInspectionFoldState(state: InspectionFoldState): InspectionFoldSta
     additionalDirectories: [...(state.additionalDirectories ?? [])],
     metadata: { ...state.metadata },
     repository: state.repository ? { ...state.repository } : state.repository,
-    latestContextUsage: state.latestContextUsage ? { ...state.latestContextUsage } : null,
+    contextState: {
+      ...state.contextState,
+      latestUsage: state.contextState.latestUsage ? { ...state.contextState.latestUsage } : null,
+      currentResponse: state.contextState.currentResponse ? { ...state.contextState.currentResponse } : null,
+    },
     models: new Map(
       [...state.models.entries()].map(([key, value]) => [key, { ...value }]),
     ),
@@ -1292,7 +1318,8 @@ export class SessionService {
       now: this.now,
       scope: () => this.getConfigDir(),
       revision: () => this.projectHistoryRevision(),
-      mutation: () => `${this.getConfigDir()}:${getSharedSessionMutationState(this.localIndexGateway).epoch}:${readSessionArchives(this.getConfigDir()).revision}`,
+      mutation: () => `${this.getConfigDir()}:${getSharedSessionMutationState(this.localIndexGateway).epoch}:${readSessionArchives(this.getConfigDir()).revision}:${readProjectIdentity(this.getConfigDir()).revision}`,
+      identityRevision: () => readProjectIdentity(this.getConfigDir()).revision,
       load: () => this.loadProjectHistoryRows(),
       archiveIds: () => readSessionArchives(this.getConfigDir()).ids,
       hydrate: async (row, archived) => {
@@ -1341,6 +1368,7 @@ export class SessionService {
       offset: options?.offset ?? 0,
       archived: options?.archived ?? false,
       archiveRevision: readSessionArchives(scope).revision,
+      projectIdentityRevision: readProjectIdentity(scope).revision,
     })
   }
 
@@ -3141,6 +3169,17 @@ export class SessionService {
     workDir: string | null
     fallbackProjectDir?: string
   }): Promise<string | null> {
+    const sourceDirectory = worktreeSession?.originalCwd || repository?.requestedWorkDir || workDir
+    const identity = readProjectIdentity(this.getConfigDir())
+    if (sourceDirectory && identity.roots.length > 0) {
+      const nativeDirectory = await fs.realpath(sourceDirectory).catch(() => sourceDirectory)
+      const explicitRoot = findExplicitProjectRoot(nativeDirectory, identity.roots)
+      if (explicitRoot) {
+        const sourceGitRoot = findCanonicalGitRootPreservingPathIdentity(nativeDirectory)
+        if (!sourceGitRoot || findExplicitProjectRoot(explicitRoot, [sourceGitRoot])) return explicitRoot
+      }
+    }
+
     const candidate = worktreeSession?.originalCwd ||
       repository?.repoRoot ||
       workDir ||
@@ -3149,22 +3188,17 @@ export class SessionService {
     if (!candidate) return null
 
     const canonicalCandidate = await this.canonicalizeProjectPath(candidate)
-    if (workDir) {
-      const marker = `${path.sep}.claude${path.sep}worktrees${path.sep}`
-      const markerIndex = canonicalCandidate.indexOf(marker)
-      const nestedMarkerIndex = markerIndex > 0
-        ? canonicalCandidate.indexOf(marker, markerIndex + marker.length)
-        : -1
-      if (nestedMarkerIndex > markerIndex) {
-        return canonicalCandidate.slice(0, markerIndex)
-      }
-    }
-
-    if (await this.candidateHasOwnProjectDir(canonicalCandidate)) {
-      return canonicalCandidate
+    const marker = `${path.sep}.claude${path.sep}worktrees${path.sep}`
+    const markerIndex = workDir ? canonicalCandidate.indexOf(marker) : -1
+    if (markerIndex > 0) {
+      const nestedMarkerIndex = canonicalCandidate.indexOf(marker, markerIndex + marker.length)
+      if (nestedMarkerIndex > markerIndex) return canonicalCandidate.slice(0, markerIndex)
+      // 保留显式命名的 Agent worktree；普通子目录身份由 explicitProjectRoots 决定。
+      if (await this.candidateHasOwnProjectDir(canonicalCandidate)) return canonicalCandidate
     }
     const gitRoot = findCanonicalGitRoot(canonicalCandidate)
     if (gitRoot) return gitRoot
+    if (markerIndex > 0) return canonicalCandidate.slice(0, markerIndex)
 
     return canonicalCandidate
   }
@@ -3339,7 +3373,13 @@ export class SessionService {
         })
       }
     }
-
+    const durationMs =
+      type === 'tool_result' &&
+      typeof entry.durationMs === 'number' &&
+      Number.isFinite(entry.durationMs) &&
+      entry.durationMs >= 0
+        ? entry.durationMs
+        : undefined
     return {
       id: entry.uuid || crypto.randomUUID(),
       type,
@@ -3349,10 +3389,10 @@ export class SessionService {
       ...(type === 'assistant' && typeof entry.businessErrorCode === 'string' ? { businessErrorCode: entry.businessErrorCode } : {}),
       ...(sessionReferences ? { sessionReferences } : {}),
       ...(collaboration ? { collaboration } : {}),
-      ...(sessionReferences ? { sessionReferences } : {}),
       ...(scheduledTask ? { scheduledTask } : {}),
       ...(entry.bodyTruncated === true ? { bodyTruncated: true } : {}),
       ...(entry.toolUseResult !== undefined ? { toolUseResult: entry.toolUseResult } : {}),
+      ...(durationMs !== undefined ? { durationMs } : {}),
       timestamp: entry.timestamp || new Date().toISOString(),
       model: msg.model,
       ...(usage ? { usage } : {}),
@@ -4288,6 +4328,7 @@ export class SessionService {
     model: string,
     launchInfoOverride?: ProviderContextWindowHint | null,
     hints: { autoCompactWindow?: string } = {},
+    openAIRuntimeEnv?: Record<string, string> | null,
   ): Promise<number | undefined> {
     const launchInfo = launchInfoOverride ?? await this.getSessionLaunchInfo(sessionId).catch(() => null)
     const providerIds: string[] = []
@@ -4327,7 +4368,9 @@ export class SessionService {
     let sessionProviderAutoCompactWindow: string | undefined
     let sawSessionProvider = false
     for (const providerId of providerIds) {
-      const env = await this.providerService.getProviderRuntimeEnv(providerId).catch(() => null)
+      const env = openAIRuntimeEnv !== undefined && isOpenAIOfficialProviderId(providerId)
+        ? openAIRuntimeEnv
+        : await this.providerService.getProviderRuntimeEnv(providerId, { cachedCatalogOnly: true }).catch(() => null)
       hints.autoCompactWindow = env?.[AUTO_COMPACT_WINDOW_ENV_KEY]
       if (env && !sawSessionProvider) {
         sawSessionProvider = true
@@ -4479,6 +4522,7 @@ export class SessionService {
     sessionId: string,
     model: string,
     launchInfo?: ProviderContextWindowHint | null,
+    openAIRuntimeEnv?: Record<string, string> | null,
   ): Promise<number> {
     const hints: { autoCompactWindow?: string } = {}
     const providerContextWindow = await this.getProviderContextWindowForSession(
@@ -4486,6 +4530,7 @@ export class SessionService {
       model,
       launchInfo,
       hints,
+      openAIRuntimeEnv,
     )
     if (providerContextWindow !== undefined) {
       return applyAutoCompactWindowLimit(providerContextWindow, hints.autoCompactWindow, true)
@@ -4515,8 +4560,8 @@ export class SessionService {
     return (await this.getInspectionTranscriptSnapshot(sessionId))?.metadata ?? null
   }
 
-  private async buildTranscriptContextEstimate(
-    sessionId: string,
+  private buildTranscriptContextEstimate(
+    rawMaxTokens: number,
     latest: {
       model: string
       inputTokens: number
@@ -4527,12 +4572,10 @@ export class SessionService {
     estimatedTokensFromMessages: number,
     estimatedTokensAfterUsage: number,
     transcriptHasMediaInput: boolean,
-    launchInfo?: ProviderContextWindowHint | null,
-  ): Promise<TranscriptContextEstimate> {
-    const rawMaxTokens = await this.getSessionModelContextWindow(sessionId, latest.model, launchInfo)
+  ): TranscriptContextEstimate {
     const promptTokens = latest.inputTokens + latest.cacheReadInputTokens + latest.cacheCreationInputTokens
     const providerTokens = promptTokens + latest.outputTokens
-    const hasProviderUsage = providerTokens > 0
+    const hasProviderUsage = promptTokens > 0
     const estimatedTokens = estimatedTokensFromMessages || promptTokens
     const contextBudget = calculateContextBudget({
       estimatedTokens,
@@ -4551,10 +4594,7 @@ export class SessionService {
     const totalTokens =
       hasProviderUsage && !contextBudget.ignoredUsageReason
         ? Math.min(
-            Math.max(
-              contextBudget.usedTokens,
-              providerTokens + estimatedTokensAfterUsage,
-            ),
+            providerTokens + estimatedTokensAfterUsage,
             rawMaxTokens,
           )
         : contextBudget.usedTokens
@@ -4657,7 +4697,6 @@ export class SessionService {
   ): void {
     this.inspectionFoldCache.delete(filePath)
     this.inspectionFoldCache.set(filePath, {
-      size: offset,
       offset,
       fold: cloneInspectionFoldState(fold),
     })
@@ -4676,9 +4715,14 @@ export class SessionService {
     // snapshot, and the desktop polls all three together. Without this the fold below
     // runs once per reader instead of once per transcript revision.
     const stat = await fs.stat(found.filePath, { bigint: true })
-    const providers = await this.providerService.listProviders().catch(() => null)
+    // Provider settings and the cached account catalog can change without a transcript append.
+    const [providers, openAIRuntimeEnv] = await Promise.all([
+      this.providerService.listProviders().catch(() => null),
+      this.providerService.getProviderRuntimeEnv(OPENAI_OFFICIAL_PROVIDER_ID, { cachedCatalogOnly: true }).catch(() => null),
+    ])
     const contextRevision = createHash('sha256').update(JSON.stringify({
       activeId: providers?.activeId,
+      openAIRuntimeEnv,
       providers: providers?.providers.map(provider => ({
         id: provider.id,
         models: provider.models,
@@ -4704,7 +4748,7 @@ export class SessionService {
       this.inspectionSnapshots.set(found.filePath, cached)
       return cached.request
     }
-    const request = this.readInspectionSnapshotForSession(sessionId, found.filePath)
+    const request = this.readInspectionSnapshotForSession(sessionId, found.filePath, openAIRuntimeEnv)
     this.inspectionSnapshots.set(found.filePath, { signature, request })
     while (this.inspectionSnapshots.size > this.inspectionSnapshotsMaxEntries) {
       const oldest = this.inspectionSnapshots.keys().next().value
@@ -4712,15 +4756,20 @@ export class SessionService {
       this.inspectionSnapshots.delete(oldest)
     }
     try { return await request }
-    catch (error) { this.inspectionSnapshots.delete(found.filePath); throw error }
+    catch (error) {
+      if (this.inspectionSnapshots.get(found.filePath)?.request === request) {
+        this.inspectionSnapshots.delete(found.filePath)
+      }
+      throw error
+    }
   }
 
-  private async readInspectionSnapshotForSession(sessionId: string, filePath: string): Promise<SessionInspectionTranscriptSnapshot | null> {
-    // Resume the fold from the last known byte offset when the transcript has
-    // only grown. Every accumulator below is monotonic over an append-only
-    // file, so this yields the same result as re-parsing from byte 0 — which on
-    // a multi-hundred-MB transcript costs seconds and is triggered on every
-    // inspection poll during an active conversation.
+  private async readInspectionSnapshotForSession(
+    sessionId: string,
+    filePath: string,
+    openAIRuntimeEnv: Record<string, string> | null,
+  ): Promise<SessionInspectionTranscriptSnapshot | null> {
+    // The fold retains the state needed to read only the appended records on the next poll.
     const seed = await this.takeInspectionFoldSeed(filePath)
     const startOffset = seed.offset
 
@@ -4757,13 +4806,7 @@ export class SessionService {
     let firstUsageAt: number | null = seed.fold.firstUsageAt
     let lastUsageAt: number | null = seed.fold.lastUsageAt
 
-    const contextState = createTranscriptContextAccumulator()
-    contextState.latestUsage = seed.fold.latestContextUsage
-      ? { ...seed.fold.latestContextUsage }
-      : null
-    contextState.estimatedTokensFromMessages = seed.fold.estimatedTokensFromMessages
-    contextState.estimatedTokensAfterUsage = seed.fold.estimatedTokensAfterUsage
-    contextState.transcriptHasMediaInput = seed.fold.transcriptHasMediaInput
+    const contextState = seed.fold.contextState
     const usageLedger = seed.fold.usageLedger
 
     const { consumed: consumedOffset } = await this.streamJsonlFileFrom(filePath, startOffset, (entry) => {
@@ -4939,6 +4982,8 @@ export class SessionService {
       latestCwd,
       repository,
       worktreeSession,
+      additionalDirectories,
+      agentProfile,
       permissionMode,
       runtimeProviderId,
       runtimeModelId,
@@ -4958,10 +5003,7 @@ export class SessionService {
       hasUnknownModelCost,
       firstUsageAt,
       lastUsageAt,
-      latestContextUsage: contextState.latestUsage,
-      estimatedTokensFromMessages: contextState.estimatedTokensFromMessages,
-      estimatedTokensAfterUsage: contextState.estimatedTokensAfterUsage,
-      transcriptHasMediaInput: contextState.transcriptHasMediaInput,
+      contextState,
       usageLedger,
     })
 
@@ -4990,6 +5032,7 @@ export class SessionService {
         sessionId,
         modelUsage.model,
         modelRuntimeHints.get(modelUsage.model) ?? launchInfo,
+        openAIRuntimeEnv,
       )
     }
 
@@ -5021,13 +5064,12 @@ export class SessionService {
         }
     const latestContextUsage = resolveTranscriptContextUsage(contextState)
     const contextEstimate = latestContextUsage
-      ? await this.buildTranscriptContextEstimate(
-          sessionId,
+      ? this.buildTranscriptContextEstimate(
+          await this.getSessionModelContextWindow(sessionId, latestContextUsage.model, launchInfo, openAIRuntimeEnv),
           latestContextUsage,
           contextState.estimatedTokensFromMessages,
-          contextState.estimatedTokensAfterUsage,
+          contextState.estimatedTokensAfterUsage + contextState.unreportedOutputTokens,
           contextState.transcriptHasMediaInput,
-          launchInfo,
         )
       : null
 
@@ -5056,7 +5098,7 @@ export class SessionService {
     const status = indexed ? this.localIndexGateway.getPublicStatus() : null
     const degradedPlan = indexed ? null : this.getDegradedListPlan()
     return JSON.stringify([scope, this.sessionListCacheGeneration,
-      readSessionArchives(scope).revision,
+      readSessionArchives(scope).revision, readProjectIdentity(scope).revision,
       indexed && (status?.state === 'ready' || status?.state === 'building')
         ? status.lastUpdatedAt
         : degradedPlan
@@ -5117,7 +5159,7 @@ export class SessionService {
       // Thousands of sessions normally share a handful of workspaces. Resolve
       // each candidate once, preserving the same worktree/git boundary as list.
       const candidate = row.worktreeSession?.originalCwd || row.repository?.repoRoot || row.workDir || this.desanitizePath(row.projectPath)
-      const key = JSON.stringify([candidate, Boolean(row.workDir)])
+      const key = JSON.stringify([candidate, row.workDir, row.repository?.requestedWorkDir])
       let root = roots.get(key)
       if (!roots.has(key)) {
         root = await this.resolveProjectRootFromSessionMetadata({
@@ -5136,12 +5178,13 @@ export class SessionService {
     const scope = this.getConfigDir()
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const archiveRevision = readSessionArchives(scope).revision
+      const identityRevision = readProjectIdentity(scope).revision
       const result = await this.listSessionsOnce(options)
       // A storage switch belongs to subsequent requests. Repeating this scan
       // after a switch would replace its original scope with another config's sessions.
-      if (scope !== this.getConfigDir() || archiveRevision === readSessionArchives(scope).revision) return result
+      if (scope !== this.getConfigDir() || (archiveRevision === readSessionArchives(scope).revision && identityRevision === readProjectIdentity(scope).revision)) return result
     }
-    throw new ApiError(409, 'Session archives changed during loading; retry', 'SESSION_LIST_CHANGED')
+    throw new ApiError(409, 'Session projects or archives changed during loading; retry', 'SESSION_LIST_CHANGED')
   }
 
   private async listSessionsOnce(options?: SessionListOptions): Promise<{ sessions: SessionListItem[]; total: number }> {
@@ -6418,7 +6461,7 @@ export class SessionService {
       sessionId,
     )
     const absWorkDir = preparedWorkspace.workDir
-    const { additionalDirectories: configuredDirectories } = await new DesktopUiPreferencesService().getProjectDirectories(absWorkDir)
+    const { additionalDirectories: configuredDirectories } = await new DesktopUiPreferencesService().getProjectDirectories(preparedWorkspace.repository?.requestedWorkDir || absWorkDir)
     const additionalDirectories = await validateProjectAdditionalDirectories(absWorkDir, configuredDirectories)
     registerCanonicalFilesystemAccessRoot(absWorkDir)
     console.log(

@@ -64,3 +64,18 @@ export const ASK_USER_QUESTION_NO_ANSWER_MESSAGE = `The user did not answer thes
 // transcript — same precedent as the /model switch breadcrumbs.
 export const PLAN_EXECUTION_CONTINUE_MESSAGE =
   'The plan is approved. Continue with the implementation.'
+export const PLAN_REVISION_CONTINUE_MESSAGE =
+  'Stay in plan mode. Revise the plan and present it again for approval.'
+export const PLAN_REVISION_CONTINUE_WITH_FEEDBACK_PREFIX =
+  'Stay in plan mode. Revise the plan to address this feedback and present it again for approval:\n'
+
+export function buildPlanContinueMessage(
+  allowed: boolean,
+  denyMessage?: string,
+): string {
+  if (allowed) return PLAN_EXECUTION_CONTINUE_MESSAGE
+  const feedback = denyMessage?.trim()
+  return feedback
+    ? `${PLAN_REVISION_CONTINUE_WITH_FEEDBACK_PREFIX}${feedback}`
+    : PLAN_REVISION_CONTINUE_MESSAGE
+}

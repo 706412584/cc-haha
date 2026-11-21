@@ -6244,6 +6244,84 @@ describe('chatStore history mapping', () => {
     ])
   })
 
+  it('preserves existing and live slashCommands when initial connectToSession discovery fails', async () => {
+    const id = 'slash-failure-session'
+    const existingPluginCommand = {
+      name: 'nexuskit:nk-build',
+      description: 'Build with NexusKit',
+      kind: 'command' as const,
+      source: 'plugin' as const,
+    }
+    let rejectInitial!: (error: Error) => void
+    vi.mocked(sessionsApi.getSlashCommands)
+      .mockImplementationOnce(
+        () => new Promise((_resolve, reject) => { rejectInitial = reject }),
+      )
+      .mockResolvedValueOnce({
+        commands: [existingPluginCommand],
+      })
+    useChatStore.setState({
+      sessions: {
+        [id]: makeSession({
+          connectionState: 'disconnected',
+          slashCommands: [existingPluginCommand],
+        }),
+      },
+    })
+
+    useChatStore.getState().connectToSession(id, { prewarm: false, applyRuntimeSelection: false })
+    expect(useChatStore.getState().sessions[id]?.slashCommands).toEqual([existingPluginCommand])
+
+    rejectInitial(new Error('transient error'))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(useChatStore.getState().sessions[id]?.slashCommands).toEqual([existingPluginCommand])
+    useChatStore.getState().disconnectSession(id)
+  })
+
+  it('does not clobber live CLI slash_commands with a late initial getSlashCommands response', async () => {
+    const id = 'slash-race-session'
+    const staleInitialCommand = {
+      name: 'stale-only',
+      description: 'Pre-CLI fallback command',
+      kind: 'command' as const,
+    }
+    const liveCliCommand = {
+      name: 'nexuskit:nk-build',
+      description: 'Live CLI plugin command',
+      kind: 'command' as const,
+      source: 'plugin' as const,
+    }
+
+    let resolveInitial!: (value: { commands: typeof staleInitialCommand[] }) => void
+    vi.mocked(sessionsApi.getSlashCommands)
+      .mockImplementationOnce(
+        () => new Promise((resolve) => { resolveInitial = resolve }),
+      )
+      .mockResolvedValueOnce({
+        commands: [liveCliCommand],
+      })
+
+    useChatStore.getState().connectToSession(id, { prewarm: false, applyRuntimeSelection: false })
+
+    // Live CLI slash_commands event arrives while the initial HTTP discovery is still in flight.
+    useChatStore.getState().handleServerMessage(id, {
+      type: 'system_notification',
+      subtype: 'slash_commands',
+      data: [liveCliCommand],
+    })
+    await Promise.resolve()
+
+    expect(useChatStore.getState().sessions[id]?.slashCommands).toEqual([liveCliCommand])
+
+    // Now the stale pre-CLI request resolves late; it must not overwrite the live CLI list.
+    resolveInitial({ commands: [staleInitialCommand] })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(useChatStore.getState().sessions[id]?.slashCommands).toEqual([liveCliCommand])
+    useChatStore.getState().disconnectSession(id)
+  })
+
   it('syncs live TodoWrite tool input into the task store for that session', () => {
     const todos = [{ content: 'Live todo', status: 'in_progress' }]
     useChatStore.setState({
@@ -9257,6 +9335,9 @@ describe('chatStore history mapping', () => {
     onConnectionState?.('reconnecting')
     onConnectionState?.('connected')
     useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'permission_requests_snapshot', toolRequestIds: [], computerUseRequestIds: [], turnActive: false,
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
       type: 'session_state',
       turnState: 'idle',
       activeBackgroundTaskIds: ['agent-task-idle-reconnect'],
@@ -9307,6 +9388,9 @@ describe('chatStore history mapping', () => {
       expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.historyStatus).toBe('ready')
     })
     const messages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
+    expect(useChatStore.getState().unreadCompletions.get(TEST_SESSION_ID)).toMatchObject({
+      transcriptId: 'persisted-during-idle-reconnect',
+    })
     expect(messages).toContainEqual(
       expect.objectContaining({
         type: 'assistant_text',

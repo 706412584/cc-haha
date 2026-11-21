@@ -136,6 +136,8 @@ export type RepositoryWorktreeInfo = {
   current: boolean
 }
 export type RepositoryContextResult = {
+  /** Logical project identity, separate from the Git repository root. */
+  projectRoot?: string | null
   state: 'ok' | 'not_git_repo' | 'missing_workdir' | 'error'
   workDir: string
   repoRoot: string | null
@@ -243,6 +245,8 @@ export type SessionUsageSnapshot = {
 }
 
 export type SessionContextSnapshot = {
+  /** Fast meter response; categories are collected only for an opened panel. */
+  summaryOnly?: boolean
   categories: Array<{
     name: string
     tokens: number
@@ -464,17 +468,57 @@ export type TurnCheckpointDiffResult = WorkspaceDiffResult & {
   workDir?: string
 }
 
+type GitInfoListener = (info: SessionGitInfo) => void
+type GitInfoInvalidateListener = () => void
+
 const gitInfoRequests = new Map<string, Promise<SessionGitInfo>>()
+const gitInfoInFlightCounts = new Map<string, number>()
+const gitInfoGenerations = new Map<string, number>()
+const gitInfoListeners = new Map<string, Set<GitInfoListener>>()
+const gitInfoInvalidationListeners = new Map<string, Set<GitInfoInvalidateListener>>()
+
+function cleanupGitInfoSessionState(sessionId: string) {
+  if (
+    !gitInfoRequests.has(sessionId) &&
+    !gitInfoInFlightCounts.has(sessionId) &&
+    !gitInfoListeners.has(sessionId) &&
+    !gitInfoInvalidationListeners.has(sessionId)
+  ) {
+    gitInfoGenerations.delete(sessionId)
+  }
+}
+
+function notifyGitInfoListeners(sessionId: string, info: SessionGitInfo) {
+  const listeners = gitInfoListeners.get(sessionId)
+  if (!listeners) return
+  for (const listener of [...listeners]) {
+    listener(info)
+  }
+}
 
 function getSessionGitInfo(sessionId: string) {
   const pending = gitInfoRequests.get(sessionId)
   if (pending) return pending
 
+  const generation = gitInfoGenerations.get(sessionId) ?? 0
+  gitInfoInFlightCounts.set(sessionId, (gitInfoInFlightCounts.get(sessionId) ?? 0) + 1)
   const request = api.get<SessionGitInfo>(`/api/sessions/${sessionId}/git-info`)
-  const trackedRequest = request.finally(() => {
+  const trackedRequest = request.then((info) => {
+    if ((gitInfoGenerations.get(sessionId) ?? 0) === generation) {
+      notifyGitInfoListeners(sessionId, info)
+    }
+    return info
+  }).finally(() => {
+    const remaining = (gitInfoInFlightCounts.get(sessionId) ?? 1) - 1
+    if (remaining <= 0) {
+      gitInfoInFlightCounts.delete(sessionId)
+    } else {
+      gitInfoInFlightCounts.set(sessionId, remaining)
+    }
     if (gitInfoRequests.get(sessionId) === trackedRequest) {
       gitInfoRequests.delete(sessionId)
     }
+    cleanupGitInfoSessionState(sessionId)
   })
   gitInfoRequests.set(sessionId, trackedRequest)
   return trackedRequest
@@ -578,9 +622,34 @@ export const sessionsApi = {
       cursor = older.page.nextCursor
     }
     pages.reverse()
+    const messages = pages.flatMap(page => page.messages)
+    const latestIndexById = new Map<string, number>()
+    messages.forEach((message, index) => {
+      if (typeof message.id === 'string' && message.id.trim()) latestIndexById.set(message.id, index)
+    })
+    const taskNotifications = pages.flatMap(page => page.taskNotifications ?? [])
+    const latestNoticeIndexByKey = new Map<string, number>()
+    const noticeIdentity = (notice: AgentTaskNotification) => (
+      typeof notice.toolUseId === 'string' && notice.toolUseId.trim()
+        ? JSON.stringify([notice.ownerAgentId || null, notice.toolUseId])
+        : null
+    )
+    taskNotifications.forEach((notice, index) => {
+      const key = noticeIdentity(notice)
+      if (key !== null) latestNoticeIndexByKey.set(key, index)
+    })
     return {
-      messages: pages.flatMap(page => page.messages),
-      taskNotifications: pages.flatMap(page => page.taskNotifications ?? []),
+      // Server projection deduplicates each slice separately. Replays spanning
+      // slices must also keep only the last record, in its original position,
+      // with its metadata intact. Missing/blank identities remain independent.
+      messages: messages.filter((message, index) => {
+        const latestIndex = latestIndexById.get(message.id)
+        return latestIndex === undefined || latestIndex === index
+      }),
+      taskNotifications: taskNotifications.filter((notice, index) => {
+        const key = noticeIdentity(notice)
+        return key === null || latestNoticeIndexByKey.get(key) === index
+      }),
       page: {
         ...newest.page,
         nextCursor: null,
@@ -613,6 +682,10 @@ export const sessionsApi = {
 
   getChatStatus(sessionId: string, signal?: AbortSignal) {
     return api.get<SessionChatStatusResponse>(`/api/sessions/${sessionId}/chat/status`, { signal })
+  },
+
+  stopChat(sessionId: string) {
+    return api.post<{ ok: boolean }>(`/api/sessions/${sessionId}/chat/stop`)
   },
 
   getTrace(sessionId: string, options?: ApiRequestOptions, page?: { offset?: number; revisionToken?: string; scanCursor?: string }) {
@@ -684,6 +757,62 @@ export const sessionsApi = {
 
   getGitInfo: getSessionGitInfo,
 
+  invalidateGitInfo(sessionId: string) {
+    // A cwd notification or explicit refresh supersedes requests reading an older checkout.
+    gitInfoGenerations.set(sessionId, (gitInfoGenerations.get(sessionId) ?? 0) + 1)
+    gitInfoRequests.delete(sessionId)
+    const invalidationListeners = gitInfoInvalidationListeners.get(sessionId)
+    if (invalidationListeners) {
+      for (const onInvalidate of [...invalidationListeners]) {
+        onInvalidate()
+      }
+    }
+    cleanupGitInfoSessionState(sessionId)
+  },
+
+  subscribeGitInfo(
+    sessionId: string,
+    listener: GitInfoListener,
+    options?: { onInvalidate?: GitInfoInvalidateListener },
+  ) {
+    let listeners = gitInfoListeners.get(sessionId)
+    if (!listeners) {
+      listeners = new Set()
+      gitInfoListeners.set(sessionId, listeners)
+    }
+    listeners.add(listener)
+
+    const onInvalidate = options?.onInvalidate
+    if (onInvalidate) {
+      let invalidationListeners = gitInfoInvalidationListeners.get(sessionId)
+      if (!invalidationListeners) {
+        invalidationListeners = new Set()
+        gitInfoInvalidationListeners.set(sessionId, invalidationListeners)
+      }
+      invalidationListeners.add(onInvalidate)
+    }
+
+    return () => {
+      const current = gitInfoListeners.get(sessionId)
+      if (current) {
+        current.delete(listener)
+        if (current.size === 0) {
+          gitInfoListeners.delete(sessionId)
+        }
+      }
+      if (onInvalidate) {
+        const currentInvalidations = gitInfoInvalidationListeners.get(sessionId)
+        if (currentInvalidations) {
+          currentInvalidations.delete(onInvalidate)
+          if (currentInvalidations.size === 0) {
+            gitInfoInvalidationListeners.delete(sessionId)
+          }
+        }
+      }
+      cleanupGitInfoSessionState(sessionId)
+    }
+  },
+
   getSlashCommands(sessionId: string) {
     return api.get<{ commands: SlashCommandOption[] }>(`/api/sessions/${sessionId}/slash-commands`)
   },
@@ -692,6 +821,7 @@ export const sessionsApi = {
     includeContext?: boolean
     timeout?: number
     contextOnly?: boolean
+    summaryOnly?: boolean
     statusOnly?: boolean
     signal?: AbortSignal
   }) {
@@ -701,6 +831,9 @@ export const sessionsApi = {
     }
     if (options?.contextOnly) {
       query.set('contextOnly', '1')
+    }
+    if (options?.summaryOnly) {
+      query.set('summaryOnly', '1')
     }
     if (options?.statusOnly) {
       query.set('statusOnly', '1')

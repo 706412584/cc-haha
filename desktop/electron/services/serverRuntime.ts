@@ -41,6 +41,7 @@ import {
   SystemProxyBridge,
   type SystemProxyBridgeLike,
 } from './systemProxyBridge'
+import { createPublicAccessDiagnosticWriter, type PublicAccessDiagnosticWriter } from './publicAccessDiagnostics'
 
 export type TunnelStartOptions = {
   mode: H5TunnelMode
@@ -126,7 +127,7 @@ type ServerRuntimeDeps = {
   spawnSidecar: typeof spawnSidecar
   waitForServer: typeof waitForServer
   writeLastServerPort: typeof writeLastServerPort
-  createSystemProxyBridge: (resolveSystemProxy: (url: string) => Promise<string>) => SystemProxyBridgeLike
+  createSystemProxyBridge: (resolveSystemProxy: (url: string) => Promise<string>, onDiagnostic?: PublicAccessDiagnosticWriter) => SystemProxyBridgeLike
   /**
    * Build an undici dispatcher that routes a request through the userspace proxy
    * bridge, for the *public* tunnel health probe. Returns null when no proxy
@@ -149,7 +150,7 @@ const DEFAULT_SERVER_RUNTIME_DEPS: ServerRuntimeDeps = {
   spawnSidecar,
   waitForServer,
   writeLastServerPort,
-  createSystemProxyBridge: resolveSystemProxy => new SystemProxyBridge(resolveSystemProxy),
+  createSystemProxyBridge: (resolveSystemProxy, onDiagnostic) => new SystemProxyBridge(resolveSystemProxy, onDiagnostic),
   createProxyDispatcher: createUndiciProxyDispatcher,
   ensureCloudflaredBinary,
   createCloudflareTunnel,
@@ -1638,7 +1639,8 @@ export class ElectronServerRuntime {
     const baseEnv = clearProxyEnv(this.baseEnv)
     if (!this.resolveSystemProxy) return applyRuntimeEnv(baseEnv)
 
-    const bridge = this.deps.createSystemProxyBridge(this.resolveSystemProxy)
+    const bridge = this.deps.createSystemProxyBridge(this.resolveSystemProxy,
+      this.diagnosticsFile ? createPublicAccessDiagnosticWriter(this.diagnosticsFile, this.deps.appendHostDiagnostic) : undefined)
     this.systemProxyBridge = bridge
     try {
       const bridgeUrl = await bridge.start()

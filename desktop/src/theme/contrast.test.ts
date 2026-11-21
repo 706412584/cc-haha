@@ -27,7 +27,7 @@ type Rgb = { r: number; g: number; b: number; a: number }
  * The ink themes additionally override part of the semantic layer, so their
  * combined block is listed ahead of `:root`.
  */
-const INK_THEME_BLOCK = '[data-theme="dark"],\n[data-theme="ink-blue"],\n[data-theme="classic-dark"]'
+const INK_THEME_BLOCK = '[data-theme="dark"],\n[data-theme="ink-blue"],\n[data-theme="neutral-dark"],\n[data-theme="classic-dark"]'
 
 const THEME_BLOCKS = {
   white: [':root,\n[data-theme="white"]', ':root', '@theme'],
@@ -36,6 +36,7 @@ const THEME_BLOCKS = {
   celadon: ['[data-theme="celadon"]', ':root', '@theme'],
   dark: ['[data-theme="dark"]', INK_THEME_BLOCK, ':root', '@theme'],
   'ink-blue': ['[data-theme="ink-blue"]', INK_THEME_BLOCK, ':root', '@theme'],
+  'neutral-dark': ['[data-theme="neutral-dark"]', INK_THEME_BLOCK, ':root', '@theme'],
   'classic-white': ['[data-theme="classic-white"]', ':root', '@theme'],
   'classic-light': ['[data-theme="classic-light"]', ':root', '@theme'],
   'eye-care': ['[data-theme="eye-care"]', ':root', '@theme'],
@@ -153,7 +154,7 @@ describe('default theme reading contrast', () => {
     '--color-surface-container-highest',
   ] as const
 
-  for (const theme of ['white', 'dark'] as const) {
+  for (const theme of ['white', 'dark', 'neutral-dark'] as const) {
     const selectors = THEME_BLOCKS[theme]
     const surface = parseColor(resolve('--color-surface', selectors))
 

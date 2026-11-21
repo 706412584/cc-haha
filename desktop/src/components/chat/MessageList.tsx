@@ -1,4 +1,5 @@
 import { getDisclosure } from '@/lib/disclosureMemory'
+import { resolveUnreadCompletion } from '@/lib/unreadCompletion'
 import { ScheduledTaskCard } from '@/components/tasks/ScheduledTaskCard'
 import { ScheduledTaskTrigger } from '@/components/tasks/ScheduledTaskTrigger'
 import { parseScheduledTaskResult } from '@/lib/scheduledTask'
@@ -6,11 +7,13 @@ import { openSideChat } from '@/lib/workspace/openSideChat'
 import { messageSnippet, traceLayoutMetric, traceSession } from '@/lib/sessionTrace'
 import { ConversationImageGalleryContext } from '@/components/chat/conversationImageGallery'
 import { resolveConversationImages } from '@/components/chat/conversationImages'
+import { isImageGenerationToolName } from '@/components/chat/imageGenerationTools'
+import { hasToolResultImageBlock } from '@/lib/toolResultContent'
 import { getServerBaseUrl } from '@/lib/desktopRuntime'
 import { useWorkspaceContentStore } from '@/stores/workspaceContentStore'
 import { Component, useRef, useEffect, useMemo, memo, useState, useCallback, useDeferredValue, useLayoutEffect, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { createPortal, flushSync } from 'react-dom'
-import { ArrowDown, BookMarked, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleStop, FileStack, LoaderCircle, Settings, Target, Undo2, XCircle } from 'lucide-react'
+import { ArrowDown, BookMarked, ChevronDown, ChevronRight, FileStack, LoaderCircle, Settings, Target, Undo2 } from 'lucide-react'
 import { ApiError } from '../../api/client'
 import { sessionsApi, type SessionRewindMode, type SessionTurnCheckpoint, type WorkspaceChangedFile } from '../../api/sessions'
 import { listPendingPermissions, useChatStore } from '../../stores/chatStore'
@@ -65,7 +68,7 @@ import {
 import type { AgentTaskNotification, BackgroundAgentTask, UIMessage } from '../../types/chat'
 import type { TeamDetail, TeamWorkbenchSnapshot } from '../../types/team'
 import { formatTokenCount } from '../../lib/formatTokenCount'
-import { formatDurationMs, hasRunningBackgroundTasks as hasAnyRunningBackgroundTasks } from '../../lib/backgroundTasks'
+import { hasRunningBackgroundTasks as hasAnyRunningBackgroundTasks } from '../../lib/backgroundTasks'
 import { buildTurnCompletionByMessageId, type TurnCompletion } from '../../lib/turnCompletion'
 import type { TurnOutputEvidence } from '../../lib/assistantOutputTargets'
 import { isTouchH5Document } from '../../lib/touchH5'
@@ -94,7 +97,6 @@ type ToolCall = Extract<UIMessage, { type: 'tool_use' }>
 type ToolResult = Extract<UIMessage, { type: 'tool_result' }>
 type MemoryEvent = Extract<UIMessage, { type: 'memory_event' }>
 type GoalEvent = Extract<UIMessage, { type: 'goal_event' }>
-type BackgroundTaskEvent = Extract<UIMessage, { type: 'background_task' }>
 type CompactSummaryEvent = Extract<UIMessage, { type: 'compact_summary' }>
 
 type RenderItem =
@@ -470,86 +472,6 @@ function GoalContinuationDivider({ message }: { message: GoalEvent }) {
       </div>
     </section>
   )
-}
-
-function BackgroundTaskEventCard({ message }: { message: BackgroundTaskEvent }) {
-  const t = useTranslation()
-  const { task } = message
-  const isRunning = task.status === 'running'
-  const isFailed = task.status === 'failed'
-  const isStopped = task.status === 'stopped'
-  const duration = formatDurationMs(task.usage?.durationMs, t)
-  const detail = task.summary || task.lastToolName || task.description || task.outputFile || task.taskId
-  const label = getBackgroundTaskLabel(task.taskType, t)
-
-  return (
-    <div className="mb-2">
-      <div
-        data-testid="background-task-event-card"
-        data-status={task.status}
-        className="flex min-w-0 items-start gap-2 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-2"
-      >
-        <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center">
-          {isRunning ? (
-            <LoaderCircle size={15} strokeWidth={1.75} className="animate-spin text-[var(--color-info)]" aria-hidden="true" />
-          ) : isFailed ? (
-            <XCircle size={15} strokeWidth={2.25} className="text-[var(--color-error)]" aria-hidden="true" />
-          ) : isStopped ? (
-            <CircleStop size={15} strokeWidth={2.25} className="text-[var(--color-text-tertiary)]" aria-hidden="true" />
-          ) : (
-            <CheckCircle2 size={15} strokeWidth={2.25} className="text-[var(--color-success)]" aria-hidden="true" />
-          )}
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-2">
-            <Bot size={14} strokeWidth={2.25} className="shrink-0 text-[var(--color-text-tertiary)]" aria-hidden="true" />
-            <span className="shrink-0 text-[12px] font-medium text-[var(--color-text-primary)]">
-              {label}
-            </span>
-            <span className="shrink-0 text-[11px] text-[var(--color-text-tertiary)]">
-              {t(`chat.backgroundAgents.status.${task.status}`)}
-            </span>
-            {task.usage?.totalTokens ? (
-              <span className="hidden shrink-0 text-[11px] text-[var(--color-text-tertiary)] sm:inline">
-                {t('chat.backgroundAgents.tokens', { count: formatTokenCount(task.usage.totalTokens) })}
-              </span>
-            ) : null}
-            {duration ? (
-              <span className="hidden shrink-0 text-[11px] text-[var(--color-text-tertiary)] sm:inline">
-                {duration}
-              </span>
-            ) : null}
-          </div>
-          <div className="mt-0.5 truncate text-[12px] leading-5 text-[var(--color-text-secondary)]">
-            {detail}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function isAgentBackgroundTaskMessage(message: UIMessage): boolean {
-  if (message.type !== 'background_task') return false
-  if (
-    message.task.taskType === 'local_agent' ||
-    message.task.taskType === 'remote_agent' ||
-    message.task.taskType === 'dream'
-  ) {
-    return true
-  }
-  return /^Agent (?:(?:"[^"]+" )?(completed|was stopped)|(?:"[^"]+" )?failed(?::|$))/.test(
-    message.task.summary ?? '',
-  )
-}
-
-function getBackgroundTaskLabel(
-  taskType: string | undefined,
-  t: (key: TranslationKey, params?: Record<string, string | number>) => string,
-): string {
-  if (taskType === 'local_bash') return t('chat.backgroundTasks.command')
-  if (taskType === 'local_workflow') return t('chat.backgroundTasks.workflow')
-  return t('chat.backgroundTasks.task')
 }
 
 function SelectableChatMessage({
@@ -928,19 +850,23 @@ export function buildRenderModel(
       id: `group-${toolCalls[0]!.id}`,
     })
   }
-  const appendRootToolCall = (toolCall: ToolCall) => {
+  const appendRootToolCall = (toolCall: ToolCall, result: ToolResult | undefined) => {
     const nextIsAgent = toolCall.toolName === 'Agent'
+    // Keep returned pictures with their source row when surrounding activity folds.
+    const separateImageRow = !nextIsAgent && !isImageGenerationToolName(toolCall.toolName)
+      && hasToolResultImageBlock(result?.content)
     // Agent runs render as their own dispatch cards, so they never mix with
     // ordinary steps — including the thinking that preceded the dispatch.
     const pendingIsAgentGroup = pendingToolCount > 0 && pendingAgentCount === pendingToolCount
     const pendingBlocksAgent = nextIsAgent && pendingSteps.length > pendingAgentCount
 
-    if (pendingBlocksAgent || (pendingToolCount > 0 && pendingIsAgentGroup !== nextIsAgent)) {
+    if (separateImageRow || pendingBlocksAgent || (pendingToolCount > 0 && pendingIsAgentGroup !== nextIsAgent)) {
       flushGroup()
     }
     pendingSteps.push({ kind: 'tool', toolCall })
     pendingToolCount += 1
     if (nextIsAgent) pendingAgentCount += 1
+    if (separateImageRow) flushGroup()
   }
   // Fork: thinking joins the open run instead of splitting it. A post-tool
   // thinking stream must stay inside the group it follows, or the live state
@@ -1020,7 +946,13 @@ export function buildRenderModel(
     if (msg.type === 'assistant_text' && !msg.content.trim()) {
       continue
     }
-    if (isAgentBackgroundTaskMessage(msg)) {
+    // Activity owns task lifecycle/status, including failures and stops. Keep
+    // the records for task details and trajectory, but do not turn internal
+    // wake-ups into conversation rows or split a contiguous tool activity run.
+    if (
+      msg.type === 'background_task' ||
+      (msg.type === 'system' && msg.backgroundContinueTaskIds !== undefined)
+    ) {
       continue
     }
 
@@ -1164,18 +1096,10 @@ export function buildRenderModel(
         flushGroup()
         items.push({ kind: 'message', message: msg })
       } else {
-        appendRootToolCall(msg)
+        appendRootToolCall(msg, toolResult)
       }
     } else if (msg.type === 'thinking') {
       appendThinking(msg)
-    } else if (msg.type === 'background_task' && msg.task.status === 'completed') {
-      // The activity panel already lists every background task — agent-like ones
-      // under SubAgents, the rest under Background Tasks — with live status and a
-      // way into the full run. A card here repeating a finished one just buries
-      // the conversation under status reports, and a long team session emits
-      // dozens. Anything that did NOT finish cleanly still gets a card: a failure
-      // or a stop changes what the turn means, and the panel can be closed.
-      continue
     } else {
       flushGroup()
       items.push({ kind: 'message', message: msg })
@@ -1262,7 +1186,6 @@ function isTurnResponseMessage(message: UIMessage) {
     message.type === 'assistant_text' ||
     message.type === 'tool_use' ||
     message.type === 'tool_result' ||
-    (message.type === 'background_task' && !isAgentBackgroundTaskMessage(message)) ||
     message.type === 'error' ||
     message.type === 'task_summary'
   )
@@ -1670,6 +1593,7 @@ function MemoryEventCard({ message }: { message: MemoryEvent }) {
 
 type MessageListProps = {
   sessionId?: string | null
+  visible?: boolean
   compact?: boolean
   mobileLayout?: boolean
   /**
@@ -2557,6 +2481,7 @@ const MeasuredRenderItem = memo(function MeasuredRenderItem({
 
 export function MessageList({
   sessionId,
+  visible = true,
   compact = false,
   mobileLayout = false,
   decisionsInComposer = false,
@@ -2573,6 +2498,9 @@ export function MessageList({
   )
   const sessionState = useChatStore((s) =>
     resolvedSessionId ? s.sessions[resolvedSessionId] : undefined,
+  )
+  const unreadCompletion = useChatStore((s) =>
+    resolvedSessionId ? s.unreadCompletions.get(resolvedSessionId) : undefined,
   )
   const branchSession = useSessionStore((s) => s.branchSession)
   const reloadHistory = useChatStore((s) => s.reloadHistory)
@@ -3391,6 +3319,43 @@ export function MessageList({
     ),
     [measuredItemsVersion, renderItemKeys, renderItemMetrics, renderItems, scrollAnchor, virtualItemHeights, virtualViewport],
   )
+
+  const unreadReplyId = useMemo(
+    () => visible && unreadCompletion ? resolveUnreadCompletion(messages, unreadCompletion)?.id : undefined,
+    [visible, messages, unreadCompletion],
+  )
+  useEffect(() => {
+    if (!unreadReplyId || !unreadCompletion || !resolvedSessionId || typeof IntersectionObserver === 'undefined') return
+    const reply = Array.from(scrollContentRef.current?.querySelectorAll<HTMLElement>('[data-chat-render-item-key]') ?? [])
+      .find(element => element.dataset.chatRenderItemKey === unreadReplyId)
+      ?.querySelector('[data-chat-selectable-message="assistant"]')
+    if (!reply) return
+
+    // Hidden tabs and the trajectory view keep their transcripts mounted. Only
+    // acknowledge a reply once its row enters the focused window's viewport.
+    let active = true
+    const observer = new IntersectionObserver(entries => {
+      const entry = entries[entries.length - 1]
+      if (active && entry?.isIntersecting && entry.intersectionRect.height > 0 && entry.intersectionRect.width > 0 &&
+        document.visibilityState === 'visible' && document.hasFocus()) {
+        useChatStore.getState().markSessionCompletionRead(resolvedSessionId, unreadCompletion)
+      }
+    }, { threshold: [0, 0.001] })
+    const observeAgain = () => {
+      observer.disconnect()
+      observer.takeRecords()
+      observer.observe(reply)
+    }
+    observer.observe(reply)
+    window.addEventListener('focus', observeAgain)
+    document.addEventListener('visibilitychange', observeAgain)
+    return () => {
+      active = false
+      observer.disconnect()
+      window.removeEventListener('focus', observeAgain)
+      document.removeEventListener('visibilitychange', observeAgain)
+    }
+  }, [unreadCompletion, unreadReplyId, resolvedSessionId, virtualTranscriptWindow.items])
 
   useLayoutEffect(() => {
     const anchor = restoringScrollAnchorRef.current
@@ -4690,7 +4655,7 @@ export const MessageBlock = memo(function MessageBlock({
         ? <GoalContinuationDivider message={message} />
         : <GoalEventCard message={message} />
     case 'background_task':
-      return <BackgroundTaskEventCard message={message} />
+      return null
     case 'system':
       return (
         <div className="mb-3 text-center text-xs text-[var(--color-text-tertiary)]">
