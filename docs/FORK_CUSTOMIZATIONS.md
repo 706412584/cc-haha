@@ -59,6 +59,7 @@
 | Relay 透传 `User-Agent`（不剥 `claude-cli/...`,上游如星驰有客户端白名单） | `src/server/proxy/handler.ts:502`(`isInternalClientHeader` 不再匹配 user-agent) | `handlerUserAgentPassthrough.test.ts` 绿;opencode-go preset 仍可被 upstreamHeaders 覆盖 UA |
 | 跨协议路径同样透传客户端身份（`openai_chat`/`openai_responses`/`gemini` 曾从空对象构造上游头,出站 UA 退化成 `Bun/x.y.z`;Anthropic 专有头与 `x-stainless-*` 仍丢弃） | `src/server/proxy/handler.ts`(`forwardClientHeaders(incomingHeaders, true)`) | `handlerUserAgentPassthrough.test.ts` 的跨协议用例绿;本地网关 `127.0.0.1:6789/panel/#logs` 应显示 `claude-cli/2.1.288 (external, cli)` |
 | Stale-modelId guard（persisted 模型已不在任何槽位时回退 main,防上游 404）——**必须含 fable 槽**,回退值必须带 `[1m]` 标记,否则 catalog 解析抛 `SESSION_MODEL_UNAVAILABLE` | `src/server/ws/handler.ts`(`Stale-modelId guard` + `applyModel1mSupport`) | `websocket-handler.test.ts` 的 `stale runtime modelId guard` 两例绿;上游无此 guard |
+| Relay 会话 ID 轮换（2026-11-21）：relay 按会话计数满 100 次返回 `400 session_request_limit_exceeded` 时，proxy 自动把发给上游的会话 ID 轮换为 `原ID-r{n}` 并重试一次，CLI 无感续跑。触发三重门槛：仅 upstreamHeaders 模板含 `$SESSION_ID` 的 preset（如 opencode-go）+ 恰为 400 + body 含精确错误码；轮换 ID 成功过→计满后继续轮换，从未成功就被拒→永久禁用该会话轮换（防按账号计数的 relay 双倍流量）；本地 trace/prompt cache 始终用原 ID；TTL 6h、每会话上限 25 次轮换、全局 1000 会话 | `src/server/proxy/sessionRotation.ts`（新文件）、`src/server/proxy/handler.ts`（`dispatchUpstream` 闭包 + 轮换重试块 + `markUpstreamSessionSuccess`） | `sessionRotation.test.ts` 12 例绿（含无关 400 不误伤、无模板不触发、禁用收敛三例）；grep `SESSION_LIMIT_ERROR_CODE`、`templateCarriesSessionId` 非零；上游无此机制 |
 
 ## E. 桌面 UX（fork-only / 改上游）
 

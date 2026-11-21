@@ -64,6 +64,13 @@ import {
 } from '../services/traceCaptureService.js'
 import { resolveModelApiBaseUrl, resolveModelApiRule } from '../../shared/modelApiFormats.js'
 import { applyUpstreamHeaders, resolveUpstreamHeaders } from './upstreamHeaders.js'
+import {
+  SESSION_LIMIT_ERROR_CODE,
+  getEffectiveUpstreamSessionId,
+  markUpstreamSessionSuccess,
+  recordSessionLimitExceeded,
+  templateCarriesSessionId,
+} from './sessionRotation.js'
 
 const providerService = new ProviderService()
 const MAX_CREDENTIAL_ERROR_BYTES = 64_000
@@ -511,9 +518,18 @@ export async function handleProxyRequest(req: Request, url: URL): Promise<Respon
   const modelApiFormat = modelApiRule?.apiFormat
   const apiFormat = modelApiFormat ?? config.apiFormat
   const upstreamBaseUrl = resolveModelApiBaseUrl(baseUrl, modelApiRule)
-  const upstreamHeaders = resolveUpstreamHeaders(config.upstreamHeaders, { sessionId: inboundSessionId })
+  // Relays that count requests per conversation id refuse the conversation with
+  // `session_request_limit_exceeded` once its cap is hit. The request body
+  // already re-sends the full history, so only the id sent upstream needs to
+  // change — see sessionRotation.ts. The local session identity (trace,
+  // prompt-cache routing) keeps using the inbound id.
+  const sessionRotationEnabled = templateCarriesSessionId(config.upstreamHeaders)
+  const effectiveUpstreamSessionId = inboundSessionId && sessionRotationEnabled
+    ? getEffectiveUpstreamSessionId(inboundSessionId)
+    : inboundSessionId
+  const upstreamHeaders = resolveUpstreamHeaders(config.upstreamHeaders, { sessionId: effectiveUpstreamSessionId })
 
-  try {
+  const dispatchUpstream = (upstreamHeaders: Record<string, string>): Promise<Response> => {
     if (apiFormat === 'anthropic') {
       // Anthropic-format providers normally connect directly to the upstream
       // endpoint (see providerRuntimeEnv). Only providers that explicitly opt out
@@ -526,7 +542,7 @@ export async function handleProxyRequest(req: Request, url: URL): Promise<Respon
       // model routes to anthropic still reaches the proxy, and its upstream is a
       // native Messages endpoint that accepts nested media unchanged.
       if (modelApiFormat === undefined && config.supportsNestedToolResultMedia) {
-        return Response.json(
+        return Promise.resolve(Response.json(
           {
             type: 'error',
             error: {
@@ -537,22 +553,44 @@ export async function handleProxyRequest(req: Request, url: URL): Promise<Respon
             },
           },
           { status: 400 },
-        )
+        ))
       }
       const hoistNestedMedia = shouldHoistNestedToolResultMedia({
         providerApiFormat: config.apiFormat,
         resolvedApiFormat: apiFormat,
         supportsNestedToolResultMedia: config.supportsNestedToolResultMedia,
       })
-      return await handleAnthropicCompatible(body, upstreamBaseUrl, config.apiKey, config.authStrategy, req.headers, isStream, networkSettings, traceContext, upstreamHeaders, hoistNestedMedia, req.signal)
+      return handleAnthropicCompatible(body, upstreamBaseUrl, config.apiKey, config.authStrategy, req.headers, isStream, networkSettings, traceContext, upstreamHeaders, hoistNestedMedia, req.signal)
     }
     if (apiFormat === 'gemini') {
-      return await handleGemini(body, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, requestOptions, upstreamHeaders, req.signal)
+      return handleGemini(body, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, requestOptions, upstreamHeaders, req.signal)
     }
     if (apiFormat === 'openai_chat') {
-      return await handleOpenaiChat(body, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, requestOptions, upstreamHeaders, undefined, new Set(), req.signal)
+      return handleOpenaiChat(body, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, requestOptions, upstreamHeaders, undefined, new Set(), req.signal)
     }
-    return await handleOpenaiResponses(body, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, promptCacheKey, requestOptions, upstreamHeaders, req.signal)
+    return handleOpenaiResponses(body, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, promptCacheKey, requestOptions, upstreamHeaders, req.signal)
+  }
+
+  try {
+    let response = await dispatchUpstream(upstreamHeaders)
+    if (inboundSessionId && sessionRotationEnabled && response.status === 400) {
+      // Only the relay's own cap code triggers a rotation; reading the (small)
+      // error body of an unrelated 400 stays bounded to this branch.
+      const errText = await response.clone().text().catch(() => '')
+      if (errText.includes(SESSION_LIMIT_ERROR_CODE)) {
+        const retrySessionId = recordSessionLimitExceeded(inboundSessionId, effectiveUpstreamSessionId ?? '')
+        if (retrySessionId) {
+          console.log(`[Proxy] upstream session request limit reached for session ${inboundSessionId}; retrying once with rotated session id ${retrySessionId}`)
+          response = await dispatchUpstream(resolveUpstreamHeaders(config.upstreamHeaders, { sessionId: retrySessionId }))
+        }
+      }
+    } else if (inboundSessionId && sessionRotationEnabled && response.ok && effectiveUpstreamSessionId !== inboundSessionId) {
+      // A successful request under the rotated id: a later refusal of that id
+      // then reads as "counter exhausted" (rotate onward), not "rotation does
+      // not work here" (disable).
+      markUpstreamSessionSuccess(inboundSessionId)
+    }
+    return response
   } catch (err) {
     if (traceContext && !wasTraceErrorRecorded(err) && !recordedTraceErrorContexts.has(traceContext)) {
       void recordProxyTrace({
