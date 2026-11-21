@@ -3575,10 +3575,12 @@ function handleStopGeneration(
     conversationService.sendInterrupt(sessionId)
   } else if (stoppedTurn?.interruptBoundaryPending && conversationService.hasSession(sessionId)) {
     conversationService.pauseTeamWorkers(sessionId)
-  } else {
+  } else if (!conversationService.hasSession(sessionId)) {
     // Team ownership outlives its lead process. Stop must reach the runtime
     // while that process is absent or starting too; an idle UI is not proof
-    // that the independent member processes have stopped.
+    // that the independent member processes have stopped. With a live session
+    // the foreground interrupt below already owns delivery, so this branch
+    // must not double-send it.
     conversationService.sendInterrupt(sessionId)
   }
 
