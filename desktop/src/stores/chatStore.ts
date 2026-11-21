@@ -2981,8 +2981,11 @@ async function fetchAndMapSessionHistory(
   sessionId: string,
   existingOwnedToolUseIds = new Set<string>(),
   signal?: AbortSignal,
+  mode: 'page' | 'full' = 'full',
 ) {
-  const response = await sessionsApi.getFullHistory(sessionId, { signal })
+  const response = mode === 'page'
+    ? await sessionsApi.getHistoryPage(sessionId, { mediaRefs: true }, { signal })
+    : await sessionsApi.getFullHistory(sessionId, { signal })
   const { page } = response
   const historyComplete = !page || page.historyComplete
   const messages = historyComplete ? response.messages : []
@@ -3162,7 +3165,7 @@ function markHistoryRowsDurable(sessionId: string, rows: UIMessage[]) {
 // Older-than-budget history is loaded on explicit request only. The timeline
 // mounts one array, so every page is prepended to `session.messages` directly.
 async function fetchOlderHistoryPage(sessionId: string, cursor: string, signal: AbortSignal): Promise<{ messages: UIMessage[]; page: SessionHistoryPage['page'] }> {
-  const response = await sessionsApi.getHistoryPage(sessionId, { cursor }, { signal })
+  const response = await sessionsApi.getHistoryPage(sessionId, { cursor, mediaRefs: true }, { signal })
   return { messages: mapHistoryMessagesToUiMessages(response.messages), page: response.page }
 }
 
@@ -3592,7 +3595,12 @@ async function loadOlderHistoryPage(
   try {
     const result = await fetchOlderHistoryPage(sessionId, cursor, controller.signal)
     if (controller.signal.aborted || !isCurrentHistoryLifecycle(sessionId, lifecycle)) return
+    const currentPage = get().sessions[sessionId]?.historyPage
+    if (currentPage?.nextCursor !== cursor || currentPage.sourceVersion !== session.historyPage?.sourceVersion) return
+    const olderPage = result.page
+    if (!olderPage || olderPage.sourceVersion !== currentPage.sourceVersion) throw new Error('Session history changed while loading')
     set(state => ({ sessions: updateSessionIn(state.sessions, sessionId, current => {
+      if (current.historyPage !== currentPage) return {}
       // Prepend into the single mounted array. Rows already present (a live
       // message that has since been persisted) keep their existing object.
       const known = new Set(current.messages.flatMap(strongHistoryMessageIdentities))
@@ -3607,11 +3615,17 @@ async function loadOlderHistoryPage(
           headId: (messages[0] as { id?: string } | undefined)?.id,
         })
       }
-      const page = result.page && current.historyPage
-        ? { ...current.historyPage, nextCursor: result.page.nextCursor, hasMore: result.page.hasMore,
-            historyComplete: result.page.historyComplete && current.historyPage.previousCursor == null,
-            omittedOversizedEntries: (current.historyPage.omittedOversizedEntries ?? 0) + (result.page.omittedOversizedEntries ?? 0) }
-        : current.historyPage
+      const omittedOversizedEntries = (currentPage.omittedOversizedEntries ?? 0) + (olderPage.omittedOversizedEntries ?? 0)
+      const contentTruncated = Boolean(currentPage.contentTruncated || olderPage.contentTruncated)
+      const page = {
+        ...currentPage,
+        nextCursor: olderPage.nextCursor,
+        hasMore: olderPage.hasMore,
+        historyComplete: olderPage.nextCursor === null && !olderPage.hasMore && currentPage.previousCursor == null && omittedOversizedEntries === 0 && !contentTruncated,
+        omittedOversizedEntries,
+        contentTruncated,
+        scannedBytes: currentPage.scannedBytes + olderPage.scannedBytes,
+      }
       return {
         messages,
         historyPage: page,
@@ -4793,6 +4807,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
           sessionId,
           sessionOwnedActivityToolUseIds(get().sessions[sessionId]),
           controller.signal,
+          terminalReconnectBoundary || options?.mode === 'terminal-reconnect' ? 'full' : 'page',
         )
         durableHistoryRows.set(sessionId, new WeakSet(uiMessages))
         // TEMP probe: what the cold history fetch returned for this session,
