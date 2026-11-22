@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import { createHash, createHmac } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createResumableSocketHandler } from './ws/resumableStreams.js'
@@ -104,6 +104,33 @@ describe('pairing outlives the listener', () => {
     // A store from a newer version is not evidence that the pairing is gone.
     writeFileSync(storePath, JSON.stringify({ version: 9, devices: [] }))
     expect(service().isDevicePaired('phone')).toBe(true)
+  })
+
+  test('a corrupt devices store is backed up and rebuilt instead of failing control', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'remote-access-corrupt-'))
+    const oldToken = process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
+    process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'fixture-process-credential'
+    cleanups.push(() => {
+      if (oldToken === undefined) delete process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
+      else process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = oldToken
+      rmSync(dir, { recursive: true, force: true })
+    })
+    const storePath = path.join(dir, 'devices.json')
+    // Simulate a torn write: the file exists but is not parseable JSON.
+    writeFileSync(storePath, '\0'.repeat(64))
+    const service = new PublicAccessServer({ storePath, now: () => 1000, serverPort: () => 3456, handleApiRequest: async () => new Response(), handleStatic: async () => null, websocket: { message() {} } })
+    // Before the fix this control route returned 400 with "unavailable device store".
+    const response = await service.control(new Request('http://localhost/api/public-access/status', {
+      method: 'GET', headers: { Authorization: 'Bearer fixture-process-credential' },
+    }))
+    expect(response.status).toBe(200)
+    const body = await response.json() as { devices: unknown[] }
+    expect(body.devices).toEqual([])
+    // The corrupt bytes are preserved for inspection, not silently deleted.
+    const backups = readdirSync(dir).filter(n => n.startsWith('devices.json.corrupt-'))
+    expect(backups.length).toBe(1)
+    // A fresh valid store is written in place so subsequent calls succeed.
+    expect(JSON.parse(readFileSync(storePath, 'utf8'))).toEqual({ version: 1, devices: [] })
   })
 })
 

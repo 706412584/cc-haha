@@ -202,7 +202,15 @@ export class PublicAccessServer {
     if (this.loaded) return
     let old: unknown = {}
     try { old = JSON.parse(readFileSync(this.storePath, 'utf8')) } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT') {
+        // First launch: nothing to load.
+      } else if (error instanceof SyntaxError) {
+        // A torn/truncated write (power loss, killed mid-rename) must not brick
+        // the whole remote access control route. Preserve the corrupt bytes for
+        // inspection and fall back to an empty store; paired phones re-pair.
+        try { renameSync(this.storePath, `${this.storePath}.corrupt-${this.now()}`) } catch { /* best effort */ }
+      } else throw error
     }
     this.stored = migratePublicAccessStore(old)
     this.persist()
