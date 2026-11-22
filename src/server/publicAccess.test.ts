@@ -132,6 +132,63 @@ describe('pairing outlives the listener', () => {
     // A fresh valid store is written in place so subsequent calls succeed.
     expect(JSON.parse(readFileSync(storePath, 'utf8'))).toEqual({ version: 1, devices: [] })
   })
+
+  test('consecutive corrupt stores each get a distinct backup file', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'remote-access-corrupt-twice-'))
+    const oldToken = process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
+    process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'fixture-process-credential'
+    cleanups.push(() => {
+      if (oldToken === undefined) delete process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
+      else process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = oldToken
+      rmSync(dir, { recursive: true, force: true })
+    })
+    const storePath = path.join(dir, 'devices.json')
+    const headers = { Authorization: 'Bearer fixture-process-credential' }
+    const corruptBytesA = 'A'.repeat(32)
+    const corruptBytesB = 'B'.repeat(48)
+    // First corruption + recovery.
+    writeFileSync(storePath, corruptBytesA)
+    const first = new PublicAccessServer({ storePath, now: () => 1000, serverPort: () => 3456, handleApiRequest: async () => new Response(), handleStatic: async () => null, websocket: { message() {} } })
+    expect((await first.control(new Request('http://localhost/api/public-access/status', { method: 'GET', headers }))).status).toBe(200)
+    // Second corruption on the same path with the SAME clock — distinct backup names required.
+    writeFileSync(storePath, corruptBytesB)
+    const second = new PublicAccessServer({ storePath, now: () => 1000, serverPort: () => 3456, handleApiRequest: async () => new Response(), handleStatic: async () => null, websocket: { message() {} } })
+    expect((await second.control(new Request('http://localhost/api/public-access/status', { method: 'GET', headers }))).status).toBe(200)
+    const backups = readdirSync(dir).filter(n => n.startsWith('devices.json.corrupt-')).sort()
+    expect(backups.length).toBe(2)
+    const contents = backups.map(n => readFileSync(path.join(dir, n), 'utf8')).sort()
+    expect(contents).toEqual([corruptBytesA, corruptBytesB])
+  })
+
+  test('if the corrupt store cannot be backed up, the original bytes are left untouched', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'remote-access-corrupt-stuck-'))
+    const oldToken = process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
+    process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'fixture-process-credential'
+    cleanups.push(() => {
+      if (oldToken === undefined) delete process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
+      else process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = oldToken
+      rmSync(dir, { recursive: true, force: true })
+    })
+    const storePath = path.join(dir, 'devices.json')
+    const corruptBytes = '\0'.repeat(64)
+    writeFileSync(storePath, corruptBytes)
+    // Force renameSync to fail so we can verify the corrupt original is left untouched.
+    const fs = await import('node:fs')
+    const renameSpy = spyOn(fs, 'renameSync').mockImplementation(() => { throw new Error('simulated rename failure') })
+    cleanups.push(() => renameSpy.mockRestore())
+    const service = new PublicAccessServer({ storePath, now: () => 1000, serverPort: () => 3456, handleApiRequest: async () => new Response(), handleStatic: async () => null, websocket: { message() {} } })
+    const response = await service.control(new Request('http://localhost/api/public-access/status', {
+      method: 'GET', headers: { Authorization: 'Bearer fixture-process-credential' },
+    }))
+    // Control still responds with an empty device list.
+    expect(response.status).toBe(200)
+    expect((await response.json() as { devices: unknown[] }).devices).toEqual([])
+    // The original corrupt bytes are preserved verbatim.
+    expect(readFileSync(storePath, 'utf8')).toBe(corruptBytes)
+    // No new store was written, and no backup file appeared.
+    const entries = readdirSync(dir)
+    expect(entries).toEqual(['devices.json'])
+  })
 })
 
 describe('public transport boundary', () => {

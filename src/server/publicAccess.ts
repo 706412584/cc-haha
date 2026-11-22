@@ -185,6 +185,8 @@ export class PublicAccessServer {
   private gatewayId: string | null = null
   private stored: Stored = { version: 1, devices: [] }
   private loaded = false
+  /** True when the on-disk store was corrupt and could not be backed up; persist() must not overwrite it. */
+  private preserveCorruptOnDisk = false
   private pairing: { hash: string, expiresAt: number } | null = null
   private pending = new Map<string, Pending>()
   private sockets = new Set<ServerWebSocket<RemoteData>>()
@@ -201,6 +203,9 @@ export class PublicAccessServer {
   private load() {
     if (this.loaded) return
     let old: unknown = {}
+    // Tracks whether the on-disk store is unusable and the bytes have been preserved
+    // elsewhere; if we cannot preserve them we must NOT overwrite the original.
+    let skipPersist = false
     try { old = JSON.parse(readFileSync(this.storePath, 'utf8')) } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       if (code === 'ENOENT') {
@@ -209,15 +214,29 @@ export class PublicAccessServer {
         // A torn/truncated write (power loss, killed mid-rename) must not brick
         // the whole remote access control route. Preserve the corrupt bytes for
         // inspection and fall back to an empty store; paired phones re-pair.
-        try { renameSync(this.storePath, `${this.storePath}.corrupt-${this.now()}`) } catch { /* best effort */ }
+        const backup = `${this.storePath}.corrupt-${this.now()}-${secret()}`
+        try {
+          renameSync(this.storePath, backup)
+          console.warn(`[public-access] devices store was unparseable; backed up to ${backup} and rebuilt empty. Paired phones must re-pair.`)
+        } catch (backupError) {
+          // Could not preserve the bytes — leave the original file untouched and
+          // run on an in-memory empty store so control still responds. Surface
+          // the failure loudly so the user can recover the file manually. Block
+          // any subsequent persist() for the lifetime of this instance so a
+          // later revoke/approve cannot silently overwrite the corrupt bytes.
+          skipPersist = true
+          this.preserveCorruptOnDisk = true
+          console.warn(`[public-access] devices store is unparseable and could not be backed up (${(backupError as Error).message}). Leaving the original file in place; running with an empty in-memory device list.`)
+        }
       } else throw error
     }
     this.stored = migratePublicAccessStore(old)
-    this.persist()
+    if (!skipPersist) this.persist()
     this.loaded = true
   }
 
   private persist() {
+    if (this.preserveCorruptOnDisk) return
     mkdirSync(path.dirname(this.storePath), { recursive: true, mode: 0o700 })
     const temporary = `${this.storePath}.${secret()}.tmp`
     writeFileSync(temporary, JSON.stringify(this.stored), { mode: 0o600 })
