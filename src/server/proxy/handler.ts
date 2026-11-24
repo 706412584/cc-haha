@@ -71,6 +71,7 @@ import {
   recordSessionLimitExceeded,
   templateCarriesSessionId,
 } from './sessionRotation.js'
+import { TURN_LIMIT_ERROR_CODE, trimHistoryForTurnLimit } from './historyTrim.js'
 
 const providerService = new ProviderService()
 const MAX_CREDENTIAL_ERROR_BYTES = 64_000
@@ -529,7 +530,10 @@ export async function handleProxyRequest(req: Request, url: URL): Promise<Respon
     : inboundSessionId
   const upstreamHeaders = resolveUpstreamHeaders(config.upstreamHeaders, { sessionId: effectiveUpstreamSessionId })
 
-  const dispatchUpstream = (upstreamHeaders: Record<string, string>): Promise<Response> => {
+  const dispatchUpstream = (
+    upstreamHeaders: Record<string, string>,
+    requestBody: AnthropicRequest = body,
+  ): Promise<Response> => {
     if (apiFormat === 'anthropic') {
       // Anthropic-format providers normally connect directly to the upstream
       // endpoint (see providerRuntimeEnv). Only providers that explicitly opt out
@@ -560,28 +564,38 @@ export async function handleProxyRequest(req: Request, url: URL): Promise<Respon
         resolvedApiFormat: apiFormat,
         supportsNestedToolResultMedia: config.supportsNestedToolResultMedia,
       })
-      return handleAnthropicCompatible(body, upstreamBaseUrl, config.apiKey, config.authStrategy, req.headers, isStream, networkSettings, traceContext, upstreamHeaders, hoistNestedMedia, req.signal)
+      return handleAnthropicCompatible(requestBody, upstreamBaseUrl, config.apiKey, config.authStrategy, req.headers, isStream, networkSettings, traceContext, upstreamHeaders, hoistNestedMedia, req.signal)
     }
     if (apiFormat === 'gemini') {
-      return handleGemini(body, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, requestOptions, upstreamHeaders, req.signal)
+      return handleGemini(requestBody, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, requestOptions, upstreamHeaders, req.signal)
     }
     if (apiFormat === 'openai_chat') {
-      return handleOpenaiChat(body, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, requestOptions, upstreamHeaders, undefined, new Set(), req.signal)
+      return handleOpenaiChat(requestBody, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, requestOptions, upstreamHeaders, undefined, new Set(), req.signal)
     }
-    return handleOpenaiResponses(body, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, promptCacheKey, requestOptions, upstreamHeaders, req.signal)
+    return handleOpenaiResponses(requestBody, upstreamBaseUrl, config.apiKey, req.headers, config.authStrategy === 'api_key', isStream, networkSettings, traceContext, promptCacheKey, requestOptions, upstreamHeaders, req.signal)
   }
 
   try {
     let response = await dispatchUpstream(upstreamHeaders)
-    if (inboundSessionId && sessionRotationEnabled && response.status === 400) {
-      // Only the relay's own cap code triggers a rotation; reading the (small)
+    if (response.status === 400) {
+      // Only the relay's own cap codes trigger a retry; reading the (small)
       // error body of an unrelated 400 stays bounded to this branch.
       const errText = await response.clone().text().catch(() => '')
-      if (errText.includes(SESSION_LIMIT_ERROR_CODE)) {
+      if (inboundSessionId && sessionRotationEnabled && errText.includes(SESSION_LIMIT_ERROR_CODE)) {
         const retrySessionId = recordSessionLimitExceeded(inboundSessionId, effectiveUpstreamSessionId ?? '')
         if (retrySessionId) {
           console.log(`[Proxy] upstream session request limit reached for session ${inboundSessionId}; retrying once with rotated session id ${retrySessionId}`)
           response = await dispatchUpstream(resolveUpstreamHeaders(config.upstreamHeaders, { sessionId: retrySessionId }))
+        }
+      } else if (errText.includes(TURN_LIMIT_ERROR_CODE)) {
+        // Relays that cap what one request may carry (history size or user
+        // turns) refuse the whole conversation; a shorter history is the only
+        // way to continue in place. Rotating the session id cannot help — the
+        // cap is on the request content, not on the conversation identity.
+        const trimmedBody = trimHistoryForTurnLimit(body, errText)
+        if (trimmedBody) {
+          console.log(`[Proxy] upstream turn limit reached for session ${inboundSessionId ?? '<unknown>'}; retrying once with trimmed history (${body.messages.length} -> ${trimmedBody.messages.length} messages)`)
+          response = await dispatchUpstream(upstreamHeaders, trimmedBody)
         }
       }
     } else if (inboundSessionId && sessionRotationEnabled && response.ok && effectiveUpstreamSessionId !== inboundSessionId) {
