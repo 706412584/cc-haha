@@ -76,7 +76,7 @@ import {
   resolveProviderApiKey,
 } from './providerRuntimeEnv.js'
 import { resolveModelApiBaseUrl, resolveModelApiRule, type ModelApiFormatRule } from '../../shared/modelApiFormats.js'
-import { applyUpstreamHeaders, resolveUpstreamHeaders } from '../proxy/upstreamHeaders.js'
+import { applyUpstreamHeaders, parseCustomHeaderLines, resolveUpstreamHeaders } from '../proxy/upstreamHeaders.js'
 import {
   getNetworkProxyFetchOptions,
   loadNetworkSettings,
@@ -1105,6 +1105,7 @@ export class ProviderService {
       proxy: provider.proxy,
       supportsNestedToolResultMedia: provider.supportsNestedToolResultMedia,
       requestCompatibility: provider.requestCompatibility,
+      customHeaders: provider.customHeaders,
     })
   }
 
@@ -1119,8 +1120,14 @@ export class ProviderService {
     // would. Keeps the probe honest without accepting rule data over HTTP.
     const presetId = input.presetId ?? ''
     const modelApiFormats = presetId ? getPresetModelApiFormats(presetId) : []
+    // The user's own headers win over the preset's: they typed them for this
+    // endpoint, and a case-insensitive replace avoids sending one header twice.
+    const declaredHeaders = applyUpstreamHeaders<Record<string, string>>(
+      presetId ? { ...getPresetUpstreamHeaders(presetId) } : {},
+      parseCustomHeaderLines(input.customHeaders),
+    )
     const upstreamHeaders = resolveUpstreamHeaders(
-      presetId ? getPresetUpstreamHeaders(presetId) : {},
+      declaredHeaders,
       { sessionId: connectivityProbeSessionId() },
     )
     // Same resolution the proxy performs, so the probe reaches what production
@@ -1201,7 +1208,13 @@ export class ProviderService {
     const trimmed = input.baseUrl.replace(/\/+$/, '')
     const url = trimmed.endsWith('/v1') ? `${trimmed}/models` : `${trimmed}/v1/models`
 
-    const headers: Record<string, string> = { Accept: 'application/json' }
+    // This probe calls the upstream directly, so a gateway that gates on the
+    // client identity (agentrouter, xingchiapi) needs the provider's own
+    // headers here too. Credentials are written after, so they always win.
+    const headers = applyUpstreamHeaders<Record<string, string>>(
+      { Accept: 'application/json' },
+      resolveUpstreamHeaders(parseCustomHeaderLines(input.customHeaders)),
+    )
     if (format === 'anthropic') {
       headers['x-api-key'] = input.apiKey
       headers['anthropic-version'] = '2023-06-01'

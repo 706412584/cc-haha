@@ -58,6 +58,9 @@ const FetchProviderModelsSchema = z.object({
   baseUrl: z.string().min(1),
   apiKey: z.string().min(1),
   isFullUrl: z.boolean().optional(),
+  // Probes go straight upstream; gateways with a client whitelist 401 without
+  // the provider's own headers.
+  customHeaders: z.string().optional(),
   proxy: ProviderProxyConfigSchema.optional(),
   // `modelsUrl` is deliberately NOT accepted over HTTP. The service still
   // supports the override for internal callers, but exposing a free-form

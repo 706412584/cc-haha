@@ -165,6 +165,12 @@ export type TestProviderConfigInput = {
    * rules and upstream headers for an unsaved config. Only the id is sent.
    */
   presetId?: string
+  /**
+   * The form's multi-line `customHeaders` text. The test probe reaches the
+   * upstream directly, so gateways gating on a client identity need these to
+   * avoid a false 401.
+   */
+  customHeaders?: string
 }
 
 /** Input for the server-side `/api/providers/fetch-models` proxy. */
@@ -172,6 +178,8 @@ export type FetchModelsInput = {
   baseUrl: string
   apiKey: string
   apiFormat?: ApiFormat
+  /** Multi-line `Name: Value` text; the probe reaches the upstream directly. */
+  customHeaders?: string
 }
 
 /** Response from `/api/providers/fetch-models`. `data` is the upstream JSON body verbatim. */
@@ -269,12 +277,16 @@ export type ProviderModelsInput = {
   modelsUrl?: string
   /** The form's proxy override, so the probe takes the route chat will take. */
   proxy?: ProviderProxyConfig
+  /** Multi-line `Name: Value` text; the probe reaches the upstream directly. */
+  customHeaders?: string
 }
 
 export type FetchUpstreamModelsInput = {
   baseUrl: string
   apiKey: string
   apiFormat: ApiFormat
+  /** Multi-line `Name: Value` text; the probe reaches the upstream directly. */
+  customHeaders?: string
 }
 
 export type FetchUpstreamModelsResult = {

@@ -88,3 +88,36 @@ export function resolveUpstreamHeaders(
 
   return resolved
 }
+
+/**
+ * Parses the multi-line `Name: Value` text a user stores in a provider's
+ * `customHeaders` field (the same text the CLI receives as
+ * `ANTHROPIC_CUSTOM_HEADERS`).
+ *
+ * Server-side callers need this for the paths that do NOT go through the CLI:
+ * the "test connection" and "fetch models" probes call the upstream directly,
+ * so without it a gateway that requires a client identity (agentrouter,
+ * xingchiapi) would reject those probes while real chat succeeds.
+ *
+ * Parse rules mirror the CLI's `getCustomHeaders`: first `:` splits name from
+ * value; malformed lines are skipped. Values containing CR/LF are dropped by
+ * `resolveUpstreamHeaders` on the next step.
+ */
+export function parseCustomHeaderLines(
+  text: string | undefined | null,
+): Record<string, string> {
+  const headers: Record<string, string> = {}
+  if (!text) return headers
+
+  for (const line of text.split(/\n|\r\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    const colonIdx = trimmed.indexOf(':')
+    if (colonIdx === -1) continue
+    const name = trimmed.slice(0, colonIdx).trim()
+    const value = trimmed.slice(colonIdx + 1).trim()
+    if (name) headers[name] = value
+  }
+
+  return headers
+}

@@ -325,6 +325,38 @@ describe('fetchProviderModels', () => {
     expect(calls[0].init?.signal).toBeDefined()
   })
 
+  test('forwards the provider customHeaders to the upstream probe', async () => {
+    // A gateway gating on client identity (agentrouter) answers 401 to the
+    // probe's default UA, which made "fetch models" fail for a provider whose
+    // real chat works. The declared headers must ride along.
+    stubFetchSequence([() => jsonResponse({ data: [{ id: 'gpt-6.1-sol' }] })])
+
+    await fetchProviderModels({
+      baseUrl: 'https://agentrouter.org',
+      apiKey: 'sk-test-key-123456',
+      customHeaders: 'user-agent: codex_cli_rs/0.20.0 (external; cli)',
+    })
+
+    const headers = new Headers(calls[0].init?.headers)
+    expect(headers.get('user-agent')).toBe('codex_cli_rs/0.20.0 (external; cli)')
+    // The probe credential is written after the declared headers and wins.
+    expect(headers.get('authorization')).toBe('Bearer sk-test-key-123456')
+  })
+
+  test('does not let customHeaders replace the probe credential', async () => {
+    stubFetchSequence([() => jsonResponse({ data: [{ id: 'gpt-4o' }] })])
+
+    await fetchProviderModels({
+      baseUrl: 'https://api.example.com',
+      apiKey: 'sk-test-key-123456',
+      customHeaders: 'Authorization: Bearer attacker\nx-api-key: attacker',
+    })
+
+    const headers = new Headers(calls[0].init?.headers)
+    expect(headers.get('authorization')).toBe('Bearer sk-test-key-123456')
+    expect(headers.get('x-api-key')).toBeNull()
+  })
+
   test('sorts by id, dedupes, and maps owned_by', async () => {
     stubFetchSequence([() => jsonResponse({
       object: 'list',

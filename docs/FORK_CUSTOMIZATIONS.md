@@ -37,6 +37,7 @@
 | Provider compat/thinking 徽章 + media proxy 步骤标签 | `desktop/src/pages/settings/ProviderSettings.tsx` | 合并 diff 目视 |
 | Provider 编辑面板自定义请求头 textarea（写入 `env.ANTHROPIC_CUSTOM_HEADERS`,可覆盖 UA) | `desktop/src/pages/settings/ProviderSettings.tsx`(`readCustomHeadersFromSettingsJson` / `updateSettingsJsonCustomHeaders`) | `ProviderSettings.test.tsx`「provider custom request headers editor」4 例绿;5 份 locale 同步 `settings.providers.customHeaders*` |
 | `SavedProvider.customHeaders` 持久化到 provider 数据（非默认 provider 也能存;`buildProviderManagedEnv` 写回 env 防 sync 覆盖) | `src/server/types/provider.ts`(3 处 schema)、`src/server/services/providerRuntimeEnv.ts`(return 末尾)、`desktop/src/types/provider.ts`(3 处) | `provider-runtime-env.test.ts` 3 例新测试绿 |
+| ★ 探针携带 `customHeaders`：测试连接 / 获取模型直连上游（不经 proxy），白名单网关（agentrouter、xingchiapi）否则对**探测**假 401 而真实聊天正常；用户头覆盖 preset 头，凭据与 BLOCKED 头始终后写 | `src/server/proxy/upstreamHeaders.ts`(`parseCustomHeaderLines`)、`src/server/services/providerService.ts`(`testProviderConfig`/`fetchUpstreamModels`)、`src/server/services/providerModelCatalog.ts`(`fetchProviderModels`)、`desktop/src/pages/settings/ProviderSettings.tsx`(`handleTest`/`handleFetchModels`/`savedConfigUnchanged`) | `upstreamHeaders.test.ts` parseCustomHeaderLines 6 例、`providerService.test.ts` 4 例、`providerModelCatalog.test.ts` 2 例绿 |
 
 ## C. 会话存储 / 索引 / 历史
 

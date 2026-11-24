@@ -319,6 +319,12 @@ export const TestProviderSchema = z.object({
    * wire — the rules themselves stay server-side.
    */
   presetId: z.string().optional(),
+  /**
+   * The provider's multi-line `customHeaders` text. Probes call the upstream
+   * directly (not through the proxy), so without this a gateway enforcing a
+   * client whitelist would fail the probe while real chat succeeds.
+   */
+  customHeaders: z.string().optional(),
   proxy: ProviderProxyConfigSchema.optional(),
 })
 
@@ -335,6 +341,8 @@ export const FetchModelsSchema = z.object({
   baseUrl: z.string().url(),
   apiKey: z.string().min(1),
   apiFormat: ApiFormatSchema.default('anthropic'),
+  /** See `TestProviderSchema.customHeaders`: the probe bypasses the proxy. */
+  customHeaders: z.string().optional(),
 })
 
 export const ReorderProvidersSchema = z.object({

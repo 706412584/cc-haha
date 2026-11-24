@@ -2037,7 +2037,12 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
         : proxyMode === 'manual' && isValidHttpProxyUrl(proxyUrl.trim())
           ? { mode: proxyMode, url: proxyUrl.trim() }
           : undefined
-      const result = await fetchModels({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim(), ...(probeProxy && { proxy: probeProxy }) })
+      const result = await fetchModels({
+        baseUrl: baseUrl.trim(),
+        apiKey: apiKey.trim(),
+        ...(customHeadersValue.trim() ? { customHeaders: customHeadersValue } : {}),
+        ...(probeProxy && { proxy: probeProxy }),
+      })
       // The form moved on while we were probing — this answer describes a base
       // URL or key the user no longer has typed in.
       if (modelsRequestRef.current !== requestId) return
@@ -2239,6 +2244,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
         apiFormat === provider.apiFormat &&
         authStrategy === provider.authStrategy &&
         supportsNestedToolResultMedia === (provider.supportsNestedToolResultMedia ?? true) &&
+        customHeadersValue.trim() === (provider.customHeaders ?? '').trim() &&
         JSON.stringify(formCompatibility) === JSON.stringify(provider.requestCompatibility)
       if (savedConfigUnchanged && provider) {
         result = await useProviderStore.getState().testProvider(provider.id, {
@@ -2254,6 +2260,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
           apiFormat,
           supportsNestedToolResultMedia,
           presetId: selectedPreset.id,
+          ...(customHeadersValue.trim() ? { customHeaders: customHeadersValue } : {}),
           ...(formCompatibility ? { requestCompatibility: formCompatibility } : {}),
         })
       }

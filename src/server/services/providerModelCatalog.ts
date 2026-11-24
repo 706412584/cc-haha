@@ -14,6 +14,7 @@ import {
   resolveProviderNetworkSettings,
 } from './networkSettings.js'
 import type { ProviderProxyConfig } from '../types/provider.js'
+import { applyUpstreamHeaders, parseCustomHeaderLines, resolveUpstreamHeaders } from '../proxy/upstreamHeaders.js'
 
 export type FetchedModel = {
   id: string
@@ -46,6 +47,11 @@ export type FetchProviderModelsInput = {
   modelsUrl?: string
   /** The provider's own proxy override, so the probe reaches it the way chat will. */
   proxy?: ProviderProxyConfig
+  /**
+   * The provider's multi-line `customHeaders` text. This probe goes straight
+   * upstream, so gateways that gate on the client identity need these too.
+   */
+  customHeaders?: string
 }
 
 // cc-switch's FETCH_TIMEOUT_SECS. Deliberately not networkSettings'
@@ -213,15 +219,19 @@ export async function fetchProviderModels(
     let response: Response
     try {
       const proxyOptions = getNetworkProxyFetchOptions(networkSettings, endpoint)
+      // cc-switch sends a bearer token to every provider, including the
+      // Anthropic- and Gemini-compatible ones. There is deliberately no
+      // x-api-key / anthropic-version branch here. The credential is written
+      // last so a credential-shaped custom header (already blocked upstream)
+      // could never replace it.
+      const headers = applyUpstreamHeaders<Record<string, string>>(
+        { Accept: 'application/json' },
+        resolveUpstreamHeaders(parseCustomHeaderLines(input.customHeaders)),
+      )
+      headers['Authorization'] = `Bearer ${apiKey}`
       response = await fetch(endpoint, {
         method: 'GET',
-        // cc-switch sends a bearer token to every provider, including the
-        // Anthropic- and Gemini-compatible ones. There is deliberately no
-        // x-api-key / anthropic-version branch here.
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          Accept: 'application/json',
-        },
+        headers,
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         ...proxyOptions,
       })

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { applyUpstreamHeaders, resolveUpstreamHeaders } from './upstreamHeaders.js'
+import { applyUpstreamHeaders, parseCustomHeaderLines, resolveUpstreamHeaders } from './upstreamHeaders.js'
 
 const OPENCODE_GO_HEADERS = {
   'User-Agent': 'cc-haha/$VERSION',
@@ -120,4 +120,38 @@ describe('applyUpstreamHeaders', () => {
     }
   })
 
+})
+
+describe('parseCustomHeaderLines', () => {
+  test('parses one header per line, trimming name and value', () => {
+    expect(parseCustomHeaderLines('user-agent: codex_cli_rs/0.20.0 (external; cli)')).toEqual({
+      'user-agent': 'codex_cli_rs/0.20.0 (external; cli)',
+    })
+    expect(parseCustomHeaderLines('A: 1\nB: 2')).toEqual({ A: '1', B: '2' })
+  })
+
+  test('splits on the first colon so values may contain colons', () => {
+    expect(parseCustomHeaderLines('Referer: https://example.test:8443/x')).toEqual({
+      Referer: 'https://example.test:8443/x',
+    })
+  })
+
+  test('skips malformed and blank lines', () => {
+    expect(parseCustomHeaderLines('\n\nno-colon-here\nX: y\n   \n')).toEqual({ X: 'y' })
+  })
+
+  test('returns an empty map for absent, empty, or whitespace-only text', () => {
+    for (const text of [undefined, null, '', '   \n  ']) expect(parseCustomHeaderLines(text)).toEqual({})
+  })
+
+  test('later duplicate lines win, matching the CLI parser', () => {
+    expect(parseCustomHeaderLines('X-Test: one\nX-Test: two')).toEqual({ 'X-Test': 'two' })
+  })
+
+  test('a credential-shaped line parses but is stripped by resolveUpstreamHeaders', () => {
+    const parsed = parseCustomHeaderLines('Authorization: Bearer sneaky')
+    expect(parsed).toEqual({ Authorization: 'Bearer sneaky' })
+    // resolveUpstreamHeaders is the guard that strips it before any request.
+    expect(resolveUpstreamHeaders(parsed)).toEqual({})
+  })
 })
