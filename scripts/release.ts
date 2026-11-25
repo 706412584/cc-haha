@@ -60,7 +60,9 @@ async function run(cmd: string[], cwd: string) {
 }
 
 function releaseNotesPath(version: string) {
-  return path.join('release-notes', `v${version}.md`)
+  // Git tree paths must use forward slashes; path.join would emit backslashes
+  // on Windows and `git cat-file <rev>:release-notes\vX.md` would not match.
+  return `release-notes/v${version}.md`
 }
 
 /** Step 1: bump the version and commit it with its notes on release/v<version>. */
