@@ -35,14 +35,39 @@ import type { AnthropicMessage, AnthropicRequest } from './transform/types.js'
 export const TURN_LIMIT_ERROR_CODE = 'session_turn_limit_exceeded'
 
 /**
- * The relay's request-size cap for `tools`/`instructions` requests, measured
- * from its own boundary: 805KB of history passes when sent without
- * `tools`/`instructions`; the same history plus 28KB of `instructions` (835KB)
- * or plus 131 tool definitions (829KB) is refused. Tools and instructions share
- * that budget, so reserve room for them: 600KB of model-visible message content
- * plus a typical system/tools payload stays under the passing side.
+ * The relay's request-size cap for `tools`/`instructions` requests.
+ *
+ * The relay changes this cap without notice: on 2026-11-25 the wording moved
+ * from "more than 200 model turns" (805KB of pure history passed, 835KB with
+ * instructions was refused) to "reached 100 model turns". Measured against the
+ * 100-turn wording: a 381KB request passes, a 572KB request is refused, and a
+ * 150-round-trip request reports "105 turns" — the counter is a size-derived
+ * number, not an item count (1 user + 101 assistant messages still passes).
+ *
+ * 250KB of model-visible message content leaves room for the real request's
+ * system prompt and ~100 tool definitions under that boundary.
  */
-export const TRIMMED_HISTORY_BUDGET_BYTES = 600 * 1024
+export const TRIMMED_HISTORY_BUDGET_BYTES = 250 * 1024
+
+/**
+ * Process-wide override for the trim budget. Relays change their caps without
+ * notice; setting this (or a provider's `turnLimitTrimBytes`) lets the user
+ * follow the new boundary without a code change or a new build.
+ */
+export const TURN_LIMIT_BUDGET_ENV = 'CLAUDE_PROXY_TURN_LIMIT_BUDGET_BYTES'
+
+/**
+ * Budget precedence: per-provider override, then the environment variable,
+ * then the built-in default.
+ */
+export function resolveTurnLimitBudgetBytes(override?: number | null): number {
+  if (typeof override === 'number' && Number.isFinite(override) && override > 0) {
+    return Math.floor(override)
+  }
+  const fromEnv = Number.parseInt(process.env[TURN_LIMIT_BUDGET_ENV] ?? '', 10)
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv
+  return TRIMMED_HISTORY_BUDGET_BYTES
+}
 
 /** The relay's user-message cap on its non-tool path. */
 export const USER_TURN_LIMIT = 20
@@ -53,10 +78,19 @@ export const USER_TURN_LIMIT = 20
  * without them the model reads the recent tool trail and concludes the user
  * never approved the work it is doing.
  */
-export const EARLIER_INSTRUCTION_BUDGET_BYTES = 6 * 1024
+export const EARLIER_INSTRUCTION_BUDGET_BYTES = 16 * 1024
 
-const EARLIER_INSTRUCTION_LIMIT = 8
-const EARLIER_INSTRUCTION_CHARS = 800
+const EARLIER_INSTRUCTION_LIMIT = 64
+const EARLIER_INSTRUCTION_CHARS = 300
+
+/**
+ * Budget for the compacted activity digest that keeps the shape of the work
+ * that fell outside the recent window. Tool calls and their outputs are
+ * summarized instead of dropped whole, so the model still knows what it did
+ * even though the details are gone.
+ */
+export const COMPACTED_ACTIVITY_BUDGET_BYTES = 32 * 1024
+const COMPACTED_ENTRY_CHARS = 500
 
 type TurnLimitKind = 'user-turns' | 'history-size'
 
@@ -66,7 +100,7 @@ type ParsedTurnLimit = {
   limit?: number
 }
 
-const TURN_LIMIT_PATTERN = /(?:已满|超过)\s*(\d+)\s*轮|(?:reached|more than)\s+(\d+)\s+(?:model\s+)?turns?/i
+const TURN_LIMIT_PATTERN = /(?:已满|超过|已回复)\s*(\d+)\s*轮|(?:reached|more than)\s+(\d+)\s+(?:model\s+)?turns?/i
 
 /**
  * Read which cap the relay reported. The "size" wording ("模型已回复超过
@@ -93,6 +127,25 @@ function isToolResultMessage(message: AnthropicMessage): boolean {
 
 function isRealUserMessage(message: AnthropicMessage): boolean {
   return message.role === 'user' && !isToolResultMessage(message)
+}
+
+/**
+ * System injections ride in user messages too (background-task notifications,
+ * skill/bootstrap blocks, local command output). They are cheap in meaning but
+ * expensive in bytes, and they crowd out the user's actual authorizations in
+ * the retained-instructions budget. Keep them out of that list.
+ */
+const USER_INJECTION_MARKERS = [
+  '<task-notification',
+  '<task-id>',
+  'Base directory for this skill',
+  '<local-command-',
+]
+
+function isUserInstructionMessage(message: AnthropicMessage): boolean {
+  if (!isRealUserMessage(message)) return false
+  const text = userMessageText(message)
+  return !USER_INJECTION_MARKERS.some(marker => text.includes(marker))
 }
 
 /** UTF-8 size of a text payload, matching what the relay counts on the wire. */
@@ -181,6 +234,78 @@ function userMessageText(message: AnthropicMessage): string {
  * {@link EARLIER_INSTRUCTION_CHARS}, and the whole list is clamped to
  * {@link EARLIER_INSTRUCTION_BUDGET_BYTES}.
  */
+function messageSummaryText(message: AnthropicMessage): string {
+  if (typeof message.content === 'string') return message.content
+  if (!Array.isArray(message.content)) return ''
+  const parts: string[] = []
+  for (const block of message.content) {
+    if (block.type === 'text') {
+      parts.push(block.text)
+    } else if (block.type === 'tool_use') {
+      let args = ''
+      try {
+        args = JSON.stringify(block.input)
+      } catch {
+        // Circular tool input: summarize the call without its arguments.
+      }
+      parts.push(`[tool_use ${block.name}${args ? ` ${args}` : ''}]`)
+    } else if (block.type === 'tool_result') {
+      const content = block.content
+      const text = typeof content === 'string'
+        ? content
+        : Array.isArray(content)
+          ? content.filter(part => part.type === 'text').map(part => part.text).join('')
+          : ''
+      parts.push(`[tool_result ${text}]`)
+    }
+  }
+  return parts.join(' ')
+}
+
+/**
+ * Summarize the messages that fell outside the recent window into one short
+ * user message: tool names, arguments and the head of each output, newest
+ * entries kept first. The model keeps a coarse memory of the work instead of
+ * losing it entirely, without spending a second upstream request.
+ */
+function buildCompactedActivity(
+  messages: AnthropicMessage[],
+  start: number,
+  anchorIndex: number,
+  budgetBytes: number,
+): AnthropicMessage | null {
+  if (start <= 0 || budgetBytes <= 0) return null
+  const header = '[Compacted earlier activity retained for continuity]'
+  const entries: string[] = []
+  let used = textBytes(header)
+  for (let index = start - 1; index >= 0; index -= 1) {
+    if (index === anchorIndex) continue
+    // Real user messages are carried by the earlier-instructions list.
+    if (isRealUserMessage(messages[index])) continue
+    const text = messageSummaryText(messages[index]).trim()
+    if (!text) continue
+    const entry = text.length > COMPACTED_ENTRY_CHARS
+      ? `${text.slice(0, COMPACTED_ENTRY_CHARS)}…`
+      : text
+    const size = textBytes(entry)
+    if (used + size > budgetBytes && entries.length > 0) break
+    entries.push(entry)
+    used += size
+    if (used >= budgetBytes) break
+  }
+  if (entries.length === 0) return null
+  entries.reverse()
+  const render = (): string => `${header}\n${entries.map(entry => `- ${entry}`).join('\n')}`
+  let content = render()
+  // The per-entry "- " prefix and newlines are not in the accumulator; drop the
+  // oldest entries until the rendered digest itself fits.
+  while (entries.length > 1 && textBytes(content) > budgetBytes) {
+    entries.shift()
+    content = render()
+  }
+  return { role: 'user', content }
+}
+
 function buildEarlierInstructions(
   messages: AnthropicMessage[],
   start: number,
@@ -189,7 +314,7 @@ function buildEarlierInstructions(
   const picked: string[] = []
   for (let index = start - 1; index >= 0; index -= 1) {
     if (index === anchorIndex) continue
-    if (!isRealUserMessage(messages[index])) continue
+    if (!isUserInstructionMessage(messages[index])) continue
     const text = userMessageText(messages[index]).trim()
     if (!text) continue
     picked.push(
@@ -320,7 +445,7 @@ function trimToByteBudget(
   // Earlier user messages are cheap and carry authorizations/task switches;
   // reserve their list up front so the window never crowds it out.
   const hasEarlierUser = messages.some(
-    (message, index) => index !== anchorIndex && isRealUserMessage(message),
+    (message, index) => index !== anchorIndex && isUserInstructionMessage(message),
   )
   const earlierReserve = hasEarlierUser ? EARLIER_INSTRUCTION_BUDGET_BYTES : 0
 
@@ -336,8 +461,9 @@ function trimToByteBudget(
     degradedLatest = true
   }
 
-  // Reserve the anchor and earlier-instruction shares up front.
-  let used = (anchorFits ? anchorBytes : 0) + earlierReserve
+  // Reserve the anchor, earlier-instruction and compacted-activity shares up
+  // front so the recent window never crowds them out.
+  let used = (anchorFits ? anchorBytes : 0) + earlierReserve + COMPACTED_ACTIVITY_BUDGET_BYTES
   let start = source.length
   for (let index = source.length - 1; index >= 0; index -= 1) {
     if (index === anchorIndex) break
@@ -365,6 +491,16 @@ function trimToByteBudget(
     ? buildEarlierInstructions(messages, start, anchorIndex)
     : null
   if (earlier) prefix.push(earlier)
+  const compacted = buildCompactedActivity(
+    messages,
+    start,
+    anchorIndex,
+    Math.min(
+      COMPACTED_ACTIVITY_BUDGET_BYTES,
+      Math.max(0, budgetBytes - totalBytes(prefix) - totalBytes(kept)),
+    ),
+  )
+  if (compacted) prefix.push(compacted)
   if (prefix.length > 0) kept = [...prefix, ...kept]
 
   if (kept.length === 0) return null
@@ -420,6 +556,7 @@ function trimToUserTurnLimit(
 export function trimHistoryForTurnLimit(
   body: AnthropicRequest,
   errText: string,
+  options: { budgetBytes?: number | null } = {},
 ): AnthropicRequest | null {
   const messages = body.messages
   if (!Array.isArray(messages) || messages.length === 0) return null
@@ -435,7 +572,7 @@ export function trimHistoryForTurnLimit(
     }
   }
 
-  const trimmed = trimToByteBudget(messages, TRIMMED_HISTORY_BUDGET_BYTES)
+  const trimmed = trimToByteBudget(messages, resolveTurnLimitBudgetBytes(options.budgetBytes))
   if (!trimmed) return null
   return { ...body, messages: trimmed }
 }

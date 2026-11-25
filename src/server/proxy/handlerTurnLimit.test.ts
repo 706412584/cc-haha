@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProviderService } from '../services/providerService.js'
 import { traceCaptureService } from '../services/traceCaptureService.js'
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
-import { handleProxyRequest } from './handler.js'
+import { handleProxyRequest, readSettingsTurnLimitBudgetBytes } from './handler.js'
 
 /** Minimal Responses API success body. */
 function upstreamBody() {
@@ -127,6 +127,25 @@ describe('proxy retries a turn-limit refusal with trimmed history', () => {
     expect(secondInput.length).toBeLessThan(firstInput.length)
     // The kept window still starts with the task anchor.
     expect(secondInput[0]).toMatchObject({ type: 'message', role: 'user', content: 'TASK' })
+  })
+
+  test('reads the trim budget from settings.json env', async () => {
+    const dir = join(fixture, 'cc-haha')
+    await mkdir(dir, { recursive: true })
+    const file = join(dir, 'settings.json')
+
+    await writeFile(file, JSON.stringify({
+      env: { CLAUDE_PROXY_TURN_LIMIT_BUDGET_BYTES: '123456' },
+    }))
+    expect(await readSettingsTurnLimitBudgetBytes()).toBe(123456)
+
+    await writeFile(file, JSON.stringify({
+      env: { CLAUDE_PROXY_TURN_LIMIT_BUDGET_BYTES: 'not-a-number' },
+    }))
+    expect(await readSettingsTurnLimitBudgetBytes()).toBeUndefined()
+
+    await writeFile(file, JSON.stringify({ env: {} }))
+    expect(await readSettingsTurnLimitBudgetBytes()).toBeUndefined()
   })
 
   test('retries at most once even when the trimmed request is still refused', async () => {

@@ -188,6 +188,7 @@ function buildSavedProvider(input: ImportProviderInput): SavedProvider {
     ...(input.proxy !== undefined && { proxy: input.proxy }),
     ...(input.notes !== undefined && { notes: input.notes }),
     ...(input.customHeaders?.trim() ? { customHeaders: input.customHeaders.trim() } : {}),
+    ...(input.turnLimitTrimBytes !== undefined && { turnLimitTrimBytes: input.turnLimitTrimBytes }),
     ...(input.usageScript !== undefined && { usageScript: input.usageScript }),
   }
 }
@@ -536,12 +537,17 @@ export class ProviderService {
         ...(input.customHeaders !== undefined && input.customHeaders !== null && input.customHeaders.trim()
           ? { customHeaders: input.customHeaders.trim() }
           : {}),
+        ...(input.turnLimitTrimBytes !== undefined && input.turnLimitTrimBytes !== null
+          && { turnLimitTrimBytes: input.turnLimitTrimBytes }),
       }
       if (input.proxy === null) {
         delete updated.proxy
       }
       if (input.customHeaders === null) {
         delete updated.customHeaders
+      }
+      if (input.turnLimitTrimBytes === null) {
+        delete updated.turnLimitTrimBytes
       }
       if (input.model1mSupport === null) {
         delete updated.model1mSupport
@@ -1022,6 +1028,8 @@ export class ProviderService {
     upstreamHeaders: Record<string, string>
     requestCompatibility?: RequestCompatibility
     proxy?: ProviderProxyConfig
+    /** See SavedProviderSchema.turnLimitTrimBytes. */
+    turnLimitTrimBytes?: number
   } | null> {
     const toProxyConfig = (provider: SavedProvider) => {
       const presetDefaultEnv = getPresetDefaultEnv(provider.presetId)
@@ -1037,6 +1045,7 @@ export class ProviderService {
         upstreamHeaders: getPresetUpstreamHeaders(provider.presetId),
         ...(provider.requestCompatibility !== undefined && { requestCompatibility: provider.requestCompatibility }),
         ...(provider.proxy !== undefined && { proxy: provider.proxy }),
+        ...(provider.turnLimitTrimBytes !== undefined && { turnLimitTrimBytes: provider.turnLimitTrimBytes }),
       }
     }
     if (providerId) {

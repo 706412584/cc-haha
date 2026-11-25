@@ -202,6 +202,15 @@ export const SavedProviderSchema = z.object({
    */
   customHeaders: z.string().optional(),
   /**
+   * Optional override for the proxy's turn-limit trim budget, in UTF-8 bytes
+   * of model-visible message content. Some relays cap a request's history size
+   * and change both the wording and the threshold without notice; this lets the
+   * user raise or lower the budget from providers.json (or the desktop provider
+   * API) without waiting for a code change. Absent reads the environment
+   * variable, then the built-in default.
+   */
+  turnLimitTrimBytes: z.number().int().positive().optional(),
+  /**
    * Sticky compatibility marker: set to true when cc-haha observes this
    * provider rejecting Anthropic's `thinking` field via a 4xx like
    * "additionalModelRequestFields not supported" (typical for Bedrock
@@ -281,6 +290,7 @@ export const CreateProviderSchema = z.object({
   proxy: ProviderProxyConfigSchema.optional(),
   notes: z.string().optional(),
   customHeaders: z.string().optional(),
+  turnLimitTrimBytes: z.number().int().positive().optional(),
 })
 
 export const UpdateProviderSchema = z.object({
@@ -303,6 +313,7 @@ export const UpdateProviderSchema = z.object({
   proxy: ProviderProxyConfigSchema.nullable().optional(),
   notes: z.string().optional(),
   customHeaders: z.string().nullable().optional(),
+  turnLimitTrimBytes: z.number().int().positive().nullable().optional(),
 })
 
 export const TestProviderSchema = z.object({

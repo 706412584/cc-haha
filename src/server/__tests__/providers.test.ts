@@ -1119,6 +1119,20 @@ describe('ProviderService', () => {
       expect((await svc.getProvider(added.id)).customHeaders).toBe('X-Test: 1')
     })
 
+    test('persists turnLimitTrimBytes and clears it on null', async () => {
+      const svc = new ProviderService()
+      const added = await svc.addProvider(sampleInput({ turnLimitTrimBytes: 200000 }))
+      expect(added.turnLimitTrimBytes).toBe(200000)
+      expect((await svc.getProvider(added.id)).turnLimitTrimBytes).toBe(200000)
+
+      const cleared = await svc.updateProvider(added.id, { turnLimitTrimBytes: null })
+      expect(cleared.turnLimitTrimBytes).toBeUndefined()
+      expect((await svc.getProvider(added.id)).turnLimitTrimBytes).toBeUndefined()
+
+      const set = await svc.updateProvider(added.id, { turnLimitTrimBytes: 150000 })
+      expect(set.turnLimitTrimBytes).toBe(150000)
+    })
+
     test('addProvider persists customHeaders', async () => {
       const svc = new ProviderService()
       const added = await svc.addProvider(sampleInput({

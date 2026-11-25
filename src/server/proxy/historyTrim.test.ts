@@ -1,9 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  COMPACTED_ACTIVITY_BUDGET_BYTES,
   EARLIER_INSTRUCTION_BUDGET_BYTES,
+  TURN_LIMIT_BUDGET_ENV,
   TURN_LIMIT_ERROR_CODE,
   TRIMMED_HISTORY_BUDGET_BYTES,
   parseTurnLimit,
+  resolveTurnLimitBudgetBytes,
   trimHistoryForTurnLimit,
   USER_TURN_LIMIT,
 } from './historyTrim.js'
@@ -106,7 +109,35 @@ describe('parseTurnLimit', () => {
   })
 })
 
+describe('resolveTurnLimitBudgetBytes', () => {
+  test('prefers the provider override, then env, then the default', () => {
+    const previous = process.env[TURN_LIMIT_BUDGET_ENV]
+    try {
+      delete process.env[TURN_LIMIT_BUDGET_ENV]
+      expect(resolveTurnLimitBudgetBytes()).toBe(TRIMMED_HISTORY_BUDGET_BYTES)
+
+      process.env[TURN_LIMIT_BUDGET_ENV] = '654321'
+      expect(resolveTurnLimitBudgetBytes()).toBe(654321)
+      expect(resolveTurnLimitBudgetBytes(123456)).toBe(123456)
+      expect(resolveTurnLimitBudgetBytes(0)).toBe(654321)
+      expect(resolveTurnLimitBudgetBytes(-1)).toBe(654321)
+    } finally {
+      if (previous === undefined) delete process.env[TURN_LIMIT_BUDGET_ENV]
+      else process.env[TURN_LIMIT_BUDGET_ENV] = previous
+    }
+  })
+})
+
 describe('trimHistoryForTurnLimit', () => {
+  test('honors a smaller per-provider budget', () => {
+    const body = request(longHistory(200, 4096))
+    const large = trimHistoryForTurnLimit(body, SIZE_WORDING, { budgetBytes: 600 * 1024 })
+    const small = trimHistoryForTurnLimit(body, SIZE_WORDING, { budgetBytes: 100 * 1024 })
+
+    expect(large).not.toBeNull()
+    expect(small).not.toBeNull()
+    expect(small!.messages.length).toBeLessThan(large!.messages.length)
+  })
   test('leaves a short history untouched', () => {
     const body = request([user('hello'), assistant('hi')])
     expect(trimHistoryForTurnLimit(body, SIZE_WORDING)).toBeNull()
@@ -247,6 +278,35 @@ describe('trimHistoryForTurnLimit', () => {
     expect(utf8Bytes(trimmed!.messages)).toBeLessThanOrEqual(TRIMMED_HISTORY_BUDGET_BYTES * 1.1)
   })
 
+  test('summarizes activity that fell outside the recent window instead of dropping it', () => {
+    const messages: AnthropicMessage[] = [user('TASK')]
+    messages.push(assistant('early plan'))
+    for (let index = 0; index < 200; index += 1) {
+      messages.push(toolUse(`c-${index}`))
+      messages.push(toolResult(`c-${index}`, `OUTPUT-MARKER-${index} ` + 'x'.repeat(4096)))
+    }
+    const body = request(messages)
+
+    const trimmed = trimHistoryForTurnLimit(body, SIZE_WORDING)
+
+    expect(trimmed).not.toBeNull()
+    const text = JSON.stringify(trimmed!.messages)
+    expect(text).toContain('Compacted earlier activity retained for continuity')
+    expect(text).toContain('[tool_use Bash')
+    // The newest tool round-trip stays complete in the recent window.
+    expect(text).toContain('c-199')
+    expect(text).toContain('OUTPUT-MARKER-199')
+    assertPaired(trimmed!.messages)
+
+    const digest = trimmed!.messages.find(
+      message => typeof message.content === 'string'
+        && message.content.startsWith('[Compacted earlier activity'),
+    ) as AnthropicMessage | undefined
+    expect(digest).toBeDefined()
+    expect(Buffer.byteLength(digest!.content as string, 'utf8'))
+      .toBeLessThanOrEqual(COMPACTED_ACTIVITY_BUDGET_BYTES + 200)
+  })
+
   test('keeps earlier real user instructions that fell outside the window', () => {
     const messages: AnthropicMessage[] = [user('TASK')]
     messages.push(user('ok，开始数据对接类任务'))
@@ -267,8 +327,8 @@ describe('trimHistoryForTurnLimit', () => {
 
   test('earlier-instruction list keeps the newest entries within its budget', () => {
     const messages: AnthropicMessage[] = [user('TASK')]
-    for (let index = 0; index < 20; index += 1) {
-      messages.push(user(`early instruction ${index} ${'x'.repeat(2000)}`))
+    for (let index = 0; index < 80; index += 1) {
+      messages.push(user(`early instruction ${index} ${'x'.repeat(1000)}`))
     }
     for (let index = 0; index < 200; index += 1) {
       messages.push(toolUse(`l-${index}`))
@@ -286,7 +346,7 @@ describe('trimHistoryForTurnLimit', () => {
     expect(Buffer.byteLength(list!.content as string, 'utf8'))
       .toBeLessThanOrEqual(EARLIER_INSTRUCTION_BUDGET_BYTES)
     // The newest authorization must survive; the oldest entries are dropped.
-    expect(list!.content as string).toContain('early instruction 19')
+    expect(list!.content as string).toContain('early instruction 79')
     expect(list!.content as string).not.toContain('early instruction 0 ')
   })
 

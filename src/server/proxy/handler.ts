@@ -71,10 +71,30 @@ import {
   recordSessionLimitExceeded,
   templateCarriesSessionId,
 } from './sessionRotation.js'
-import { TURN_LIMIT_ERROR_CODE, trimHistoryForTurnLimit } from './historyTrim.js'
+import { TURN_LIMIT_BUDGET_ENV, TURN_LIMIT_ERROR_CODE, trimHistoryForTurnLimit } from './historyTrim.js'
+import { ManagedSettingsService } from '../services/managedSettingsService.js'
 
 const providerService = new ProviderService()
 const MAX_CREDENTIAL_ERROR_BYTES = 64_000
+
+/**
+ * Read the trim budget from the user-editable settings.json (Settings -> JSON
+ * in the desktop app). This is the fastest place for a user to follow a relay
+ * that changed its cap: the file is re-read on every refusal, so an edit
+ * applies to the next request without restarting the app.
+ */
+export async function readSettingsTurnLimitBudgetBytes(): Promise<number | undefined> {
+  try {
+    const settings = await new ManagedSettingsService().readSettings()
+    const env = settings.env
+    if (!env || typeof env !== 'object') return undefined
+    const raw = (env as Record<string, unknown>)[TURN_LIMIT_BUDGET_ENV]
+    const parsed = typeof raw === 'string' ? Number.parseInt(raw, 10) : NaN
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
 
 function formatUpstreamErrorMessage(status: number, text: string): string {
   let detail = text.slice(0, 500)
@@ -592,7 +612,10 @@ export async function handleProxyRequest(req: Request, url: URL): Promise<Respon
         // turns) refuse the whole conversation; a shorter history is the only
         // way to continue in place. Rotating the session id cannot help — the
         // cap is on the request content, not on the conversation identity.
-        const trimmedBody = trimHistoryForTurnLimit(body, errText)
+        const settingsBudget = await readSettingsTurnLimitBudgetBytes()
+        const trimmedBody = trimHistoryForTurnLimit(body, errText, {
+          budgetBytes: config.turnLimitTrimBytes ?? settingsBudget,
+        })
         if (trimmedBody) {
           console.log(`[Proxy] upstream turn limit reached for session ${inboundSessionId ?? '<unknown>'}; retrying once with trimmed history (${body.messages.length} -> ${trimmedBody.messages.length} messages)`)
           response = await dispatchUpstream(upstreamHeaders, trimmedBody)
