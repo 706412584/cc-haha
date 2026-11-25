@@ -1183,6 +1183,42 @@ describe('Media-gen provider config API', () => {
     expect((await handlePluginsApi(request.req, request.url, request.segments)).status).toBe(500)
   })
 
+  it('PUT saves providers and refreshes running sessions so they apply without restart', async () => {
+    await fs.writeFile(path.join(tmpDir, 'settings.json'), JSON.stringify({ pluginConfigs: {} }))
+    const originalGetActiveSessions = conversationService.getActiveSessions
+    const reloaded: string[] = []
+    conversationService.getActiveSessions = (() => ['session-media-gen']) as typeof conversationService.getActiveSessions
+    conversationService.hasSession = ((sessionId: string) => sessionId === 'session-media-gen') as typeof conversationService.hasSession
+    conversationService.requestControl = (async (sessionId: string) => {
+      reloaded.push(sessionId)
+      return { commands: [], agents: [], plugins: [], mcpServers: [] } as never
+    }) as typeof conversationService.requestControl
+    try {
+      const request = makeRequest('PUT', '/api/plugins/media-gen/config', {
+        schemaVersion: 3,
+        providers: [{
+          id: 'p1',
+          name: 'Local',
+          enabled: true,
+          apiFormat: 'openai_compatible',
+          baseUrl: 'http://127.0.0.1:8080/v1',
+          models: { imageGeneration: 'flux' },
+          apiKey: { action: 'clear' },
+        }],
+      })
+      const response = await handlePluginsApi(request.req, request.url, request.segments)
+
+      expect(response.status).toBe(200)
+      // Without this reload the CLI keeps the provider list it assembled at MCP
+      // launch, so the saved provider would not appear until a restart.
+      expect(reloaded).toEqual(['session-media-gen'])
+    } finally {
+      conversationService.getActiveSessions = originalGetActiveSessions
+      conversationService.hasSession = originalHasSession
+      conversationService.requestControl = originalRequestControl
+    }
+  })
+
   it('POST fetch-models fetches an unsaved draft with its current URL and replacement key', async () => {
     const originalFetch = globalThis.fetch
     let upstreamUrl = ''

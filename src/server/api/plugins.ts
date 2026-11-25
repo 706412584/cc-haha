@@ -16,9 +16,27 @@ import type { PluginManifest } from '../../utils/plugins/schemas.js'
 import { getMediaGenConfig, getMediaGenProviderCredentials, saveMediaGenConfig } from '../services/mediaGenConfigService.js'
 import { ProviderService } from '../services/providerService.js'
 import { reloadSessionComponents } from '../services/sessionComponentReloadService.js'
+import { conversationService } from '../services/conversationService.js'
 
 const pluginService = new PluginService()
 const providerService = new ProviderService()
+
+/**
+ * Refresh one running session, bounded so a stuck CLI cannot hold the save
+ * response open. The timer is cleared when the reload settles, or the test
+ * process would keep a 15s handle alive on every save.
+ */
+function refreshSession(sessionId: string): Promise<unknown> {
+  return new Promise(resolve => {
+    const timer = setTimeout(resolve, 15_000)
+    reloadSessionComponents(sessionId)
+      .catch(() => undefined)
+      .finally(() => {
+        clearTimeout(timer)
+        resolve(undefined)
+      })
+  })
+}
 
 export async function handlePluginsApi(
   req: Request,
@@ -36,7 +54,16 @@ export async function handlePluginsApi(
 
     if (sub === 'media-gen' && segments[3] === 'config') {
       if (method === 'GET') return Response.json(getMediaGenConfig())
-      if (method === 'PUT') return Response.json(await saveMediaGenConfig(await parseJsonBody(req)))
+      if (method === 'PUT') {
+        const config = await saveMediaGenConfig(await parseJsonBody(req))
+        // The CLI assembles MEDIA_GEN_PROVIDERS_JSON when it launches the MCP
+        // server; refreshing the running sessions is what makes a saved
+        // provider list apply without restarting the app. Bound the wait so a
+        // stuck session cannot hold the save response open.
+        const sessions = conversationService.getActiveSessions()
+        await Promise.allSettled(sessions.map(refreshSession))
+        return Response.json(config)
+      }
     }
     if (method === 'GET' && sub === 'media-gen' && segments[3] === 'provider-choices') {
       const { providers } = await providerService.listProviders()
