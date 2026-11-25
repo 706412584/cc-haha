@@ -447,7 +447,13 @@ function trimToByteBudget(
   const hasEarlierUser = messages.some(
     (message, index) => index !== anchorIndex && isUserInstructionMessage(message),
   )
-  const earlierReserve = hasEarlierUser ? EARLIER_INSTRUCTION_BUDGET_BYTES : 0
+  // Cap the auxiliary reserves at a quarter of the budget each: with a small
+  // user-configured budget the fixed 16KB+32KB reserves would consume the whole
+  // allowance and leave nothing to keep, making the trim silently give up.
+  const earlierReserve = hasEarlierUser
+    ? Math.min(EARLIER_INSTRUCTION_BUDGET_BYTES, Math.floor(budgetBytes / 4))
+    : 0
+  const compactionReserve = Math.min(COMPACTED_ACTIVITY_BUDGET_BYTES, Math.floor(budgetBytes / 4))
 
   // The newest message can carry a screenshot larger than the whole budget.
   // Keep the turn (and its tool calls/results) by degrading its media rather
@@ -463,7 +469,7 @@ function trimToByteBudget(
 
   // Reserve the anchor, earlier-instruction and compacted-activity shares up
   // front so the recent window never crowds them out.
-  let used = (anchorFits ? anchorBytes : 0) + earlierReserve + COMPACTED_ACTIVITY_BUDGET_BYTES
+  let used = (anchorFits ? anchorBytes : 0) + earlierReserve + compactionReserve
   let start = source.length
   for (let index = source.length - 1; index >= 0; index -= 1) {
     if (index === anchorIndex) break

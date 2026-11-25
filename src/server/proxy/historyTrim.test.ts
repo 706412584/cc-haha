@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import {
   COMPACTED_ACTIVITY_BUDGET_BYTES,
   EARLIER_INSTRUCTION_BUDGET_BYTES,
@@ -11,6 +11,20 @@ import {
   USER_TURN_LIMIT,
 } from './historyTrim.js'
 import type { AnthropicMessage, AnthropicRequest } from './transform/types.js'
+
+// A developer machine can carry the budget override as a user-level env var;
+// the assertions below are written against the built-in default. Isolate the
+// suite from the ambient value so local gates match a clean CI runner.
+const AMBIENT_BUDGET_ENV = process.env[TURN_LIMIT_BUDGET_ENV]
+
+beforeEach(() => {
+  delete process.env[TURN_LIMIT_BUDGET_ENV]
+})
+
+afterEach(() => {
+  if (AMBIENT_BUDGET_ENV === undefined) delete process.env[TURN_LIMIT_BUDGET_ENV]
+  else process.env[TURN_LIMIT_BUDGET_ENV] = AMBIENT_BUDGET_ENV
+})
 
 const SIZE_WORDING = JSON.stringify({
   error: {
@@ -129,6 +143,15 @@ describe('resolveTurnLimitBudgetBytes', () => {
 })
 
 describe('trimHistoryForTurnLimit', () => {
+  test('still trims with a small user-configured budget', () => {
+    const body = request(longHistory(200, 4096))
+    const trimmed = trimHistoryForTurnLimit(body, SIZE_WORDING, { budgetBytes: 20 * 1024 })
+
+    expect(trimmed).not.toBeNull()
+    expect(trimmed!.messages.length).toBeLessThan(body.messages.length)
+    assertPaired(trimmed!.messages)
+  })
+
   test('honors a smaller per-provider budget', () => {
     const body = request(longHistory(200, 4096))
     const large = trimHistoryForTurnLimit(body, SIZE_WORDING, { budgetBytes: 600 * 1024 })
