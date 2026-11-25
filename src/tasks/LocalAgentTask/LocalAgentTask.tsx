@@ -412,7 +412,9 @@ export function restoreAgentRuntimeSnapshot(snapshot: unknown): Pick<AppState, '
       epoch: raw.epoch,
       prompt: raw.prompt,
       agentType: raw.agentType,
-      error: interrupted ? 'Agent execution interrupted during session recovery' : raw.error,
+      error: interrupted
+        ? 'Agent execution interrupted by an app restart during session recovery; the main session and workspace are available'
+        : raw.error,
       result: raw.result,
       startTime: raw.startTime,
       endTime: interrupted ? Date.now() : raw.endTime,
@@ -475,7 +477,7 @@ export function restoreAgentRuntimeSnapshot(snapshot: unknown): Pick<AppState, '
       sequence: nextSequence++,
       taskId: task.id,
       epoch: task.epoch,
-      notification: `<${TASK_NOTIFICATION_TAG}>\n<${TASK_ID_TAG}>${task.id}</${TASK_ID_TAG}>${toolUseIdLine}\n<${TASK_TYPE_TAG}>local_agent</${TASK_TYPE_TAG}>\n<${OUTPUT_FILE_TAG}>${task.outputFile}</${OUTPUT_FILE_TAG}>\n<${STATUS_TAG}>failed</${STATUS_TAG}>\n<${SUMMARY_TAG}>Agent "${task.description}" interrupted during session recovery</${SUMMARY_TAG}>\n</${TASK_NOTIFICATION_TAG}>`,
+      notification: `<${TASK_NOTIFICATION_TAG}>\n<${TASK_ID_TAG}>${task.id}</${TASK_ID_TAG}>${toolUseIdLine}\n<${TASK_TYPE_TAG}>local_agent</${TASK_TYPE_TAG}>\n<${OUTPUT_FILE_TAG}>${task.outputFile}</${OUTPUT_FILE_TAG}>\n<${STATUS_TAG}>failed</${STATUS_TAG}>\n<${SUMMARY_TAG}>Agent "${task.description}" was interrupted by an app restart during session recovery. The main session and workspace are available; do not treat this as an environment pause. Re-run the subtask if it is still needed.</${SUMMARY_TAG}>\n</${TASK_NOTIFICATION_TAG}>`,
       delivery: 'pending',
       enqueuedAt: now,
     });

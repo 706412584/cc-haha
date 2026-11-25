@@ -628,12 +628,21 @@ describe('Agent runtime recovery', () => {
 
     expect(restored.tasks['agent-restored-running']?.status).toBe('failed')
     expect((restored.tasks['agent-restored-running'] as LocalAgentTaskState).error).toContain('interrupted')
+    expect((restored.tasks['agent-restored-running'] as LocalAgentTaskState).error)
+      .toContain('main session and workspace are available')
     expect(restored.agentCompletionInbox.map(item => item.taskId)).toEqual([
       'agent-restored-finished',
       'agent-restored-running',
     ])
     expect(restored.agentCompletionInbox[1]?.notification).toContain('<status>failed</status>')
     expect(restored.agentCompletionInbox[1]?.notification).toContain('interrupted')
+    // The model must not read a restart-killed subtask as "the whole
+    // environment is paused"; that reading stopped it from operating the
+    // workspace after an app restart.
+    expect(restored.agentCompletionInbox[1]?.notification)
+      .toContain('main session and workspace are available')
+    expect(restored.agentCompletionInbox[1]?.notification)
+      .toContain('do not treat this as an environment pause')
     expect(restored.nextAgentCompletionSequence).toBe(10)
   })
 
