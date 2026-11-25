@@ -453,6 +453,24 @@ describe('retired sponsor providers', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 
+  it('does not copy the CLI proxy placeholder into the provider key field', async () => {
+    const provider = { ...savedProviders[0]!, apiKey: 'sk-real-provider-key' }
+    vi.mocked(providersApi.list).mockResolvedValue({ providers: [provider], activeId: null })
+    render(<ProviderSettings />)
+    fireEvent.click(within(await screen.findByTestId(`provider-${provider.id}`)).getByRole('button', { name: 'Edit' }))
+    const dialog = within(screen.getByRole('dialog'))
+
+    // A proxied provider's runtime env carries `proxy-managed` for the CLI.
+    // Editing the settings JSON must not treat it as the provider's real key,
+    // or Save rewrites the saved credential with the placeholder.
+    fireEvent.change(dialog.getByRole('textbox', { name: 'Settings JSON' }), {
+      target: { value: JSON.stringify({ env: { ANTHROPIC_API_KEY: 'proxy-managed' } }) },
+    })
+
+    const keyInput = dialog.getAllByPlaceholderText('sk-...')[0] as HTMLInputElement
+    expect(keyInput.value).toBe('sk-real-provider-key')
+  })
+
   it('loads saved providers while hiding their add-provider chips', async () => {
     render(<ProviderSettings />)
     for (const provider of savedProviders) {

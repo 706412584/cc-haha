@@ -106,6 +106,14 @@ const FORM_FIELD_LABEL = 'text-sm font-medium text-[var(--color-text-primary)]'
 const FORM_HINT = 'text-[11px] leading-[1.5] text-[var(--color-text-tertiary)]'
 
 /**
+ * API-key placeholders the runtime injects for the CLI, never real credentials.
+ * The dialog auto-fills its key field from settings.json env, and a proxied
+ * provider's env carries `proxy-managed` — without this guard, editing the
+ * settings JSON rewrote the provider's real key with the placeholder on save.
+ */
+const CLI_MANAGED_API_KEY_PLACEHOLDERS = new Set(['proxy-managed', 'dummy'])
+
+/**
  * The Provider panel and the add/edit provider modal.
  *
  * Moved verbatim out of `Settings.tsx` as the last of the panel extractions. The list
@@ -2743,7 +2751,12 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
                     }
                   }
                   const nextApiKey = env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY
-                  if (nextApiKey && nextApiKey !== '(your API key)' && nextApiKey !== API_KEY_JSON_PLACEHOLDER) {
+                  if (
+                    nextApiKey
+                    && !CLI_MANAGED_API_KEY_PLACEHOLDERS.has(nextApiKey)
+                    && nextApiKey !== '(your API key)'
+                    && nextApiKey !== API_KEY_JSON_PLACEHOLDER
+                  ) {
                     setApiKey(nextApiKey)
                   }
                   const nextAuthStrategy = inferAuthStrategyFromEnv(env)
