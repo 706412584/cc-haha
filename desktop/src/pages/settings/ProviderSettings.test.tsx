@@ -705,7 +705,7 @@ describe('default provider settings ownership', () => {
     fireEvent.click(dialog.getByRole('button', { name: 'DeepSeek' }))
 
     expect(dialog.getByText(/once this provider is the default/)).toBeInTheDocument()
-    expect(dialog.queryByText(/will be written on save/)).not.toBeInTheDocument()
+    expect(dialog.queryByText(/written on save/)).not.toBeInTheDocument()
   })
 
   it('still writes the settings when the default provider itself is saved', async () => {
@@ -722,7 +722,7 @@ describe('default provider settings ownership', () => {
     fireEvent.click(within(card).getByRole('button', { name: 'Edit' }))
     const dialog = within(screen.getByRole('dialog'))
     await waitFor(() => expect(settingsJsonOf(dialog)).toContain('https://api.fenno.ai'))
-    expect(dialog.getByText(/will be written on save/)).toBeInTheDocument()
+    expect(dialog.getByText(/written on save/)).toBeInTheDocument()
     fireEvent.click(dialog.getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(providersApi.updateSettings).toHaveBeenCalledWith(expect.objectContaining({
