@@ -1256,7 +1256,18 @@ async function* queryLoop(
           }
         }
       }
-      if ((isWithheld413 || isWithheldMedia) && reactiveCompact) {
+      // One compaction per overflow: when the provider recovery below takes
+      // this rejection, it compacts knowing the stated limit, while reactive
+      // compact would first re-send the refused history unchanged.
+      const providerRecoveryApplies =
+        promptTooLongRecoveryEnabled &&
+        !!lastMessage &&
+        isRecoverableContextRejection(lastMessage, messagesForQuery)
+      if (
+        (isWithheld413 || isWithheldMedia) &&
+        reactiveCompact &&
+        !providerRecoveryApplies
+      ) {
         const compacted = await reactiveCompact.tryReactiveCompact({
           hasAttempted: hasAttemptedReactiveCompact,
           querySource,
@@ -1353,6 +1364,7 @@ async function* queryLoop(
           toolUseContext,
           cacheSafeParams: rejectedCacheSafeParams,
           querySource,
+          rejection: lastMessage,
         })
         if (compacted) {
           if (params.taskBudget) {

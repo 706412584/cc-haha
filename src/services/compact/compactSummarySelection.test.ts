@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { createSandboxedTestEnvironment } from '../../../scripts/pr/test-environment.js'
 import { openaiResponsesStreamToAnthropic } from '../../server/proxy/streaming/openaiResponsesStreamToAnthropic.js'
 import type { ToolUseContext } from '../../Tool.js'
-import type { AssistantMessage } from '../../types/message.js'
+import type { AssistantMessage, Message } from '../../types/message.js'
 
 const originalEnvironment = { ...process.env }
 const globals = globalThis as typeof globalThis & { MACRO?: { BUILD_TIME: string } }
@@ -307,6 +307,38 @@ for (const useCache of [true, false]) {
     expect(requests).toBe(1)
   })
 }
+
+test('a compaction for a stated overflow trims to that limit before its first summary request', async () => {
+  // The provider already refused this history and said by how much; sending
+  // it unchanged to the summarizer only buys a second refusal minutes later.
+  const source: Message[] = [messages.createUserMessage({ content: 'start' })]
+  for (let i = 0; i < 10; i++) {
+    source.push(
+      messages.createAssistantMessage({ content: [{ type: 'tool_use', id: `read-${i}`, name: 'Read', input: {} }] }),
+      messages.createUserMessage({ content: [{ type: 'tool_result', tool_use_id: `read-${i}`, content: 'log line '.repeat(4_000) }] }),
+    )
+  }
+  const rejection = messages.createAssistantAPIErrorMessage({
+    content: 'Prompt is too long', error: 'invalid_request', businessErrorCode: 'prompt_too_long',
+    errorDetails: "This model's maximum context length is 100000 tokens. However, you requested 300000 tokens.",
+  })
+  const sent: number[] = []
+  forkSpy.mockImplementation(params => {
+    sent.push(params.cacheSafeParams.forkContextMessages.length)
+    return actualRunForkedAgent(params)
+  })
+  const result = await compact.compactConversation(source, context, {
+    systemPrompt: [] as never, userContext: {}, systemContext: {}, toolUseContext: context,
+    forkContextMessages: source,
+  }, true, undefined, true, {
+    isRecompactionInChain: false, turnsSincePreviousCompact: -1, autoCompactThreshold: 0, rejection,
+  })
+  expect(result.boundaryMarker.subtype).toBe('compact_boundary')
+  expect(requests).toBe(1)
+  expect(sent).toHaveLength(1)
+  expect(sent[0]).toBeGreaterThan(0)
+  expect(sent[0]).toBeLessThan(source.length / 2)
+})
 
 test('recovering same-response terminal metadata does not mutate source messages', async () => {
   const original = messages.createAssistantMessage({ content: 'valid summary' })

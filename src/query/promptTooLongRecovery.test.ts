@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -232,6 +232,21 @@ describe('query recovery from a provider prompt-too-long rejection', () => {
     // The rejection is recovered from, never shown.
     expect(result.tooLongErrors).toHaveLength(0)
     expect(contextModule.getEffectiveModelContextWindow('custom-200k')).toBe(80_000)
+  })
+
+  test('compacts a stated overflow once, through the path that knows the limit', async () => {
+    // The generic reactive compact cannot see the stated limit and would
+    // re-send the refused history unchanged before this recovery even starts.
+    const reactive = await import('../services/compact/reactiveCompact.js')
+    const spy = spyOn(reactive, 'tryReactiveCompact')
+    try {
+      const result = await run({ responses: ['too_long', 'reply'] })
+      expect(spy).not.toHaveBeenCalled()
+      expect(result.compactedInputs).toHaveLength(1)
+      expect(result.tooLongErrors).toHaveLength(0)
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   test('surfaces the error once when the compacted retry is still too long, and learns nothing', async () => {

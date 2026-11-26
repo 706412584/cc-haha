@@ -426,6 +426,12 @@ export type RecompactionInfo = {
   previousCompactTurnId?: string
   autoCompactThreshold: number
   querySource?: QuerySource
+  /**
+   * The provider's refusal that triggered this compaction. The history it
+   * refused is cut to the stated limit before the first summary request
+   * instead of being re-sent unchanged for a second refusal.
+   */
+  rejection?: AssistantMessage
 }
 
 /**
@@ -593,6 +599,22 @@ export async function compactConversation(
 
     let messagesToSummarize = messages
     let retryCacheSafeParams = cacheSafeParams
+    const rejection = recompactionInfo?.rejection
+    const preTrimmed = rejection && isCompactRequestTooLarge(rejection)
+      ? truncateHeadForPTLRetry(
+          messages,
+          rejection,
+          inferCompactRequestCounts(
+            messages,
+            preCompactTokenCount,
+            context.options.mainLoopModel,
+          ),
+        )
+      : null
+    if (preTrimmed) {
+      messagesToSummarize = preTrimmed
+      retryCacheSafeParams = { ...cacheSafeParams, forkContextMessages: preTrimmed }
+    }
     let summaryResponse: AssistantMessage
     let summary: string | null
     let ptlAttempts = 0
