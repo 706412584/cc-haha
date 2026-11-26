@@ -1952,6 +1952,17 @@ export function createLocalIndexCoordinator(
       }
     },
 
+    getSourceProgress(transcriptPath: string) {
+      if (!indexReadAllowed() || !index) return null
+      try {
+        const source = index.getSource(transcriptPath)
+        return source ? { state: source.state, indexedBytes: source.indexedBytes } : null
+      } catch (error) {
+        markDegraded(error, 'LOCAL_INDEX_READ_FAILED')
+        return null
+      }
+    },
+
     updateSessionTitle(sessionId: string, title: string): boolean {
       if (!synchronizeRuntimeConfiguration() || !index?.updateSessionTitle) return false
       try {

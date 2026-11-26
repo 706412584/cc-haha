@@ -94,6 +94,12 @@ export interface LocalIndexGateway extends SessionIndexReader {
    * as a whole cannot be trusted, or there are too many to overlay.
    */
   getSourceScopedFailurePaths?(): readonly string[] | null
+  /**
+   * How far the committed projection of a transcript reaches. A `pending`
+   * source whose file is larger than `indexedBytes` has rows that predate its
+   * unread tail (for example a transcript past the source-size ceiling).
+   */
+  getSourceProgress?(transcriptPath: string): Pick<SessionSourceRecord, 'state' | 'indexedBytes'> | null
 }
 
 export type SessionSourceRecord = {

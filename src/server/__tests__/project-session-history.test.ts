@@ -166,6 +166,28 @@ describe('logical project session history', () => {
     } finally { validate.mockRestore() }
   })
 
+  it('overlays runtime metadata from the unread tail of a pending source', async () => {
+    const row = await seed(0)
+    const indexedBytes = (await fs.stat(row.transcriptPath)).size
+    let progress: { state: 'ready' | 'pending' | 'degraded'; indexedBytes: number } = { state: 'pending', indexedBytes }
+    const index: LocalIndexGateway = { ...gateway([row], 'on'), getSourceProgress: () => progress }
+    const service = new SessionService(index)
+    const append = (entry: Record<string, unknown>) =>
+      fs.appendFile(row.transcriptPath, JSON.stringify({ type: 'session-meta', ...entry }) + '\n')
+    const runtime = async () => {
+      const [session] = (await service.listSessions()).sessions
+      return [session?.runtimeProviderId, session?.runtimeModelId, session?.effortLevel]
+    }
+
+    expect(await runtime()).toEqual(['fixture', 'fixture-model', undefined])
+    await append({ runtimeProviderId: 'tail', runtimeModelId: 'tail-model', effortLevel: 'max' })
+    expect(await runtime()).toEqual(['tail', 'tail-model', 'max'])
+    await append({ runtimeProviderId: 'newer', runtimeModelId: 'newer-model' })
+    expect(await runtime()).toEqual(['newer', 'newer-model', undefined])
+    progress = { state: 'ready', indexedBytes }
+    expect(await runtime()).toEqual(['fixture', 'fixture-model', undefined])
+  })
+
   it('uses complete file metadata while the on index is degraded', async () => {
     const rows = await Promise.all([0, 1, 2].map(n => seed(n)))
     const index = gateway(rows.slice(0, 1), 'on', 'degraded')

@@ -105,6 +105,7 @@ import type {
   SessionFileMatch,
 } from './localIndex/sessionIndex.js'
 import type { LocalIndexStatus } from './localIndex/types.js'
+import { foldTrailingRuntime, type RuntimeOverlay } from './localIndex/sourceTailRuntime.js'
 import { diagnosticsService } from './diagnosticsService.js'
 import {
   claimUsageIncrement,
@@ -1227,6 +1228,17 @@ export class SessionService {
    */
   private readonly metadataProjectionCache = new Map<string, SessionMetadataProjection & { signature: string }>()
   private readonly metadataProjectionRequests = new Map<string, Promise<SessionMetadataProjection>>()
+  /**
+   * Runtime metadata past a pending source's committed projection, keyed by
+   * transcript path. `end` is where folding stopped, so a growing transcript
+   * only reads its new bytes.
+   */
+  private readonly unindexedRuntimeCache = new Map<string, Promise<{
+    identity: string
+    indexedBytes: number
+    end: number
+    overlay: RuntimeOverlay
+  }>>()
   /** Addressed Agent call lookups, keyed by `[filePath, toolRef]` and stat signature. */
   private readonly subagentLookupCache = new Map<string, { version: string; transcript: SubagentTranscript }>()
   /**
@@ -5478,11 +5490,62 @@ export class SessionService {
     }
   }
 
+  /**
+   * A source the index has not read to the end (it is past the source-size
+   * ceiling) keeps the runtime of its last projected session-meta. Desktop
+   * applies list runtimes to open sessions, so a stale value here silently
+   * switches the session back to an old provider/model. Fold the session-meta
+   * records in the unread tail onto the row.
+   */
+  private async overlayUnindexedRuntime(row: IndexedSessionRow): Promise<IndexedSessionRow> {
+    const progress = this.localIndexGateway.getSourceProgress?.(row.transcriptPath)
+    if (!progress || progress.state !== 'pending') return row
+    const filePath = row.transcriptPath
+    const base: RuntimeOverlay = {
+      runtimeProviderId: row.runtimeProviderId,
+      runtimeModelId: row.runtimeModelId,
+      effortLevel: row.effortLevel,
+      thinkingEnabled: row.thinkingEnabled,
+      openAIFastMode: row.openAIFastMode,
+    }
+    const previous = this.unindexedRuntimeCache.get(filePath)
+    const request = (async () => {
+      const cached = await previous?.catch(() => undefined)
+      const handle = await fs.open(filePath, 'r')
+      try {
+        const stat = await handle.stat()
+        const identity = `${stat.dev}:${stat.ino}`
+        if (stat.size <= progress.indexedBytes) {
+          return { identity, indexedBytes: progress.indexedBytes, end: progress.indexedBytes, overlay: base }
+        }
+        const resume = cached &&
+          cached.identity === identity &&
+          cached.indexedBytes === progress.indexedBytes &&
+          cached.end <= stat.size
+        const floor = resume ? cached.end : progress.indexedBytes
+        if (resume && floor === stat.size) return cached
+        const folded = await foldTrailingRuntime(handle, floor, stat.size, resume ? cached.overlay : base)
+        return { identity, indexedBytes: progress.indexedBytes, end: folded.end, overlay: folded.overlay }
+      } finally {
+        await handle.close()
+      }
+    })()
+    this.unindexedRuntimeCache.set(filePath, request)
+    try {
+      const { overlay } = await request
+      return { ...row, ...overlay }
+    } catch {
+      if (this.unindexedRuntimeCache.get(filePath) === request) this.unindexedRuntimeCache.delete(filePath)
+      return row
+    }
+  }
+
   private async hydrateIndexedSession(
-    row: IndexedSessionRow,
+    indexedRow: IndexedSessionRow,
     pathExists = (targetPath: string | null) => this.pathExists(targetPath),
-    archived = this.isSessionArchived(row.id),
+    archived = this.isSessionArchived(indexedRow.id),
   ): Promise<SessionListItem> {
+    const row = await this.overlayUnindexedRuntime(indexedRow)
     const workDir = row.workDir
     const projectRoot = await this.resolveProjectRootFromSessionMetadata({
       worktreeSession: row.worktreeSession,
