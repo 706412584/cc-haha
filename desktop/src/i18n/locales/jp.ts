@@ -5085,6 +5085,7 @@ export const jp: Record<TranslationKey, string> = {
   'chat.retry.rateLimit': '使用量またはレート制限に達しました',
   'chat.retry.waitingLong': '約 {duration} 後に再試行',
   'chat.retry.retrying': '再試行しています…',
+  'chat.retry.inFlight': '今回の試行 {duration} 経過',
   'chat.fallback.title': 'ネットワーク不調のため非ストリーミングに切替',
   'chat.fallback.detail': '応答は一括で届くため時間がかかることがあります',
 

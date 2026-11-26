@@ -279,6 +279,31 @@ describe('StreamingIndicator', () => {
     expect(banner.textContent).not.toContain('waiting')
   })
 
+  it('shows how long the in-flight retry has been running once the countdown is over', () => {
+    // 超大请求每次在途约 4 分钟才超时；只显示"正在重试"时横幅几分钟不变，看起来像卡死。
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSession({
+          chatState: 'thinking',
+          apiRetry: {
+            attempt: 2,
+            maxRetries: 10,
+            retryDelayMs: 1000,
+            errorStatus: null,
+            // 尝试于 249 秒前开始（收到事件 250 秒前 + 1 秒延迟）。
+            receivedAt: Date.now() - 250_000,
+          },
+        }),
+      },
+    })
+
+    render(<StreamingIndicator />)
+
+    const banner = screen.getByTestId('api-retry-indicator')
+    expect(banner.textContent).toContain('retrying now')
+    expect(screen.getByTestId('api-retry-elapsed').textContent).toContain('4m 9s')
+  })
+
   it('uses stream-disconnect copy and data-retry-kind for mid-stream reconnect banners', () => {
     useChatStore.setState({
       sessions: {

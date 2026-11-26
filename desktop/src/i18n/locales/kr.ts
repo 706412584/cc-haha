@@ -5082,6 +5082,7 @@ export const kr: Record<TranslationKey, string> = {
   'chat.retry.rateLimit': '사용량 또는 요청 한도에 도달',
   'chat.retry.waitingLong': '약 {duration} 후 다시 시도',
   'chat.retry.retrying': '지금 다시 시도 중…',
+  'chat.retry.inFlight': '이번 시도 {duration} 경과',
   'chat.fallback.title': '네트워크 불안정으로 비스트리밍 모드로 전환됨',
   'chat.fallback.detail': '응답이 한 번에 도착하므로 시간이 걸릴 수 있습니다',
 

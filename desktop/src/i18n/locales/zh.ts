@@ -5083,6 +5083,7 @@ export const zh: Record<TranslationKey, string> = {
   'chat.retry.rateLimit': '已达到用量或速率限制',
   'chat.retry.waitingLong': '约 {duration} 后重试',
   'chat.retry.retrying': '正在重试…',
+  'chat.retry.inFlight': '本次已等待 {duration}',
   'chat.fallback.title': '网络波动，已切换为非流式请求',
   'chat.fallback.detail': '响应将一次性返回，可能需要较长时间',
 

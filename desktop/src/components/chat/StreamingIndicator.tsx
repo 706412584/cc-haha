@@ -107,6 +107,12 @@ export function StreamingIndicator() {
             duration: formatDurationSeconds(remainingMs / 1000, t, 1),
           })
         : t('chat.retry.waiting', { seconds: formatRetrySeconds(remainingMs) })
+    // Once the countdown ends the attempt is in flight; an oversized request can
+    // sit there for minutes before timing out, so show it is still progressing.
+    const inFlightMs = now - apiRetry.receivedAt - apiRetry.retryDelayMs
+    const inFlightText = remainingMs <= 0 && inFlightMs >= 1000
+      ? t('chat.retry.inFlight', { duration: formatDurationSeconds(inFlightMs / 1000, t) })
+      : null
 
     return (
       <div
@@ -133,6 +139,7 @@ export function StreamingIndicator() {
           {statusText}
         </Badge>
         <span>{waitText}</span>
+        {inFlightText && <span data-testid="api-retry-elapsed">{inFlightText}</span>}
         <details className="w-full min-w-0">
           <summary className="cursor-pointer rounded-[var(--radius-sm)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]">
             {t('chat.retry.details')}

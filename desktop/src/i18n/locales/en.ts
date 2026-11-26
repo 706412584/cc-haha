@@ -5116,6 +5116,7 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   'chat.retry.rateLimit': 'usage or rate limit reached',
   'chat.retry.waitingLong': 'retrying in about {duration}',
   'chat.retry.retrying': 'retrying now…',
+  'chat.retry.inFlight': 'this attempt: {duration} elapsed',
   'chat.fallback.title': 'Network hiccup — switched to non-streaming mode',
   'chat.fallback.detail': 'response arrives in one piece, this can take a while',
 
