@@ -684,7 +684,7 @@ export function buildProviderManagedEnv(
     return buildOpenAIOfficialRuntimeEnv(provider.models, provider.modelContextWindows)
   }
   if (provider.runtimeKind === 'grok_oauth') {
-    return buildGrokOfficialRuntimeEnv(provider.models)
+    return buildGrokOfficialRuntimeEnv(provider.models, provider.modelContextWindows)
   }
   if (provider.runtimeKind === 'deepseek_oauth') {
     // Same request shape as the DeepSeek API provider; only the credential
@@ -877,7 +877,10 @@ function buildActiveProviderManagedEnv(
     )
   }
   if (isGrokOfficialProviderId(index.activeId)) {
-    return buildGrokOfficialRuntimeEnv(index.officialProviderModels[GROK_OFFICIAL_PROVIDER_ID])
+    return buildGrokOfficialRuntimeEnv(
+      index.officialProviderModels[GROK_OFFICIAL_PROVIDER_ID],
+      index.officialProviderContextWindows[GROK_OFFICIAL_PROVIDER_ID],
+    )
   }
   if (isDeepSeekAccountProviderId(index.activeId)) {
     const models = index.officialProviderModels[DEEPSEEK_ACCOUNT_PROVIDER_ID]

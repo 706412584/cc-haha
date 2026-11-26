@@ -5,12 +5,9 @@ export type PermissionMode = 'default' | 'acceptEdits' | 'auto' | 'plan' | 'bypa
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type ReasoningEffortLevel = EffortLevel
 /**
- * The current 「纸 · 墨 · 印」 palettes followed by the four restored classic
- * palettes. Each name matches a `[data-theme]` block in theme/globals.css.
- *
- * `light` was the pre-redesign storage key; it still migrates to
- * `warm-classic`, while the restored palette uses `classic-light` to avoid
- * changing that migration's meaning.
+ * 保留「纸 · 墨 · 印」主题及四套经典主题。
+ * 每个名称均对应 theme/globals.css 中的 `[data-theme]` 块。
+ * 旧存储键 `light` 迁移至 `white`，经典主题使用独立键 `classic-light`。
  */
 export const THEME_MODES = [
   'white',
@@ -47,6 +44,11 @@ export const LIGHT_THEME_MODES = [
 ] as const
 export type LightThemeMode = (typeof LIGHT_THEME_MODES)[number]
 
+/** Forward-migration map for retired theme keys. */
+export const LEGACY_THEME_MIGRATIONS: Readonly<Record<string, ThemeMode>> = {
+  light: 'white',
+}
+
 /**
  * Every palette belongs to exactly one half. This fails to compile if a
  * theme is added without deciding which ground it sits on — the appearance
@@ -57,6 +59,13 @@ void _everyThemeHasAGround
 
 export function isThemeMode(value: unknown): value is ThemeMode {
   return typeof value === 'string' && (THEME_MODES as readonly string[]).includes(value)
+}
+
+/** 将当前及旧存储主题键解析到保留的主题集合。 */
+export function normalizeThemeMode(value: unknown): ThemeMode | null {
+  if (typeof value !== 'string') return null
+  if (isThemeMode(value)) return value
+  return LEGACY_THEME_MIGRATIONS[value] ?? null
 }
 
 export function isDarkTheme(theme: ThemeMode): boolean {
@@ -231,10 +240,13 @@ export type UserSettings = {
   modelContext?: string
   effort?: EffortLevel
   alwaysThinkingEnabled?: boolean
+  /** Claude fast mode (persisted in ~/.claude/settings.json as fastMode; null clears it). */
+  fastMode?: boolean | null
   workflowKeywordTriggerEnabled?: boolean
   /** Desktop composer next-prompt suggestions; absent means off (opt-in, costs tokens). */
   nextPromptSuggestionsEnabled?: boolean
   leanModeEnabled?: boolean
+  includeCyberRiskInstruction?: boolean
   agentTeamsEnabled?: boolean
   /** 同一会话的普通前台/后台 SubAgent 并发上限，缺省或 null 表示不限。 */
   maxConcurrentSubagents?: number | null

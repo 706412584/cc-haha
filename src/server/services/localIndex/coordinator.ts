@@ -312,6 +312,49 @@ export async function discoverTranscriptSources(
  */
 const SUBAGENT_SCAN_MAX_DEPTH = 3
 
+function parseSubagentWatchedPath(
+  activeScope: string,
+  candidatePath: string,
+): { normalizedPath: string; projectPath: string; sessionId: string } | null {
+  const projectsRoot = resolve(activeScope, 'projects')
+  const normalizedPath = resolve(candidatePath)
+  const child = relative(projectsRoot, normalizedPath)
+  if (!child || child === '..' || child.startsWith(`..${sep}`)) return null
+  const parts = child.split(sep)
+  if (
+    parts.length < 4 ||
+    parts.length > 3 + SUBAGENT_SCAN_MAX_DEPTH ||
+    parts[2] !== 'subagents' ||
+    parts.some(part => !part || part === '.' || part === '..')
+  ) {
+    return null
+  }
+  const leaf = parts.at(-1)!
+  if (!leaf.startsWith('agent-') || !leaf.endsWith('.jsonl')) return null
+  return {
+    normalizedPath,
+    projectPath: parts[0]!,
+    sessionId: parts[1]!,
+  }
+}
+
+function isLocalIndexWatchedPath(activeScope: string, candidatePath: string): boolean {
+  const projectsRoot = resolve(activeScope, 'projects')
+  const normalizedPath = resolve(candidatePath)
+  const child = relative(projectsRoot, normalizedPath)
+  if (!child || child === '..' || child.startsWith(`..${sep}`)) return false
+  const parts = child.split(sep)
+  if (
+    parts.length === 2 &&
+    parts[0]!.length > 0 &&
+    parts[1]!.endsWith('.jsonl') &&
+    parts[1] !== '.jsonl'
+  ) {
+    return true
+  }
+  return parseSubagentWatchedPath(activeScope, normalizedPath) !== null
+}
+
 /**
  * Every `agent-*.jsonl` beneath one session's `subagents/` directory, at any nesting level up to
  * `SUBAGENT_SCAN_MAX_DEPTH`. Walking rather than reading one level is what brings workflow agent
@@ -524,6 +567,8 @@ export function createLocalIndexCoordinator(
   // Per-source limitations are tracked separately from `failedPaths` so they stay visible as
   // `lastErrorCode` without counting as outstanding reconciliation work.
   let limitedPaths = new Map<string, string>()
+  let failedActivityPaths = new Map<string, string>()
+  let retriedActivityPaths = new Set<string>()
   let fullSweepFailureCode: string | null = null
   // A code restored from the previous run's backfill state describes that
   // run; this run's first sweep replaces it.
@@ -718,6 +763,26 @@ export function createLocalIndexCoordinator(
     }
   }
 
+  const subagentCandidateFromWatchedPath = async (
+    activeScope: string,
+    path: string,
+  ): Promise<ActivitySourceCandidate | null> => {
+    const parsed = parseSubagentWatchedPath(activeScope, path)
+    if (!parsed) return null
+    const snapshot = await lstat(parsed.normalizedPath)
+    if (!snapshot.isFile()) return null
+    return {
+      path: parsed.normalizedPath,
+      sessionId: parsed.sessionId,
+      projectPath: parsed.projectPath,
+      fallbackCreatedAt: snapshot.birthtime.toISOString(),
+      fallbackModifiedAt: snapshot.mtime.toISOString(),
+      fallbackWorkDir: desanitizeProjectPath(parsed.projectPath),
+      modifiedAtMs: snapshot.mtimeMs,
+      isSubagent: true,
+    }
+  }
+
   const runActivityDiscoveryGeneration = async (
     signal: AbortSignal,
     activeScope: string,
@@ -796,6 +861,10 @@ export function createLocalIndexCoordinator(
     if (!isActiveGeneration()) return
 
     const discovered = discovery.candidates.length
+    if (complete && degraded === 0 && indexed === discovered) {
+      failedActivityPaths.clear()
+      retriedActivityPaths.clear()
+    }
     activeDatabase.transaction(operation => {
       writeActivityBackfillState(operation, {
         scope: activeScope,
@@ -1175,9 +1244,124 @@ export function createLocalIndexCoordinator(
       lastErrorCode: latestPathCode() ?? fullSweepFailureCode,
     }
 
+    const recordTargetedActivityFailure = (
+      normalizedPath: string,
+      code: string,
+      shouldRetryOnce: boolean,
+    ): void => {
+      failedActivityPaths.set(normalizedPath, code)
+      if (typeof activeIndex.getActivityBackfillState === 'function') {
+        try {
+          const previous = activeIndex.getActivityBackfillState(activeScope)
+          activeDatabase.transaction(operation => {
+            writeActivityBackfillState(operation, {
+              scope: activeScope,
+              state: 'degraded',
+              watermark: normalizedPath,
+              discovered: previous?.discovered ?? 0,
+              indexed: previous?.indexed ?? 0,
+              degraded: Math.max(1, failedActivityPaths.size),
+              lastErrorCode: code,
+              updatedAtMs: now(),
+            })
+          })
+        } catch {
+          // If SQLite itself cannot record degraded state, the next read/sweep will reconcile.
+        }
+      }
+      if (shouldRetryOnce && !retriedActivityPaths.has(normalizedPath)) {
+        retriedActivityPaths.add(normalizedPath)
+        watcher?.queueTranscriptPath(normalizedPath)
+      }
+    }
+
+    const clearTargetedActivityFailure = (normalizedPath: string): void => {
+      const hadFailure = failedActivityPaths.delete(normalizedPath)
+      retriedActivityPaths.delete(normalizedPath)
+      if (!hadFailure || typeof activeIndex.getActivityBackfillState !== 'function') return
+      try {
+        const previous = activeIndex.getActivityBackfillState(activeScope)
+        if (!previous || previous.state !== 'degraded') return
+        const remaining = failedActivityPaths.size
+        const remainingCode = [...failedActivityPaths.values()].at(-1) ?? null
+        activeDatabase.transaction(operation => {
+          writeActivityBackfillState(operation, {
+            scope: activeScope,
+            state: remaining === 0 && previous.discovered === previous.indexed
+              ? 'ready'
+              : 'degraded',
+            watermark: normalizedPath,
+            discovered: previous.discovered,
+            indexed: previous.indexed,
+            degraded: remaining,
+            lastErrorCode: remainingCode,
+            updatedAtMs: now(),
+          })
+        })
+      } catch {
+        // Leave activity state degraded until the next reconciliation pass.
+      }
+    }
+
     for (const path of paths) {
       if (!isActiveGeneration()) return
       const normalizedPath = resolve(path)
+      if (parseSubagentWatchedPath(activeScope, normalizedPath)) {
+        if (
+          typeof activeProjector.projectActivitySource === 'function' &&
+          typeof activeProjector.deleteActivitySource === 'function'
+        ) {
+          try {
+            let subagentCandidate: ActivitySourceCandidate | null
+            try {
+              subagentCandidate = await subagentCandidateFromWatchedPath(activeScope, normalizedPath)
+            } catch (error) {
+              if (!isMissing(error)) throw error
+              subagentCandidate = null
+            }
+            if (!isActiveGeneration()) return
+            if (!subagentCandidate) {
+              if (activeIndex.getActivitySource?.(normalizedPath)) {
+                const deleted = await activeProjector.deleteActivitySource(normalizedPath)
+                if (!isActiveGeneration()) return
+                if (deleted.kind === 'retry') {
+                  recordTargetedActivityFailure(
+                    normalizedPath,
+                    'LOCAL_INDEX_ACTIVITY_DELETE_FAILED',
+                    true,
+                  )
+                  continue
+                }
+              }
+              clearTargetedActivityFailure(normalizedPath)
+            } else {
+              const projected = await activeProjector.projectActivitySource(subagentCandidate)
+              if (!isActiveGeneration()) return
+              if (projected.kind === 'retry') {
+                recordTargetedActivityFailure(
+                  normalizedPath,
+                  projected.reason === 'changed-during-read'
+                    ? 'LOCAL_INDEX_ACTIVITY_SOURCE_CHANGED'
+                    : 'LOCAL_INDEX_ACTIVITY_TRANSIENT_IO',
+                  true,
+                )
+                continue
+              }
+              clearTargetedActivityFailure(normalizedPath)
+            }
+          } catch (error) {
+            if (!isActiveGeneration()) return
+            // Degrade only activity readiness so /api/activity-stats falls back
+            // to disk accurately without degrading the session-list snapshot.
+            recordTargetedActivityFailure(
+              normalizedPath,
+              errorCode(error, 'LOCAL_INDEX_ACTIVITY_PROJECT_FAILED'),
+              false,
+            )
+          }
+        }
+        continue
+      }
       const existing = activeIndex.getSource(normalizedPath)
       const remainingFailureCount = failedPaths.size -
         (failedPaths.has(normalizedPath) ? 1 : 0) +
@@ -1357,6 +1541,8 @@ export function createLocalIndexCoordinator(
       limitedPaths = new Map(
         persistedDegraded.filter(([, code]) => isSourceLimitationCode(code)),
       )
+      failedActivityPaths = new Map()
+      retriedActivityPaths = new Set()
       const persistedSweepCode = persisted?.state === 'degraded' && failedPaths.size === 0
         ? persisted.lastErrorCode ?? 'LOCAL_INDEX_DISCOVERY_INCOMPLETE'
         : null
@@ -1391,6 +1577,7 @@ export function createLocalIndexCoordinator(
       startupSweepPending = true
       const activeWatcher = createWatcher({
         scope: resolvedScope,
+        isTargetPath: isLocalIndexWatchedPath,
         yieldToForeground,
         onBatch: async (batch: ReconciliationBatch) => {
           await enqueueWriter(expectedGeneration, () => batch.fullSweep

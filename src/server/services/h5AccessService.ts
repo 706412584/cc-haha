@@ -144,6 +144,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function toPublicSettings(settings: StoredH5AccessSettings): H5AccessSettings {
+  let publicBaseUrl = settings.publicBaseUrl
+  if (settings.enabled) {
+    const configuredPublicBaseUrl = resolveConfiguredPublicBaseUrl()
+    if (configuredPublicBaseUrl) {
+      publicBaseUrl = configuredPublicBaseUrl
+    } else {
+      const autoPublicBaseUrl = resolveAutoLanPublicBaseUrl()
+      publicBaseUrl = resolveEffectiveH5PublicBaseUrl({
+        enabled: settings.enabled,
+        storedPublicBaseUrl: settings.publicBaseUrl,
+        configuredPublicBaseUrl: null,
+        autoPublicBaseUrl,
+        localInterfaceHosts:
+          autoPublicBaseUrl && settings.publicBaseUrl && !isLocalPublicBaseUrl(settings.publicBaseUrl)
+            ? collectLocalIPv4Hosts()
+            : undefined,
+      })
+    }
+  }
   return {
     enabled: settings.enabled,
     token: settings.token,
@@ -152,13 +171,7 @@ function toPublicSettings(settings: StoredH5AccessSettings): H5AccessSettings {
     fixedPort: settings.fixedPort,
     disconnectGraceSeconds: settings.disconnectGraceSeconds,
     tunnelBaseUrl: settings.tunnelBaseUrl,
-    publicBaseUrl: resolveEffectiveH5PublicBaseUrl({
-      enabled: settings.enabled,
-      storedPublicBaseUrl: settings.publicBaseUrl,
-      configuredPublicBaseUrl: resolveConfiguredPublicBaseUrl(),
-      autoPublicBaseUrl: resolveAutoLanPublicBaseUrl(),
-      localInterfaceHosts: collectLocalIPv4Hosts(),
-    }),
+    publicBaseUrl,
   }
 }
 

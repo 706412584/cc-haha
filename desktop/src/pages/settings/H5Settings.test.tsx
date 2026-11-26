@@ -136,16 +136,16 @@ it('activates and deletes providers through the existing API without connection 
   await waitFor(() => expect(remove).toHaveBeenCalledWith('fixture-provider'))
   expect(probe).not.toHaveBeenCalled()
 })
-it.each(['ink-blue', 'neutral-dark'])('changes browser appearance to %s without writing connected computer settings', async (theme) => {
+it.each(['dark', 'white'] as const)('changes browser appearance to %s without writing connected computer settings', async (theme) => {
   useUIStore.setState({ activeSettingsTab: 'general', followSystemTheme: true })
   const update = vi.spyOn(settingsApi, 'updateUser')
   render(<H5Settings />)
-  expect(screen.getByRole('option', { name: theme === 'neutral-dark' ? 'Neutral Dark' : 'Ink Blue' })).toHaveValue(theme)
+  expect(screen.getByRole('option', { name: theme === 'dark' ? 'Dark' : 'Pure White' })).toHaveValue(theme)
   fireEvent.change(screen.getByLabelText('Appearance'), { target: { value: theme } })
   expect(useUIStore.getState().theme).toBe(theme)
   expect(useUIStore.getState().followSystemTheme).toBe(false)
   expect(window.localStorage.getItem('cc-haha-theme')).toBe(theme)
-  expect(document.documentElement.style.colorScheme).toBe('dark')
+  expect(document.documentElement.style.colorScheme).toBe(theme === 'dark' ? 'dark' : 'light')
   expect(update).not.toHaveBeenCalled()
 })
 
@@ -600,4 +600,22 @@ describe('H5 tunnel i18n contract', () => {
       translate('en', 'settings.general.h5AccessTunnelDownloadFailedHint'),
     )
   })
+})
+
+it('renders a clean desktop page header and autohide scroller without modal-close padding workarounds', () => {
+  render(<H5Settings />)
+  const header = screen.getByTestId('h5-settings-desktop-header')
+  expect(header).toHaveTextContent('Settings')
+  expect(header.className).toContain('md:flex')
+  expect(header.className).not.toContain('pr-10')
+  expect(screen.getByTestId('h5-settings-scroll').className).toContain('scrollbar-autohide')
+})
+
+it('keeps H5Settings and its subpages on opaque paper surfaces', async () => {
+  render(<H5Settings />)
+  expect(screen.getByTestId('h5-settings-scroll')).toHaveClass('bg-[var(--color-surface)]')
+  expect(screen.getByTestId('h5-settings-scroll')).not.toHaveClass('bg-transparent')
+  fireEvent.click(screen.getByTestId('h5-settings-providers'))
+  expect(await screen.findByTestId('h5-settings-subpage')).toHaveClass('bg-[var(--color-surface)]')
+  expect(screen.getByTestId('h5-settings-subpage')).not.toHaveClass('bg-transparent')
 })

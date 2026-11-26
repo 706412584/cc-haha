@@ -53,6 +53,7 @@ import { Spinner } from '@/components/ui/Spinner'
 import { SettingsPageHeader, SettingsPill } from '@/components/settings/SettingsSection'
 import { Dropdown } from '@/components/ui/Dropdown'
 import { Tooltip } from '@/components/ui/Tooltip'
+import { ModelBrandIcon, resolveModelBrand } from '@/components/composite/ModelBrandIcon'
 import type { SavedProvider, UpdateProviderInput, ProviderTestResult, ProviderTestStepResult, ModelMapping, Model1mSupport, ApiFormat, ModelApiFormat, ProviderAuthStrategy, ProviderModelInfo, ProviderModelsErrorCode, ProviderProxyMode } from '../../types/provider'
 import { groupProviderModels, providerModelsErrorKey } from '../../lib/providerModels'
 import { resolveModelApiFormat } from '../../../../src/shared/modelApiFormats'
@@ -490,6 +491,13 @@ export function ProviderSettings({ browserMode = false }: { browserMode?: boolea
           dragLabel={t('settings.providers.dragToReorder')}
           dragDisabled={searching}
           onActivate={!isActive ? activate : undefined}
+          icon={(
+            <ModelBrandIcon
+              providerId={item.id}
+              size={15}
+              className={isActive ? 'text-[var(--color-brand)]' : 'text-[var(--color-text-secondary)]'}
+            />
+          )}
           title={<HighlightedText text={t(official.title)} terms={terms} />}
           subtitle={<HighlightedText text={t(official.subtitle)} terms={terms} />}
           badges={isActive ? (
@@ -528,6 +536,15 @@ export function ProviderSettings({ browserMode = false }: { browserMode?: boolea
         dragLabel={t('settings.providers.dragToReorder')}
         dragDisabled={searching}
         onActivate={!isActive ? () => handleActivate(provider.id) : undefined}
+        icon={(
+          <ModelBrandIcon
+            presetId={provider.presetId}
+            providerName={provider.name}
+            modelId={resolveModelBrand({ presetId: provider.presetId, providerName: provider.name }) ? undefined : provider.models.main}
+            size={15}
+            className={isActive ? 'text-[var(--color-brand)]' : 'text-[var(--color-text-secondary)]'}
+          />
+        )}
         title={<HighlightedText text={provider.name} terms={terms} />}
         subtitle={<span className="font-mono text-[11px]"><HighlightedText text={providerSubtitle(provider)} terms={terms} /></span>}
         matchNote={match?.hiddenField ? (
@@ -798,6 +815,7 @@ type SortableProviderCardProps = {
   dragLabel: string
   /** While searching the list is a filtered view, so it is not reorderable. */
   dragDisabled?: boolean
+  icon?: ReactNode
   title: ReactNode
   subtitle: ReactNode
   badges?: ReactNode
@@ -829,6 +847,7 @@ function SortableProviderCard({
   isActive,
   dragLabel,
   dragDisabled = false,
+  icon,
   title,
   subtitle,
   badges,
@@ -861,13 +880,13 @@ function SortableProviderCard({
       style={style}
       data-testid={providerItemTestId(item)}
       className={cx(
-        'group relative flex flex-wrap items-start gap-x-2.5 gap-y-2 rounded-[var(--radius-lg)] border bg-[var(--color-surface-container-lowest)] p-[14px] pl-1.5',
+        'group relative flex flex-wrap items-start gap-x-2.5 gap-y-2 rounded-[var(--radius-lg)] border bg-[var(--color-surface-container)] p-[14px] pl-1.5',
         'transition-[border-color,box-shadow] duration-150 ease-out',
-        // The default provider: a terracotta-mixed hairline plus a soft brand
+        // The default provider: a cobalt/accent-mixed hairline plus a soft brand
         // halo. Not the focus color, which would collide with the real focus ring.
         isActive
           ? 'border-[var(--color-primary-fixed-dim)] shadow-[0_0_0_3px_var(--color-brand-soft)]'
-          : 'border-[var(--color-border)] hover:border-[var(--color-outline)]',
+          : 'border-[var(--color-border)] shadow-[var(--bevel-surface-rest)] hover:border-[var(--color-outline)]',
         isDragging && 'opacity-90 shadow-[var(--shadow-dropdown)]',
       )}
     >
@@ -910,6 +929,7 @@ function SortableProviderCard({
         />
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            {icon}
             <span className="min-w-0 truncate text-sm font-semibold leading-5 text-[var(--color-text-primary)]">{title}</span>
             {badges}
           </span>

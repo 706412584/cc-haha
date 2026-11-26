@@ -98,22 +98,17 @@ describe('uiStore theme handling', () => {
   })
 
   it('reports a dark color scheme for dark-ground palettes, not just the one named dark', async () => {
-    // `ink-blue` is a dark ground under a name that does not contain "dark".
-    // Testing `theme === 'dark'` leaves native scrollbars and form controls in
-    // their light variant against a near-black page.
     const { useUIStore } = await import('./uiStore')
 
-    // Pick palettes by hand: while following the system the OS chooses the
-    // ground, so a manual pick lands in a preference instead of on screen.
     useUIStore.setState({ followSystemTheme: false })
-    useUIStore.getState().setTheme('ink-blue')
-    expect(document.documentElement.getAttribute('data-theme')).toBe('ink-blue')
-    expect(document.documentElement.style.colorScheme).toBe('dark')
+    for (const theme of ['dark', 'ink-blue', 'neutral-dark', 'classic-dark'] as const) {
+      useUIStore.getState().setTheme(theme)
+      expect(document.documentElement.getAttribute('data-theme')).toBe(theme)
+      expect(document.documentElement.style.colorScheme).toBe('dark')
+    }
 
-    useUIStore.getState().setTheme('dark')
-    expect(document.documentElement.style.colorScheme).toBe('dark')
-
-    useUIStore.getState().setTheme('celadon')
+    useUIStore.getState().setTheme('white')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('white')
     expect(document.documentElement.style.colorScheme).toBe('light')
   })
 
@@ -139,19 +134,19 @@ describe('uiStore theme handling', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
   })
 
-  it('retains neutral dark across a restart and round trips through every existing palette', async () => {
+  it('retains dark across a restart and round trips with light', async () => {
     const first = await import('./uiStore')
     first.useUIStore.getState().setFollowSystemTheme(false)
-    first.useUIStore.getState().setTheme('neutral-dark')
-    expect(window.localStorage.getItem('cc-haha-theme')).toBe('neutral-dark')
+    first.useUIStore.getState().setTheme('dark')
+    expect(window.localStorage.getItem('cc-haha-theme')).toBe('dark')
     first.teardownTheme()
 
     vi.resetModules()
     const restarted = await import('./uiStore')
     restarted.initializeTheme()
-    expect(restarted.useUIStore.getState().theme).toBe('neutral-dark')
+    expect(restarted.useUIStore.getState().theme).toBe('dark')
     expect(document.documentElement.style.colorScheme).toBe('dark')
-    expect(readThemeColor()).toBe('#202020')
+    expect(readThemeColor()).toBe('#1B1A18')
 
     for (const theme of ['white', 'paper', 'warm-classic', 'celadon', 'dark', 'ink-blue', 'classic-white', 'classic-light', 'eye-care', 'classic-dark'] as const) {
       restarted.useUIStore.getState().setTheme(theme)
@@ -165,20 +160,20 @@ describe('uiStore theme handling', () => {
     restarted.teardownTheme()
   })
 
-  it('sends the neutral dark ground and dark appearance to the native host', async () => {
+  it('sends the dark ground and dark appearance to the native host', async () => {
     const setApplied = vi.fn().mockResolvedValue(undefined)
     vi.doMock('../lib/desktopHost', () => ({ desktopHost: { appearance: { setApplied } } }))
     try {
       const { useUIStore } = await import('./uiStore')
       await vi.dynamicImportSettled()
       useUIStore.setState({ followSystemTheme: false })
-      useUIStore.getState().setTheme('neutral-dark')
+      useUIStore.getState().setTheme('dark')
       await vi.dynamicImportSettled()
       expect(setApplied).toHaveBeenLastCalledWith({
         isDark: true,
-        background: '#202020',
+        background: '#1B1A18',
         lightBackground: '#FFFFFF',
-        darkBackground: '#202020',
+        darkBackground: '#1B1A18',
         followSystem: false,
       })
     } finally {
@@ -186,21 +181,21 @@ describe('uiStore theme handling', () => {
     }
   })
 
-  it('reports a neutral dark preference to the host before a light system applies it', async () => {
+  it('reports the dark preference to the host while a light system is active', async () => {
     const setApplied = vi.fn().mockResolvedValue(undefined)
     vi.doMock('../lib/desktopHost', () => ({ desktopHost: { appearance: { setApplied } } }))
     try {
       stubMatchMedia(false)
       const { useUIStore } = await import('./uiStore')
       await vi.dynamicImportSettled()
-      useUIStore.setState({ followSystemTheme: true, lightTheme: 'celadon', theme: 'celadon' })
-      useUIStore.getState().setTheme('neutral-dark')
+      useUIStore.setState({ followSystemTheme: true, lightTheme: 'white', theme: 'white' })
+      useUIStore.getState().setTheme('dark')
       await vi.dynamicImportSettled()
       expect(setApplied).toHaveBeenLastCalledWith({
         isDark: false,
-        background: '#F5F8F5',
-        lightBackground: '#F5F8F5',
-        darkBackground: '#202020',
+        background: '#FFFFFF',
+        lightBackground: '#FFFFFF',
+        darkBackground: '#1B1A18',
         followSystem: true,
       })
     } finally {
@@ -274,8 +269,6 @@ describe('uiStore following the system appearance', () => {
   })
 
   it('freezes the theme on screen when the switch is turned off', async () => {
-    // Turning it off at night should keep the dark theme, not snap back to
-    // the light half.
     stubMatchMedia(true)
 
     const { initializeTheme, useUIStore, teardownTheme } = await import('./uiStore')
@@ -295,28 +288,25 @@ describe('uiStore following the system appearance', () => {
     const { initializeTheme, useUIStore, teardownTheme } = await import('./uiStore')
     initializeTheme()
 
-    useUIStore.getState().setTheme('warm-classic')
+    useUIStore.getState().setTheme('white')
 
-    // Still dark on screen — the OS says so — but tomorrow morning it is warm
-    // classic rather than pure white.
     expect(useUIStore.getState().theme).toBe('dark')
-    expect(useUIStore.getState().lightTheme).toBe('warm-classic')
-    expect(window.localStorage.getItem('cc-haha-light-theme')).toBe('warm-classic')
+    expect(useUIStore.getState().lightTheme).toBe('white')
+    expect(window.localStorage.getItem('cc-haha-light-theme')).toBe('white')
     teardownTheme()
   })
 
   it('stores a dark pick as the dark half without overriding a light OS', async () => {
-    // The symmetric case: ink-blue chosen at noon is remembered for tonight.
     stubMatchMedia(false)
 
     const { initializeTheme, useUIStore, teardownTheme } = await import('./uiStore')
     initializeTheme()
 
-    useUIStore.getState().setTheme('ink-blue')
+    useUIStore.getState().setTheme('dark')
 
     expect(useUIStore.getState().theme).toBe('white')
-    expect(useUIStore.getState().darkTheme).toBe('ink-blue')
-    expect(window.localStorage.getItem('cc-haha-dark-theme')).toBe('ink-blue')
+    expect(useUIStore.getState().darkTheme).toBe('dark')
+    expect(window.localStorage.getItem('cc-haha-dark-theme')).toBe('dark')
     teardownTheme()
   })
 
@@ -326,27 +316,27 @@ describe('uiStore following the system appearance', () => {
     const { initializeTheme, useUIStore, teardownTheme } = await import('./uiStore')
     initializeTheme()
 
-    useUIStore.getState().setTheme('warm-classic')
+    useUIStore.getState().setTheme('white')
 
-    expect(useUIStore.getState().theme).toBe('warm-classic')
-    expect(document.documentElement.getAttribute('data-theme')).toBe('warm-classic')
+    expect(useUIStore.getState().theme).toBe('white')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('white')
     teardownTheme()
   })
 
-  it('remembers neutral dark for system flips and a restarted dark session', async () => {
+  it('remembers dark for system flips and a restarted dark session', async () => {
     const media = stubMatchMedia(false)
     const first = await import('./uiStore')
     first.initializeTheme()
-    first.useUIStore.getState().setTheme('celadon')
-    first.useUIStore.getState().setTheme('neutral-dark')
-    expect(first.useUIStore.getState().theme).toBe('celadon')
-    expect(window.localStorage.getItem('cc-haha-dark-theme')).toBe('neutral-dark')
+    first.useUIStore.getState().setTheme('white')
+    first.useUIStore.getState().setTheme('dark')
+    expect(first.useUIStore.getState().theme).toBe('white')
+    expect(window.localStorage.getItem('cc-haha-dark-theme')).toBe('dark')
 
     media.emit(true)
-    expect(first.useUIStore.getState().theme).toBe('neutral-dark')
+    expect(first.useUIStore.getState().theme).toBe('dark')
     expect(document.documentElement.style.colorScheme).toBe('dark')
     media.emit(false)
-    expect(first.useUIStore.getState().theme).toBe('celadon')
+    expect(first.useUIStore.getState().theme).toBe('white')
     expect(document.documentElement.style.colorScheme).toBe('light')
     first.teardownTheme()
 
@@ -354,8 +344,8 @@ describe('uiStore following the system appearance', () => {
     stubMatchMedia(true)
     const restarted = await import('./uiStore')
     restarted.initializeTheme()
-    expect(restarted.useUIStore.getState()).toMatchObject({ theme: 'neutral-dark', darkTheme: 'neutral-dark', lightTheme: 'celadon', followSystemTheme: true })
-    expect(readThemeColor()).toBe('#202020')
+    expect(restarted.useUIStore.getState()).toMatchObject({ theme: 'dark', darkTheme: 'dark', lightTheme: 'white', followSystemTheme: true })
+    expect(readThemeColor()).toBe('#1B1A18')
     restarted.teardownTheme()
   })
 
@@ -364,7 +354,7 @@ describe('uiStore following the system appearance', () => {
 
     const first = await import('./uiStore')
     first.initializeTheme()
-    first.useUIStore.getState().setTheme('warm-classic')
+    first.useUIStore.getState().setTheme('white')
     first.teardownTheme()
 
     vi.resetModules()
@@ -372,7 +362,7 @@ describe('uiStore following the system appearance', () => {
     const recreated = await import('./uiStore')
 
     expect(recreated.useUIStore.getState().followSystemTheme).toBe(true)
-    expect(recreated.useUIStore.getState().lightTheme).toBe('warm-classic')
+    expect(recreated.useUIStore.getState().lightTheme).toBe('white')
     expect(recreated.useUIStore.getState().theme).toBe('dark')
   })
 
@@ -383,10 +373,11 @@ describe('uiStore following the system appearance', () => {
     initializeTheme()
     expect(useUIStore.getState().followSystemTheme).toBe(true)
 
-    // white -> paper, the next palette in the rotation.
+    // 保留 fork 的完整轮换顺序：white 后为 paper。
     useUIStore.getState().toggleTheme()
 
     expect(useUIStore.getState().followSystemTheme).toBe(false)
+    expect(useUIStore.getState().theme).toBe('paper')
     media.emit(true)
     expect(useUIStore.getState().theme).toBe('paper')
     teardownTheme()
@@ -404,10 +395,6 @@ describe('uiStore following the system appearance', () => {
   })
 
   it('does not revive the switch from a window whose store went stale', async () => {
-    // The pet window is long-lived and runs the same bootstrap with its own
-    // store over the shared localStorage. When the main window turns the
-    // switch off, this window's in-memory copy still says "on" — acting on it
-    // would write the user's choice straight back out.
     const media = stubMatchMedia(false)
 
     const { initializeTheme, useUIStore, teardownTheme } = await import('./uiStore')
@@ -431,16 +418,16 @@ describe('uiStore following the system appearance', () => {
     initializeTheme()
     expect(useUIStore.getState().theme).toBe('dark')
 
-    window.localStorage.setItem('cc-haha-light-theme', 'celadon')
-    window.localStorage.setItem('cc-haha-dark-theme', 'ink-blue')
+    window.localStorage.setItem('cc-haha-light-theme', 'white')
+    window.localStorage.setItem('cc-haha-dark-theme', 'dark')
 
     media.emit(false)
-    expect(useUIStore.getState().theme).toBe('celadon')
-    expect(useUIStore.getState().lightTheme).toBe('celadon')
+    expect(useUIStore.getState().theme).toBe('white')
+    expect(useUIStore.getState().lightTheme).toBe('white')
 
     media.emit(true)
-    expect(useUIStore.getState().theme).toBe('ink-blue')
-    expect(useUIStore.getState().darkTheme).toBe('ink-blue')
+    expect(useUIStore.getState().theme).toBe('dark')
+    expect(useUIStore.getState().darkTheme).toBe('dark')
     teardownTheme()
   })
 
@@ -451,18 +438,13 @@ describe('uiStore following the system appearance', () => {
     initializeTheme()
     expect(useUIStore.getState().theme).toBe('white')
 
-    // A storage event is what the browser delivers to the windows that did
-    // not perform the write.
-    window.localStorage.setItem('cc-haha-theme', 'celadon')
-    window.localStorage.setItem('cc-haha-light-theme', 'celadon')
-    window.dispatchEvent(new StorageEvent('storage', { key: 'cc-haha-light-theme' }))
+    window.localStorage.setItem('cc-haha-follow-system-theme', '0')
+    window.localStorage.setItem('cc-haha-theme', 'dark')
+    window.dispatchEvent(new StorageEvent('storage', { key: 'cc-haha-theme' }))
 
-    expect(useUIStore.getState().theme).toBe('celadon')
-    expect(useUIStore.getState().lightTheme).toBe('celadon')
-    expect(document.documentElement.getAttribute('data-theme')).toBe('celadon')
-    // The window that performed the write repaints through applyTheme; this one
-    // only ever sees the storage event, so it needs the same repaint.
-    expect(readThemeColor()).toBe(THEME_BACKGROUNDS.celadon)
+    expect(useUIStore.getState().theme).toBe('dark')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+    expect(readThemeColor()).toBe(THEME_BACKGROUNDS.dark)
     teardownTheme()
   })
 
@@ -472,7 +454,7 @@ describe('uiStore following the system appearance', () => {
     const { initializeTheme, useUIStore, teardownTheme } = await import('./uiStore')
     initializeTheme()
 
-    window.localStorage.setItem('cc-haha-theme', 'celadon')
+    window.localStorage.setItem('cc-haha-theme', 'dark')
     window.dispatchEvent(new StorageEvent('storage', { key: 'cc-haha-open-tabs' }))
 
     expect(useUIStore.getState().theme).toBe('white')

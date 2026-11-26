@@ -16,7 +16,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:*; connect-src 'self' blob: https: http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; worker-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:*; connect-src 'self' blob: https: http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; worker-src 'self' blob:; media-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'self'"
     />
     <!--
       `viewport-fit=cover` MUST live here, in the markup. iOS WebKit reads the
@@ -144,11 +144,17 @@
           var read = function (key) {
             try { return window.localStorage.getItem(key) } catch (_) { return null }
           }
-          // Supported palettes, split by ground. Keep in step with
-          // LIGHT_THEME_MODES / DARK_THEME_MODES in src/types/settings.ts.
+          // The two canonical palettes accept fork classic themes as valid modes.
+          // Legacy upstream names migrate to the matching ground without affecting fork themes.
           var LIGHT = ['white', 'paper', 'warm-classic', 'celadon', 'classic-white', 'classic-light', 'eye-care']
           var DARK = ['dark', 'ink-blue', 'neutral-dark', 'classic-dark']
+          var LEGACY = { light: 'white' }
           var has = function (list, value) { return list.indexOf(value) !== -1 }
+          var normalize = function (value) {
+            if (!value) return null
+            if (has(LIGHT, value) || has(DARK, value)) return value
+            return LEGACY[value] || null
+          }
           var isDark = function (value) { return has(DARK, value) }
           // Mirrors THEME_BACKGROUNDS in src/theme/systemAppearance.ts; the
           // <style> block below and bootstrapScript.test.ts hold all three
@@ -158,7 +164,7 @@
             paper: '#FBF9F4',
             'warm-classic': '#F6F0E1',
             celadon: '#F5F8F5',
-            dark: '#201D17',
+            dark: '#1B1A18',
             'ink-blue': '#1A1D24',
             'neutral-dark': '#202020',
             'classic-white': '#FFFFFF',
@@ -172,7 +178,7 @@
           }
 
           var stored = read('cc-haha-theme')
-          var theme = (has(LIGHT, stored) || isDark(stored)) ? stored : 'white'
+          var theme = normalize(stored) || 'white'
 
           var followRaw = read('cc-haha-follow-system-theme')
           // Unset means: new install follows the system, existing install
@@ -180,11 +186,11 @@
           var follow = followRaw === '1' || (followRaw !== '0' && stored === null)
 
           if (follow) {
-            var storedLight = read('cc-haha-light-theme')
+            var storedLight = normalize(read('cc-haha-light-theme'))
             var lightTheme = has(LIGHT, storedLight)
               ? storedLight
               : (has(LIGHT, theme) ? theme : 'white')
-            var storedDark = read('cc-haha-dark-theme')
+            var storedDark = normalize(read('cc-haha-dark-theme'))
             var darkTheme = isDark(storedDark) ? storedDark : (isDark(theme) ? theme : 'dark')
             var prefersDark = false
             try {
@@ -220,7 +226,7 @@
       html[data-theme="paper"] { background: #FBF9F4; }
       html[data-theme="warm-classic"] { background: #F6F0E1; }
       html[data-theme="celadon"] { background: #F5F8F5; }
-      html[data-theme="dark"] { background: #201D17; }
+      html[data-theme="dark"] { background: #1B1A18; }
       html[data-theme="ink-blue"] { background: #1A1D24; }
       html[data-theme="neutral-dark"] { background: #202020; }
       html[data-theme="classic-white"] { background: #FFFFFF; }

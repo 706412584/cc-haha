@@ -119,7 +119,7 @@ describe('ShareImageDialog', () => {
     await settle()
     expect(lastRenderOptions()).toMatchObject({ size: 'wide', showLink: false, showCost: true })
 
-    fireEvent.change(screen.getByLabelText('Image theme'), { target: { value: 'celadon' } })
+    fireEvent.change(screen.getByLabelText('Image theme'), { target: { value: 'dark' } })
     await settle()
     expect(renderShareImageMock.mock.calls.length).toBeGreaterThan(initialCalls + 2)
     // The image is drawn in the chosen palette, whatever theme the app shows.
@@ -128,7 +128,7 @@ describe('ShareImageDialog', () => {
     expect(themeUsed.series).toHaveLength(5)
   })
 
-  it('offers every theme, led by "follow the current one"', async () => {
+  it('offers both canonical themes, led by "follow the current one"', async () => {
     renderDialog()
     await settle()
 
@@ -138,7 +138,7 @@ describe('ShareImageDialog', () => {
       'current', 'white', 'paper', 'warm-classic', 'celadon', 'dark', 'ink-blue', 'neutral-dark',
       'classic-white', 'classic-light', 'eye-care', 'classic-dark',
     ])
-    expect(screen.getByRole('option', { name: 'Neutral Dark' })).toHaveValue('neutral-dark')
+    expect(screen.getByRole('option', { name: 'Dark' })).toHaveValue('dark')
     expect(select.value).toBe('current')
   })
 

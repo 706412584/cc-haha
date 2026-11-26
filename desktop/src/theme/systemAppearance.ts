@@ -23,7 +23,7 @@ import {
   isDarkTheme,
   isDarkThemeMode,
   isLightThemeMode,
-  isThemeMode,
+  normalizeThemeMode,
   type DarkThemeMode,
   type LightThemeMode,
   type ThemeMode,
@@ -54,7 +54,7 @@ export const THEME_BACKGROUNDS: Record<ThemeMode, string> = {
   paper: '#FBF9F4',
   'warm-classic': '#F6F0E1',
   celadon: '#F5F8F5',
-  dark: '#201D17',
+  dark: '#1B1A18',
   'ink-blue': '#1A1D24',
   'neutral-dark': '#202020',
   'classic-white': '#FFFFFF',
@@ -166,20 +166,20 @@ function getStorage(): StorageLike | null {
 
 export function readStoredTheme(storage: StorageLike | null = getStorage()): ThemeMode {
   const stored = safeRead(storage, THEME_STORAGE_KEY)
-  return isThemeMode(stored) ? stored : DEFAULT_THEME
+  return normalizeThemeMode(stored) ?? DEFAULT_THEME
 }
 
 export function readStoredLightTheme(storage: StorageLike | null = getStorage()): LightThemeMode {
-  const stored = safeRead(storage, LIGHT_THEME_STORAGE_KEY)
+  const stored = normalizeThemeMode(safeRead(storage, LIGHT_THEME_STORAGE_KEY))
   if (isLightThemeMode(stored)) return stored
-  // Not chosen yet: fall back to the manual theme when that one is a paper
-  // ground, so someone already running celadon keeps it as their light half.
+  // Not chosen yet: fall back to the manual theme when that one is a light
+  // ground.
   const theme = readStoredTheme(storage)
   return isLightThemeMode(theme) ? theme : DEFAULT_LIGHT_THEME
 }
 
 export function readStoredDarkTheme(storage: StorageLike | null = getStorage()): DarkThemeMode {
-  const stored = safeRead(storage, DARK_THEME_STORAGE_KEY)
+  const stored = normalizeThemeMode(safeRead(storage, DARK_THEME_STORAGE_KEY))
   if (isDarkThemeMode(stored)) return stored
   const theme = readStoredTheme(storage)
   return isDarkTheme(theme) && isDarkThemeMode(theme) ? theme : DEFAULT_DARK_THEME

@@ -48,6 +48,13 @@ vi.mock('../api/client', async (importOriginal) => ({
   rawRecordDiagnosticEvent: vi.fn().mockResolvedValue(undefined),
 }))
 
+vi.mock('@/api/promptHistory', () => ({
+  promptHistoryApi: {
+    list: vi.fn(async () => ({ entries: [] })),
+    append: vi.fn(async () => ({ ok: true })),
+  },
+}))
+
 vi.mock('../api/sessions', () => ({
   sessionsApi: {
     create: mocks.createSession,
@@ -198,6 +205,7 @@ vi.mock('../components/controls/ModelSelector', async () => {
 })
 
 import { EmptySession } from './EmptySession'
+import { clearComposerPromptHistoryCacheForTesting } from '@/hooks/useComposerPromptHistory'
 import { ApiError } from '../api/client'
 import { useChatStore } from '../stores/chatStore'
 import { useProviderStore } from '../stores/providerStore'
@@ -298,6 +306,7 @@ describe('EmptySession', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    clearComposerPromptHistoryCacheForTesting()
     // ProseMirror selection scrolling needs geometry APIs absent in jsdom.
     Object.defineProperties(Range.prototype, {
       getClientRects: { configurable: true, value: () => [] },
@@ -409,13 +418,14 @@ describe('EmptySession', () => {
   it('keeps the seal and title reachable when the welcome cards outgrow the hero pane', () => {
     render(<EmptySession />)
 
-    // Regression: the hero used `justify-end` + `overflow-hidden`, so on a short
-    // window the seal and the top half of the title were clipped above the
-    // scroll origin with no way to scroll to them.
+    // 标题、输入框和任务卡片共用可滚动区域，短窗口下也能回到顶部。
     const hero = screen.getByTestId('empty-session-hero')
-    expect(hero).toHaveClass('overflow-y-auto')
-    expect(hero).not.toHaveClass('justify-end')
-    expect(within(hero).getByRole('heading', { level: 1 }).parentElement).toHaveClass('mt-auto')
+    const scrollPane = hero.closest('.overflow-y-auto')
+    expect(scrollPane).not.toBeNull()
+    expect(scrollPane).not.toHaveClass('justify-end')
+    expect(scrollPane).toContainElement(within(hero).getByRole('heading', { level: 1 }))
+    expect(scrollPane).toContainElement(screen.getByTestId('empty-session-composer-shell'))
+    expect(scrollPane).toContainElement(screen.getByTestId('welcome-task-cards'))
   })
 
   it('keeps the starter row off the phone layout, where the composer docks to the bottom', () => {
@@ -486,7 +496,7 @@ describe('EmptySession', () => {
     expect(screen.getByTestId('model-selector')).toHaveAttribute('data-compact', 'true')
     expect(screen.getByRole('button', { name: 'Run' })).toHaveClass('h-11', 'w-11')
     expect(screen.getByTestId('empty-session-composer-shell')).toHaveClass('px-3')
-    expect(screen.getByTestId('empty-session-composer-panel')).toHaveClass('rounded-[var(--radius-xl)]')
+    expect(screen.getByTestId('empty-session-composer-panel')).toHaveClass('composer-glass', 'rounded-[var(--radius-2xl)]')
   })
 
   it.each(['@', '/', '/empty', '+'] as const)('hides withdrawn bundled capabilities in %s while keeping personal skills and other plugins', async (entry) => {
@@ -986,29 +996,25 @@ describe('EmptySession', () => {
     expect(mocks.wsSend).not.toHaveBeenCalled()
   })
 
-  // The launch controls used to be a bar welded under the composer, which is
-  // what forced the panel's squared bottom edge and the third divider line.
-  // They are one pill in the toolbar now, so the panel is fully rounded and
-  // the row the pill sits in is the same one holding "+" and the model.
-  it('puts the run-location pill in the composer toolbar, not on a bar of its own', async () => {
+  // The floating frosted-glass composer stays uncluttered: repository launch
+  // controls tuck cleanly underneath in a bare `.surface-glass` seam strip.
+  it('renders the floating frosted-glass composer with a bare under-card context strip', async () => {
     render(<EmptySession />)
 
     const panel = screen.getByTestId('empty-session-composer-panel')
-    // 16px corner and the composer shadow step — the same floating card as
-    // ChatInput's. The repository controls live inside this panel, so it
-    // must stay a single rounded block rather than a split top/bottom pair.
-    expect(panel).toHaveClass('rounded-[var(--radius-xl)]', 'p-2', 'glass-panel--composer')
+    expect(panel).toHaveClass('composer-glass', 'rounded-[var(--radius-2xl)]', 'p-2')
     expect(panel).not.toHaveClass('rounded-b-none')
+    expect(screen.getByTestId('empty-session-hero')).toBeInTheDocument()
 
     await pickProject()
 
+    const strip = screen.getByTestId('composer-context-strip')
+    expect(strip).toHaveClass('pt-2', 'overflow-x-clip')
+    expect(strip).not.toHaveClass('composer-seam-below', '-mt-4')
     const pill = await screen.findByRole('button', { name: 'Location: project / main' })
-    expect(panel).toContainElement(pill)
+    expect(strip).toContainElement(pill)
+    expect(panel).not.toContainElement(pill)
     expect(pill).toHaveClass('h-7')
-
-    // Same toolbar row as Run — that row is the whole point of the change.
-    const toolbarRow = pill.closest('.justify-between')
-    expect(toolbarRow).toContainElement(screen.getByRole('button', { name: /Run/i }))
   })
 
   it('creates a session with the selected project and branch when submitted', async () => {
@@ -2073,8 +2079,8 @@ describe('EmptySession', () => {
     const leading = screen.getByTestId('empty-session-toolbar-leading')
     const trailing = screen.getByTestId('empty-session-toolbar-trailing')
     expect(toolbar).not.toHaveClass('flex-wrap')
-    expect(leading).toHaveClass('min-w-0', 'shrink')
-    expect(trailing).toHaveClass('shrink-0')
+    expect(leading).toHaveClass('shrink-0')
+    expect(trailing).toHaveClass('min-w-0', 'flex-1')
     expect(trailing).not.toHaveClass('min-w-max')
     // The permission glyph leads the trailing group; the usage ring is not on a draft.
     expect(trailing.firstElementChild).toContainElement(screen.getByRole('button', { name: /^Permission mode/ }))

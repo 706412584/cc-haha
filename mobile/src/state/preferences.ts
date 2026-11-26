@@ -14,6 +14,8 @@ export type Preferences = Record<string, unknown> & {
   notifyPrompted: boolean
   /** iOS：审批提醒标成时效性通知，专注模式下也送达。 */
   timeSensitive: boolean
+  /** 打开 App 时保持屏幕常亮，避免自动息屏。 */
+  keepAwake: boolean
 }
 export type LiveActivityMode = 'running' | 'decisions'
 export type PreferencesPatch = Omit<
@@ -62,12 +64,17 @@ export function migratePreferences(raw: string | null): Preferences {
     typeof input === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(input)
       ? input
       : fallback
+  const normalizeAppearance = (input: unknown): Appearance => {
+    if (input === 'light' || input === 'dark' || input === 'system') return input
+    if (input === 'white' || input === 'paper' || input === 'warm-classic' || input === 'celadon')
+      return 'light'
+    if (input === 'ink-blue' || input === 'neutral-dark') return 'dark'
+    return 'system'
+  }
   return {
     ...value,
     version: 1,
-    appearance: ['light', 'dark', 'system'].includes(value.appearance)
-      ? value.appearance
-      : 'system',
+    appearance: normalizeAppearance(value.appearance),
     notifications: {
       ...notifications,
       decisions: notifications.decisions !== false,
@@ -85,6 +92,7 @@ export function migratePreferences(raw: string | null): Preferences {
     liveActivityShowCommand: value.liveActivityShowCommand !== false,
     notifyPrompted: value.notifyPrompted === true,
     timeSensitive: value.timeSensitive !== false,
+    keepAwake: value.keepAwake === true,
   }
 }
 export class PreferencesRepository {
