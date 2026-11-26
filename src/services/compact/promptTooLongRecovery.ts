@@ -134,11 +134,13 @@ export async function compactAfterPromptTooLong({
   toolUseContext,
   cacheSafeParams,
   querySource,
+  rejection,
 }: {
   messages: Message[]
   toolUseContext: ToolUseContext
   cacheSafeParams: CacheSafeParams
   querySource: QuerySource
+  rejection?: AssistantMessage
 }): Promise<CompactionResult | null> {
   if (toolUseContext.abortController.signal.aborted) return null
   try {
@@ -156,6 +158,7 @@ export async function compactAfterPromptTooLong({
           toolUseContext.options.mainLoopModel,
         ),
         querySource,
+        rejection,
       },
     )
     // Same bookkeeping as a proactive auto-compact: the summarized message
