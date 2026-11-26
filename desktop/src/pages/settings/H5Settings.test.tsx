@@ -140,7 +140,7 @@ it.each(['dark', 'white'] as const)('changes browser appearance to %s without wr
   useUIStore.setState({ activeSettingsTab: 'general', followSystemTheme: true })
   const update = vi.spyOn(settingsApi, 'updateUser')
   render(<H5Settings />)
-  expect(screen.getByRole('option', { name: theme === 'dark' ? 'Dark' : 'Light' })).toHaveValue(theme)
+  expect(screen.getByRole('option', { name: theme === 'dark' ? 'Dark' : 'Pure White' })).toHaveValue(theme)
   fireEvent.change(screen.getByLabelText('Appearance'), { target: { value: theme } })
   expect(useUIStore.getState().theme).toBe(theme)
   expect(useUIStore.getState().followSystemTheme).toBe(false)

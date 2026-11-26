@@ -1149,7 +1149,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
                     onClick={() => handleRuntimeThinkingSelect(option.value)}
                     className={`rounded-[var(--radius-sm)] py-2 text-center text-xs font-semibold transition-colors ${
                       option.value === selectedRuntimeThinkingEnabled
-                        ? 'bg-[var(--color-brand)] text-[var(--color-on-brand)]'
+                        ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)]'
                         : 'bg-[var(--color-surface-container-high)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
                     }`}
                   >
