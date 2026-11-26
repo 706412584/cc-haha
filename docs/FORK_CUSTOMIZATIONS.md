@@ -48,6 +48,7 @@
 | sessionService.appendJsonlEntry：保留 fork `invalidateReadCache`，不做双写 | `src/server/services/sessionService.ts` | grep `invalidateReadCache`；确认无重复 appendFile |
 | 会话右键菜单 Export JSONL / Copy path / Show in folder + 批量导出；与上游 Markdown 导出并存 | `desktop/src/components/layout/Sidebar.tsx` | `Sidebar.test.tsx` 与 `sessionMarkdown.test.ts` |
 | 会话列表索引水合并发与 inspection 增量折叠：按文件路径缓存、stat/provider revision 作签名，追加只扫描新字节；OpenAI 当前账号窗口仍参与缓存签名 | `src/server/services/sessionService.ts`（`hydrateIndexedSession`、`readInspectionSnapshotForSession`、`inspectionSnapshots`） | `sessionService.sessionListPerformance.test.ts`、`sessionService.metadata.test.ts`、`session-context-provider-usage.test.ts` |
+| 超限 transcript（> `SESSION_INDEX_MAX_SOURCE_BYTES` 256MB，源以 `pending` 停在上限）列表 runtime 回读：`hydrateIndexedSession` 先 `overlayUnindexedRuntime`，从 `indexedBytes` 往后反向读末尾 session-meta 覆盖 provider/model/effort/thinking/fastMode，按路径增量缓存；否则桌面端 `syncFromSessions` 会把旧模型盖回并在重连时写回 | `src/server/services/localIndex/sourceTailRuntime.ts`、`sessionService.ts`（`overlayUnindexedRuntime`）、gateway `getSourceProgress`（`sessionIndex.ts`、`coordinator.ts`） | `sourceTailRuntime.test.ts`、`project-session-history.test.ts` 的 `overlays runtime metadata from the unread tail of a pending source` |
 | 断电恢复：原子写入 fsync + snapshot，损坏 Provider 索引先从快照恢复身份，再写 settings owner，最后升级 schema | `src/server/storage/atomicWrite.ts`、`managedSettingsService.ts`、`persistentStorageMigrations.ts` | `atomicWrite*.test.ts`、`persistence-upgrade.test.ts` 的恢复与子代理 owner 用例 |
 
 ## D. 中转/断流韧性
