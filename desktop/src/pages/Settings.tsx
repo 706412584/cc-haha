@@ -1,8 +1,33 @@
 import { H5Settings } from './settings/H5Settings'
 import { getDesktopHost } from '@/lib/desktopHost'
-import { useEffect, useRef } from 'react'
-import { useTranslation } from '../i18n'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import {
+  BookOpen,
+  Bot,
+  Box,
+  ChartNoAxesColumn,
+  HeartPulse,
+  Info,
+  MessageSquare,
+  Mic,
+  MousePointer2,
+  PawPrint,
+  Plug,
+  Puzzle,
+  QrCode,
+  Server,
+  SlidersHorizontal,
+  SquareTerminal,
+  Network,
+  ShieldCheck,
+  FileText,
+  Route,
+  type LucideIcon,
+} from 'lucide-react'
+import { useTranslation, type TranslationKey } from '../i18n'
 import { SettingsPageHeader } from '@/components/settings/SettingsSection'
+import { Kbd } from '@/components/ui/Kbd'
+import { SearchField } from '@/components/ui/SearchField'
 import { AdapterSettings } from './AdapterSettings'
 import { useSkillStore } from '../stores/skillStore'
 import { SkillList } from '../components/skills/SkillList'
@@ -21,10 +46,8 @@ import { OrchestrationPromptSettings } from '../components/settings/Orchestratio
 import { SystemPromptSettings } from '../components/settings/SystemPromptSettings'
 import { ProjectRulesSettings } from './ProjectRulesSettings'
 import { PetSettings } from '../features/pets/PetSettings'
-import { useUIStore } from '../stores/uiStore'
+import { useUIStore, type SettingsTab } from '../stores/uiStore'
 import { AgentManager } from '../components/settings/AgentManager'
-import { isDesktopRuntime } from '../lib/desktopRuntime'
-import { useMobileViewport } from '../hooks/useMobileViewport'
 import { VoiceInputSettings } from './settings/VoiceInputSettings'
 import { ProviderSettings } from './settings/ProviderSettings'
 import { GeneralSettings } from './settings/GeneralSettings'
@@ -35,12 +58,57 @@ export function Settings() {
   return getDesktopHost().isDesktop ? <DesktopSettings /> : <H5Settings />
 }
 
+type SettingsNavEntry = {
+  tab: SettingsTab
+  icon: LucideIcon
+  label: TranslationKey
+  keywords: readonly string[]
+}
+
+const SETTINGS_NAV: SettingsNavEntry[] = [
+  { tab: 'providers', icon: Server, label: 'settings.tab.providers', keywords: ['model', 'api', 'key', 'provider', 'claude', 'openai', 'deepseek', 'proxy', '模型', '供应商', '接口'] },
+  { tab: 'general', icon: SlidersHorizontal, label: 'settings.tab.general', keywords: ['theme', 'appearance', 'language', 'zoom', 'font', 'proxy', 'notification', 'storage', '主题', '外观', '语言', '缩放', '代理', '通用'] },
+  { tab: 'voice', icon: Mic, label: 'settings.tab.voice', keywords: ['speech', 'microphone', 'asr', 'dictation', 'shortcut', 'vocabulary', '语音', '麦克风', '听写'] },
+  { tab: 'h5Access', icon: QrCode, label: 'settings.tab.h5Access', keywords: ['phone', 'mobile', 'qr', 'remote', 'tunnel', 'h5', '手机', '远程', '扫码'] },
+  { tab: 'adapters', icon: MessageSquare, label: 'settings.tab.adapters', keywords: ['im', 'wechat', 'feishu', 'lark', 'dingtalk', 'telegram', 'slack', 'discord', '微信', '飞书', '钉钉', '机器人'] },
+  { tab: 'terminal', icon: SquareTerminal, label: 'settings.tab.terminal', keywords: ['shell', 'zsh', 'bash', 'xterm', 'font', '终端', '命令行'] },
+  { tab: 'mcp', icon: Plug, label: 'settings.tab.mcp', keywords: ['server', 'tool', 'stdio', 'sse', 'http', '工具', '服务'] },
+  { tab: 'agents', icon: Bot, label: 'settings.tab.agents', keywords: ['subagent', 'team', 'agent', '智能体', '代理'] },
+  { tab: 'skills', icon: Box, label: 'settings.tab.skills', keywords: ['skill', 'slash', 'command', '技能'] },
+  { tab: 'memory', icon: BookOpen, label: 'settings.tab.memory', keywords: ['claude.md', 'memory', 'context', '记忆'] },
+  { tab: 'orchestration', icon: Network, label: 'settings.tab.orchestration', keywords: ['orchestrator', 'coordinator', 'pipeline', 'prompt', '编排', '协调', '提示词'] },
+  { tab: 'systemPrompt', icon: ShieldCheck, label: 'settings.tab.systemPrompt', keywords: ['system', 'prompt', 'replace', 'snapshot', '系统提示词'] },
+  { tab: 'projectRules', icon: FileText, label: 'settings.tab.projectRules', keywords: ['rule', 'claude.md', 'agents.md', 'project', '规则', '项目'] },
+  { tab: 'plugins', icon: Puzzle, label: 'settings.tab.plugins', keywords: ['plugin', 'extension', 'hook', '插件', '扩展'] },
+  { tab: 'pets', icon: PawPrint, label: 'settings.tab.pets', keywords: ['pet', 'desktop', 'mascot', '桌宠', '宠物'] },
+  { tab: 'computerUse', icon: MousePointer2, label: 'settings.tab.computerUse', keywords: ['screen', 'accessibility', 'mouse', 'keyboard', 'control', '电脑', '操控', '权限'] },
+  { tab: 'activity', icon: ChartNoAxesColumn, label: 'settings.tab.activity', keywords: ['token', 'usage', 'cost', 'heatmap', 'stats', 'chart', '用量', '统计', '账单'] },
+  { tab: 'trace', icon: Route, label: 'settings.tab.trace', keywords: ['trace', 'trajectory', 'session', 'log', '轨迹', '追踪'] },
+  { tab: 'diagnostics', icon: HeartPulse, label: 'settings.tab.diagnostics', keywords: ['log', 'doctor', 'health', 'debug', 'repair', '诊断', '日志', '修复'] },
+]
+
+/** Set apart below a rule, the way the reference rail ends. */
+const SETTINGS_NAV_ABOUT: SettingsNavEntry = {
+  tab: 'about',
+  icon: Info,
+  label: 'settings.tab.about',
+  keywords: ['version', 'update', 'changelog', 'github', 'author', '关于', '版本', '更新'],
+}
+
+function isEditableElement(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  const tag = target.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable
+}
+
 export function DesktopSettings() {
   const activeTab = useUIStore((s) => s.activeSettingsTab)
   const setActiveTab = useUIStore((s) => s.setActiveSettingsTab)
   const pendingSettingsTab = useUIStore((s) => s.pendingSettingsTab)
+  const contentRef = useRef<HTMLDivElement>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const [navQuery, setNavQuery] = useState('')
   const t = useTranslation()
-  const isMobileSettings = useMobileViewport() && !isDesktopRuntime()
 
   useEffect(() => {
     if (!pendingSettingsTab) return
@@ -48,85 +116,177 @@ export function DesktopSettings() {
     useUIStore.getState().setPendingSettingsTab(null)
   }, [pendingSettingsTab, setActiveTab])
 
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented) return
+      if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return
+      if (isEditableElement(event.target)) return
+      const input = searchInputRef.current
+      if (!input) return
+      const dialogs = document.querySelectorAll('[role="dialog"][aria-modal="true"]')
+      if (dialogs.length > 0) {
+        const topDialog = dialogs[dialogs.length - 1]
+        if (!topDialog?.contains(input)) return
+      }
+      event.preventDefault()
+      input.focus()
+      input.select()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [])
+
+  const normalizedQuery = navQuery.trim().toLowerCase()
+  const matchesEntry = useCallback(
+    (entry: SettingsNavEntry) => {
+      if (!normalizedQuery) return true
+      if (t(entry.label).toLowerCase().includes(normalizedQuery)) return true
+      if (entry.tab.toLowerCase().includes(normalizedQuery)) return true
+      return entry.keywords.some((keyword) => keyword.toLowerCase().includes(normalizedQuery))
+    },
+    [normalizedQuery, t],
+  )
+
+  const filteredNav = useMemo(() => SETTINGS_NAV.filter(matchesEntry), [matchesEntry])
+  const showAbout = matchesEntry(SETTINGS_NAV_ABOUT)
+  const visibleEntries = useMemo(
+    () => (showAbout ? [...filteredNav, SETTINGS_NAV_ABOUT] : filteredNav),
+    [filteredNav, showAbout],
+  )
+
+  const selectTab = useCallback(
+    (tab: SettingsTab) => {
+      setActiveTab(tab)
+      if (contentRef.current) contentRef.current.scrollTop = 0
+    },
+    [setActiveTab],
+  )
+
+  const handleSearchNavigate = (direction: 'up' | 'down') => {
+    if (visibleEntries.length === 0) return
+    const currentIndex = visibleEntries.findIndex((entry) => entry.tab === activeTab)
+    const nextIndex =
+      currentIndex === -1
+        ? direction === 'down'
+          ? 0
+          : visibleEntries.length - 1
+        : (currentIndex + (direction === 'down' ? 1 : -1) + visibleEntries.length) % visibleEntries.length
+    const target = visibleEntries[nextIndex]
+    if (target) selectTab(target.tab)
+  }
+
+  const handleSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape' && navQuery) {
+      event.preventDefault()
+      event.stopPropagation()
+      setNavQuery('')
+      return
+    }
+    if (event.key === 'Enter' && visibleEntries.length > 0) {
+      const currentVisible = visibleEntries.some((entry) => entry.tab === activeTab)
+      if (!currentVisible) {
+        event.preventDefault()
+        selectTab(visibleEntries[0]!.tab)
+      }
+    }
+  }
+
+  const navItem = ({ tab, icon, label }: SettingsNavEntry) => (
+    <TabButton key={tab} icon={icon} label={t(label)} active={activeTab === tab} onClick={() => selectTab(tab)} />
+  )
+
   return (
-    <div data-testid="settings-page" className={`settings-page flex-1 flex flex-col overflow-hidden bg-[var(--color-surface)]${isMobileSettings ? ' settings-page--mobile' : ''}`}>
-      <div className="settings-page__layout flex-1 flex overflow-hidden">
-        {/* Tab navigation */}
-        {/* The rail keeps the Settings tab's 195px width for a same-width paper
-            handoff when that tab sits at the leading edge of the strip. It does
-            *not* chase the tab's live horizontal offset: the rail is page chrome,
-            not a geometric extension of a scrollable tab chip, so following
-            reorder/scroll lefts shoved the whole navigation mid-panel. Its
-            tighter trailing gutter keeps the Japanese "コンピューター操作"
-            clear at this width without moving the row contents left.
-
-            Paper, separated by the rule, the way every other secondary panel
-            in the app is (the workbench, the diff split). It used to be
-            `--color-surface-container-low`, which is the same value the tab
-            strip's trough resolves to — so the Settings tab, the one tab whose
-            content this rail *is*, was the only selected tab in the app whose
-            paper fill met a different colour at its bottom edge. It read as a
-            white card stranded on a grey panel. Nothing else changed to fix
-            it: the tab is right, this was the odd one out. */}
-        <div
+    <div
+      data-testid="desktop-settings-root"
+      className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-[var(--color-surface)]"
+    >
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {/* The rail sits on the page's own paper, separated by the rule, the
+            way every other secondary panel in the app is (the workbench, the
+            diff split). The Settings tab is filled with paper so its bottom
+            edge runs unbroken into the view it opens onto; a grey rail here
+            made it the one tab whose paper met a different colour. */}
+        <nav
           data-testid="settings-navigation"
-          className="settings-page__tabs w-[195px] flex-shrink-0 flex flex-col overflow-y-auto border-r border-[var(--color-border)] bg-[var(--color-surface)] py-4 pl-3 pr-1"
+          aria-label={t('settings.title')}
+          className="flex w-[216px] flex-shrink-0 flex-col overflow-hidden border-r border-[var(--color-border)] bg-[var(--color-surface)] px-2.5"
         >
-          <div className="flex-1 flex flex-col gap-0.5">
-            <TabButton icon="dns" label={t('settings.tab.providers')} active={activeTab === 'providers'} onClick={() => setActiveTab('providers')} />
-            <TabButton icon="tune" label={t('settings.tab.general')} active={activeTab === 'general'} onClick={() => setActiveTab('general')} />
-            <TabButton icon="mic" label={t('settings.tab.voice')} active={activeTab === 'voice'} onClick={() => setActiveTab('voice')} />
-            <TabButton icon="qr_code_2" label={t('settings.tab.h5Access')} active={activeTab === 'h5Access'} onClick={() => setActiveTab('h5Access')} />
-            <TabButton icon="chat" label={t('settings.tab.adapters')} active={activeTab === 'adapters'} onClick={() => setActiveTab('adapters')} />
-            <TabButton icon="terminal" label={t('settings.tab.terminal')} active={activeTab === 'terminal'} onClick={() => setActiveTab('terminal')} />
-            <TabButton icon="dns" label={t('settings.tab.mcp')} active={activeTab === 'mcp'} onClick={() => setActiveTab('mcp')} />
-            <TabButton icon="smart_toy" label={t('settings.tab.agents')} active={activeTab === 'agents'} onClick={() => setActiveTab('agents')} />
-            <TabButton icon="auto_awesome" label={t('settings.tab.skills')} active={activeTab === 'skills'} onClick={() => setActiveTab('skills')} />
-            <TabButton icon="history_edu" label={t('settings.tab.memory')} active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} />
-            <TabButton icon="account_tree" label={t('settings.tab.orchestration')} active={activeTab === 'orchestration'} onClick={() => setActiveTab('orchestration')} />
-            <TabButton icon="shield_person" label={t('settings.tab.systemPrompt')} active={activeTab === 'systemPrompt'} onClick={() => setActiveTab('systemPrompt')} />
-            <TabButton icon="description" label={t('settings.tab.projectRules')} active={activeTab === 'projectRules'} onClick={() => setActiveTab('projectRules')} />
-            <TabButton icon="extension" label={t('settings.tab.plugins')} active={activeTab === 'plugins'} onClick={() => setActiveTab('plugins')} />
-            <TabButton icon="pets" label={t('settings.tab.pets')} active={activeTab === 'pets'} onClick={() => setActiveTab('pets')} />
-            <TabButton icon="mouse" label={t('settings.tab.computerUse')} active={activeTab === 'computerUse'} onClick={() => setActiveTab('computerUse')} />
-            <TabButton icon="monitoring" label={t('settings.tab.activity')} active={activeTab === 'activity'} onClick={() => setActiveTab('activity')} />
-            <TabButton icon="account_tree" label={t('settings.tab.trace')} active={activeTab === 'trace'} onClick={() => setActiveTab('trace')} />
-            <TabButton icon="monitor_heart" label={t('settings.tab.diagnostics')} active={activeTab === 'diagnostics'} onClick={() => setActiveTab('diagnostics')} />
+          <div className="shrink-0 pb-2 pt-4">
+            <div className="px-2 pb-2 text-xs font-semibold text-[var(--color-text-tertiary)]">{t('settings.title')}</div>
+            <SearchField
+              ref={searchInputRef}
+              size="sm"
+              value={navQuery}
+              onChange={setNavQuery}
+              label={t('search.findInPage.placeholder')}
+              placeholder={t('search.findInPage.placeholder')}
+              clearLabel={t('common.clearSearch')}
+              trailing={<Kbd size="xs">/</Kbd>}
+              onNavigate={handleSearchNavigate}
+              onKeyDown={handleSearchKeyDown}
+              data-testid="settings-nav-search"
+            />
           </div>
-          <div className="mt-2 border-t border-[var(--color-border-separator)] pt-2">
-            <TabButton icon="info" label={t('settings.tab.about')} active={activeTab === 'about'} onClick={() => setActiveTab('about')} />
+          <div className="scrollbar-autohide flex min-h-0 flex-1 flex-col overflow-y-auto pb-4 pt-1">
+            {visibleEntries.length === 0 ? (
+              <p
+                data-testid="settings-nav-empty"
+                className="px-2.5 py-6 text-center text-xs text-[var(--color-text-tertiary)]"
+              >
+                {t('search.global.noResults')}
+              </p>
+            ) : (
+              <>
+                {filteredNav.length > 0 && (
+                  <div className="flex flex-col gap-0.5">
+                    {filteredNav.map(navItem)}
+                  </div>
+                )}
+                {filteredNav.length > 0 && showAbout && (
+                  <div aria-hidden="true" className="mx-2 my-2 h-px shrink-0 bg-[var(--color-border)]" />
+                )}
+                {showAbout && navItem(SETTINGS_NAV_ABOUT)}
+              </>
+            )}
           </div>
-        </div>
+        </nav>
 
-        {/* Tab content; trace embeds a full-bleed page that manages its own scroll */}
-        <div className={activeTab === 'trace' ? 'settings-page__content flex-1 flex min-h-0 flex-col overflow-hidden' : 'settings-page__content flex-1 overflow-y-auto px-9 py-8'}>
-          {activeTab === 'providers' && <ProviderSettings />}
-          {activeTab === 'activity' && <ActivitySettings />}
-          {activeTab === 'general' && <GeneralSettings />}
-          {activeTab === 'voice' && <VoiceInputSettings />}
-          {activeTab === 'h5Access' && <H5AccessSettings />}
-          {activeTab === 'adapters' && <AdapterSettings />}
-          {activeTab === 'terminal' && <TerminalSettings showPreferences />}
-          {activeTab === 'mcp' && <McpSettings />}
-          {activeTab === 'agents' && <AgentManager />}
-          {activeTab === 'skills' && <SkillSettings />}
-          {activeTab === 'memory' && <MemorySettings />}
-          {activeTab === 'orchestration' && <OrchestrationPromptSettings />}
-          {activeTab === 'systemPrompt' && <SystemPromptSettings />}
-          {activeTab === 'projectRules' && <ProjectRulesSettings />}
-          {activeTab === 'plugins' && <PluginSettings />}
-          {activeTab === 'pets' && <PetSettings />}
-          {activeTab === 'computerUse' && <ComputerUseSettings />}
-          {activeTab === 'trace' && <TraceList />}
-          {activeTab === 'diagnostics' && <DiagnosticsSettings />}
-          {activeTab === 'about' && <AboutSettings />}
+        {/* The page frame every pane shares — one width, one set of gutters —
+            so a pane never sets its own max-width. It is fluid up to 1120px:
+            at the common 1440px window it fills the column, and on a large
+            display it stops before rows stretch past reading distance. The old
+            700px cap left explorer-style panes (memory, skills) cramped in the
+            middle of an empty page. One width for every pane, so switching
+            panes never moves the header. */}
+        <div ref={contentRef} className={activeTab === 'trace' ? 'flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden' : 'scrollbar-autohide flex-1 min-w-0 overflow-y-auto [scrollbar-gutter:stable]'}>
+          {activeTab === 'trace' ? <TraceList /> : <div data-testid="settings-page-frame" className="mx-auto w-full max-w-[1120px] px-10 pt-9 pb-[72px]">
+            {activeTab === 'providers' && <ProviderSettings />}
+            {activeTab === 'activity' && <ActivitySettings />}
+            {activeTab === 'general' && <GeneralSettings />}
+            {activeTab === 'voice' && <VoiceInputSettings />}
+            {activeTab === 'h5Access' && <H5AccessSettings />}
+            {activeTab === 'adapters' && <AdapterSettings />}
+            {activeTab === 'terminal' && <TerminalSettings showPreferences />}
+            {activeTab === 'mcp' && <McpSettings />}
+            {activeTab === 'agents' && <AgentManager />}
+            {activeTab === 'skills' && <SkillSettings />}
+            {activeTab === 'memory' && <MemorySettings />}
+            {activeTab === 'orchestration' && <OrchestrationPromptSettings />}
+            {activeTab === 'systemPrompt' && <SystemPromptSettings />}
+            {activeTab === 'projectRules' && <ProjectRulesSettings />}
+            {activeTab === 'plugins' && <PluginSettings />}
+            {activeTab === 'pets' && <PetSettings />}
+            {activeTab === 'computerUse' && <ComputerUseSettings />}
+            {activeTab === 'diagnostics' && <DiagnosticsSettings />}
+            {activeTab === 'about' && <AboutSettings />}
+          </div>}
         </div>
       </div>
     </div>
   )
 }
 
-function TabButton({ icon, label, active, onClick }: { icon: string; label: string; active: boolean; onClick: () => void }) {
+function TabButton({ icon: Icon, label, active, onClick }: { icon: LucideIcon; label: string; active: boolean; onClick: () => void }) {
   const ref = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
@@ -139,20 +299,14 @@ function TabButton({ icon, label, active, onClick }: { icon: string; label: stri
       ref={ref}
       onClick={onClick}
       aria-current={active ? 'page' : undefined}
-      // `ring-offset` has to name the rail's own fill — it is painted, not
-      // transparent, so it tracks whatever the rail is.
-      className={`w-full flex items-center gap-2.5 rounded-[var(--radius-md)] py-2 pl-3 pr-2 text-[13.5px] text-left transition-[background-color,color] duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface)] ${
+      className={`flex h-[30px] w-full shrink-0 items-center gap-2.5 rounded-[var(--radius-sm)] border px-2.5 text-left text-[13px] transition-[background-color,color,border-color,box-shadow] duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${
         active
-          ? 'bg-[var(--color-surface-hover)] text-[var(--color-text-primary)] font-medium'
-          : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
+          ? 'border-[var(--color-border)] bg-[var(--color-surface-selected)] font-medium text-[var(--color-text-primary)] shadow-[var(--bevel-surface-rest)]'
+          : 'border-transparent text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
       }`}
+      type="button"
     >
-      <span
-        className={`material-symbols-outlined text-[18px] ${active ? 'text-[var(--color-brand)]' : 'text-[var(--color-text-tertiary)]'}`}
-        aria-hidden="true"
-      >
-        {icon}
-      </span>
+      <Icon size={16} strokeWidth={1.75} className="shrink-0 text-[var(--color-text-tertiary)]" aria-hidden="true" />
       <span className="min-w-0 truncate">{label}</span>
     </button>
   )

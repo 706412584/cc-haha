@@ -71,7 +71,10 @@
       "target": "nsis",
       "icon": "src-tauri/icons/icon.ico",
       "extraResources": [
-        { "from": "src-tauri/icons/icon.ico", "to": "app-icon.ico" }
+        {
+          "from": "src-tauri/icons/icon.ico",
+          "to": "app-icon.ico"
+        }
       ]
     },
     "nsis": {
@@ -160,6 +163,7 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@esotericsoftware/spine-pixi-v8": "4.2.119",
     "@lezer/highlight": "^1.2.3",
+    "@lobehub/icons-static-svg": "^1.106.0",
     "@ngrok/ngrok": "^1.7.0",
     "@tailwindcss/typography": "^0.5.19",
     "@types/dompurify": "^3.2.0",

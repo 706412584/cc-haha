@@ -624,4 +624,23 @@ describe('AppShell boot flow', () => {
     expect(screen.getByTestId('sidebar-resize-handle')).toBeInTheDocument()
     expect(screen.queryByTestId('mobile-shell-stub')).not.toBeInTheDocument()
   })
+
+  it('frames the desktop workspace as a full-bleed split separated by a hairline border without grain', async () => {
+    mocks.layout = 'desktop'
+
+    const { container } = render(<AppShell />)
+
+    await screen.findByText('content loaded')
+    const shell = container.querySelector('.app-shell')
+    const main = screen.getByRole('main')
+    expect(shell).toHaveClass('bg-[var(--color-surface-sidebar)]')
+    expect(shell).not.toHaveClass('surface-grain')
+    expect(main).toHaveAttribute('data-canvas-inset', 'false')
+    expect(main).toHaveClass(
+      'bg-[var(--color-surface)]',
+      'border-l',
+      'border-[var(--color-border)]',
+    )
+    expect(main).not.toHaveClass('surface-grain', 'md:m-1.5', 'md:rounded-[var(--radius-lg)]')
+  })
 })

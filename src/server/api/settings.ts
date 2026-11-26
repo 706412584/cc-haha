@@ -119,6 +119,7 @@ async function handleUserSettings(req: Request): Promise<Response> {
     const body = await parseJsonBody(req)
     await settingsService.updateUserSettings(body)
     syncThinkingSettingToActiveSessions(body)
+    syncFastModeSettingToActiveSessions(body)
     if (Object.prototype.hasOwnProperty.call(body, 'sessionContentSearchEnabled')) {
       const settings = await settingsService.getUserSettings()
       if (!isSessionContentSearchEnabled(settings)) {
@@ -321,4 +322,16 @@ function syncThinkingSettingToActiveSessions(settings: Record<string, unknown>):
   conversationService.setMaxThinkingTokensForActiveSessions(
     settings.alwaysThinkingEnabled ? null : 0,
   )
+}
+
+function syncFastModeSettingToActiveSessions(settings: Record<string, unknown>): void {
+  if (!Object.prototype.hasOwnProperty.call(settings, 'fastMode')) {
+    return
+  }
+  const value = settings.fastMode
+  if (typeof value !== 'boolean' && value !== null && value !== undefined) {
+    return
+  }
+
+  conversationService.setFastModeForActiveSessions(value === true)
 }

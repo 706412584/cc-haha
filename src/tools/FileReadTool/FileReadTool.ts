@@ -32,6 +32,7 @@ import type { ToolUseContext } from '../../Tool.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import { crc32 } from '../../utils/crc32.js'
 import { getCwd } from '../../utils/cwd.js'
+import { shouldIncludeCyberRiskInstruction } from '../../utils/cyberRiskSettings.js'
 import { getClaudeConfigHomeDir, isEnvTruthy } from '../../utils/envUtils.js'
 import { resolveRelocatedAttachmentPath } from '../../utils/storageRelocations.js'
 import { getErrnoCode, isENOENT } from '../../utils/errors.js'
@@ -1064,6 +1065,7 @@ export const CYBER_RISK_MITIGATION_REMINDER =
 const MITIGATION_EXEMPT_MODELS = new Set(['claude-opus-4-7'])
 
 function shouldIncludeFileReadMitigation(): boolean {
+  if (!shouldIncludeCyberRiskInstruction()) return false
   const shortName = getCanonicalName(getMainLoopModel())
   return !MITIGATION_EXEMPT_MODELS.has(shortName)
 }

@@ -154,7 +154,7 @@ describe('default theme reading contrast', () => {
     '--color-surface-container-highest',
   ] as const
 
-  for (const theme of ['white', 'dark', 'neutral-dark'] as const) {
+  for (const theme of ['white', 'dark'] as const) {
     const selectors = THEME_BLOCKS[theme]
     const surface = parseColor(resolve('--color-surface', selectors))
 

@@ -31,8 +31,8 @@ const WARM_LIGHT = '#F6F0E1'
 function appearance(overrides: Partial<AppliedAppearance> = {}): AppliedAppearance {
   return {
     isDark: false,
-    background: '#FFFFFF',
-    lightBackground: '#FFFFFF',
+    background: LIGHT_WINDOW_BACKGROUND,
+    lightBackground: LIGHT_WINDOW_BACKGROUND,
     darkBackground: DARK_WINDOW_BACKGROUND,
     followSystem: false,
     ...overrides,
@@ -208,8 +208,8 @@ describe('startupWindowBackground', () => {
     expect(startupWindowBackground(cached, false)).toBe(WARM_LIGHT)
   })
 
-  it.each(['neutral-dark', 'ink-blue'] as const)('keeps the selected %s ground on startup and native appearance updates', (theme) => {
-    const background = THEME_BACKGROUNDS[theme]
+  it('keeps the selected dark ground on startup and native appearance updates', () => {
+    const background = THEME_BACKGROUNDS.dark
     const cached = appearance({ background: WARM_LIGHT, lightBackground: WARM_LIGHT, darkBackground: background, followSystem: true })
 
     // The app last reported a light theme; its independent dark preference
@@ -232,6 +232,25 @@ describe('applyAppliedAppearance', () => {
     expect(first.setBackgroundColor).toHaveBeenCalledWith('#201D17')
     expect(second.setBackgroundColor).toHaveBeenCalledWith('#201D17')
     expect(JSON.parse(readFileSync(appearanceStatePath(app, env), 'utf-8'))).toEqual(state)
+  })
+
+  it('repaints every live window cleanly for OLED dark and cold porcelain light themes', () => {
+    const { app, env } = makeApp()
+    const win = fakeWindow()
+
+    applyAppliedAppearance(
+      appearance({ isDark: true, background: '#000000', lightBackground: '#FCFCFC', darkBackground: '#000000' }),
+      { app, windows: () => [win], env },
+    )
+    expect(win.setBackgroundColor).toHaveBeenLastCalledWith('#000000')
+    expect(startupWindowBackground(readAppearanceState(app, env), true)).toBe('#000000')
+
+    applyAppliedAppearance(
+      appearance({ isDark: false, background: '#FCFCFC', lightBackground: '#FCFCFC', darkBackground: '#000000' }),
+      { app, windows: () => [win], env },
+    )
+    expect(win.setBackgroundColor).toHaveBeenLastCalledWith('#FCFCFC')
+    expect(startupWindowBackground(readAppearanceState(app, env), false)).toBe('#FCFCFC')
   })
 
   it('skips windows that were already torn down', () => {
@@ -267,6 +286,8 @@ describe('window background constants', () => {
     // CSS and bootstrapScript.test.ts binds it to index.html, but the main
     // process had its own copies. Without this, changing the palette would
     // leave the pre-paint window color silently behind.
+    expect(LIGHT_WINDOW_BACKGROUND).toBe('#FFFFFF')
+    expect(DARK_WINDOW_BACKGROUND).toBe('#1B1A18')
     expect(LIGHT_WINDOW_BACKGROUND).toBe(THEME_BACKGROUNDS.white)
     expect(DARK_WINDOW_BACKGROUND).toBe(THEME_BACKGROUNDS.dark)
     // The defaults of each half — what a first launch paints before the

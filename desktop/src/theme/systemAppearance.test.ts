@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { DARK_THEME_MODES, LIGHT_THEME_MODES } from '../types/settings'
 
 import {
   DARK_SCHEME_QUERY,
@@ -56,44 +57,30 @@ describe('resolveAppliedTheme', () => {
     for (const systemAppearance of ['dark', 'light'] as const) {
       expect(resolveAppliedTheme({
         followSystem: false,
-        theme: 'warm-classic',
+        theme: 'dark',
         lightTheme: 'white',
         darkTheme: 'dark',
         systemAppearance,
-      })).toBe('warm-classic')
+      })).toBe('dark')
     }
   })
 
   it('resolves each ground to the palette chosen for it', () => {
-    // Two palettes sit on each ground, so a dark OS does not simply mean the
-    // one literally named `dark`.
     expect(resolveAppliedTheme({
       followSystem: true,
       theme: 'white',
-      lightTheme: 'celadon',
-      darkTheme: 'ink-blue',
+      lightTheme: 'white',
+      darkTheme: 'dark',
       systemAppearance: 'dark',
-    })).toBe('ink-blue')
+    })).toBe('dark')
 
     expect(resolveAppliedTheme({
       followSystem: true,
-      theme: 'white',
-      lightTheme: 'celadon',
-      darkTheme: 'ink-blue',
+      theme: 'dark',
+      lightTheme: 'white',
+      darkTheme: 'dark',
       systemAppearance: 'light',
-    })).toBe('celadon')
-  })
-
-  it('resolves a ground to its preference, not to the last applied palette', () => {
-    // Evening: the app is on ink-blue. Morning: it must return to warm
-    // classic rather than to the palette it happens to be sitting on.
-    expect(resolveAppliedTheme({
-      followSystem: true,
-      theme: 'ink-blue',
-      lightTheme: 'warm-classic',
-      darkTheme: 'ink-blue',
-      systemAppearance: 'light',
-    })).toBe('warm-classic')
+    })).toBe('white')
   })
 })
 
@@ -177,19 +164,29 @@ describe('stored appearance preferences', () => {
     expect(readStoredFollowSystemTheme(window.localStorage)).toBe(false)
   })
 
-  it('seeds each ground from a manual theme sitting on it', () => {
-    window.localStorage.setItem('cc-haha-theme', 'celadon')
-    expect(readStoredLightTheme(window.localStorage)).toBe('celadon')
+  it('仅迁移已退役的 light 键并保留全部现有主题', () => {
+    window.localStorage.setItem('cc-haha-theme', 'light')
+    expect(readStoredTheme(window.localStorage)).toBe('white')
+    expect(readStoredLightTheme(window.localStorage)).toBe('white')
 
-    window.localStorage.setItem('cc-haha-theme', 'ink-blue')
-    expect(readStoredDarkTheme(window.localStorage)).toBe('ink-blue')
+    for (const theme of LIGHT_THEME_MODES) {
+      window.localStorage.setItem('cc-haha-theme', theme)
+      expect(readStoredTheme(window.localStorage), theme).toBe(theme)
+      expect(readStoredLightTheme(window.localStorage), theme).toBe(theme)
+    }
+
+    for (const theme of DARK_THEME_MODES) {
+      window.localStorage.setItem('cc-haha-theme', theme)
+      expect(readStoredTheme(window.localStorage), theme).toBe(theme)
+      expect(readStoredDarkTheme(window.localStorage), theme).toBe(theme)
+    }
   })
 
   it('falls back to the defaults when the manual theme is on the other ground', () => {
-    window.localStorage.setItem('cc-haha-theme', 'ink-blue')
+    window.localStorage.setItem('cc-haha-theme', 'dark')
     expect(readStoredLightTheme(window.localStorage)).toBe('white')
 
-    window.localStorage.setItem('cc-haha-theme', 'celadon')
+    window.localStorage.setItem('cc-haha-theme', 'white')
     expect(readStoredDarkTheme(window.localStorage)).toBe('dark')
   })
 
@@ -215,7 +212,7 @@ describe('stored appearance preferences', () => {
     expect(readStoredFollowSystemTheme(storage)).toBe(true)
   })
 
-  it('accepts neutral dark as a manual choice and a dark preference only', () => {
+  it('保留 neutral-dark 手动选择且仅将其用于深色偏好', () => {
     window.localStorage.setItem('cc-haha-theme', 'neutral-dark')
     window.localStorage.setItem('cc-haha-light-theme', 'neutral-dark')
     window.localStorage.setItem('cc-haha-dark-theme', 'neutral-dark')

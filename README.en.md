@@ -29,7 +29,7 @@ cc-haha is a **desktop Claude Code workspace** for macOS, Windows, and Linux: mu
   </a>
 </p>
 
-<p><sub>Thanks to <a href="https://modelflare.dev/sign-up?utm_source=github&amp;utm_campaign=cchaha">Modelflare</a> for sponsoring this project! Modelflare: Full strength, stable, nothing watered down. Global SOTA models at a lower cost. Operated by US-based Havenbyte LLC, Modelflare supports GPT, Claude, Gemini, Grok, and other leading models through common compatible protocols, plus 40+ image and video models.</sub></p>
+<p><sub>Thanks to <a href="https://modelflare.dev/sign-up?utm_source=github&amp;utm_campaign=cchaha">Modelflare</a> for sponsoring this project! Modelflare: Full strength, stable, nothing watered down. Global SOTA models at a lower cost. Operated by US-based Havenbyte LLC, Modelflare supports GPT, Claude, Gemini, Grok, and other leading models through common compatible protocols, plus 40+ image and video models, and supports legitimate business cooperation in mainland China.</sub></p>
 
 <p><sub><b>Cache compensation is a highlight:</b> selected OpenAI groups (price-first, stable, and premium) guarantee daily cache hit rates of 65%, 75%, or 85%, and if eligible requests fall short, Modelflare refunds the difference, visible on the usage dashboard after settlement.</sub></p>
 
@@ -126,12 +126,12 @@ This project is maintained in the author's spare time. Corporate or individual s
     </tr>
     <tr>
       <td align="center" valign="middle">
-        <a href="https://www.dynadot.com/zh/market?utm_source=github&amp;utm_medium=display&amp;utm_campaign=dm&amp;drefid=5638">
+        <a href="https://www.dynadot.com/zh/black-friday-sale?utm_source=github&amp;utm_medium=display&amp;utm_campaign=Promo&amp;drefid=5638">
           <img src="docs/images/sponsors/dynadot-logo.png" width="180" alt="Dynadot">
         </a>
       </td>
       <td valign="middle">
-        Dynadot is an ICANN-accredited domain registrar, ranks among the world's top five registrars by domains under management, and is a leading international domain marketplace. It offers quality domain-focused services, including domain registration, trading, management, business email, and website building. All users can access a variety of domain promotions and submit domain backorder requests for free. Visit the <a href="https://www.dynadot.com/zh/market?utm_source=github&amp;utm_medium=display&amp;utm_campaign=dm&amp;drefid=5638">Dynadot domain marketplace</a>, featuring a wide selection of domains, low commissions, installment payments, and no-reserve listings, to find your ideal domain.
+        Dynadot is an ICANN-accredited domain registrar, ranks among the world's top five registrars by domains under management, and is a leading international domain marketplace. It offers quality domain-focused services, including domain registration, trading, management, business email, and website building. All users can access a variety of domain promotions and submit domain backorder requests for free. The <a href="https://www.dynadot.com/zh/black-friday-sale?utm_source=github&amp;utm_medium=display&amp;utm_campaign=Promo&amp;drefid=5638">Dynadot Black Friday sale</a> is live! Explore our official deals page to register domains at single-digit prices and get website builders and Professional Email at 50% off.
       </td>
     </tr>
     <tr>
@@ -246,6 +246,7 @@ Thanks to the following open-source projects and community practices for referen
 - [Electron](https://github.com/electron/electron): cross-platform desktop app capabilities and engineering practices.
 - [agent-desktop](https://github.com/vercel-labs/agent-desktop) by Vercel Labs: a reference and directly reused native implementation for Windows / Linux Computer Use. Pinned to **1.0.2**, commit [`9eb9b296192fcb70bda25e918cd6dd66abfa3d0d`](https://github.com/vercel-labs/agent-desktop/tree/9eb9b296192fcb70bda25e918cd6dd66abfa3d0d), with the [Apache-2.0 license](native/agent-desktop/LICENSE), [provenance and file hashes](native/agent-desktop/UPSTREAM.json), and [local changes](native/agent-desktop/PATCHES.md) retained.
 - [cc-switch](https://github.com/farion1231/cc-switch): reference for model provider configuration.
+- [t3code](https://github.com/pingdotgg/t3code): visual texture and interaction design reference for the desktop UI.
 - [LINUX DO](https://linux.do/): a new ideal developer community.
 - [AtomGit](https://atomgit.com/NanmiCoder/cc-haha): code hosting for this project in China.
 
